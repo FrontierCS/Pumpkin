@@ -1,0 +1,16 @@
+[package]
+name = "pumpkin-schema"
+version = "0.0.0"
+description = "Pumpkin's v0 schemas: Rust types serialized as JSON"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+expect-test.workspace = true
+
+[lints]
+workspace = true

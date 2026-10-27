@@ -1,0 +1,126 @@
+{
+  "ir_version": "pumpkin.ir/v0",
+  "name": "frontier-cs/lwe_structured_recovery",
+  "roles": [
+    {
+      "name": "agent",
+      "image": "pumpkin/lwe-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "user": { "uid": 10001, "gid": 10001 },
+      "resources": {
+        "cpu_millis": 8000,
+        "memory_bytes": 34359738368,
+        "workspace_bytes": 34359738368
+      },
+      "runtime": {
+        "agent": {
+          "command": {
+            "argv": ["/usr/local/bin/pumpkin-fake-agent"],
+            "cwd": "/workspace"
+          }
+        }
+      },
+      "egress": {
+        "model": { "models": ["gpt-6-astra"], "budget_microusd": 100000000 }
+      }
+    },
+    {
+      "name": "train_judge",
+      "image": "pumpkin/lwe-verifier@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "user": { "uid": 65532, "gid": 65532 },
+      "resources": {
+        "cpu_millis": 8000,
+        "memory_bytes": 2147483648,
+        "workspace_bytes": 34359738368
+      },
+      "runtime": {
+        "judge": {
+          "command": {
+            "argv": ["/opt/frontier/lwe-verifier"],
+            "cwd": "/pumpkin/home",
+            "env": [
+              "FRONTIER_VERIFICATION_MODE=train",
+              "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/train.json"
+            ]
+          },
+          "mode": "train",
+          "trust": "trusted",
+          "slots": [{ "name": "payload", "kind": "data", "max_bytes": 4194304 }]
+        }
+      }
+    },
+    {
+      "name": "final_judge",
+      "image": "pumpkin/lwe-verifier@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "user": { "uid": 65532, "gid": 65532 },
+      "resources": {
+        "cpu_millis": 8000,
+        "memory_bytes": 2147483648,
+        "workspace_bytes": 34359738368
+      },
+      "runtime": {
+        "judge": {
+          "command": {
+            "argv": ["/opt/frontier/lwe-verifier"],
+            "cwd": "/pumpkin/home",
+            "env": [
+              "FRONTIER_VERIFICATION_MODE=eval",
+              "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/eval.json"
+            ]
+          },
+          "mode": "final",
+          "trust": "trusted",
+          "slots": [{ "name": "payload", "kind": "data", "max_bytes": 4194304 }]
+        }
+      }
+    }
+  ],
+  "grants": [
+    {
+      "name": "train",
+      "holder": { "role": "agent" },
+      "phases": ["work"],
+      "op": {
+        "judge": {
+          "role": "train_judge",
+          "slot": "payload",
+          "calls": 100,
+          "cumulative_seconds": 12000,
+          "concurrency": 1
+        }
+      }
+    },
+    {
+      "name": "submit",
+      "holder": { "role": "agent" },
+      "phases": ["work"],
+      "op": { "submit": { "max_bytes": 4194304 } }
+    },
+    {
+      "name": "score",
+      "holder": "root",
+      "phases": ["final"],
+      "op": {
+        "judge": {
+          "role": "final_judge",
+          "slot": "payload",
+          "concurrency": 1,
+          "call_timeout_seconds": 120
+        }
+      }
+    }
+  ],
+  "phases": [
+    { "name": "work", "live": ["agent", "train_judge"], "next": ["final"] },
+    { "name": "final", "live": ["final_judge"] }
+  ],
+  "main": {
+    "solo_then_judge": {
+      "agent": "agent",
+      "submit": "submit",
+      "score": "score",
+      "work_phase": "work",
+      "final_phase": "final",
+      "deadline_seconds": 18000
+    }
+  }
+}
