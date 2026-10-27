@@ -117,7 +117,7 @@ fn check_image(image: &str) -> Result<(), String> {
     let pinned = match image.split_once('@') {
         Some((repository, digest)) => {
             !repository.is_empty()
-                && !repository.contains(char::is_whitespace)
+                && !repository.contains(|char: char| char.is_whitespace() || char == '\0')
                 && check_sha256_digest(digest).is_ok()
         }
         None => check_sha256_digest(image).is_ok(),
@@ -160,8 +160,11 @@ fn check_absolute_path(path: &str) -> Result<(), String> {
 }
 
 fn check_model_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        Err("a model name is not empty".to_owned())
+    if name.is_empty() || name.contains(|char: char| char.is_whitespace() || char == '\0') {
+        Err(format!(
+            "`{}` is not a model name: use one word",
+            name.escape_default()
+        ))
     } else {
         Ok(())
     }
@@ -183,9 +186,9 @@ impl TryFrom<Vec<String>> for Argv {
 
     fn try_from(argv: Vec<String>) -> Result<Self, Self::Error> {
         match argv.first() {
-            None => return Err("a command has a program to run".to_owned()),
+            None => return Err("the command is empty: it needs a program".to_owned()),
             Some(program) if program.is_empty() => {
-                return Err("a command's program is not empty".to_owned());
+                return Err("the program is empty: name one".to_owned());
             }
             Some(_) => {}
         }
@@ -303,7 +306,7 @@ impl TryFrom<Vec<ModelName>> for Models {
 
     fn try_from(models: Vec<ModelName>) -> Result<Self, Self::Error> {
         if models.is_empty() {
-            return Err("a model route allows at least one model".to_owned());
+            return Err("no models: a model route allows at least one".to_owned());
         }
         let mut seen = HashSet::new();
         if let Some(model) = models.iter().find(|model| !seen.insert(*model)) {

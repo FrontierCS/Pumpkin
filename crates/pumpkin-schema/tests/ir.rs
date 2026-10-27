@@ -44,6 +44,7 @@ fn deserialize<T: DeserializeOwned>(value: &Value) -> String {
 #[test]
 fn lwe() {
     let ir: ir::Workflow = serde_json::from_str(LWE).unwrap();
+    // Whatever writes the IR serializes these types, so each must read back what it wrote.
     assert_eq!(
         serde_json::to_value(&ir).unwrap(),
         lwe_json(),
@@ -94,11 +95,11 @@ fn checked_values() {
         "/opt/frontier": ok
         "/pumpkin/../etc": `/pumpkin/../etc` is not a normalized absolute path
         "workspace": `workspace` is not a normalized absolute path
-        []: a command has a program to run
+        []: the command is empty: it needs a program
         ["MODE=train"]: ok
         ["1ST=value"]: `1ST` is not a valid environment variable name
         ["MODE=train","MODE=eval"]: `MODE` is set more than once
-        []: a model route allows at least one model
+        []: no models: a model route allows at least one
         ["gpt-6-astra","gpt-6-astra"]: `gpt-6-astra` is listed more than once"#]].assert_eq(&actual.join("\n"));
 }
 
@@ -124,16 +125,16 @@ fn broken_references() {
     check(
         ir,
         &expect![[r#"
-        roles[final_judge].runtime.judge.slots[payload]: the name is already used
-        roles[root].name: `root` is reserved
-        phases[work].live: `agent` is already listed
-        phases[work].live: no role is named `ghost`
-        phases[work].next: no phase is named `later`
-        phases[final].next: a phase does not follow itself
-        grants[train]: the name is already used
-        grants[train].holder: no role is named `ghost`
-        main.solo_then_judge.agent: `train_judge` is a judge, not an agent
-        main.solo_then_judge.score: `submit` is not a judge grant"#]],
+            roles[final_judge].runtime.judge.slots[payload]: the name is already used
+            roles[root].name: `root` is reserved
+            phases[work].live: `agent` is already listed
+            phases[work].live: no role is named `ghost`
+            phases[work].next: no phase is named `later`
+            phases[final].next: the phase follows itself: it may not
+            grants[train]: the name is already used
+            grants[train].holder: no role is named `ghost`
+            main.solo_then_judge.agent: `train_judge` is a judge, not an agent
+            main.solo_then_judge.score: `submit` is not a judge grant"#]],
     );
 }
 
@@ -153,12 +154,12 @@ fn broken_grants() {
     check(
         ir,
         &expect![[r#"
-        grants[train].holder: `agent` is not live in phase `final`
-        grants[train].op.judge.role: `train_judge` is not live in phase `final`
-        grants[train].op.judge.slot: `train_judge` has no slot named `submission`
-        grants[submit].holder: only a role holds a submit grant
-        grants[score].op.judge.role: `agent` is an agent, not a judge
-        grants[idle].phases: a grant applies in at least one phase"#]],
+            grants[train].holder: `agent` is not live in phase `final`
+            grants[train].op.judge.role: `train_judge` is not live in phase `final`
+            grants[train].op.judge.slot: `train_judge` has no slot named `submission`
+            grants[submit].holder: the root holds a submit grant: only a role may
+            grants[score].op.judge.role: `agent` is an agent, not a judge
+            grants[idle].phases: no phases: a grant applies in at least one"#]],
     );
 }
 

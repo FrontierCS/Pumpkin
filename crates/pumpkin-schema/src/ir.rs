@@ -1,20 +1,7 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data, and each part is a type here:
-//!
-//! - A [`Role`] is a sandbox template; every instance of a role is a sandbox. A role is an
-//!   agent, which runs a harness and is untrusted, or a judge, whose command runs once per
-//!   call in a fresh instance.
-//! - A [`Slot`] is a place in a judge where an inbound value lands. A value in a code slot
-//!   gives whoever influenced it control of the judge; a value in a data slot is parsed, never
-//!   executed, so it carries information but not control.
-//! - A judge's [`Mode`] tells judges of work in progress (train) from judges of the final
-//!   submission (final).
-//! - A [`Grant`] lets a principal (a role, or the root, which is the workflow's pattern) use
-//!   an [`Op`] in some phases.
-//! - A [`Phase`] is a stage of a run. Entering a phase destroys the instances of the roles
-//!   not live in it.
-//! - [`Main`] is the pattern that drives the run.
+//! A workflow is data: [`Role`]s (agents and judges, with their [`Slot`]s and [`Mode`]s),
+//! [`Grant`]s of [`Op`]s, [`Phase`]s, and the pattern, [`Main`].
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -145,6 +132,7 @@ pub struct Role {
     pub user: User,
     pub resources: Resources,
     pub runtime: Runtime,
+    /// The role's routes out; absent, the role has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
     /// Data the role's image holds, declared for the per-mode rule.
@@ -181,8 +169,8 @@ pub enum Trust {
     Untrusted,
 }
 
-/// The mode of a judge. Final-mode data, such as hidden evaluation data, may only be held by
-/// final-mode roles.
+/// The mode of a judge. The checker requires that only final-mode roles hold
+/// [`AssetMode::Final`] assets; parsing does not check it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {

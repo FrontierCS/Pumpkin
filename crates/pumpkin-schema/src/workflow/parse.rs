@@ -50,8 +50,8 @@ impl fmt::Display for ParseErrors {
 impl Error for ParseErrors {}
 
 impl Workflow {
-    /// Parses a deserialized IR: resolves its names to ids, applies its defaults, and checks
-    /// the rules that span its parts.
+    /// Parses a deserialized IR: resolves its names to ids and checks the rules that span its
+    /// parts.
     ///
     /// # Errors
     ///
@@ -106,13 +106,26 @@ impl Errors {
         for name in names {
             if !seen.insert(name) {
                 self.report(path, format!("`{name}` is already listed"));
-            } else if let Some(&id) = ids.get(name.as_str()) {
+            } else if let Some(id) = self.resolve(path, name, ids, kind) {
                 resolved.insert(id);
-            } else {
-                self.report(path, format!("no {kind} is named `{name}`"));
             }
         }
         resolved
+    }
+
+    /// Resolves one reference, reporting an unknown name.
+    fn resolve<Id: Copy>(
+        &mut self,
+        path: &str,
+        name: &Name,
+        ids: &HashMap<&str, Id>,
+        kind: &str,
+    ) -> Option<Id> {
+        let id = ids.get(name.as_str()).copied();
+        if id.is_none() {
+            self.report(path, format!("no {kind} is named `{name}`"));
+        }
+        id
     }
 }
 
@@ -234,7 +247,7 @@ impl<'ir> Parser<'ir> {
     fn phases(&mut self, phases: &'ir [ir::Phase]) {
         if phases.is_empty() {
             self.errors
-                .report("phases", "a workflow has at least one phase");
+                .report("phases", "no phases: a workflow has at least one");
         }
         self.errors
             .unique("phases", phases.iter().map(|phase| &phase.name));
@@ -253,8 +266,10 @@ impl<'ir> Parser<'ir> {
                 self.errors
                     .resolve_all(&format!("{path}.next"), next, &self.phase_ids, "phase");
             if next.contains(&PhaseId(index)) {
-                self.errors
-                    .report(format!("{path}.next"), "a phase does not follow itself");
+                self.errors.report(
+                    format!("{path}.next"),
+                    "the phase follows itself: it may not",
+                );
             }
             self.phases.push(Phase {
                 name: name.clone(),
@@ -278,10 +293,10 @@ impl<'ir> Parser<'ir> {
             if phases.is_empty() {
                 self.errors.report(
                     format!("{path}.phases"),
-                    "a grant applies in at least one phase",
+                    "no phases: a grant applies in at least one",
                 );
             }
-            let phase_ids = self.errors.resolve_all(
+            let phases = self.errors.resolve_all(
                 &format!("{path}.phases"),
                 phases,
                 &self.phase_ids,
@@ -291,43 +306,55 @@ impl<'ir> Parser<'ir> {
                 ir::Principal::Root => Some(Holder::Root),
                 ir::Principal::Role(role) => {
                     let holder_path = format!("{path}.holder");
-                    let id = self.role(&holder_path, role);
+                    let id = self
+                        .errors
+                        .resolve(&holder_path, role, &self.role_ids, "role");
                     if let Some(id) = id {
-                        self.require_live(&holder_path, id, role, &phase_ids);
+                        self.require_live(&holder_path, id, role, &phases);
                     }
                     id.map(Holder::Role)
                 }
             };
             let id = match op {
-                ir::Op::Judge(op) => self
-                    .judge_grant(&path, name, holder, phase_ids, op)
-                    .map(GrantId::Judge),
-                ir::Op::Submit(op) => self
-                    .submit_grant(&path, name, holder, phase_ids, *op)
-                    .map(GrantId::Submit),
+                ir::Op::Judge(op) => {
+                    // Checked even when the holder is unknown, so its errors are reported too.
+                    let slot = self.judge_slot(&path, op, &phases);
+                    holder.zip(slot).map(|(holder, slot)| {
+                        GrantId::Judge(self.push_judge_grant(name, holder, phases, slot, op))
+                    })
+                }
+                ir::Op::Submit(op) => match holder {
+                    Some(Holder::Role(role)) => Some(GrantId::Submit(
+                        self.push_submit_grant(name, role, phases, *op),
+                    )),
+                    Some(Holder::Root) => {
+                        self.errors.report(
+                            format!("{path}.holder"),
+                            "the root holds a submit grant: only a role may",
+                        );
+                        None
+                    }
+                    None => None,
+                },
             };
             self.grant_ids.entry(name.as_str()).or_insert(id);
         }
     }
 
-    fn judge_grant(
+    /// Resolves a judge grant's slot: its role must be a judge with that slot, live in every
+    /// phase the grant applies in.
+    fn judge_slot(
         &mut self,
         path: &str,
-        name: &Name,
-        holder: Option<Holder>,
-        phases: BTreeSet<PhaseId>,
         op: &ir::JudgeOp,
-    ) -> Option<JudgeGrantId> {
-        let ir::JudgeOp {
-            role,
-            slot,
-            calls,
-            cumulative_seconds,
-            concurrency,
-            call_timeout_seconds,
-        } = op;
+        phases: &BTreeSet<PhaseId>,
+    ) -> Option<SlotId> {
+        let role = &op.role;
         let role_path = format!("{path}.op.judge.role");
-        let judge = match self.role(&role_path, role)? {
+        let judge = match self
+            .errors
+            .resolve(&role_path, role, &self.role_ids, "role")?
+        {
             RoleId::Judge(judge) => judge,
             RoleId::Agent(_) => {
                 self.errors
@@ -335,55 +362,65 @@ impl<'ir> Parser<'ir> {
                 return None;
             }
         };
-        self.require_live(&role_path, RoleId::Judge(judge), role, &phases);
-        let Some(index) = self.judges[judge.0]
+        self.require_live(&role_path, RoleId::Judge(judge), role, phases);
+        let slot = &op.slot;
+        let index = self.judges[judge.0]
             .slots
             .iter()
-            .position(|judge_slot| judge_slot.name == *slot)
-        else {
+            .position(|judge_slot| judge_slot.name == *slot);
+        if index.is_none() {
             self.errors.report(
                 format!("{path}.op.judge.slot"),
                 format!("`{role}` has no slot named `{slot}`"),
             );
-            return None;
-        };
+        }
+        index.map(|index| SlotId { judge, index })
+    }
+
+    fn push_judge_grant(
+        &mut self,
+        name: &Name,
+        holder: Holder,
+        phases: BTreeSet<PhaseId>,
+        slot: SlotId,
+        op: &ir::JudgeOp,
+    ) -> JudgeGrantId {
+        let ir::JudgeOp {
+            role: _,
+            slot: _,
+            calls,
+            cumulative_seconds,
+            concurrency,
+            call_timeout_seconds,
+        } = op;
         self.judge_grants.push(JudgeGrant {
             name: name.clone(),
-            holder: holder?,
+            holder,
             phases,
-            slot: SlotId { judge, index },
+            slot,
             calls: *calls,
             cumulative_seconds: *cumulative_seconds,
             concurrency: *concurrency,
             call_timeout_seconds: *call_timeout_seconds,
         });
-        Some(JudgeGrantId(self.judge_grants.len() - 1))
+        JudgeGrantId(self.judge_grants.len() - 1)
     }
 
-    fn submit_grant(
+    fn push_submit_grant(
         &mut self,
-        path: &str,
         name: &Name,
-        holder: Option<Holder>,
+        holder: RoleId,
         phases: BTreeSet<PhaseId>,
         op: ir::SubmitOp,
-    ) -> Option<SubmitGrantId> {
+    ) -> SubmitGrantId {
         let ir::SubmitOp { max_bytes } = op;
-        let holder = match holder? {
-            Holder::Role(role) => role,
-            Holder::Root => {
-                self.errors
-                    .report(format!("{path}.holder"), "only a role holds a submit grant");
-                return None;
-            }
-        };
         self.submit_grants.push(SubmitGrant {
             name: name.clone(),
             holder,
             phases,
             max_bytes,
         });
-        Some(SubmitGrantId(self.submit_grants.len() - 1))
+        SubmitGrantId(self.submit_grants.len() - 1)
     }
 
     /// Reports each of a grant's phases in which a role is not live.
@@ -405,99 +442,105 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    fn role(&mut self, path: &str, name: &Name) -> Option<RoleId> {
-        let role = self.role_ids.get(name.as_str()).copied();
-        if role.is_none() {
-            self.errors
-                .report(path, format!("no role is named `{name}`"));
-        }
-        role
-    }
-
-    fn phase(&mut self, path: &str, name: &Name) -> Option<PhaseId> {
-        let phase = self.phase_ids.get(name.as_str()).copied();
-        if phase.is_none() {
-            self.errors
-                .report(path, format!("no phase is named `{name}`"));
-        }
-        phase
-    }
-
-    /// Resolves a grant by name. `None` if the grant is unknown, or failed to parse.
-    fn grant(&mut self, path: &str, name: &Name) -> Option<GrantId> {
-        let Some(&id) = self.grant_ids.get(name.as_str()) else {
-            self.errors
-                .report(path, format!("no grant is named `{name}`"));
-            return None;
+    fn solo_then_judge(&mut self, pattern: &'ir ir::SoloThenJudge) -> Option<SoloThenJudge> {
+        let ir::SoloThenJudge {
+            agent,
+            submit,
+            score,
+            work_phase,
+            final_phase,
+            deadline_seconds,
+        } = pattern;
+        let names = PatternNames {
+            agent,
+            submit,
+            score,
+            work_phase,
+            final_phase,
         };
-        id
-    }
-
-    fn solo_then_judge(&mut self, pattern: &ir::SoloThenJudge) -> Option<SoloThenJudge> {
-        let path = "main.solo_then_judge";
         // Resolve every reference first, so that the rules below see only parsed parts.
-        let agent = match self.role(&format!("{path}.agent"), &pattern.agent) {
-            Some(RoleId::Agent(agent)) => Some(agent),
-            Some(RoleId::Judge(_)) => {
-                self.errors.report(
-                    format!("{path}.agent"),
-                    format!("`{}` is a judge, not an agent", pattern.agent),
-                );
-                None
-            }
-            None => None,
-        };
-        let submit = match self.grant(&format!("{path}.submit"), &pattern.submit) {
-            Some(GrantId::Submit(submit)) => Some(submit),
-            Some(GrantId::Judge(_)) => {
-                self.errors.report(
-                    format!("{path}.submit"),
-                    format!("`{}` is not a submit grant", pattern.submit),
-                );
-                None
-            }
-            None => None,
-        };
-        let score = match self.grant(&format!("{path}.score"), &pattern.score) {
-            Some(GrantId::Judge(score)) => Some(score),
-            Some(GrantId::Submit(_)) => {
-                self.errors.report(
-                    format!("{path}.score"),
-                    format!("`{}` is not a judge grant", pattern.score),
-                );
-                None
-            }
-            None => None,
-        };
-        let work_phase = self.phase(&format!("{path}.work_phase"), &pattern.work_phase);
-        let final_phase = self.phase(&format!("{path}.final_phase"), &pattern.final_phase);
+        let agent = self.pattern_agent(agent);
+        let submit = self.pattern_submit(submit);
+        let score = self.pattern_score(score);
+        let work_phase = self.pattern_phase("work_phase", work_phase);
+        let final_phase = self.pattern_phase("final_phase", final_phase);
         let parsed = SoloThenJudge {
             agent: agent?,
             submit: submit?,
             score: score?,
             work_phase: work_phase?,
             final_phase: final_phase?,
-            deadline_seconds: pattern.deadline_seconds,
+            deadline_seconds: *deadline_seconds,
         };
+        // The pattern parses only if none of its rules reports an error.
         let errors = self.errors.0.len();
-        self.pattern_phases(path, pattern, &parsed);
-        self.pattern_grants(path, pattern, &parsed);
+        self.pattern_phases(&names, &parsed);
+        self.pattern_grants(&names, &parsed);
         (self.errors.0.len() == errors).then_some(parsed)
     }
 
-    /// The agent works in the initial phase, which is followed by the final phase, and is gone
-    /// by the final phase.
-    fn pattern_phases(&mut self, path: &str, pattern: &ir::SoloThenJudge, parsed: &SoloThenJudge) {
-        let ir::SoloThenJudge {
+    fn pattern_agent(&mut self, name: &Name) -> Option<AgentId> {
+        let path = format!("{PATTERN}.agent");
+        match self.errors.resolve(&path, name, &self.role_ids, "role")? {
+            RoleId::Agent(agent) => Some(agent),
+            RoleId::Judge(_) => {
+                self.errors
+                    .report(path, format!("`{name}` is a judge, not an agent"));
+                None
+            }
+        }
+    }
+
+    /// `None` also for a grant that failed to parse, which has reported why.
+    fn pattern_submit(&mut self, name: &Name) -> Option<SubmitGrantId> {
+        let path = format!("{PATTERN}.submit");
+        match self
+            .errors
+            .resolve(&path, name, &self.grant_ids, "grant")??
+        {
+            GrantId::Submit(submit) => Some(submit),
+            GrantId::Judge(_) => {
+                self.errors
+                    .report(path, format!("`{name}` is not a submit grant"));
+                None
+            }
+        }
+    }
+
+    /// `None` also for a grant that failed to parse, which has reported why.
+    fn pattern_score(&mut self, name: &Name) -> Option<JudgeGrantId> {
+        let path = format!("{PATTERN}.score");
+        match self
+            .errors
+            .resolve(&path, name, &self.grant_ids, "grant")??
+        {
+            GrantId::Judge(score) => Some(score),
+            GrantId::Submit(_) => {
+                self.errors
+                    .report(path, format!("`{name}` is not a judge grant"));
+                None
+            }
+        }
+    }
+
+    fn pattern_phase(&mut self, field: &str, name: &Name) -> Option<PhaseId> {
+        let path = format!("{PATTERN}.{field}");
+        self.errors.resolve(&path, name, &self.phase_ids, "phase")
+    }
+
+    /// Checks the phase rules of [`SoloThenJudge`].
+    fn pattern_phases(&mut self, names: &PatternNames<'_>, parsed: &SoloThenJudge) {
+        let PatternNames {
             agent: agent_name,
             work_phase: work_name,
             final_phase: final_name,
-            ..
-        } = pattern;
+            submit: _,
+            score: _,
+        } = names;
         if parsed.work_phase == parsed.final_phase {
             self.errors.report(
-                format!("{path}.final_phase"),
-                "the final phase differs from the work phase",
+                format!("{PATTERN}.final_phase"),
+                "the final phase is the work phase: they must differ",
             );
             return;
         }
@@ -506,25 +549,25 @@ impl<'ir> Parser<'ir> {
         let final_ = &self.phases[parsed.final_phase.0];
         if parsed.work_phase != PhaseId(0) {
             self.errors.report(
-                format!("{path}.work_phase"),
+                format!("{PATTERN}.work_phase"),
                 format!("`{work_name}` is not the first phase, in which a run starts"),
             );
         }
         if !work.next.contains(&parsed.final_phase) {
             self.errors.report(
-                format!("{path}.final_phase"),
+                format!("{PATTERN}.final_phase"),
                 format!("the work phase `{work_name}` is not followed by `{final_name}`"),
             );
         }
         if !work.is_live(agent) {
             self.errors.report(
-                format!("{path}.agent"),
+                format!("{PATTERN}.agent"),
                 format!("`{agent_name}` is not live in the work phase `{work_name}`"),
             );
         }
         if final_.is_live(agent) {
             self.errors.report(
-                format!("{path}.agent"),
+                format!("{PATTERN}.agent"),
                 format!(
                     "`{agent_name}` is live in the final phase `{final_name}`, so it would \
                      survive into judging"
@@ -533,40 +576,38 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    /// The agent submits in the work phase, and the root scores in the final phase with a
-    /// final-mode judge whose slot fits any submission.
-    fn pattern_grants(&mut self, path: &str, pattern: &ir::SoloThenJudge, parsed: &SoloThenJudge) {
-        let ir::SoloThenJudge {
+    /// Checks the grant rules of [`SoloThenJudge`].
+    fn pattern_grants(&mut self, names: &PatternNames<'_>, parsed: &SoloThenJudge) {
+        let PatternNames {
             agent: agent_name,
             submit: submit_name,
             score: score_name,
             work_phase: work_name,
             final_phase: final_name,
-            ..
-        } = pattern;
+        } = names;
         let submit = &self.submit_grants[parsed.submit.0];
         if submit.holder != RoleId::Agent(parsed.agent) {
             self.errors.report(
-                format!("{path}.submit"),
+                format!("{PATTERN}.submit"),
                 format!("`{submit_name}` is not held by the agent `{agent_name}`"),
             );
         }
         if !submit.phases.contains(&parsed.work_phase) {
             self.errors.report(
-                format!("{path}.submit"),
+                format!("{PATTERN}.submit"),
                 format!("`{submit_name}` does not apply in the work phase `{work_name}`"),
             );
         }
         let score = &self.judge_grants[parsed.score.0];
         if score.holder != Holder::Root {
             self.errors.report(
-                format!("{path}.score"),
+                format!("{PATTERN}.score"),
                 format!("`{score_name}` is not held by the root"),
             );
         }
         if !score.phases.contains(&parsed.final_phase) {
             self.errors.report(
-                format!("{path}.score"),
+                format!("{PATTERN}.score"),
                 format!("`{score_name}` does not apply in the final phase `{final_name}`"),
             );
         }
@@ -574,7 +615,7 @@ impl<'ir> Parser<'ir> {
         match judge.mode {
             Mode::Final => {}
             Mode::Train => self.errors.report(
-                format!("{path}.score"),
+                format!("{PATTERN}.score"),
                 format!(
                     "`{score_name}` judges with `{}`, which is train-mode",
                     judge.sandbox.name
@@ -584,7 +625,7 @@ impl<'ir> Parser<'ir> {
         let slot = &judge.slots[score.slot.index];
         if submit.max_bytes > slot.max_bytes {
             self.errors.report(
-                format!("{path}.submit"),
+                format!("{PATTERN}.submit"),
                 format!(
                     "submissions of up to {} bytes do not fit the score slot's {} bytes",
                     submit.max_bytes, slot.max_bytes
@@ -592,4 +633,16 @@ impl<'ir> Parser<'ir> {
             );
         }
     }
+}
+
+/// Where a `solo_then_judge` pattern's errors are reported.
+const PATTERN: &str = "main.solo_then_judge";
+
+/// The names a `solo_then_judge` pattern refers to, for its error messages.
+struct PatternNames<'ir> {
+    agent: &'ir Name,
+    submit: &'ir Name,
+    score: &'ir Name,
+    work_phase: &'ir Name,
+    final_phase: &'ir Name,
 }

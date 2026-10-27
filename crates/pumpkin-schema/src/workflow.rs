@@ -1,5 +1,5 @@
-//! A workflow parsed from its IR: references resolved to typed ids, defaults applied, and the
-//! rules that span its parts checked.
+//! A workflow parsed from its IR: references resolved to typed ids, and the rules that span
+//! its parts checked.
 //!
 //! A [`Workflow`] can only be made by [`Workflow::parse`], so code that acts on one need not
 //! check again what parsing established. Each kind of part has its own id type, so that, for
@@ -170,11 +170,11 @@ pub struct Sandbox {
     pub assets: Vec<Asset>,
 }
 
-/// An agent role. Agents are untrusted, and whatever reaches them is code.
+/// An agent role; see [`ir::Runtime::Agent`](crate::ir::Runtime::Agent).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub sandbox: Sandbox,
-    /// The command that launches the harness.
+    /// See [`ir::AgentRuntime::command`](crate::ir::AgentRuntime::command).
     pub command: Command,
 }
 
@@ -182,7 +182,7 @@ pub struct Agent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Judge {
     pub sandbox: Sandbox,
-    /// The command each call runs.
+    /// See [`ir::JudgeRuntime::command`](crate::ir::JudgeRuntime::command).
     pub command: Command,
     pub mode: Mode,
     pub trust: Trust,
@@ -257,8 +257,7 @@ pub enum Main {
     SoloThenJudge(SoloThenJudge),
 }
 
-/// One agent works until it exits, finalizes a submission or reaches the deadline; then the
-/// pattern enters the final phase and judges the selected submission.
+/// The parsed [`ir::SoloThenJudge`](crate::ir::SoloThenJudge).
 ///
 /// The work phase is the initial phase and is followed by the final phase. The agent is live
 /// in the work phase and not in the final phase. The agent holds the submit grant, which
