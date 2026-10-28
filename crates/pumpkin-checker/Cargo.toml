@@ -1,0 +1,19 @@
+[package]
+name = "pumpkin-checker"
+version = "0.0.0"
+description = "Pumpkin's checker: proves properties of a workflow before it runs"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+pumpkin-schema = { path = "../pumpkin-schema" }
+
+[dev-dependencies]
+serde_json.workspace = true
+expect-test.workspace = true
+
+[lints]
+workspace = true
