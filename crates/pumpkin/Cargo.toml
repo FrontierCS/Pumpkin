@@ -1,0 +1,16 @@
+[package]
+name = "pumpkin"
+version = "0.0.0"
+description = "Pumpkin's host side: the gateway that sandboxes connect to"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+pumpkin-schema = { path = "../pumpkin-schema" }
+
+[dev-dependencies]
+serde_json.workspace = true
+expect-test.workspace = true
+
+[lints]
+workspace = true
