@@ -1,7 +1,8 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (agents and judges, with their [`Slot`]s and [`Mode`]s),
-//! [`Grant`]s of [`Op`]s, [`Phase`]s, and the pattern, [`Main`].
+//! A workflow is data: [`Role`]s (one agent and its judges, with their [`Slot`]s and
+//! [`Mode`]s), and the pattern, [`Main`], which gives the agent its [`Grant`]s and judges what
+//! it submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -29,10 +30,8 @@ pub use values::{
 pub struct Workflow {
     pub ir_version: IrVersion,
     pub name: WorkflowName,
+    /// Exactly one of them has an agent runtime: the agent. The others are judges.
     pub roles: Vec<Role>,
-    pub grants: Vec<Grant>,
-    /// The phases a run moves through. A run starts in the first one.
-    pub phases: Vec<Phase>,
     /// The pattern that drives a run.
     pub main: Main,
 }
@@ -60,10 +59,12 @@ pub struct Role {
     pub user: User,
     pub resources: Resources,
     pub runtime: Runtime,
-    /// The role's routes out; absent, the role has none.
+    /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// Data the role's image holds, declared for the per-mode rule.
+    /// Data the role's image holds, declared for the per-mode rule. A task declares its assets
+    /// once it has data to keep from the agent, such as hidden evaluation data; none of the
+    /// tasks ported so far has any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<Asset>,
 }
@@ -91,7 +92,7 @@ pub struct Resources {
 pub enum Trust {
     /// The role's code acts as its author intends, though code it is given may not.
     Trusted,
-    /// The role's code may act against the run. Every agent is untrusted.
+    /// The role's code may act against the run. The agent is untrusted.
     Untrusted,
 }
 
@@ -155,6 +156,10 @@ pub struct Command {
 pub struct Slot {
     pub name: Name,
     pub kind: SlotKind,
+    /// The most bytes a payload into the slot may hold, at most
+    /// [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), since every payload
+    /// reaches its judge through an op. The [`Score`] slot's also caps every submission, so that
+    /// whatever is selected fits it.
     pub max_bytes: NonZeroU64,
 }
 
@@ -215,75 +220,6 @@ pub enum AssetMode {
     Final,
 }
 
-/// Permission for a principal to use an op in some phases.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Grant {
-    /// The name the holder uses the grant by. Unique within the workflow.
-    pub name: Name,
-    pub holder: Principal,
-    /// The phases in which the grant applies.
-    pub phases: Vec<Name>,
-    pub op: Op,
-}
-
-/// The holder of a grant.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Principal {
-    /// The workflow's pattern.
-    Root,
-    /// Every instance of the named role.
-    Role(Name),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Op {
-    Judge(JudgeOp),
-    Submit(SubmitOp),
-}
-
-/// Runs a payload in a fresh instance of a judge role and collects its result.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JudgeOp {
-    /// The judge role.
-    pub role: Name,
-    /// The judge's slot that receives the payload.
-    pub slot: Name,
-    /// The most calls the holder may make.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calls: Option<NonZeroU64>,
-    /// The most judge command time the holder's calls may use in all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cumulative_seconds: Option<NonZeroU64>,
-    /// The most calls that may run at once. A call beyond it is refused.
-    pub concurrency: NonZeroU32,
-    /// The timeout of each call, counted from the start of the judge command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub call_timeout_seconds: Option<NonZeroU64>,
-}
-
-/// Stores submissions, of which the pattern judges the one selected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubmitOp {
-    pub max_bytes: NonZeroU64,
-}
-
-/// A phase of a run. Entering a phase destroys the instances of the roles not live in it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Phase {
-    pub name: Name,
-    /// The roles whose instances may exist in this phase.
-    pub live: Vec<Name>,
-    /// The phases this phase may be followed by.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next: Vec<Name>,
-}
-
 /// The pattern that drives a run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -292,24 +228,79 @@ pub enum Main {
 }
 
 /// One agent works until it exits, finalizes a submission or reaches the deadline; then the
-/// pattern enters the final phase and judges the selected submission.
+/// pattern judges the selected submission with the [`Score`] judge.
+///
+/// A run has two phases. In the work phase, the agent works and calls the judges its grants
+/// name. In the final phase, which starts once the agent's sandbox and every call it made are
+/// gone, the score judge judges the selection: the finalized submission, else the latest one
+/// stored. Only the pattern itself, which keeps the submissions, lives through both phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SoloThenJudge {
-    /// The agent role.
-    pub agent: Name,
-    /// The agent's submit grant.
-    pub submit: Name,
-    /// The root's judge grant that scores the selected submission.
-    pub score: Name,
-    /// The initial phase, in which the agent works.
-    pub work_phase: Name,
-    /// The phase in which the submission is judged.
-    pub final_phase: Name,
+    /// The ops the agent may use while it works: judge calls, and exactly one submit grant.
+    pub grants: Vec<Grant>,
+    /// How the selected submission is judged.
+    pub score: Score,
     /// How long the work phase may last.
     ///
     /// The clock starts with the run, so starting the agent's sandbox counts against it.
-    /// Judging the selected submission comes after the deadline, bounded instead by the score
-    /// grant's [`JudgeOp::call_timeout_seconds`].
+    /// Judging the selected submission comes after the deadline.
     pub deadline_seconds: NonZeroU64,
+}
+
+/// Permission for the agent to use an op while it works.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Grant {
+    Judge(JudgeGrant),
+    Submit(SubmitGrant),
+}
+
+impl Grant {
+    /// The name the agent uses the grant by. Unique among the agent's grants.
+    pub fn name(&self) -> &Name {
+        match self {
+            Self::Judge(JudgeGrant { name, .. }) | Self::Submit(SubmitGrant { name }) => name,
+        }
+    }
+}
+
+/// Runs a payload in a fresh instance of a judge role and collects its result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeGrant {
+    pub name: Name,
+    /// The judge role.
+    pub role: Name,
+    /// The judge's slot that receives the payload.
+    pub slot: Name,
+    /// The most calls the agent may make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<NonZeroU64>,
+    /// The most judge command time the agent's calls may use in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_seconds: Option<NonZeroU64>,
+    /// The most calls that may run at once. A call beyond it is refused.
+    pub concurrency: NonZeroU32,
+    /// The timeout of each call, counted from the start of the judge command. A call also
+    /// ends with the grant's cumulative time, or with the work phase, if either comes first.
+    pub call_timeout_seconds: NonZeroU64,
+}
+
+/// Stores submissions, of which the pattern judges the one selected. A submission may hold as
+/// many bytes as the [`Score`] slot takes, its [`max_bytes`](Slot::max_bytes).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitGrant {
+    pub name: Name,
+}
+
+/// The judge call that scores the selected submission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Score {
+    /// The judge role, which is final-mode.
+    pub role: Name,
+    /// The judge's slot that receives the submission.
+    pub slot: Name,
 }

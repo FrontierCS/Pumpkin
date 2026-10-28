@@ -44,8 +44,8 @@ macro_rules! checked_string {
 }
 
 checked_string!(
-    /// The name of a role, slot, asset, grant or phase: 1 to 64 characters from a-z, 0-9, `_`
-    /// and `-`, starting with a letter.
+    /// The name of a role, slot, asset or grant: 1 to 64 characters from a-z, 0-9, `_` and
+    /// `-`, starting with a letter.
     Name,
     check_name
 );
