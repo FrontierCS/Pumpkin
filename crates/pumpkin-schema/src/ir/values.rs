@@ -1,4 +1,5 @@
-//! Values that deserialization checks, so that each one in an IR is well formed.
+//! Values that deserialization checks, so that each one in an IR or a sandbox protocol message
+//! is well formed.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -73,6 +74,13 @@ checked_string!(
     /// An absolute path without empty, `.` or `..` components.
     AbsolutePath,
     check_absolute_path
+);
+
+checked_string!(
+    /// A relative path of one or more components, none of them empty, `.` or `..`, so that it
+    /// stays below the directory it is joined to.
+    RelativePath,
+    check_relative_path
 );
 
 checked_string!(
@@ -151,19 +159,32 @@ fn check_sha256_digest(digest: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `path` is one or more `/`-separated components, none of them empty, `.` or `..`.
+fn has_normal_components(path: &str) -> bool {
+    path.split('/')
+        .all(|component| !matches!(component, "" | "." | ".."))
+}
+
 fn check_absolute_path(path: &str) -> Result<(), String> {
-    let normalized = path == "/"
-        || path.strip_prefix('/').is_some_and(|relative| {
-            relative
-                .split('/')
-                .all(|component| !matches!(component, "" | "." | ".."))
-        });
+    let normalized = path == "/" || path.strip_prefix('/').is_some_and(has_normal_components);
     if normalized && !path.contains('\0') {
         Ok(())
     } else {
         Err(format!(
             "`{}` is not a normalized absolute path: start with `/`, and use no empty, `.` or \
              `..` components and no NUL byte",
+            path.escape_debug()
+        ))
+    }
+}
+
+fn check_relative_path(path: &str) -> Result<(), String> {
+    if has_normal_components(path) && !path.contains('\0') {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` is not a normalized relative path: use `/`-separated components, none of them \
+             empty, `.` or `..`, and no NUL byte",
             path.escape_debug()
         ))
     }

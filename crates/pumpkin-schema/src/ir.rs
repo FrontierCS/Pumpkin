@@ -94,7 +94,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
-mod values;
+pub(crate) mod values;
 
 pub use values::{
     AbsolutePath, Argv, Env, EnvVar, Image, ModelName, Models, Name, Sha256Digest, WorkflowName,
