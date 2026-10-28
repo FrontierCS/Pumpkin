@@ -1,4 +1,4 @@
-- ALWAYS pass the checks before finishing: `cargo xtask ci`
+- ALWAYS pass the checks before finishing: `cargo xtask ci`, with `--docker` for the Docker tier
 - NEVER assume a clippy warning or a test failure is pre-existing
 - PREFER running the narrowest relevant test while iterating
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend
