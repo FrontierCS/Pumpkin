@@ -116,6 +116,11 @@ pub struct Workflow {
 
 /// The IR's version. Each version serializes to its own string, so a consumer refuses an IR
 /// whose version it does not know.
+///
+/// Deserialization reports the first error in the order the IR's fields are written, so the
+/// refusal names the version only when `ir_version` comes first, as [`Workflow`] serializes
+/// it. An IR from another version that writes a changed field earlier fails on that field
+/// instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrVersion {
     #[serde(rename = "pumpkin.ir/v0")]

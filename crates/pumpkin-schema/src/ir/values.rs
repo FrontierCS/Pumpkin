@@ -92,8 +92,9 @@ fn check_name(name: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "`{name}` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, \
-             starting with a letter"
+            "`{}` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, \
+             starting with a letter",
+            name.escape_debug()
         ))
     }
 }
@@ -107,8 +108,9 @@ fn check_workflow_name(name: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "`{name}` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, \
-             `.`, `_`, `-` and `/`"
+            "`{}` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, \
+             `.`, `_`, `-` and `/`",
+            name.escape_debug()
         ))
     }
 }
@@ -126,7 +128,8 @@ fn check_image(image: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "`{image}` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`"
+            "`{}` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`",
+            image.escape_debug()
         ))
     }
 }
@@ -141,7 +144,10 @@ fn check_sha256_digest(digest: &str) -> Result<(), String> {
     if valid {
         Ok(())
     } else {
-        Err(format!("`{digest}` is not a `sha256:<hex>` digest"))
+        Err(format!(
+            "`{}` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits",
+            digest.escape_debug()
+        ))
     }
 }
 
@@ -155,7 +161,11 @@ fn check_absolute_path(path: &str) -> Result<(), String> {
     if normalized && !path.contains('\0') {
         Ok(())
     } else {
-        Err(format!("`{path}` is not a normalized absolute path"))
+        Err(format!(
+            "`{}` is not a normalized absolute path: start with `/`, and use no empty, `.` or \
+             `..` components and no NUL byte",
+            path.escape_debug()
+        ))
     }
 }
 
@@ -163,7 +173,7 @@ fn check_model_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.contains(|char: char| char.is_whitespace() || char == '\0') {
         Err(format!(
             "`{}` is not a model name: use one word",
-            name.escape_default()
+            name.escape_debug()
         ))
     } else {
         Ok(())
@@ -193,7 +203,10 @@ impl TryFrom<Vec<String>> for Argv {
             Some(_) => {}
         }
         if let Some(arg) = argv.iter().find(|arg| arg.contains('\0')) {
-            return Err(format!("`{}` holds a NUL byte", arg.escape_default()));
+            return Err(format!(
+                "`{}` holds a NUL byte: no argument may",
+                arg.escape_debug()
+            ));
         }
         Ok(Self(argv))
     }
@@ -230,7 +243,8 @@ impl TryFrom<String> for EnvVar {
     fn try_from(entry: String) -> Result<Self, Self::Error> {
         let Some((name, value)) = entry.split_once('=') else {
             return Err(format!(
-                "`{entry}` is not an environment entry, `NAME=value`"
+                "`{}` is not an environment entry: write `NAME=value`",
+                entry.escape_debug()
             ));
         };
         let mut chars = name.chars();
@@ -239,10 +253,16 @@ impl TryFrom<String> for EnvVar {
             .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
             && chars.all(|char| char.is_ascii_alphanumeric() || char == '_');
         if !valid_name {
-            return Err(format!("`{name}` is not a valid environment variable name"));
+            return Err(format!(
+                "`{}` is not a valid environment variable name: use A-Z, a-z, 0-9 and `_`, \
+                 not starting with a digit",
+                name.escape_debug()
+            ));
         }
         if value.contains('\0') {
-            return Err(format!("the value of `{name}` holds a NUL byte"));
+            return Err(format!(
+                "the value of `{name}` holds a NUL byte: no value may"
+            ));
         }
         Ok(Self {
             name: name.to_owned(),
@@ -278,7 +298,10 @@ impl TryFrom<Vec<EnvVar>> for Env {
     fn try_from(entries: Vec<EnvVar>) -> Result<Self, Self::Error> {
         let mut names = HashSet::new();
         if let Some(entry) = entries.iter().find(|entry| !names.insert(entry.name())) {
-            return Err(format!("`{}` is set more than once", entry.name()));
+            return Err(format!(
+                "`{}` is set more than once: set each name once",
+                entry.name()
+            ));
         }
         Ok(Self(entries))
     }
@@ -310,7 +333,10 @@ impl TryFrom<Vec<ModelName>> for Models {
         }
         let mut seen = HashSet::new();
         if let Some(model) = models.iter().find(|model| !seen.insert(*model)) {
-            return Err(format!("`{model}` is listed more than once"));
+            return Err(format!(
+                "`{}` is listed more than once: list each model once",
+                model.as_str().escape_debug()
+            ));
         }
         Ok(Self(models))
     }

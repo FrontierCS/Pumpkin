@@ -8,11 +8,8 @@
 )]
 
 use expect_test::{Expect, expect};
-use pumpkin_schema::ir::{
-    self, AbsolutePath, Argv, Env, Image, Models, Name, Sha256Digest, WorkflowName,
-};
+use pumpkin_schema::ir;
 use pumpkin_schema::workflow::{Holder, Main, RoleId, Workflow};
-use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 const LWE: &str = include_str!("fixtures/lwe.json");
@@ -23,22 +20,29 @@ fn lwe_json() -> Value {
     serde_json::from_str(LWE).unwrap()
 }
 
-/// Deserializes and parses `ir`, and checks the rules it breaks against `expect`.
-fn check(ir: Value, expect: &Expect) {
-    let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
-    let actual = match Workflow::parse(&ir) {
-        Ok(_) => "parsed".to_owned(),
-        Err(errors) => errors.to_string(),
-    };
-    expect.assert_eq(&actual);
+/// The LWE workflow with `value` set at `pointer`, whose parent is an object.
+fn lwe_with(pointer: &str, value: Value) -> Value {
+    let mut ir = lwe_json();
+    let (parent, key) = pointer.rsplit_once('/').unwrap();
+    let parent = ir.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+    parent.insert(key.to_owned(), value);
+    ir
 }
 
-/// Deserializes a single value, and renders it with the outcome.
-fn deserialize<T: DeserializeOwned>(value: &Value) -> String {
-    match serde_json::from_value::<T>(value.clone()) {
-        Ok(_) => format!("{value}: ok"),
-        Err(error) => format!("{value}: {error}"),
-    }
+/// Deserializes and parses each IR, and checks what becomes of them against `expect`: each
+/// parses, or fails to deserialize, or breaks rules.
+fn check(irs: impl IntoIterator<Item = Value>, expect: &Expect) {
+    let actual: Vec<String> = irs
+        .into_iter()
+        .map(|ir| match serde_json::from_value::<ir::Workflow>(ir) {
+            Err(error) => error.to_string(),
+            Ok(ir) => match Workflow::parse(&ir) {
+                Ok(_) => "parsed".to_owned(),
+                Err(errors) => errors.to_string(),
+            },
+        })
+        .collect();
+    expect.assert_eq(&actual.join("\n"));
 }
 
 #[test]
@@ -64,43 +68,48 @@ fn lwe() {
 
 #[test]
 fn checked_values() {
-    let actual = [
-        deserialize::<Name>(&json!("train_judge")),
-        deserialize::<Name>(&json!("Train")),
-        deserialize::<WorkflowName>(&json!("frontier-cs/lwe_structured_recovery")),
-        deserialize::<WorkflowName>(&json!("lwe structured recovery")),
-        deserialize::<Image>(&json!(format!("pumpkin/lwe-agent@sha256:{HEX}"))),
-        deserialize::<Image>(&json!(format!("sha256:{HEX}"))),
-        deserialize::<Image>(&json!("ubuntu:24.04")),
-        deserialize::<Sha256Digest>(&json!("md5:abc")),
-        deserialize::<AbsolutePath>(&json!("/opt/frontier")),
-        deserialize::<AbsolutePath>(&json!("/pumpkin/../etc")),
-        deserialize::<AbsolutePath>(&json!("workspace")),
-        deserialize::<Argv>(&json!([])),
-        deserialize::<Env>(&json!(["MODE=train"])),
-        deserialize::<Env>(&json!(["1ST=value"])),
-        deserialize::<Env>(&json!(["MODE=train", "MODE=eval"])),
-        deserialize::<Models>(&json!([])),
-        deserialize::<Models>(&json!(["gpt-6-astra", "gpt-6-astra"])),
-    ];
-    expect![[r#"
-        "train_judge": ok
-        "Train": `Train` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
-        "frontier-cs/lwe_structured_recovery": ok
-        "lwe structured recovery": `lwe structured recovery` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
-        "pumpkin/lwe-agent@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": ok
-        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": ok
-        "ubuntu:24.04": `ubuntu:24.04` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`
-        "md5:abc": `md5:abc` is not a `sha256:<hex>` digest
-        "/opt/frontier": ok
-        "/pumpkin/../etc": `/pumpkin/../etc` is not a normalized absolute path
-        "workspace": `workspace` is not a normalized absolute path
-        []: the command is empty: it needs a program
-        ["MODE=train"]: ok
-        ["1ST=value"]: `1ST` is not a valid environment variable name
-        ["MODE=train","MODE=eval"]: `MODE` is set more than once
-        []: no models: a model route allows at least one
-        ["gpt-6-astra","gpt-6-astra"]: `gpt-6-astra` is listed more than once"#]].assert_eq(&actual.join("\n"));
+    let agent = "/roles/0";
+    let command = "/roles/0/runtime/agent/command";
+    let asset = json!({ "name": "data", "path": "/data", "digest": "md5:abc", "mode": "any" });
+    check(
+        [
+            lwe_with("/name", json!("lwe structured recovery")),
+            lwe_with(&format!("{agent}/name"), json!("Agent")),
+            lwe_with(&format!("{agent}/name"), json!("bad\nname")),
+            lwe_with(&format!("{agent}/image"), json!(format!("sha256:{HEX}"))),
+            lwe_with(&format!("{agent}/image"), json!("ubuntu:24.04")),
+            lwe_with(&format!("{agent}/assets"), json!([asset])),
+            lwe_with(&format!("{command}/cwd"), json!("workspace")),
+            lwe_with(&format!("{command}/cwd"), json!("/workspace/")),
+            lwe_with(&format!("{command}/argv"), json!([])),
+            lwe_with(&format!("{command}/env"), json!(["MODE"])),
+            lwe_with(&format!("{command}/env"), json!(["1ST=value"])),
+            lwe_with(
+                &format!("{command}/env"),
+                json!(["MODE=train", "MODE=eval"]),
+            ),
+            lwe_with(&format!("{agent}/egress/model/models"), json!([])),
+            lwe_with(
+                &format!("{agent}/egress/model/models"),
+                json!(["gpt-6-astra", "gpt-6-astra"]),
+            ),
+        ],
+        &expect![[r#"
+            `lwe structured recovery` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
+            `Agent` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
+            `bad\nname` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
+            parsed
+            `ubuntu:24.04` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`
+            `md5:abc` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits
+            `workspace` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
+            `/workspace/` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
+            the command is empty: it needs a program
+            `MODE` is not an environment entry: write `NAME=value`
+            `1ST` is not a valid environment variable name: use A-Z, a-z, 0-9 and `_`, not starting with a digit
+            `MODE` is set more than once: set each name once
+            no models: a model route allows at least one
+            `gpt-6-astra` is listed more than once: list each model once"#]],
+    );
 }
 
 #[test]
@@ -123,18 +132,18 @@ fn broken_references() {
     ir["main"]["solo_then_judge"]["agent"] = json!("train_judge");
     ir["main"]["solo_then_judge"]["score"] = json!("submit");
     check(
-        ir,
+        [ir],
         &expect![[r#"
-            roles[final_judge].runtime.judge.slots[payload]: the name is already used
-            roles[root].name: `root` is reserved
-            phases[work].live: `agent` is already listed
-            phases[work].live: no role is named `ghost`
-            phases[work].next: no phase is named `later`
+            roles[final_judge].runtime.judge.slots[1].name: `payload` also names roles[final_judge].runtime.judge.slots[0]: give each a unique name
+            roles[root].name: `root` is reserved: use another name
+            phases[work].live: `agent` is already listed: list each once
+            phases[work].live: no role is named `ghost`: name one listed in `roles`
+            phases[work].next: no phase is named `later`: name one listed in `phases`
             phases[final].next: the phase follows itself: it may not
-            grants[train]: the name is already used
-            grants[train].holder: no role is named `ghost`
-            main.solo_then_judge.agent: `train_judge` is a judge, not an agent
-            main.solo_then_judge.score: `submit` is not a judge grant"#]],
+            grants[3].name: `train` also names grants[0]: give each a unique name
+            grants[0].holder: no role is named `ghost`: name one listed in `roles`
+            main.solo_then_judge.agent: `train_judge` is a judge: name an agent
+            main.solo_then_judge.score: `submit` is a submit grant: name a judge grant"#]],
     );
 }
 
@@ -152,13 +161,13 @@ fn broken_grants() {
         "op": { "submit": { "max_bytes": 1 } }
     }));
     check(
-        ir,
+        [ir],
         &expect![[r#"
-            grants[train].holder: `agent` is not live in phase `final`
-            grants[train].op.judge.role: `train_judge` is not live in phase `final`
-            grants[train].op.judge.slot: `train_judge` has no slot named `submission`
+            grants[train].holder: `agent` is not live in phase `final`: a grant applies only in phases where its roles are live
+            grants[train].op.judge.role: `train_judge` is not live in phase `final`: a grant applies only in phases where its roles are live
+            grants[train].op.judge.slot: `train_judge` has no slot named `submission`: name one of its slots
             grants[submit].holder: the root holds a submit grant: only a role may
-            grants[score].op.judge.role: `agent` is an agent, not a judge
+            grants[score].op.judge.role: `agent` is an agent: name a judge
             grants[idle].phases: no phases: a grant applies in at least one"#]],
     );
 }
@@ -175,12 +184,12 @@ fn broken_pattern() {
     ir["grants"][2]["op"]["judge"]["role"] = json!("train_judge");
     ir["grants"][1]["op"]["submit"]["max_bytes"] = json!(8_388_608);
     check(
-        ir,
+        [ir],
         &expect![[r#"
-        main.solo_then_judge.work_phase: `work` is not the first phase, in which a run starts
-        main.solo_then_judge.final_phase: the work phase `work` is not followed by `final`
-        main.solo_then_judge.agent: `agent` is live in the final phase `final`, so it would survive into judging
-        main.solo_then_judge.score: `score` judges with `train_judge`, which is train-mode
-        main.solo_then_judge.submit: submissions of up to 8388608 bytes do not fit the score slot's 4194304 bytes"#]],
+            main.solo_then_judge.work_phase: `work` is not the first phase: name the phase a run starts in
+            main.solo_then_judge.final_phase: the work phase `work` is not followed by `final`: list `final` in its `next`
+            main.solo_then_judge.agent: `agent` is live in the final phase `final`, so it would survive into judging: drop it from the phase's `live`
+            main.solo_then_judge.score: `score` judges with `train_judge`, which is train-mode: name a final-mode judge
+            main.solo_then_judge.submit: submissions of up to 8388608 bytes do not fit the score slot's 4194304 bytes: raise the slot's `max_bytes` or lower the submit grant's"#]],
     );
 }
