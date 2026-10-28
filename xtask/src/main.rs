@@ -3,18 +3,22 @@
 //! This is integrated as a `cargo` subcommand by using an alias in `.cargo/config.toml`.
 
 #![expect(
+    clippy::print_stdout,
     clippy::print_stderr,
-    reason = "a command line reports on its standard error"
+    reason = "a command line reports on its standard output and error"
 )]
 
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xshell::{Shell, cmd};
 
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// The target the static `sandboxd` is built for.
+const MUSL: &str = "x86_64-unknown-linux-musl";
 
 mod flags {
     #![expect(
@@ -30,6 +34,9 @@ mod flags {
             /// Runs the checks every change must pass, in order, and stops at the first that
             /// fails.
             cmd ci {}
+
+            /// Builds the static sandboxd that every sandbox runs, and prints its path.
+            cmd sandboxd {}
         }
     }
     // generated start
@@ -43,10 +50,14 @@ mod flags {
     #[derive(Debug)]
     pub enum XtaskCmd {
         Ci(Ci),
+        Sandboxd(Sandboxd),
     }
 
     #[derive(Debug)]
     pub struct Ci;
+
+    #[derive(Debug)]
+    pub struct Sandboxd;
 
     impl Xtask {
         #[allow(dead_code)]
@@ -85,6 +96,10 @@ fn try_main() -> Result<()> {
     sh.change_dir(root());
     match flags.subcommand {
         flags::XtaskCmd::Ci(flags::Ci) => ci(&sh),
+        flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
+            println!("{}", sandboxd(&sh)?.display());
+            Ok(())
+        }
     }
 }
 
@@ -108,4 +123,24 @@ fn ci(sh: &Shell) -> Result<()> {
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
     cmd!(sh, "cargo test --workspace --locked").run()?;
     Ok(())
+}
+
+/// Builds the static `sandboxd` that every sandbox runs, and returns the path cargo reports
+/// for it, so that the path is right wherever cargo's configuration puts the target directory.
+fn sandboxd(sh: &Shell) -> Result<PathBuf> {
+    let build = cmd!(
+        sh,
+        "cargo build --release --locked --package pumpkin-sandboxd --target {MUSL} --message-format json-render-diagnostics"
+    );
+    // One JSON message per line; diagnostics are rendered on standard error instead.
+    for line in build.read()?.lines() {
+        let message: serde_json::Value = serde_json::from_str(line)?;
+        if message["reason"] == "compiler-artifact"
+            && message["target"]["name"] == "sandboxd"
+            && let Some(path) = message["executable"].as_str()
+        {
+            return Ok(path.into());
+        }
+    }
+    Err("cargo reported no sandboxd executable: expected a compiler-artifact message for it".into())
 }
