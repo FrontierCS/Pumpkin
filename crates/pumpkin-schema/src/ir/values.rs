@@ -64,6 +64,16 @@ checked_string!(
     check_image
 );
 
+impl Image {
+    /// The digest the image is pinned by, `sha256:<hex>`, whichever repository names it. A
+    /// repository digest and a local image ID differ for the same image.
+    pub fn digest(&self) -> &str {
+        self.0
+            .rsplit_once('@')
+            .map_or(self.as_str(), |(_, digest)| digest)
+    }
+}
+
 checked_string!(
     /// A content digest: `sha256:` and 64 lowercase hexadecimal digits.
     Sha256Digest,
