@@ -315,7 +315,8 @@ fn refusals() {
             // Started by name with its own PATH, a missing program is waited for by the
             // standard library itself, which must not race the reaper while another command
             // runs.
-            let _running = sandbox.session.start(sandbox.sh("exec sleep 60", &[]));
+            let sleep = sandbox.sh("exec sleep 60", &[]);
+            let _running = sandbox.session.start(sleep).unwrap();
             let mut failures: Vec<String> = (0..1000)
                 .map(|_| {
                     let mut by_name = sandbox.sh("", &["PATH=/usr/bin:/bin"]);
@@ -338,10 +339,10 @@ fn refusals() {
             lines
         },
         &expect![[r#"
-            missing program: `/nonexistent/program` didn't start: No such file or directory (os error 2)
+            missing program: `/nonexistent/program` didn't start in $ROOT/home: No such file or directory (os error 2)
             stdout a link: $ROOT/log/2.stdout: Too many levels of symbolic links (os error 40)
             stdout a FIFO: $ROOT/log/3.stdout: No such device or address (os error 6)
-            missing program by name, 1000 times: ["`no-such-program` didn't start: No such file or directory (os error 2)"]
+            missing program by name, 1000 times: ["`no-such-program` didn't start in $ROOT/home: No such file or directory (os error 2)"]
             same file twice: in/file: File exists (os error 17)
             link: $ROOT/out/link is neither a directory nor a regular file: collect only those
             missing: $ROOT/missing: No such file or directory (os error 2)

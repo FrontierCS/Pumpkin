@@ -22,6 +22,7 @@ pub(crate) fn send(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
     if let Err(message) = list(dir, None, &mut entries) {
         return sender.reply(stream, Err(message));
     }
+    let mut buffer = vec![0; MAX_BODY_BYTES];
     for (path, entry) in entries {
         let size = match &entry {
             Entry::Dir { .. } => None,
@@ -29,7 +30,7 @@ pub(crate) fn send(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
         };
         sender.send(&FromSandbox::Entry { stream, entry }, &[])?;
         if let Some(size) = size
-            && let Err(message) = send_file(sender, stream, &path, size)?
+            && let Err(message) = send_file(sender, stream, &path, size, &mut buffer)?
         {
             return sender.reply(stream, Err(message));
         }
@@ -79,23 +80,23 @@ fn list(
     Ok(())
 }
 
-/// Sends the `size` bytes of the file at `path`. The outer error is the session's, the inner
-/// one the file's.
+/// Sends the `size` bytes of the file at `path`, reading them through `buffer`, which holds a
+/// frame's body. The outer error is the session's, the inner one the file's.
 fn send_file(
     sender: &Sender,
     stream: u32,
     path: &Path,
     size: u64,
+    buffer: &mut [u8],
 ) -> io::Result<Result<(), String>> {
     let file = match open(path, size) {
         Ok(file) => file,
         Err(message) => return Ok(Err(message)),
     };
     let mut file = file.take(size.saturating_add(1));
-    let mut buffer = vec![0; MAX_BODY_BYTES];
     let mut sent = 0;
     loop {
-        let read = match file.read(&mut buffer) {
+        let read = match file.read(buffer) {
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,

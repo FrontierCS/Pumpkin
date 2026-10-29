@@ -36,8 +36,8 @@ pub(crate) fn wait_for_exit() -> io::Result<i32> {
     }
 }
 
-/// Reaps child `pid` if it has exited and returns its raw status: `None` if it was already
-/// reaped.
+/// Reaps child `pid` if it has exited and returns its raw status: `None` if it hasn't exited
+/// yet, or was already reaped.
 pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
     let mut status = 0;
     // SAFETY: waitpid writes only to `status`, which outlives the call.

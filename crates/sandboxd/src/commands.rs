@@ -150,7 +150,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         .stderr(stderr)
         .process_group(0)
         .spawn()
-        .context(format_args!("`{program}` didn't start"))?;
+        .context(format_args!("`{program}` didn't start in {cwd}"))?;
     // The reaper waits for it, so its handle is dropped without waiting.
     i32::try_from(child.id()).map_err(|error| error.to_string())
 }
