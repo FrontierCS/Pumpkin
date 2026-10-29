@@ -7,9 +7,10 @@
 //! is talking.
 //!
 //! Everything a session receives is untrusted, since the sandbox may run an agent's code. A
-//! message that fails to parse or comes out of turn, more replies than a request takes, or
-//! silence for [`REPLY_TIMEOUT`] while a request waits ends the session, which stops the
-//! sandbox. A collected tree is written into a new directory of its own, within [`Limits`].
+//! message that fails to parse or comes out of turn, more replies than a request takes,
+//! silence for [`REPLY_TIMEOUT`] while a request waits, or a write the sandbox doesn't read
+//! within it ends the session, which stops the sandbox. A collected tree is written into a
+//! new directory of its own, within [`Limits`].
 
 use std::collections::HashMap;
 use std::fs;
@@ -30,9 +31,12 @@ use pumpkin_schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, RelativePath, Signal, ToSandbox, frame,
 };
 
-/// How long a request waits for the sandbox's next frame. `sandboxd` answers every request
-/// promptly, and sends a tree's frames one after another, so a sandbox silent this long is
-/// stuck or hostile.
+/// How long a session waits on the sandbox: for its next frame, and for it to read a write.
+///
+/// `sandboxd` answers every request promptly, reads what it is sent, and sends a tree's frames
+/// one after another, so a sandbox that stalls this long is stuck or hostile. The limit holds
+/// for each frame and each write, not for a whole request: a tree's transfer is bounded only
+/// by its [`Limits`] times this.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How many frames of a tree may wait for the request writing it. While they wait, the session
@@ -163,6 +167,8 @@ impl Drop for Process {
 
 impl Session {
     fn new(stream: UnixStream) -> io::Result<Self> {
+        // A socket option, so it holds for every handle on the connection.
+        stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
         let routes = Arc::new(Mutex::new(Routes::default()));
         let reader = stream.try_clone()?;
         let reader_routes = Arc::clone(&routes);
@@ -357,12 +363,21 @@ impl Session {
         lock(&self.routes).open.remove(&stream);
     }
 
-    /// Sends a frame. If the session has ended, its reason is the error, rather than the
-    /// failed write's.
+    /// Sends a frame. A write that fails, or that the sandbox doesn't read within
+    /// [`REPLY_TIMEOUT`], may leave part of a frame on the connection, so it ends the session.
+    /// The session's reason is the error: the failed write's, unless it had ended already.
     fn send(&self, message: &ToSandbox, body: &[u8]) -> io::Result<()> {
         frame::write(&mut *lock(&self.writer), message, body).map_err(|error| {
-            let reason = lock(&self.routes).ended.clone();
-            reason.map_or(error, |reason| ended(&reason))
+            let reason = if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) {
+                format!("the sandbox read nothing for {REPLY_TIMEOUT:?}")
+            } else {
+                format!("writing to the sandbox failed: {error}")
+            };
+            end(&self.routes, &self.connection, reason);
+            self.ended()
         })
     }
 
