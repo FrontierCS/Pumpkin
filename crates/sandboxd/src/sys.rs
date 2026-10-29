@@ -3,7 +3,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "libc has no safe wrappers for waitpid, kill and prctl"
+    reason = "libc has no safe wrappers for the wait, kill and prctl calls"
 )]
 
 use std::io;
@@ -51,14 +51,16 @@ pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
 
 /// Kills the process group `group`, if any of it is left.
 pub(crate) fn kill_group(group: i32) -> io::Result<()> {
-    kill(-group, libc::SIGKILL)
+    // SAFETY: killpg takes only integers and touches no memory of this process.
+    signalled(unsafe { libc::killpg(group, libc::SIGKILL) })
 }
 
 /// Kills every process this one may signal. As the first process of its namespace, that is
 /// every other process in it: the kernel never sends a signal for `-1` to the sender itself
 /// or to PID 1.
 pub(crate) fn kill_all_others() -> io::Result<()> {
-    kill(-1, libc::SIGKILL)
+    // SAFETY: kill takes only integers and touches no memory of this process.
+    signalled(unsafe { libc::kill(-1, libc::SIGKILL) })
 }
 
 /// Whether this is the first process of its PID namespace, as `sandboxd` is in a sandbox.
@@ -85,9 +87,10 @@ pub(crate) fn make_non_dumpable() -> io::Result<()> {
     }
 }
 
-fn kill(pid: i32, signal: i32) -> io::Result<()> {
-    // SAFETY: kill takes only integers and touches no memory of this process.
-    if unsafe { libc::kill(pid, signal) } == 0 {
+/// The outcome of a `kill` or `killpg` that returned `result`: finding no process left to
+/// kill is no failure.
+fn signalled(result: libc::c_int) -> io::Result<()> {
+    if result == 0 {
         return Ok(());
     }
     let error = io::Error::last_os_error();
