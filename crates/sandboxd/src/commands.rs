@@ -28,7 +28,8 @@ pub(crate) struct Commands {
 
 struct Shared {
     state: Mutex<State>,
-    /// Signalled when a command starts or a started one exits.
+    /// Signalled when a command starts or a started one exits, and when the reaper finds no
+    /// children, which is what freezing waits for.
     changed: Condvar,
     sender: Sender,
 }
@@ -94,7 +95,7 @@ impl Commands {
     pub(crate) fn freeze(&self) -> Result<(), String> {
         let mut state = self.shared.lock();
         state.frozen = true;
-        kill_everything(&state).map_err(|error| error.to_string())?;
+        kill_everything(&state).context("the sandbox's processes couldn't be killed")?;
         while !(state.running.is_empty() && state.childless) {
             state = self
                 .shared
@@ -114,15 +115,14 @@ impl Commands {
 
 /// Kills every other process in the sandbox when this is its first process, and otherwise the
 /// process groups of the commands still running. A group whose leader has exited may live on
-/// there, but its ID may also have been reused by now.
+/// there, but its ID may also have been reused by now. Every group is tried, so that one that
+/// can't be killed leaves no other alive, and the first failure is returned.
 fn kill_everything(state: &State) -> io::Result<()> {
     if sys::is_first_process() {
         return sys::kill_all_others();
     }
-    for &group in state.running.keys() {
-        sys::kill_group(group)?;
-    }
-    Ok(())
+    let killed = state.running.keys().map(|&group| sys::kill_group(group));
+    killed.fold(Ok(()), Result::and)
 }
 
 /// Starts a command in a process group of its own, which its process leads.

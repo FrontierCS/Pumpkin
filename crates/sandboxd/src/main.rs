@@ -9,7 +9,7 @@
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
 //! kills every other process in the sandbox. Run as any other process, as in tests, it kills
-//! only the process groups of the commands it started.
+//! only the process groups of the commands still running.
 //!
 //! It runs as the role's user from the start and needs no privileges: everything it does,
 //! the role's own code could do too. That is why its reports are untrusted wherever the role
