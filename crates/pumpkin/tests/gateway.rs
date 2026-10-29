@@ -28,7 +28,7 @@ type Answer = fn(stream: u32) -> Vec<(Value, Vec<u8>)>;
 /// Runs each case against a fake sandbox of its own, and checks what came of them against
 /// `expect`.
 fn check(cases: &[(Action, Answer)], expect: &Expect) {
-    let dir = std::env::temp_dir().join("pumpkin-gateway");
+    let dir = std::env::temp_dir().join(format!("pumpkin-gateway-{}", std::process::id()));
     if dir.exists() {
         fs::remove_dir_all(&dir).unwrap();
     }
