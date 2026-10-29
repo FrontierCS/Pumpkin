@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use pumpkin_schema::ir::AbsolutePath;
 use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
+use stdx::Context;
 
 use crate::collect;
 use crate::commands::Commands;
@@ -84,15 +85,15 @@ impl Session {
         if self.puts.contains_key(&stream) {
             return Err(protocol_error(stream, "is already putting a tree"));
         }
-        match fs::create_dir_all(dir.as_str()) {
+        match fs::create_dir_all(dir.as_str()).context(dir) {
             Ok(()) => {
                 let tree = tree::Writer::new(dir.as_str().into(), Limits::NONE);
                 self.puts.insert(stream, Some(tree));
                 Ok(())
             }
-            Err(error) => {
+            Err(message) => {
                 self.puts.insert(stream, None);
-                self.sender.reply(stream, Err(format!("{dir}: {error}")))
+                self.sender.reply(stream, Err(message))
             }
         }
     }

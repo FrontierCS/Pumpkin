@@ -6,8 +6,8 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-xflags.workspace = true
 serde_json.workspace = true
+xflags.workspace = true
 xshell = "0.2.7"
 
 [lints]

@@ -86,9 +86,9 @@ fn send_file(
     path: &Path,
     size: u64,
 ) -> io::Result<Result<(), String>> {
-    let file = match File::open(path) {
+    let file = match File::open(path).context(path.display()) {
         Ok(file) => file,
-        Err(error) => return Ok(Err(format!("{}: {error}", path.display()))),
+        Err(message) => return Ok(Err(message)),
     };
     let mut file = file.take(size.saturating_add(1));
     let mut buffer = vec![0; MAX_BODY_BYTES];
@@ -98,7 +98,7 @@ fn send_file(
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Ok(Err(format!("{}: {error}", path.display()))),
+            Err(error) => return Ok(Err(error).context(path.display())),
         };
         sent += u64::try_from(read).map_err(io::Error::other)?;
         if sent > size {

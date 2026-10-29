@@ -15,14 +15,10 @@ use std::fmt::Display;
 /// `format_args!("reading {}", path.display())`, which adds words.
 ///
 /// ```
-/// use std::fs;
-/// use std::path::Path;
-///
 /// use stdx::Context;
 ///
-/// let path = Path::new("/nonexistent/pumpkin.toml");
-/// let error = fs::read_to_string(path).context(path.display()).unwrap_err();
-/// assert_eq!(error, "/nonexistent/pumpkin.toml: No such file or directory (os error 2)");
+/// let error = "x".parse::<u16>().context("the port").unwrap_err();
+/// assert_eq!(error, "the port: invalid digit found in string");
 /// ```
 pub trait Context<T> {
     /// Prefixes the error's message with `context`.
