@@ -7,6 +7,7 @@
 //! failed to start, and must find it unreaped.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -43,6 +44,8 @@ struct State {
     /// Whether the reaper has found no children since the last command started.
     childless: bool,
     frozen: bool,
+    /// Why reaping failed, once it has: the reaper has stopped then, and ended the session.
+    failure: Option<String>,
 }
 
 impl Shared {
@@ -59,6 +62,7 @@ impl Commands {
             started: 0,
             childless: true,
             frozen: false,
+            failure: None,
         };
         let shared = Arc::new(Shared {
             state: Mutex::new(state),
@@ -111,6 +115,11 @@ impl Commands {
         // The session is over, so there is nobody left to tell about a failure.
         let _ = kill_everything(&self.shared.lock());
     }
+
+    /// Fails with why reaping failed, if it has, which ends the session ([`reap`] says how).
+    pub(crate) fn reaping(&self) -> Result<(), String> {
+        self.shared.lock().failure.clone().map_or(Ok(()), Err)
+    }
 }
 
 /// Kills every other process in the sandbox when this is its first process, and otherwise the
@@ -155,14 +164,27 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     i32::try_from(child.id()).map_err(|error| error.to_string())
 }
 
-/// Reaps children forever, reporting the exits of started commands. With no children, it
-/// waits until another command starts.
+/// Reaps children until reaping fails, reporting the exits of started commands. With no
+/// children, it waits until another command starts.
+///
+/// Once interruptions and finding no child are ruled out, waiting for and reaping a child fail
+/// only through a bug, past which the reaper can't go on. Its failure ends the session instead:
+/// it is kept for [`Commands::reaping`], and the connection is shut down, which ends the
+/// session's read.
 fn reap(shared: &Shared) {
+    let Err(error) = reap_children(shared);
+    shared.lock().failure = Some(format!("reaping failed: {error}"));
+    // Linux fails a Unix socket's shutdown only for an invalid argument.
+    let _ = shared.sender.shut_down();
+}
+
+/// Reaps children and reports exits, as [`reap`] says, until reaping fails.
+fn reap_children(shared: &Shared) -> io::Result<Infallible> {
     let mut seen = 0;
     loop {
-        if let Ok(pid) = sys::wait_for_exit() {
+        if let Some(pid) = sys::wait_for_exit()? {
             let mut state = shared.lock();
-            let Ok(Some(status)) = sys::reap(pid) else {
+            let Some(status) = sys::reap(pid)? else {
                 continue;
             };
             if let Some(stream) = state.running.remove(&pid) {

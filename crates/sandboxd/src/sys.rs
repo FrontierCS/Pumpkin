@@ -14,12 +14,9 @@ use std::path::Path;
 
 use stdx::Context;
 
-/// Waits until a child has exited, without reaping it, and returns its process ID.
-///
-/// # Errors
-///
-/// Fails with `ECHILD` when there are no children.
-pub(crate) fn wait_for_exit() -> io::Result<i32> {
+/// Waits until a child has exited, without reaping it, and returns its process ID: `None` if
+/// there are no children.
+pub(crate) fn wait_for_exit() -> io::Result<Option<i32>> {
     loop {
         // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -27,9 +24,12 @@ pub(crate) fn wait_for_exit() -> io::Result<i32> {
         // SAFETY: waitid writes only to `info`, which outlives the call.
         if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
             // SAFETY: waitid filled `info` for an exited child, so it holds a process ID.
-            return Ok(unsafe { info.si_pid() });
+            return Ok(Some(unsafe { info.si_pid() }));
         }
         let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            return Ok(None);
+        }
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
@@ -106,7 +106,7 @@ pub(crate) fn make_non_dumpable() -> io::Result<()> {
 ///   become `sandboxd`'s controlling one.
 ///
 /// The file stays non-blocking, which Linux ignores for a regular file's reads and writes, so
-/// a command may be handed it as its standard input or output.
+/// a command may be handed it as its standard output or error.
 pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, String> {
     let file = options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)

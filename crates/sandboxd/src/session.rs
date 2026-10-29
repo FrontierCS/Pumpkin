@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufReader, Read};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,11 +16,18 @@ use stdx::Context;
 use crate::collect;
 use crate::commands::Commands;
 
-/// Connects to the gateway at `socket` and serves the session until the gateway ends it.
-pub(crate) fn serve(socket: &Path) -> io::Result<()> {
-    let stream = UnixStream::connect(socket)?;
-    let sender = Sender(Arc::new(Mutex::new(stream.try_clone()?)));
-    let commands = Commands::start_reaping(sender.clone())?;
+/// Connects to the gateway at `socket` and serves the session until the gateway ends it, or
+/// until reaping fails ([`Commands::reaping`]).
+pub(crate) fn serve(socket: &Path) -> Result<(), String> {
+    let stream = UnixStream::connect(socket).context(format_args!(
+        "connecting to the gateway at {} failed",
+        socket.display()
+    ))?;
+    let sender = stream
+        .try_clone()
+        .context("cloning the connection to the gateway failed")?;
+    let sender = Sender(Arc::new(Mutex::new(sender)));
+    let commands = Commands::start_reaping(sender.clone()).context("starting the reaper failed")?;
     let mut session = Session {
         sender,
         commands,
@@ -27,7 +35,9 @@ pub(crate) fn serve(socket: &Path) -> io::Result<()> {
     };
     let served = session.serve(&mut BufReader::new(stream));
     session.commands.kill_all();
-    served
+    // A reaper that failed ended the session itself, so its failure is the session's.
+    let served = served.context("the session with the gateway failed");
+    session.commands.reaping().and(served)
 }
 
 /// Sends frames to the gateway, from the session and from the thread that reports exits.
@@ -47,6 +57,13 @@ impl Sender {
             Err(message) => FromSandbox::Failed { stream, message },
         };
         self.send(&message, &[])
+    }
+
+    /// Shuts the connection down both ways, which ends the session: its read finds the
+    /// connection's end, and every later send fails.
+    pub(crate) fn shut_down(&self) -> io::Result<()> {
+        let stream = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        stream.shutdown(Shutdown::Both)
     }
 }
 
