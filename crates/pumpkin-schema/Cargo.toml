@@ -7,9 +7,9 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 expect-test.workspace = true
 
 [lints]

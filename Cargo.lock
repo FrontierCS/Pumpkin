@@ -46,6 +46,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pumpkin"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "pumpkin-schema",
+ "serde_json",
+]
+
+[[package]]
 name = "pumpkin-schema"
 version = "0.0.0"
 dependencies = [
