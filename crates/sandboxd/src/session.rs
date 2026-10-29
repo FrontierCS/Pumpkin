@@ -73,13 +73,6 @@ impl Session {
             ToSandbox::Data { stream } => self.put(stream, |tree| tree.data(body)),
             ToSandbox::End { stream } => self.end_put(stream),
             ToSandbox::Start { stream, launch } => self.commands.start(stream, &launch),
-            ToSandbox::Signal {
-                stream,
-                command,
-                signal,
-            } => self
-                .sender
-                .reply(stream, self.commands.signal(command, signal)),
             ToSandbox::Freeze { stream } => self.sender.reply(stream, self.commands.freeze()),
             ToSandbox::Collect { stream, dir } => {
                 collect::send(&self.sender, stream, Path::new(dir.as_str()))

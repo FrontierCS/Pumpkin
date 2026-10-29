@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
-use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch, Signal};
+use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
 use stdx::Context;
 
 use crate::session::Sender;
@@ -87,17 +87,6 @@ impl Commands {
         self.shared.sender.reply(stream, started)
     }
 
-    /// Signals the process group of the running command started on stream `command`.
-    pub(crate) fn signal(&self, command: u32, signal: Signal) -> Result<(), String> {
-        let state = self.shared.lock();
-        let Some((&pid, _)) = state.running.iter().find(|(_, stream)| **stream == command) else {
-            return Err(format!(
-                "no command started on stream {command} is running: signal a running one"
-            ));
-        };
-        sys::kill_group(pid, signal).map_err(|error| error.to_string())
-    }
-
     /// Kills every process this sandboxd may kill, refuses further commands, and returns once
     /// no children are left. As a sandbox's first process, that means no process at all but
     /// `sandboxd`: every other one descends from it.
@@ -130,7 +119,7 @@ fn kill_everything(state: &State) -> io::Result<()> {
         return sys::kill_all_others();
     }
     for &group in state.running.keys() {
-        sys::kill_group(group, Signal::Kill)?;
+        sys::kill_group(group)?;
     }
     Ok(())
 }

@@ -3,7 +3,7 @@
 //!
 //! It connects to the gateway at the Unix socket named by its one argument and serves the
 //! session ([`pumpkin_schema::sandbox`]) until the gateway closes it: it writes the trees it is
-//! put, starts commands and reports their exits, signals them, freezes the sandbox, and sends
+//! put, starts commands and reports their exits, freezes the sandbox, and sends
 //! the trees it is asked to collect. When the session ends it kills its commands and exits,
 //! which stops a sandbox whose first process it is.
 //!

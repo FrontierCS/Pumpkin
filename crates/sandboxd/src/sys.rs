@@ -1,4 +1,4 @@
-//! The system calls the standard library doesn't offer: waiting for any child, signalling a
+//! The system calls the standard library doesn't offer: waiting for any child, killing a
 //! process group or every process, and making the process non-dumpable.
 
 #![expect(
@@ -7,8 +7,6 @@
 )]
 
 use std::io;
-
-use pumpkin_schema::sandbox::Signal;
 
 /// Waits until a child has exited, without reaping it, and returns its process ID.
 ///
@@ -51,13 +49,9 @@ pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
     }
 }
 
-/// Signals the process group `group`, if any of it is left.
-pub(crate) fn kill_group(group: i32, signal: Signal) -> io::Result<()> {
-    let signal = match signal {
-        Signal::Terminate => libc::SIGTERM,
-        Signal::Kill => libc::SIGKILL,
-    };
-    kill(-group, signal)
+/// Kills the process group `group`, if any of it is left.
+pub(crate) fn kill_group(group: i32) -> io::Result<()> {
+    kill(-group, libc::SIGKILL)
 }
 
 /// Kills every process this one may signal. As the first process of its namespace, that is

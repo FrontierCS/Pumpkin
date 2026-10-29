@@ -19,7 +19,7 @@ use expect_test::{Expect, expect};
 use pumpkin::gateway::{Listener, Process, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{Launch, RelativePath, Signal};
+use pumpkin_schema::sandbox::{Launch, RelativePath};
 
 /// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
 struct Sandbox {
@@ -196,30 +196,21 @@ fn judge() {
     );
 }
 
-/// Signals reach a command's process group, and freezing kills every group and refuses new
-/// commands.
+/// Freezing kills every process group and refuses new commands.
 #[test]
-fn signals_and_freezing() {
+fn freezing() {
     check(
-        "signals",
+        "freezing",
         |sandbox| {
-            let launch = sandbox.sh("exec sleep 1000", &[]);
-            let mut sleeper = sandbox.session.start(launch).unwrap();
-            sandbox.session.signal(&sleeper, Signal::Terminate).unwrap();
-            let mut lines = vec![sandbox.wait(&mut sleeper)];
-            let again = sandbox.session.signal(&sleeper, Signal::Kill);
-            lines.push(format!("signal again: {}", again.unwrap_err()));
             let launch = sandbox.sh("sleep 1000 & sleep 1000 & wait", &[]);
             let mut group = sandbox.session.start(launch).unwrap();
             sandbox.session.freeze().unwrap();
-            lines.push(sandbox.wait(&mut group));
+            let mut lines = vec![sandbox.wait(&mut group)];
             let after = sandbox.session.start(sandbox.sh("true", &[]));
             lines.push(format!("start after freezing: {}", after.unwrap_err()));
             lines
         },
         &expect![[r#"
-            exited: Signal(15)
-            signal again: no command started on stream 2 is running: signal a running one
             exited: Signal(9)
             start after freezing: the sandbox is frozen: start commands before freezing it
             sandboxd: exit status: 0"#]],
