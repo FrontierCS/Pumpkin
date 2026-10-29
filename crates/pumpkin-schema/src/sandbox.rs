@@ -39,12 +39,6 @@ pub enum ToSandbox {
     /// Starts a command in a process group of its own. `sandboxd` replies when it has
     /// started, and later sends [`FromSandbox::Exited`] on the same stream.
     Start { stream: u32, launch: Launch },
-    /// Signals the process group of the command started on stream `command`.
-    Signal {
-        stream: u32,
-        command: u32,
-        signal: Signal,
-    },
     /// Kills every process in the sandbox but `sandboxd` and refuses to start more, so that
     /// what is collected afterwards can't change. `sandboxd` replies once they are gone.
     Freeze { stream: u32 },
@@ -93,16 +87,6 @@ pub enum Entry {
     Dir { path: RelativePath },
     /// A regular file of `size` bytes, which follow in `Data` frames.
     File { path: RelativePath, size: u64 },
-}
-
-/// A signal for a command's process group.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Signal {
-    /// `SIGTERM`.
-    Terminate,
-    /// `SIGKILL`.
-    Kill,
 }
 
 /// How a command ended.

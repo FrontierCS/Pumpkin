@@ -75,7 +75,6 @@ fn stream_of(request: &ToSandbox) -> u32 {
         | ToSandbox::Data { stream }
         | ToSandbox::End { stream }
         | ToSandbox::Start { stream, .. }
-        | ToSandbox::Signal { stream, .. }
         | ToSandbox::Freeze { stream }
         | ToSandbox::Collect { stream, .. } => stream,
     }

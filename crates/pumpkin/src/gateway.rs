@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use pumpkin_schema::ir::AbsolutePath;
 use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, Launch, RelativePath, Signal, ToSandbox, frame,
+    Entry, ExitStatus, FromSandbox, Launch, RelativePath, ToSandbox, frame,
 };
 
 /// How long a session waits on the sandbox: for its next frame, and for it to read a write.
@@ -242,20 +242,6 @@ impl Session {
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Err(self.ended()),
         }
-    }
-
-    /// Signals a running command's process group.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the command isn't running or the session ends.
-    pub fn signal(&self, process: &Process, signal: Signal) -> io::Result<()> {
-        let command = process.stream;
-        self.request(|stream| ToSandbox::Signal {
-            stream,
-            command,
-            signal,
-        })
     }
 
     /// Kills every process in the sandbox but `sandboxd`, so that nothing collected afterwards
