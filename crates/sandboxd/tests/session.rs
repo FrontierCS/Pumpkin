@@ -301,6 +301,17 @@ fn refusals() {
             missing.argv = Argv::try_from(vec!["/nonexistent/program".to_owned()]).unwrap();
             let started = sandbox.session.start(missing).map(|_| ());
             lines.push(format!("missing program: {}", show_error(sandbox, started)));
+            // The role's code can plant anything at a command's output paths, such as a link to
+            // `sandboxd`'s own standard error, or a FIFO that nothing reads.
+            let link = sandbox.sh("echo leaked", &[]);
+            std::os::unix::fs::symlink("/proc/self/fd/2", link.stdout.as_str()).unwrap();
+            let started = sandbox.session.start(link).map(|_| ());
+            lines.push(format!("stdout a link: {}", show_error(sandbox, started)));
+            let fifo = sandbox.sh("true", &[]);
+            let made = Command::new("mkfifo").arg(fifo.stdout.as_str()).status();
+            assert!(made.unwrap().success());
+            let started = sandbox.session.start(fifo).map(|_| ());
+            lines.push(format!("stdout a FIFO: {}", show_error(sandbox, started)));
             // Started by name with its own PATH, a missing program is waited for by the
             // standard library itself, which must not race the reaper while another command
             // runs.
@@ -328,6 +339,8 @@ fn refusals() {
         },
         &expect![[r#"
             missing program: `/nonexistent/program` didn't start: No such file or directory (os error 2)
+            stdout a link: $ROOT/log/2.stdout: Too many levels of symbolic links (os error 40)
+            stdout a FIFO: $ROOT/log/3.stdout: No such device or address (os error 6)
             missing program by name, 1000 times: ["`no-such-program` didn't start: No such file or directory (os error 2)"]
             same file twice: in/file: File exists (os error 17)
             link: $ROOT/out/link is neither a directory nor a regular file: collect only those

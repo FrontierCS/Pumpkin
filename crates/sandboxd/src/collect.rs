@@ -5,7 +5,7 @@
 //! while they are sent, as after the sandbox is frozen.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -14,6 +14,7 @@ use pumpkin_schema::sandbox::{Entry, FromSandbox, RelativePath};
 use stdx::Context;
 
 use crate::session::Sender;
+use crate::sys;
 
 /// Sends the tree in `dir` on `stream`, or a failure.
 pub(crate) fn send(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
@@ -86,7 +87,7 @@ fn send_file(
     path: &Path,
     size: u64,
 ) -> io::Result<Result<(), String>> {
-    let file = match File::open(path).context(path.display()) {
+    let file = match open(path, size) {
         Ok(file) => file,
         Err(message) => return Ok(Err(message)),
     };
@@ -109,9 +110,24 @@ fn send_file(
     if sent == size {
         Ok(Ok(()))
     } else {
-        Ok(Err(format!(
-            "{} changed while it was collected: freeze the sandbox first",
-            path.display()
-        )))
+        Ok(Err(changed(path)))
     }
+}
+
+/// Opens the file at `path` to send it, which must still be the regular file of `size` bytes
+/// that was listed.
+fn open(path: &Path, size: u64) -> Result<File, String> {
+    let file = sys::open_regular(path, OpenOptions::new().read(true))?;
+    if file.metadata().context(path.display())?.len() == size {
+        Ok(file)
+    } else {
+        Err(changed(path))
+    }
+}
+
+fn changed(path: &Path) -> String {
+    format!(
+        "{} changed while it was collected: freeze the sandbox first",
+        path.display()
+    )
 }

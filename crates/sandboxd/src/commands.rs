@@ -7,9 +7,10 @@
 //! failed to start, and must find it unreaped.
 
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -136,8 +137,10 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     let Some((program, args)) = argv.as_slice().split_first() else {
         return Err("the command is empty: it needs a program".to_owned());
     };
-    let stdout = File::create(stdout.as_str()).context(stdout)?;
-    let stderr = File::create(stderr.as_str()).context(stderr)?;
+    let mut output = OpenOptions::new();
+    output.write(true).create(true).truncate(true);
+    let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
+    let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
     let child = Command::new(program)
         .args(args)
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))

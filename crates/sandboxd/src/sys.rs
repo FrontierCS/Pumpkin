@@ -1,12 +1,18 @@
-//! The system calls the standard library doesn't offer: waiting for any child, killing a
-//! process group or every process, and making the process non-dumpable.
+//! The system calls the standard library doesn't offer, and the flags it doesn't name: waiting
+//! for any child, killing a process group or every process, making the process non-dumpable,
+//! and opening only a regular file, at a path the role's code can write.
 
 #![expect(
     unsafe_code,
     reason = "libc has no safe wrappers for the wait, kill and prctl calls"
 )]
 
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+
+use stdx::Context;
 
 /// Waits until a child has exited, without reaping it, and returns its process ID.
 ///
@@ -84,6 +90,35 @@ pub(crate) fn make_non_dumpable() -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Opens the regular file at `path` with `options`, and fails for anything else there.
+/// `sandboxd` runs as the same user as the role's code, which can plant anything at the paths
+/// `sandboxd` opens, so this adds to `options`:
+///
+/// - `O_NOFOLLOW`, so that a symbolic link there fails the open instead of leading elsewhere,
+///   such as to `/proc/self/fd/2`, `sandboxd`'s own standard error, which
+///   [`make_non_dumpable`] otherwise keeps from the role's code;
+/// - `O_NONBLOCK`, so that a FIFO fails the open, or is opened at once and refused, instead of
+///   blocking it until the FIFO's other end is opened;
+/// - `O_NOCTTY`, so that a terminal, which a link in a parent directory can lead to, can't
+///   become `sandboxd`'s controlling one.
+///
+/// The file stays non-blocking, which Linux ignores for a regular file's reads and writes, so
+/// a command may be handed it as its standard input or output.
+pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, String> {
+    let file = options
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .context(path.display())?;
+    if file.metadata().context(path.display())?.is_file() {
+        Ok(file)
+    } else {
+        Err(format!(
+            "{} is not a regular file: name one",
+            path.display()
+        ))
     }
 }
 
