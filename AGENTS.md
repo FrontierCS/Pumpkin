@@ -1,8 +1,4 @@
-- ALWAYS pass the checks before finishing:
-  - `cargo fmt --check`
-  - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-  - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked`
-  - `cargo test --workspace --locked`
+- ALWAYS pass the checks before finishing: `cargo xtask ci`
 - NEVER assume a clippy warning or a test failure is pre-existing
 - PREFER running the narrowest relevant test while iterating
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend
