@@ -170,13 +170,14 @@ impl Session {
         // A socket option, so it holds for every handle on the connection.
         stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
         let routes = Arc::new(Mutex::new(Routes::default()));
+        let connection = stream.try_clone()?;
         let reader = stream.try_clone()?;
         let reader_routes = Arc::clone(&routes);
         thread::Builder::new()
             .name("session".to_owned())
             .spawn(move || route(reader, &reader_routes))?;
         Ok(Self {
-            connection: stream.try_clone()?,
+            connection,
             writer: Mutex::new(stream),
             routes,
             next_stream: AtomicU32::new(1),
@@ -275,18 +276,18 @@ impl Session {
     /// Fails if `into` exists, if `sandboxd` can't send the tree, if the tree breaks the
     /// protocol or passes a limit, or if the session ends.
     pub fn collect(&self, dir: &AbsolutePath, into: &Path, limits: Limits) -> io::Result<()> {
-        fs::create_dir(into)?;
         let (stream, replies) = self.open(Queue::Tree)?;
-        let tree = tree::Writer::new(into.to_owned(), limits);
-        let collected = self
-            .send(
+        let collected = fs::create_dir(into).and_then(|()| {
+            let tree = tree::Writer::new(into.to_owned(), limits);
+            self.send(
                 &ToSandbox::Collect {
                     stream,
                     dir: dir.clone(),
                 },
                 &[],
-            )
-            .and_then(|()| self.receive_tree(&replies, tree));
+            )?;
+            self.receive_tree(&replies, tree)
+        });
         self.close(stream);
         collected
     }

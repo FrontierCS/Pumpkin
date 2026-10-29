@@ -10,9 +10,9 @@
 //! to several requests can interleave.
 //!
 //! Files move as trees: [`Entry`]s, each a directory or a regular file whose bytes follow in
-//! `Data` frames, every entry after its parent's, then an `End`. A tree holds nothing else, so no link or special file crosses
-//! a session, and every path in it is a [`RelativePath`], which can't leave the directory the
-//! tree is written to; [`tree::Writer`] writes one there.
+//! `Data` frames, every entry after its parent's, then an `End`. A tree holds nothing else, so
+//! no link or special file crosses a session, and every path in it is a [`RelativePath`],
+//! which can't leave the directory the tree is written to; [`tree::Writer`] writes one there.
 
 use serde::{Deserialize, Serialize};
 
