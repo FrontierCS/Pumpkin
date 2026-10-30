@@ -31,14 +31,22 @@
 //!
 //! The operator provides the engine, once, as a Docker context, which they name; the provider
 //! picks up none of its own, and nothing in its environment overrides the one named
-//! ([`ContextName`]). Within that engine, the provider creates only containers, each labelled
-//! with its run's [`RunTag`], so that [`Engine::list`] and [`Engine::destroy_all`] find a run's
-//! containers, and only those, even when the driver that started them is gone.
+//! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
+//! ([`Report`]). Within it, the provider creates only containers, each labelled with its run's
+//! [`RunTag`], so that [`Engine::list`] and [`Engine::destroy_all`] find a run's containers,
+//! and only those, even when the driver that started them is gone.
+//!
+//! Rootless Docker is the setup to choose: its engine, and so every container, runs as an
+//! ordinary user, so escaping a container gains no more than that user has. A rootful engine
+//! runs as root, and whoever may use its socket, as the `docker` group may, can make it do
+//! anything root can. The provider runs on either, and its report says which.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
+use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -46,6 +54,8 @@ use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
 use pumpkin_schema::workflow::Sandbox;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,7 +85,7 @@ const RUN_LABEL: &str = "pumpkin.run";
 /// It is a letter or digit, then at least one more letter, digit, `_`, `.`, `+` or `-`, as
 /// `docker context create` requires. `default` is Docker's own context, which reaches the
 /// engine at Docker's default socket.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -106,10 +116,100 @@ impl TryFrom<String> for ContextName {
     }
 }
 
-/// The Docker engine a context reaches, which every container of the provider's runs in.
+/// The Docker engine a context reaches, which every container of the provider's runs in, and
+/// its report.
 #[derive(Clone, Debug)]
 pub struct Engine {
-    context: ContextName,
+    report: Report,
+}
+
+/// The engine, as `docker` describes it before anything starts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Report {
+    /// The context, and the endpoint it reaches the engine at.
+    pub context: ContextName,
+    pub endpoint: String,
+    /// The versions of the `docker` command line and of the engine.
+    pub client_version: String,
+    pub engine_version: String,
+    /// Whether the `docker` command line's configuration, `config.json`, sets `proxies`, from
+    /// which `docker` gives every container it creates, and every build it runs, proxy
+    /// variables such as `HTTP_PROXY`: an input to the sandboxes' environment that no workflow
+    /// names.
+    pub client_proxies: bool,
+    /// The cgroup version, `1` or `2`, and the driver of containers' cgroups.
+    pub cgroup_version: String,
+    pub cgroup_driver: String,
+    /// The storage driver, which holds containers' writable layers, and whether images are in
+    /// containerd's store, the driver being one of its snapshotters.
+    pub storage_driver: String,
+    pub containerd_store: bool,
+    /// What the engine's security options say.
+    pub security: Security,
+    /// The kernel's version, and the operating system, of the engine's host.
+    pub kernel: String,
+    pub os: String,
+}
+
+/// What the engine's security options say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Security {
+    /// Whether the engine runs as an ordinary user rather than as root: see
+    /// [the envelope](crate#the-envelope).
+    pub rootless: bool,
+    /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own,
+    /// or `None` if the engine has no seccomp.
+    pub seccomp_profile: Option<String>,
+    /// Whether the engine confines containers with `AppArmor`.
+    pub apparmor: bool,
+    /// Whether the engine maps containers' users into a user namespace of their own.
+    pub userns: bool,
+}
+
+/// What `docker context inspect` prints of a context, as JSON.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ContextJson {
+    endpoints: EndpointsJson,
+}
+
+#[derive(Deserialize)]
+struct EndpointsJson {
+    docker: EndpointJson,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct EndpointJson {
+    host: String,
+}
+
+/// What `docker version` prints, as JSON.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VersionJson {
+    client: VersionedJson,
+    server: VersionedJson,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VersionedJson {
+    version: String,
+}
+
+/// What `docker info` prints, as JSON.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InfoJson {
+    cgroup_version: String,
+    cgroup_driver: String,
+    driver: String,
+    /// Pairs of a name and a value, such as `driver-type` and `io.containerd.snapshotter.v1`.
+    driver_status: Option<Vec<(String, String)>>,
+    security_options: Option<Vec<String>>,
+    kernel_version: String,
+    operating_system: String,
 }
 
 /// Names the containers of one run, for finding them again: 1 to 63 characters from a-z, 0-9
@@ -214,9 +314,69 @@ impl Drop for Container {
 }
 
 impl Engine {
-    /// The engine `context` reaches. Nothing is run until a method needs `docker`.
-    pub fn new(context: ContextName) -> Self {
-        Self { context }
+    /// Reaches the engine through `context`, and reports it. Nothing is started.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the context can't be read, or the engine can't be reached through it, saying
+    /// what to do; if `docker` describes either in JSON of another form; or if the `docker`
+    /// command line's configuration can't be read, or isn't JSON.
+    pub fn connect(context: ContextName) -> io::Result<Self> {
+        let inspect = [
+            "context",
+            "inspect",
+            "--format",
+            "{{json .}}",
+            context.as_str(),
+        ];
+        let inspected = docker(&context, inspect).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "the Docker context `{}` can't be read: {error}: name one that `docker \
+                     context ls` lists",
+                    context.as_str()
+                ),
+            )
+        })?;
+        let ContextJson { endpoints } = parse_json("docker context inspect", &inspected)?;
+        let reach =
+            |args: [&str; 3]| docker(&context, args).map_err(|error| unreached(&context, &error));
+        let version = reach(["version", "--format", "{{json .}}"])?;
+        let VersionJson { client, server } = parse_json("docker version", &version)?;
+        let info = reach(["info", "--format", "{{json .}}"])?;
+        let InfoJson {
+            cgroup_version,
+            cgroup_driver,
+            driver,
+            driver_status,
+            security_options,
+            kernel_version,
+            operating_system,
+        } = parse_json("docker info", &info)?;
+        let containerd_store = (driver_status.unwrap_or_default().iter())
+            .any(|(name, value)| name == "driver-type" && value == "io.containerd.snapshotter.v1");
+        Ok(Self {
+            report: Report {
+                context,
+                endpoint: endpoints.docker.host,
+                client_version: client.version,
+                engine_version: server.version,
+                client_proxies: client_proxies()?,
+                cgroup_version,
+                cgroup_driver,
+                storage_driver: driver,
+                containerd_store,
+                security: Security::parse(&security_options.unwrap_or_default()),
+                kernel: kernel_version,
+                os: operating_system,
+            },
+        })
+    }
+
+    /// The engine, as it was when [`connect`](Self::connect) reached it.
+    pub fn report(&self) -> &Report {
+        &self.report
     }
 
     /// Starts a container for the role, connects its session, and puts [`PUMPKIN_SUBDIRS`]
@@ -228,7 +388,7 @@ impl Engine {
     /// connect within [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever
     /// container `docker` created is removed first.
     pub fn start(&self, start: &Start<'_>) -> io::Result<Container> {
-        let context = &self.context;
+        let context = &self.report.context;
         let socket = start.socket_dir.join(SOCKET_NAME);
         let listener = Listener::bind(socket)?;
         // Creating and starting apart gives the container's ID before anything can fail with
@@ -264,7 +424,7 @@ impl Engine {
     pub fn list(&self, run: &RunTag) -> io::Result<Vec<String>> {
         let filter = format!("label={RUN_LABEL}={}", run.as_str());
         let ids = docker(
-            &self.context,
+            &self.report.context,
             [
                 "container",
                 "ls",
@@ -290,7 +450,7 @@ impl Engine {
         let failures: Vec<String> = ids
             .iter()
             .filter_map(|id| {
-                remove(&self.context, id)
+                remove(&self.report.context, id)
                     .err()
                     .map(|error| error.to_string())
             })
@@ -301,18 +461,117 @@ impl Engine {
             Err(io::Error::other(failures.join("; ")))
         }
     }
+}
 
-    /// The engine's version, for the run record.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `docker` can't reach the engine.
-    pub fn version(&self) -> io::Result<String> {
-        let version = docker(
-            &self.context,
-            ["version", "--format", "{{.Server.Version}}"],
-        )?;
-        Ok(version.trim().to_owned())
+impl Security {
+    /// The security options `docker info` lists, each a list of `key=value`, such as
+    /// `name=seccomp,profile=builtin`.
+    fn parse(options: &[String]) -> Self {
+        let mut security = Self::default();
+        for option in options {
+            let mut name = None;
+            let mut profile = None;
+            for pair in option.split(',') {
+                match pair.split_once('=') {
+                    Some(("name", value)) => name = Some(value),
+                    Some(("profile", value)) => profile = Some(value),
+                    _ => {}
+                }
+            }
+            match name {
+                Some("rootless") => security.rootless = true,
+                Some("seccomp") => {
+                    security.seccomp_profile = Some(profile.unwrap_or_default().to_owned());
+                }
+                Some("apparmor") => security.apparmor = true,
+                Some("userns") => security.userns = true,
+                _ => {}
+            }
+        }
+        security
+    }
+}
+
+/// Why the engine can't be reached through `context`, from `docker`'s `error`, and what to do.
+fn unreached(context: &ContextName, error: &io::Error) -> io::Error {
+    let todo = if error.to_string().contains("permission denied") {
+        "let this user reach the engine's socket: by the `docker` group, which is \
+         root-equivalent, or by running rootless Docker and naming its context"
+    } else {
+        "start the engine, or name a context whose engine runs"
+    };
+    io::Error::new(
+        error.kind(),
+        format!(
+            "the Docker engine isn't reachable through context `{}`: {error}: {todo}",
+            context.as_str()
+        ),
+    )
+}
+
+/// Parses `json`, which `command` printed.
+fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, json: &str) -> io::Result<T> {
+    serde_json::from_str(json).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the JSON `{command}` printed isn't of the form expected: {error}: use Docker's \
+                 own command line, which prints it"
+            ),
+        )
+    })
+}
+
+/// Whether the `docker` command line's configuration has a `proxies` key.
+///
+/// The file is `config.json` in `DOCKER_CONFIG`, if that is set and not empty, or else in
+/// `.docker` in the home directory: `HOME`, if that is set and not empty, or else the user's in
+/// the user database. That is where `docker` looks, given the variables [`docker_output`]
+/// passes it; a missing file is no configuration. The file is read as `docker` reads it: its
+/// first JSON value, if it has one, with `null` as no configuration, and keys matched
+/// regardless of case (here, of ASCII case). Only the names of its keys are kept, never their
+/// values, which may be a registry's credentials.
+fn client_proxies() -> io::Result<bool> {
+    let dir = (env::var_os("DOCKER_CONFIG").filter(|dir| !dir.is_empty())).map_or_else(
+        || env::home_dir().unwrap_or_default().join(".docker"),
+        PathBuf::from,
+    );
+    let path = dir.join("config.json");
+    let json = match fs::read(&path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "the Docker command line's configuration {} can't be read: {error}: make it \
+                     readable by this user, as `docker` reads it",
+                    path.display()
+                ),
+            ));
+        }
+    };
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "a JSON object's keys are read as a map's, whose values are skipped"
+    )]
+    let first = (serde_json::Deserializer::from_slice(&json))
+        .into_iter::<Option<BTreeMap<String, IgnoredAny>>>()
+        .next();
+    match first {
+        None | Some(Ok(None)) => Ok(false),
+        Some(Ok(Some(keys))) => Ok(keys.keys().any(|key| key.eq_ignore_ascii_case("proxies"))),
+        // serde_json's message may quote the file, so only where it went wrong is said.
+        Some(Err(error)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the Docker command line's configuration {} isn't a JSON object, at line {}, \
+                 column {}: make it one, as `docker` reads it",
+                path.display(),
+                error.line(),
+                error.column()
+            ),
+        )),
     }
 }
 

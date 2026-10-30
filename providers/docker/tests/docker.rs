@@ -13,6 +13,7 @@
     reason = "a failed test shows its containers' logs"
 )]
 
+use std::cell::Cell;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{Container, ContextName, Engine, RunTag, Start};
+use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Security, Start};
 use pumpkin_gateway::Put;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::sandbox::tree::Limits;
@@ -34,12 +35,14 @@ const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
 /// The environment of one test: its run tags and a directory for sockets and collected files.
-/// Dropping it removes the containers of its runs, after showing their logs if the test failed.
+/// Dropping it removes the containers of its runs, if it started any, after showing their logs
+/// if the test failed.
 struct Fixture {
     sandboxd: PathBuf,
     dir: PathBuf,
     run: RunTag,
     other_run: RunTag,
+    started: Cell<bool>,
 }
 
 impl Fixture {
@@ -63,6 +66,7 @@ impl Fixture {
             dir,
             run: tag(""),
             other_run: tag("-other"),
+            started: Cell::new(false),
         }
     }
 
@@ -94,13 +98,19 @@ impl Fixture {
             sandboxd,
             socket_dir: &socket_dir,
         };
+        self.started.set(true);
         engine().start(&start)
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        for run in [&self.run, &self.other_run] {
+        let runs = if self.started.get() {
+            vec![&self.run, &self.other_run]
+        } else {
+            Vec::new()
+        };
+        for run in runs {
             if thread::panicking() {
                 for id in engine().list(run).unwrap_or_default() {
                     let logs = docker().args(["logs", &id]).output().unwrap();
@@ -126,7 +136,7 @@ fn context() -> ContextName {
 /// The engine the tests' context reaches.
 fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
-    ENGINE.get_or_init(|| Engine::new(context()))
+    ENGINE.get_or_init(|| Engine::connect(context()).unwrap())
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
@@ -326,6 +336,70 @@ fn confinement() {
     );
 }
 
+/// What the provider reports of the engine before anything starts, but its versions, and how
+/// it refuses a context name `docker` wouldn't take, or one that doesn't exist.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn report() {
+    check(
+        "report",
+        |_| {
+            let Report {
+                context,
+                endpoint,
+                client_version,
+                engine_version,
+                client_proxies,
+                cgroup_version,
+                cgroup_driver,
+                storage_driver,
+                containerd_store,
+                security,
+                kernel,
+                os,
+            } = engine().report().clone();
+            let Security {
+                rootless,
+                seccomp_profile,
+                apparmor,
+                userns,
+            } = security;
+            let named = [client_version, engine_version, kernel, os];
+            let missing = ContextName::try_from("pumpkin-missing".to_owned()).unwrap();
+            let missing = Engine::connect(missing).unwrap_err().to_string();
+            let (wrong, _) = missing.split_once(": ").unwrap();
+            let (_, todo) = missing.rsplit_once(": ").unwrap();
+            vec![
+                format!("context: {} at {endpoint}", context.as_str()),
+                format!(
+                    "versions, kernel and OS named: {}",
+                    named.iter().all(|named| !named.is_empty())
+                ),
+                format!(
+                    "proxies in the client's config.json: {}",
+                    if client_proxies { "set" } else { "not set" }
+                ),
+                format!("rootless: {rootless}"),
+                format!("cgroup: {cgroup_version}, {cgroup_driver}"),
+                format!("storage: {storage_driver}, containerd store: {containerd_store}"),
+                format!("seccomp: {seccomp_profile:?}, AppArmor: {apparmor}, userns: {userns}"),
+                format!("{wrong}: …: {todo}"),
+                ContextName::try_from("-v".to_owned()).unwrap_err(),
+            ]
+        },
+        &expect![[r#"
+            context: default at unix:///var/run/docker.sock
+            versions, kernel and OS named: true
+            proxies in the client's config.json: not set
+            rootless: false
+            cgroup: 2, systemd
+            storage: overlayfs, containerd store: true
+            seccomp: Some("builtin"), AppArmor: true, userns: false
+            the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
+            `-v` is not a valid Docker context name: use a letter or digit, then at least one more letter, digit, `_`, `.`, `+` or `-`, as `docker context ls` lists them"#]],
+    );
+}
+
 /// Destroying a sandbox removes its container, and cleaning up a run removes the rest of its
 /// containers and no others.
 #[test]
@@ -334,8 +408,7 @@ fn cleanup() {
     check(
         "cleanup",
         |fixture| {
-            let version = engine().version().unwrap();
-            let mut lines = vec![format!("engine version recorded: {}", !version.is_empty())];
+            let mut lines = Vec::new();
             let first = fixture.start(&fixture.run, "first");
             let _second = fixture.start(&fixture.run, "second");
             let _third = fixture.start(&fixture.run, "third");
@@ -356,7 +429,6 @@ fn cleanup() {
             lines
         },
         &expect![[r#"
-            engine version recorded: true
             listed after destroying one: 2
             removed: 2
             left: 0

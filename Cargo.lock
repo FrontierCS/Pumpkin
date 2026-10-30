@@ -58,6 +58,7 @@ dependencies = [
  "expect-test",
  "pumpkin-gateway",
  "pumpkin-schema",
+ "serde",
  "serde_json",
 ]
 
