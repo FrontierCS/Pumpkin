@@ -15,7 +15,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -195,12 +195,14 @@ fn show_logs(run: &RunTag) -> Result<(), String> {
 
 /// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
 /// a world-writable `/workspace`, which a role's user needs, since the writable layer is the
-/// workspace. Built once, from the pinned image, and tagged, so that each build replaces the
-/// last instead of leaving it behind untagged.
+/// workspace, and a world-writable `VOLUME` at `/volume`, for which Docker makes each container
+/// an anonymous volume. Built once, from the pinned image, and tagged, so that each build
+/// replaces the last instead of leaving it behind untagged.
 fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
-        let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
+        let dockerfile =
+            format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace /volume\nVOLUME /volume\n");
         let mut build = docker()
             .args([
                 "build",
@@ -344,8 +346,9 @@ fn judge() {
 }
 
 /// What the role's code can reach, seen from inside the container, whether the container's
-/// users map to the host's as the engine's report says, and the container's log, which
-/// `sandboxd` alone writes, seen from the host.
+/// users map to the host's as the engine's report says, and, seen from the host, the container's
+/// log, which `sandboxd` alone writes, and what `docker create` pinned that the daemon or the
+/// image would otherwise decide.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn confinement() {
@@ -357,16 +360,21 @@ fn confinement() {
                 echo "interfaces: $(ls /sys/class/net)"
                 nc -w 2 1.1.1.1 80 </dev/null >/dev/null 2>&1
                 echo "outbound connect: exit $?"
-                grep -E '^(CapEff|NoNewPrivs)' /proc/self/status
+                grep -E '^(Cap|NoNewPrivs)' /proc/self/status
                 echo "uid=$(id -u) gid=$(id -g)"
                 for limit in cpu.max memory.max memory.swap.max pids.max; do
                     echo "$limit: $(cat /sys/fs/cgroup/$limit)"
                 done
                 echo "core file size: $(ulimit -c)"
+                awk '$2 ~ /^\/(pumpkin|tmp|dev\/shm|dev\/mqueue)$/ { print $3 " at " $2 }' /proc/mounts | sort
                 echo "/pumpkin: $(stat -c '%u:%g %a' /pumpkin), $(df -k /pumpkin | awk 'NR == 2 { print $2 }') KiB"
-                for file in /tmp/x /.pumpkin/sandboxd /workspace/x /pumpkin/home/x /proc/1/fd/1; do
+                printf '#!/bin/sh\necho ran\n' > /pumpkin/home/program && chmod +x /pumpkin/home/program
+                echo "a program in /pumpkin: $(/pumpkin/home/program 2>&1)"
+                for file in /tmp/x /.pumpkin/sandboxd /.pumpkin/gateway/x /etc/hosts /workspace/x \
+                    /volume/x /pumpkin/home/x /dev/shm/x /proc/1/fd/1; do
                     if echo > $file 2>/dev/null; then echo "$file: writable"; else echo "$file: refused"; fi
                 done
+                touch /dev/mqueue/x && echo "/dev/mqueue/x: made"
                 cat /proc/self/uid_map > /pumpkin/out/uid_map"#;
             let status = sh(&sandbox, 1, script);
             let mut lines = vec![format!("{status:?}")];
@@ -392,24 +400,30 @@ fn confinement() {
                 let (stdout, stderr) = (output.stdout, output.stderr);
                 String::from_utf8([stdout, stderr].concat()).unwrap()
             };
-            let config = from_host(&["inspect", "--format", "{{json .HostConfig.LogConfig}}"]);
-            lines.push(format!("log config: {}", config.trim_end()));
+            let pinned = "log config: {{json .HostConfig.LogConfig}}\n\
+                          init: {{json .HostConfig.Init}}\n\
+                          healthcheck: {{json .Config.Healthcheck}}";
+            let inspected = from_host(&["inspect", "--format", pinned]);
+            lines.extend(inspected.lines().map(str::to_owned));
             lines.push(format!("log: {:?}", from_host(&["logs", "--tail", "20"])));
             lines
         },
         &expect![[r#"
             Code(0)
-            1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /proc/1/fd/1: Permission denied
-            1.stdout: interfaces: lo; outbound connect: exit 1; CapEff:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; /pumpkin: 4242:4243 755, 1048576 KiB; /tmp/x: refused; /.pumpkin/sandboxd: refused; /workspace/x: writable; /pumpkin/home/x: writable; /proc/1/fd/1: refused
+            1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /.pumpkin/gateway/x: Read-only file system; sh: can't create /etc/hosts: Permission denied; sh: can't create /proc/1/fd/1: Permission denied
+            1.stdout: interfaces: lo; outbound connect: exit 1; CapInh:	0000000000000000; CapPrm:	0000000000000000; CapEff:	0000000000000000; CapBnd:	0000000000000000; CapAmb:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; mqueue at /dev/mqueue; tmpfs at /dev/shm; tmpfs at /pumpkin; tmpfs at /tmp; /pumpkin: 4242:4243 755, 1048576 KiB; a program in /pumpkin: ran; /tmp/x: refused; /.pumpkin/sandboxd: refused; /.pumpkin/gateway/x: refused; /etc/hosts: refused; /workspace/x: writable; /volume/x: writable; /pumpkin/home/x: writable; /dev/shm/x: writable; /proc/1/fd/1: refused; /dev/mqueue/x: made
             rootless or userns, exactly when the uid map isn't the identity: true
             log config: {"Type":"json-file","Config":{"max-file":"1","max-size":"1048576"}}
+            init: false
+            healthcheck: {"Test":["NONE"]}
             log: """#]],
     );
 }
 
 /// What the provider reports of the engine before anything starts, as far as every engine it
 /// takes shows the same, and how it refuses an empty context name, and names no context has,
-/// one that begins with `-` among them.
+/// among them `--help`, which `docker context inspect` mustn't take for its own option, which
+/// prints its help and succeeds.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn report() {
@@ -433,7 +447,7 @@ fn report() {
                 ),
                 ContextName::try_from(String::new()).unwrap_err(),
             ];
-            for name in ["pumpkin-missing", "-v"] {
+            for name in ["pumpkin-missing", "--help"] {
                 let refused = Engine::connect(ContextName::try_from(name.to_owned()).unwrap());
                 let refused = refused.unwrap_err();
                 let (wrong, _) = refused.split_once(": ").unwrap();
@@ -446,12 +460,13 @@ fn report() {
             endpoint, versions, kernel and OS named: true
             the Docker context's name is empty: name one that `docker context ls` lists
             the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
-            the Docker context `-v` can't be read: …: name one that `docker context ls` lists"#]],
+            the Docker context `--help` can't be read: …: name one that `docker context ls` lists"#]],
     );
 }
 
-/// Destroying a sandbox removes its container, and cleaning up a run removes the rest of its
-/// containers and no others.
+/// Destroying a sandbox removes its container, as dropping it does, and cleaning up a run
+/// removes the rest of its containers and no others; destroying one already removed succeeds.
+/// Each way removes the container's anonymous volume with it.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn cleanup() {
@@ -460,28 +475,56 @@ fn cleanup() {
         |fixture| {
             let mut lines = Vec::new();
             let first = fixture.start(&fixture.run, "first");
-            let _second = fixture.start(&fixture.run, "second");
-            let _third = fixture.start(&fixture.run, "third");
-            let _other = fixture.start(&fixture.other_run, "other");
+            let second = fixture.start(&fixture.run, "second");
+            let third = fixture.start(&fixture.run, "third");
+            let other = fixture.start(&fixture.other_run, "other");
+            let volumes = [&first, &second, &third, &other].map(volume);
             let roles = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#).unwrap();
             first.destroy().unwrap();
-            lines.push(format!("after destroying one: {:?}", roles(&fixture.run)));
+            drop(second);
+            lines.push(format!(
+                "after destroying first and dropping second: {:?}",
+                roles(&fixture.run)
+            ));
             let removed = engine().destroy_all(&fixture.run).unwrap();
             lines.push(format!("removed: {}", removed.len()));
             lines.push(format!("left: {:?}", roles(&fixture.run)));
+            lines.push(format!("destroying third again: {:?}", third.destroy()));
             lines.push(format!("other run's: {:?}", roles(&fixture.other_run)));
+            let listed = docker().args(["volume", "ls", "--quiet"]).output().unwrap();
+            let listed = String::from_utf8(listed.stdout).unwrap();
+            let kept = (["first", "second", "third", "other"].iter().zip(&volumes))
+                .filter(|&(_, volume)| listed.lines().any(|listed| listed == volume))
+                .map(|(role, _)| role);
+            lines.push(format!("volumes left: {:?}", kept.collect::<Vec<_>>()));
             lines
         },
         &expect![[r#"
-            after destroying one: ["second", "third"]
-            removed: 2
+            after destroying first and dropping second: ["third"]
+            removed: 1
             left: []
-            other run's: ["other"]"#]],
+            destroying third again: Ok(())
+            other run's: ["other"]
+            volumes left: ["other"]"#]],
     );
 }
 
-/// A `sandboxd` that doesn't exist is named, a container that Docker creates but can't start is
-/// removed, and an image the engine doesn't have isn't pulled.
+/// The name of the anonymous volume Docker made for the sandbox's `/volume`.
+fn volume(sandbox: &Container) -> String {
+    let format = r#"{{range .Mounts}}{{if eq .Destination "/volume"}}{{.Name}}{{end}}{{end}}"#;
+    let inspect = ["inspect", "--format", format, sandbox.id()];
+    let output = docker().args(inspect).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let name = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    assert!(!name.is_empty(), "the sandbox has no volume at /volume");
+    name
+}
+
+/// A `sandboxd` that doesn't exist is named, and one whose path has a comma, which `--mount`
+/// would read as the start of another option, is refused; a container that Docker creates but
+/// can't start is removed, as is one whose `sandboxd` exits without connecting, after the
+/// connect timeout, with the end of its log quoted; and an image the engine doesn't have isn't
+/// pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -491,10 +534,19 @@ fn failed_start() {
             let not_executable = fixture.dir.join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
             let missing = fixture.dir.join("absent");
+            let comma = fixture.dir.join("sandboxd,readonly=false");
+            fs::write(&comma, "").unwrap();
+            // Its standard error first, to show that the log quotes its standard output first.
+            let exiting = fixture.dir.join("exiting-sandboxd");
+            let script = "#!/bin/sh\necho 'to standard error' >&2\necho 'to standard output'\n";
+            fs::write(&exiting, script).unwrap();
+            fs::set_permissions(&exiting, fs::Permissions::from_mode(0o755)).unwrap();
             let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
             let attempts = [
                 ("missing", missing.as_path(), image()),
+                ("comma", comma.as_path(), image()),
                 ("unexecutable", not_executable.as_path(), image()),
+                ("exiting", exiting.as_path(), image()),
                 ("unpulled", fixture.sandboxd.as_path(), unpulled),
             ];
             let mut lines = Vec::new();
@@ -509,7 +561,10 @@ fn failed_start() {
         },
         &expect![[r#"
             missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
+            comma: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
             unexecutable: `docker start <id>` failed with exit status: 1: …: fix what Docker reports
+            exiting: the `sandboxd` of container <id> didn't connect: no sandbox connected to <dir>/exiting/s within 30s: expected it to connect as it starts; the container's logs end: to standard output
+            to standard error
             unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports
             left: []"#]],
     );

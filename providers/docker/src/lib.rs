@@ -27,8 +27,8 @@
 //! - The provider puts no size limit on the container's writable layer, the role's
 //!   workspace, or on its image's volumes, so a role can fill the disk the Docker daemon
 //!   stores containers on.
-//! - A container that dies at once still costs [`CONNECT_TIMEOUT`] before [`Engine::start`]
-//!   fails.
+//! - A container whose `sandboxd` exits before connecting still costs [`CONNECT_TIMEOUT`]
+//!   before [`Engine::start`] fails.
 //!
 //! # The envelope
 //!
@@ -374,8 +374,8 @@ impl Engine {
     /// Fails, naming the path, if the socket directory or `sandboxd` doesn't exist; if
     /// `docker` can't create or start the container; if its `sandboxd` doesn't connect within
     /// [`CONNECT_TIMEOUT`]; or if the directories can't be put. Whatever container `docker`
-    /// created is removed first, and the error says if that failed, and quotes the end of the
-    /// container's logs.
+    /// created is removed before the error returns, which quotes the end of the container's
+    /// logs, and says if removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
         let listener = Listener::bind(start.socket_dir.join(SOCKET_NAME)).map_err(|error| {
@@ -580,14 +580,15 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         "--log-opt=max-file=1".to_owned(),
         format!("--pids-limit={PIDS_LIMIT}"),
         // A crash would otherwise dump core where the host's `core_pattern` says: into the
-        // writable layer, or to a helper that may store it on the host's disk, outside the
-        // session and every limit. A helper still runs, but is told the limit is 0.
+        // container's own files, such as its writable layer, or to a helper that may store it
+        // on the host's disk, outside the session and every limit. A helper still runs, but is
+        // told the limit is 0.
         "--ulimit=core=0".to_owned(),
         format!(
             "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
             *PUMPKIN_DIR
         ),
-        "--tmpfs=/tmp:ro,size=4k".to_owned(),
+        "--tmpfs=/tmp:ro".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(socket_dir, GATEWAY_DIR)?,
         format!("--entrypoint={SANDBOXD_PATH}"),
@@ -616,13 +617,10 @@ fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
     ))
 }
 
-/// Removes the container with ID `id`, and its anonymous volumes. A container already gone is
-/// removed.
+/// Removes the container with ID `id`, and its anonymous volumes. `--force` kills the container
+/// first if it runs, and has `docker` succeed if it is gone already.
 fn remove(context: &ContextName, id: &str) -> Result<(), String> {
-    match docker(context, ["rm", "--force", "--volumes", id]) {
-        Err(error) if error.contains("No such container") => Ok(()),
-        other => other.map(|_| ()),
-    }
+    docker(context, ["rm", "--force", "--volumes", id]).map(|_| ())
 }
 
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
@@ -660,7 +658,7 @@ where
 ///
 /// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
 /// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
-/// helpers and plugins; and `DOCKER_CONFIG`, if set, Docker's own variable for where that
+/// helpers; and `DOCKER_CONFIG`, if set, Docker's own variable for where that
 /// configuration lives. The rest of the environment is dropped, so that the context named
 /// alone steers the command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and
 /// `DOCKER_CERT_PATH`, among others, would set the endpoint and TLS of `default`. A context
