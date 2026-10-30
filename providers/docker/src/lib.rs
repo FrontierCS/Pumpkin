@@ -88,7 +88,7 @@ const ROLE_LABEL: &str = "pumpkin.role";
 /// Any name but the empty one, which `docker` would take for no name, and so reach the engine
 /// of the command line's current context. A name no context has is refused by
 /// [`Engine::connect`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -114,13 +114,13 @@ impl TryFrom<String> for ContextName {
 
 /// The Docker engine a context reaches, which every container of the provider's runs in, and
 /// its report.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Engine {
     report: Report,
 }
 
 /// The engine, as `docker` describes it before anything starts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Report {
     /// The context, and the endpoint it reaches the engine at.
     pub context: ContextName,
@@ -136,7 +136,7 @@ pub struct Report {
 }
 
 /// What the engine's security options say.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Security {
     /// Whether the engine runs as an ordinary user rather than as root: see
     /// [the envelope](crate#the-envelope).
@@ -168,20 +168,6 @@ struct EndpointJson {
     host: String,
 }
 
-/// What `docker version` prints, as JSON.
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct VersionJson {
-    client: VersionedJson,
-    server: VersionedJson,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct VersionedJson {
-    version: String,
-}
-
 /// What `docker info` prints, as JSON.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -198,11 +184,20 @@ struct InfoJson {
     security_options: Option<Vec<String>>,
     kernel_version: String,
     operating_system: String,
+    /// The engine's version, and the `docker` command line's.
+    server_version: String,
+    client_info: ClientInfoJson,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ClientInfoJson {
+    version: String,
 }
 
 /// Names the containers of one run, for finding them again: 1 to 63 characters from a-z, 0-9
 /// and `-`, starting with a letter or digit.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunTag(String);
 
 impl RunTag {
@@ -234,7 +229,7 @@ impl TryFrom<String> for RunTag {
 }
 
 /// What [`Engine::start`] needs to start a container.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Start<'a> {
     /// The run the container belongs to.
     pub run: &'a RunTag,
@@ -318,22 +313,18 @@ impl Engine {
             )
         })?;
         let ContextJson { endpoints } = parse_json("docker context inspect", &inspected)?;
-        let reach = |args: [&str; 3]| {
-            docker_output(&context, args).map_err(|error| {
+        let info =
+            docker_output(&context, ["info", "--format", "{{json .}}"]).map_err(|error| {
                 let todo = if error.contains("permission denied") {
                     "let this user reach the engine's socket: by the `docker` group, which is \
-                     root-equivalent, or by running rootless Docker and naming its context"
+                 root-equivalent, or by running rootless Docker and naming its context"
                 } else {
                     "start the engine, or name a context whose engine runs"
                 };
                 format!(
                     "the Docker engine isn't reachable through context `{name}`: {error}: {todo}"
                 )
-            })
-        };
-        let version = reach(["version", "--format", "{{json .}}"])?;
-        let VersionJson { client, server } = parse_json("docker version", &version)?;
-        let info = reach(["info", "--format", "{{json .}}"])?;
+            })?;
         let InfoJson {
             memory_limit,
             swap_limit,
@@ -342,6 +333,8 @@ impl Engine {
             security_options,
             kernel_version,
             operating_system,
+            server_version,
+            client_info,
         } = parse_json("docker info", &info)?;
         check_limits(
             &context,
@@ -356,8 +349,8 @@ impl Engine {
             report: Report {
                 context,
                 endpoint: endpoints.docker.host,
-                client_version: client.version,
-                engine_version: server.version,
+                client_version: client_info.version,
+                engine_version: server_version,
                 security: Security::parse(&security_options.unwrap_or_default()),
                 kernel: kernel_version,
                 os: operating_system,
@@ -459,7 +452,12 @@ impl Security {
     /// The security options `docker info` lists, each a list of `key=value`, such as
     /// `name=seccomp,profile=builtin`.
     fn parse(options: &[String]) -> Self {
-        let mut security = Self::default();
+        let mut security = Self {
+            rootless: false,
+            seccomp_profile: None,
+            apparmor: false,
+            userns: false,
+        };
         for option in options {
             let mut name = None;
             let mut profile = None;
@@ -534,12 +532,12 @@ fn connect(listener: Listener, id: &str) -> Result<Session, String> {
 
 /// The arguments of `docker create` for the container.
 fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
-    let Start {
+    let &Start {
         run,
         sandbox,
         sandboxd,
         socket_dir,
-    } = *start;
+    } = start;
     let Sandbox {
         name,
         image,
