@@ -1,6 +1,7 @@
 //! The system calls the standard library doesn't offer, and the flags it doesn't name: waiting
-//! for any child, killing a process group or every process, making the process non-dumpable,
-//! and opening only a regular file, at a path the role's code can write.
+//! for any child or finding whether there is one, killing a process group or every process,
+//! making the process non-dumpable, and opening only a regular file, at a path the role's code
+//! can write.
 
 #![expect(
     unsafe_code,
@@ -38,6 +39,28 @@ pub(crate) fn wait_for_child() -> Option<i32> {
             )]
             _ => unreachable!("waitid(P_ALL, WEXITED | WNOWAIT) failed: {error}"),
         }
+    }
+}
+
+/// Whether this process has any children: running, stopped, or exited and not yet reaped.
+pub(crate) fn has_children() -> bool {
+    // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    // SAFETY: waitid writes only to `info`, which outlives the call.
+    if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
+        return true;
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ECHILD) => false,
+        #[expect(
+            clippy::unreachable,
+            reason = "waitid fails otherwise only for invalid options, a nonblocking pidfd, or a \
+                      signal while it blocks, and these options are valid, name no pidfd, and \
+                      don't block"
+        )]
+        _ => unreachable!("waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT) failed: {error}"),
     }
 }
 

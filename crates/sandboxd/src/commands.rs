@@ -5,6 +5,12 @@
 //! it. It reaps a child only while holding the lock that starting a command holds, because
 //! starting may reap a child itself: the standard library waits for a child whose program
 //! failed to start, and must find it unreaped.
+//!
+//! Whether there are children is asked of the kernel, under that lock too, by the reaper,
+//! which sleeps while there are none, and by freezing, which waits while there are any. That
+//! relies on children appearing only under the lock: only starting a command creates one, and
+//! an orphan the kernel hands a sandbox's first process descends from a child, so it arrives
+//! while there are children already.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -28,8 +34,9 @@ pub(crate) struct Commands {
 
 struct Shared {
     state: Mutex<State>,
-    /// Signalled when a command starts or a started one exits, and when the reaper finds no
-    /// children, which is what freezing waits for.
+    /// Signalled when a command starts, which the reaper waits for while there are no
+    /// children, and when the reaper reaps a child, which freezing waits for while there are
+    /// any.
     changed: Condvar,
     sender: Sender,
 }
@@ -38,10 +45,6 @@ struct State {
     /// The started commands still running, by process ID, each with the stream that started
     /// it. Each leads a process group of its own.
     running: HashMap<i32, u32>,
-    /// How many commands have started, so the reaper knows when to look for children again.
-    started: u64,
-    /// Whether the reaper has found no children since the last command started.
-    childless: bool,
     frozen: bool,
 }
 
@@ -61,8 +64,6 @@ impl Commands {
     pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
         let state = State {
             running: HashMap::new(),
-            started: 0,
-            childless: true,
             frozen: false,
         };
         let shared = Arc::new(Shared {
@@ -86,11 +87,9 @@ impl Commands {
         } else {
             spawn(launch).map(|pid| {
                 state.running.insert(pid, stream);
-                state.started += 1;
-                state.childless = false;
+                self.shared.changed.notify_all();
             })
         };
-        self.shared.changed.notify_all();
         self.shared.sender.reply(stream, started)
     }
 
@@ -101,7 +100,9 @@ impl Commands {
         let mut state = self.shared.lock();
         state.frozen = true;
         kill_everything(&state).context("the sandbox's processes couldn't be killed")?;
-        while !(state.running.is_empty() && state.childless) {
+        // A running command is a child until the reaper reaps it, which it reports before
+        // letting go of the lock, so once no children are left, every exit has been reported.
+        while sys::has_children() {
             state = self.shared.wait(state);
         }
         Ok(())
@@ -171,7 +172,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 }
 
 /// Reaps children forever, reporting the exits of started commands. With no children, it
-/// waits until another command starts.
+/// waits until a command starts.
 ///
 /// A child may also stop. The kernel reports the stops of a child that made `sandboxd` its
 /// tracer, as any command may with `ptrace(PTRACE_TRACEME)`, to `sandboxd`'s waits, though they
@@ -180,36 +181,38 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 /// never resumes the child, which stays stopped until freezing or the end of the session kills
 /// it.
 fn reaper(shared: &Shared) {
-    let mut seen = 0;
     loop {
-        if let Some(pid) = sys::wait_for_child() {
-            let mut state = shared.lock();
-            let Some(raw) = sys::reap(pid) else {
-                continue;
-            };
-            let status = std::process::ExitStatus::from_raw(raw);
-            if status.stopped_signal().is_some() {
-                continue;
-            }
-            if let Some(stream) = state.running.remove(&pid) {
-                let status = exit_status(status);
-                // A report that can't be sent has nobody left to read it.
-                let _ = shared
-                    .sender
-                    .send(&FromSandbox::Exited { stream, status }, &[]);
-                shared.changed.notify_all();
-            }
-        } else {
-            let mut state = shared.lock();
-            if state.started == seen {
-                state.childless = true;
-                shared.changed.notify_all();
-                while state.started == seen {
-                    state = shared.wait(state);
-                }
-            }
-            seen = state.started;
+        let mut state = shared.lock();
+        while !sys::has_children() {
+            state = shared.wait(state);
         }
+        // Commands may start while the reaper waits for a child.
+        drop(state);
+        #[expect(
+            clippy::unreachable,
+            reason = "the reaper found children under the lock, and nothing else reaps them: \
+                      starting a command reaps only a child that failed to start, before it lets \
+                      go of the lock"
+        )]
+        let Some(pid) = sys::wait_for_child() else {
+            unreachable!("the children found under the lock are gone, reaped by another")
+        };
+        let mut state = shared.lock();
+        let Some(raw) = sys::reap(pid) else {
+            continue;
+        };
+        let status = std::process::ExitStatus::from_raw(raw);
+        if status.stopped_signal().is_some() {
+            continue;
+        }
+        if let Some(stream) = state.running.remove(&pid) {
+            let status = exit_status(status);
+            // A report that can't be sent has nobody left to read it.
+            let _ = shared
+                .sender
+                .send(&FromSandbox::Exited { stream, status }, &[]);
+        }
+        shared.changed.notify_all();
     }
 }
 
