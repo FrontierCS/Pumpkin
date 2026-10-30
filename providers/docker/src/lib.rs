@@ -10,8 +10,9 @@
 //! - CPU, memory (swap included) and process limits;
 //! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
 //!   container's log, which holds at most 1 MiB;
-//! - `/pumpkin`, a memory-backed filesystem owned by the role's user, holding the `in`, `out`,
-//!   `home` and `log` directories the driver puts there over the session;
+//! - [`/pumpkin`](PUMPKIN_DIR), a memory-backed filesystem of [`PUMPKIN_BYTES`] owned by the
+//!   role's user, holding the [directories](PUMPKIN_SUBDIRS) the driver puts there over the
+//!   session;
 //! - `/tmp`, a read-only mask, so the container's writable layer is the only other place on
 //!   disk a role's code can write: that layer is its workspace. Docker's `/dev/shm` and
 //!   `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so what they hold
@@ -51,7 +52,7 @@ use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Name};
-use pumpkin_schema::sandbox::RelativePath;
+use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
 use pumpkin_schema::workflow::Sandbox;
 
 /// How often a container's writable layer is measured.
@@ -75,9 +76,6 @@ const LOG_BYTES: u64 = 1 << 20;
 /// The most processes and threads a container may have.
 const PIDS_LIMIT: u32 = 4096;
 
-/// The size of `/pumpkin`, which counts against the container's memory limit while in use.
-const PUMPKIN_TMPFS: &str = "1g";
-
 /// Where `sandboxd` is mounted in the container, and where the session's socket directory is.
 const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
 const GATEWAY_DIR: &str = "/.pumpkin/gateway";
@@ -87,9 +85,6 @@ const SOCKET_NAME: &str = "s";
 
 /// The label that carries a container's run tag.
 const RUN_LABEL: &str = "pumpkin.run";
-
-/// The directories the driver expects below `/pumpkin`.
-const DIRS: [&str; 4] = ["in", "out", "home", "log"];
 
 /// Names the containers of one run, for finding them again: 1 to 63 characters from a-z, 0-9
 /// and `-`, starting with a letter or digit.
@@ -233,8 +228,8 @@ impl Drop for Container {
     }
 }
 
-/// Starts a container for the role, connects its session, and puts the directories `in`, `out`,
-/// `home` and `log` under `/pumpkin`.
+/// Starts a container for the role, connects its session, and puts [`PUMPKIN_SUBDIRS`] under
+/// [`PUMPKIN_DIR`].
 ///
 /// # Errors
 ///
@@ -265,15 +260,15 @@ pub fn start(start: &Start<'_>) -> io::Result<Container> {
 
 fn connect(listener: Listener, id: &str) -> io::Result<Session> {
     let session = listener.accept(CONNECT_TIMEOUT)?;
-    let root = AbsolutePath::try_from("/pumpkin".to_owned());
-    let dirs = DIRS.map(|dir| RelativePath::try_from(dir.to_owned()));
+    let root = AbsolutePath::try_from(PUMPKIN_DIR.to_owned());
+    let dirs = PUMPKIN_SUBDIRS.map(|dir| RelativePath::try_from(dir.to_owned()));
     #[expect(
         clippy::unreachable,
-        reason = "`/pumpkin` is an absolute path, and each of `DIRS` one component, neither \
-                  empty, `.` nor `..`"
+        reason = "`PUMPKIN_DIR` is an absolute path, and each of `PUMPKIN_SUBDIRS` one \
+                  component, neither empty, `.` nor `..`"
     )]
     let (Ok(root), Ok(dirs)) = (root, dirs.into_iter().collect::<Result<Vec<_>, _>>()) else {
-        unreachable!("`/pumpkin` or one of {DIRS:?} isn't a valid path")
+        unreachable!("`{PUMPKIN_DIR}` or one of {PUMPKIN_SUBDIRS:?} isn't a valid path")
     };
     let puts: Vec<Put<'_>> = dirs.iter().map(Put::Dir).collect();
     session
@@ -403,7 +398,7 @@ fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
         format!("--log-opt=max-size={LOG_BYTES}"),
         "--log-opt=max-file=1".to_owned(),
         format!("--pids-limit={PIDS_LIMIT}"),
-        format!("--tmpfs=/pumpkin:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_TMPFS}"),
+        format!("--tmpfs={PUMPKIN_DIR}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}"),
         "--tmpfs=/tmp:ro,size=4k".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(socket_dir, GATEWAY_DIR)?,
