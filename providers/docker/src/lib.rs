@@ -201,7 +201,16 @@ struct VersionedJson {
 /// What `docker info` prints, as JSON.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "`docker info` reports whether the engine supports each limit as a boolean"
+)]
 struct InfoJson {
+    /// Whether the engine supports each limit [`create_args`] sets.
+    memory_limit: bool,
+    swap_limit: bool,
+    cpu_cfs_quota: bool,
+    pids_limit: bool,
     cgroup_version: String,
     cgroup_driver: String,
     driver: String,
@@ -252,7 +261,8 @@ pub struct Start<'a> {
     pub run: &'a RunTag,
     /// The container's name, which must not be taken.
     pub name: &'a Name,
-    /// The role's image, user and resources.
+    /// The role's image, user and resources. The image must be in the engine already: the
+    /// provider never pulls one.
     pub sandbox: &'a Sandbox,
     /// A static `sandboxd` binary, which the role's user can execute.
     pub sandboxd: &'a Path,
@@ -319,8 +329,9 @@ impl Engine {
     /// # Errors
     ///
     /// Fails if the context can't be read, or the engine can't be reached through it, saying
-    /// what to do; if `docker` describes either in JSON of another form; or if the `docker`
-    /// command line's configuration can't be read, or isn't JSON.
+    /// what to do; if `docker` describes either in JSON of another form; if the engine can't
+    /// enforce the CPU, memory, swap and process limits every container has; or if the
+    /// `docker` command line's configuration can't be read, or isn't JSON.
     pub fn connect(context: ContextName) -> io::Result<Self> {
         let inspect = [
             "context",
@@ -346,6 +357,10 @@ impl Engine {
         let VersionJson { client, server } = parse_json("docker version", &version)?;
         let info = reach(["info", "--format", "{{json .}}"])?;
         let InfoJson {
+            memory_limit,
+            swap_limit,
+            cpu_cfs_quota,
+            pids_limit,
             cgroup_version,
             cgroup_driver,
             driver,
@@ -354,6 +369,15 @@ impl Engine {
             kernel_version,
             operating_system,
         } = parse_json("docker info", &info)?;
+        check_limits(
+            &context,
+            [
+                ("MemoryLimit", memory_limit),
+                ("SwapLimit", swap_limit),
+                ("CpuCfsQuota", cpu_cfs_quota),
+                ("PidsLimit", pids_limit),
+            ],
+        )?;
         let containerd_store = (driver_status.unwrap_or_default().iter())
             .any(|(name, value)| name == "driver-type" && value == "io.containerd.snapshotter.v1");
         Ok(Self {
@@ -509,6 +533,29 @@ fn unreached(context: &ContextName, error: &io::Error) -> io::Error {
     )
 }
 
+/// Fails unless the engine of `context` supports each of `limits`, a name in `docker info`
+/// and whether it reports the limit supported. Those are the limits [`create_args`] sets, and
+/// the engine discards one it doesn't support with only a warning from `docker create`, so a
+/// container would start without it.
+fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> io::Result<()> {
+    let unsupported: Vec<&str> = (limits.iter())
+        .filter_map(|&(name, supported)| (!supported).then_some(name))
+        .collect();
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "the Docker engine of context `{}` can't enforce every limit a sandbox has: \
+             `docker info` reports {} false: use an engine that reports MemoryLimit, SwapLimit, \
+             CpuCfsQuota and PidsLimit true",
+            context.as_str(),
+            unsupported.join(", ")
+        ),
+    ))
+}
+
 /// Parses `json`, which `command` printed.
 fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, json: &str) -> io::Result<T> {
     serde_json::from_str(json).map_err(|error| {
@@ -620,6 +667,15 @@ fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
         format!("--user={uid}:{gid}"),
         "--cap-drop=ALL".to_owned(),
         "--security-opt=no-new-privileges".to_owned(),
+        // The daemon's `init` setting would otherwise make `docker-init` the first process, in
+        // place of `sandboxd`.
+        "--init=false".to_owned(),
+        // An image's `HEALTHCHECK` would otherwise run as the role's user outside `sandboxd`,
+        // after freezing too, with its output kept on the host.
+        "--no-healthcheck".to_owned(),
+        // Images are the operator's or the build's: a pull would fetch one that no run owns,
+        // with the operator's registry credentials.
+        "--pull=never".to_owned(),
         format!("--cpus={}.{:03}", millis / 1000, millis % 1000),
         format!("--memory={memory}"),
         format!("--memory-swap={memory}"),
