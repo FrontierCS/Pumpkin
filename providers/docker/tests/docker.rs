@@ -1,6 +1,7 @@
 //! The Docker provider, against a real Docker daemon. These tests need Docker, so they are
 //! ignored; `cargo xtask ci --docker` runs them, with `PUMPKIN_SANDBOXD` naming the static
-//! `sandboxd` binary that `cargo xtask sandboxd` builds. Run without it, they fail.
+//! `sandboxd` binary that `cargo xtask sandboxd` builds. Run without it, they fail. They reach
+//! Docker through the context `PUMPKIN_DOCKER_CONTEXT` names, `default` if it is unset.
 
 #![expect(
     clippy::unwrap_used,
@@ -13,14 +14,15 @@
 )]
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{self as docker, Container, RunTag, Start};
+use pumpkin_docker::{Container, ContextName, Engine, RunTag, Start};
 use pumpkin_gateway::Put;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::sandbox::tree::Limits;
@@ -92,7 +94,7 @@ impl Fixture {
             sandboxd,
             socket_dir: &socket_dir,
         };
-        docker::start(&start)
+        engine().start(&start)
     }
 }
 
@@ -100,8 +102,8 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         for run in [&self.run, &self.other_run] {
             if thread::panicking() {
-                for id in docker::list(run).unwrap_or_default() {
-                    let logs = Command::new("docker").args(["logs", &id]).output().unwrap();
+                for id in engine().list(run).unwrap_or_default() {
+                    let logs = docker().args(["logs", &id]).output().unwrap();
                     eprintln!(
                         "logs of {id}:\n{}{}",
                         String::from_utf8_lossy(&logs.stdout),
@@ -109,10 +111,34 @@ impl Drop for Fixture {
                     );
                 }
             }
-            let _ = docker::destroy_all(run);
+            let _ = engine().destroy_all(run);
         }
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+/// The context the tests reach Docker through: `PUMPKIN_DOCKER_CONTEXT`, or `default`.
+fn context() -> ContextName {
+    let name = std::env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
+    ContextName::try_from(name).unwrap()
+}
+
+/// The engine the tests' context reaches.
+fn engine() -> &'static Engine {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE.get_or_init(|| Engine::new(context()))
+}
+
+/// `docker`, run as the provider runs it, against the tests' context alone.
+fn docker() -> Command {
+    // Only what the provider's `docker_output` keeps of the environment, for the reasons it gives.
+    let kept = ["HOME", "PATH", "DOCKER_CONFIG"]
+        .into_iter()
+        .filter_map(|name| Some((name, std::env::var_os(name)?)));
+    let mut docker = Command::new("docker");
+    docker.env_clear().envs(kept);
+    docker.args(["--context", context().as_str()]);
+    docker
 }
 
 /// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
@@ -122,11 +148,18 @@ fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
-        let build = Command::new("sh")
-            .args(["-c", "printf '%s' \"$0\" | docker build --quiet -"])
-            .arg(dockerfile)
-            .output()
+        let mut build = docker()
+            .args(["build", "--quiet", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        // Dropping its standard input once written ends the Dockerfile.
+        (build.stdin.take().unwrap())
+            .write_all(dockerfile.as_bytes())
+            .unwrap();
+        let build = build.wait_with_output().unwrap();
         assert!(build.status.success(), "{build:?}");
         String::from_utf8(build.stdout).unwrap().trim().to_owned()
     });
@@ -202,7 +235,7 @@ fn list(base: &Path, dir: &Path, lines: &mut Vec<String>) {
 
 /// The commands of the container's processes, from the host, by process ID.
 fn processes(sandbox: &Container) -> String {
-    let top = Command::new("docker")
+    let top = docker()
         .args(["top", sandbox.id(), "-o", "pid,args"])
         .output()
         .unwrap();
@@ -274,7 +307,7 @@ fn confinement() {
             let mut lines = vec![format!("{status:?}")];
             lines.extend(collect(fixture, &sandbox, "log"));
             let from_host = |args: &[&str]| {
-                let output = Command::new("docker").args(args).arg(sandbox.id()).output();
+                let output = docker().args(args).arg(sandbox.id()).output();
                 let output = output.unwrap();
                 let (stdout, stderr) = (output.stdout, output.stderr);
                 String::from_utf8([stdout, stderr].concat()).unwrap()
@@ -301,7 +334,7 @@ fn cleanup() {
     check(
         "cleanup",
         |fixture| {
-            let version = docker::engine_version().unwrap();
+            let version = engine().version().unwrap();
             let mut lines = vec![format!("engine version recorded: {}", !version.is_empty())];
             let first = fixture.start(&fixture.run, "first");
             let _second = fixture.start(&fixture.run, "second");
@@ -310,15 +343,15 @@ fn cleanup() {
             first.destroy().unwrap();
             lines.push(format!(
                 "listed after destroying one: {}",
-                docker::list(&fixture.run).unwrap().len()
+                engine().list(&fixture.run).unwrap().len()
             ));
-            let removed = docker::destroy_all(&fixture.run).unwrap();
+            let removed = engine().destroy_all(&fixture.run).unwrap();
             lines.push(format!("removed: {}", removed.len()));
             lines.push(format!(
                 "left: {}",
-                docker::list(&fixture.run).unwrap().len()
+                engine().list(&fixture.run).unwrap().len()
             ));
-            let others = docker::list(&fixture.other_run).unwrap();
+            let others = engine().list(&fixture.other_run).unwrap();
             lines.push(format!("other run's: {}", others.len()));
             lines
         },
@@ -347,7 +380,7 @@ fn failed_start() {
             }
             lines.push(format!(
                 "left: {}",
-                docker::list(&fixture.run).unwrap().len()
+                engine().list(&fixture.run).unwrap().len()
             ));
             lines
         },

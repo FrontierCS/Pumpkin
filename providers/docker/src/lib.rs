@@ -1,8 +1,8 @@
 //! The Docker provider: a sandbox for a role as a container that needs no root to start.
 //!
-//! [`start`] runs the `docker` command line, as an ordinary user in the `docker` group, and
-//! returns a [`Container`] whose [`Session`] is connected to the `sandboxd` inside. The
-//! container has:
+//! [`Engine::start`] runs the `docker` command line, as an ordinary user, against the engine of
+//! the operator's [context](#the-envelope), and returns a [`Container`] whose [`Session`] is
+//! connected to the `sandboxd` inside. The container has:
 //!
 //! - no network but loopback; the session's socket, in a host directory mounted read-only,
 //!   is the only way out;
@@ -24,11 +24,18 @@
 //!
 //! - The provider puts no size limit on the container's writable layer, the role's
 //!   workspace, so a role can fill the disk the Docker daemon stores containers on.
-//! - A container that dies at once still costs [`CONNECT_TIMEOUT`] before [`start`] fails.
+//! - A container that dies at once still costs [`CONNECT_TIMEOUT`] before [`Engine::start`]
+//!   fails.
 //!
-//! Every container carries a [`RunTag`] label, so that [`list`] and [`destroy_all`] find a
-//! run's containers, and only those, even when the driver that started them is gone.
+//! # The envelope
+//!
+//! The operator provides the engine, once, as a Docker context, which they name; the provider
+//! picks up none of its own, and nothing in its environment overrides the one named
+//! ([`ContextName`]). Within that engine, the provider creates only containers, each labelled
+//! with its run's [`RunTag`], so that [`Engine::list`] and [`Engine::destroy_all`] find a run's
+//! containers, and only those, even when the driver that started them is gone.
 
+use std::env;
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
@@ -63,6 +70,48 @@ const SOCKET_NAME: &str = "s";
 /// The label that carries a container's run tag.
 const RUN_LABEL: &str = "pumpkin.run";
 
+/// The name of a Docker context, which says what engine `docker` reaches, and how.
+///
+/// It is a letter or digit, then at least one more letter, digit, `_`, `.`, `+` or `-`, as
+/// `docker context create` requires. `default` is Docker's own context, which reaches the
+/// engine at Docker's default socket.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ContextName(String);
+
+impl ContextName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ContextName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let mut chars = name.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+            && !chars.as_str().is_empty()
+            && chars.all(|char| char.is_ascii_alphanumeric() || "_.+-".contains(char));
+        if valid {
+            Ok(Self(name))
+        } else {
+            Err(format!(
+                "`{}` is not a valid Docker context name: use a letter or digit, then at least \
+                 one more letter, digit, `_`, `.`, `+` or `-`, as `docker context ls` lists them",
+                name.escape_debug()
+            ))
+        }
+    }
+}
+
+/// The Docker engine a context reaches, which every container of the provider's runs in.
+#[derive(Clone, Debug)]
+pub struct Engine {
+    context: ContextName,
+}
+
 /// Names the containers of one run, for finding them again: 1 to 63 characters from a-z, 0-9
 /// and `-`, starting with a letter or digit.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -96,7 +145,7 @@ impl TryFrom<String> for RunTag {
     }
 }
 
-/// What [`start`] needs to start a container.
+/// What [`Engine::start`] needs to start a container.
 #[derive(Clone, Copy, Debug)]
 pub struct Start<'a> {
     /// The run the container belongs to.
@@ -118,6 +167,7 @@ pub struct Start<'a> {
 /// container.
 #[derive(Debug)]
 pub struct Container {
+    context: ContextName,
     id: String,
     name: Name,
     session: Session,
@@ -152,7 +202,7 @@ impl Container {
             return Ok(());
         }
         self.session.end();
-        remove(&self.id)
+        remove(&self.context, &self.id)
     }
 }
 
@@ -163,38 +213,106 @@ impl Drop for Container {
     }
 }
 
-/// Starts a container for the role, connects its session, and puts [`PUMPKIN_SUBDIRS`] under
-/// [`PUMPKIN_DIR`].
-///
-/// # Errors
-///
-/// Fails if `docker` can't create or start the container, if its `sandboxd` doesn't connect
-/// within [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever container `docker`
-/// created is removed first.
-pub fn start(start: &Start<'_>) -> io::Result<Container> {
-    let socket = start.socket_dir.join(SOCKET_NAME);
-    let listener = Listener::bind(socket)?;
-    // Creating and starting apart gives the container's ID before anything can fail with a
-    // container left behind, so a failure removes this container by ID, and never another
-    // that has its name.
-    let id = docker(&create_args(start)?)?.trim().to_owned();
-    let started = docker(["start", &id]).and_then(|_| connect(listener, &id));
-    match started {
-        Ok(session) => Ok(Container {
-            id,
-            name: start.name.clone(),
-            session,
-            removed: false,
-        }),
-        Err(error) => {
-            let logs = log_tail(&id).unwrap_or_default();
-            let _ = remove(&id);
-            let message = match logs.trim() {
-                "" => error.to_string(),
-                logs => format!("{error}; the container's logs end: {logs}"),
-            };
-            Err(io::Error::new(error.kind(), message))
+impl Engine {
+    /// The engine `context` reaches. Nothing is run until a method needs `docker`.
+    pub fn new(context: ContextName) -> Self {
+        Self { context }
+    }
+
+    /// Starts a container for the role, connects its session, and puts [`PUMPKIN_SUBDIRS`]
+    /// under [`PUMPKIN_DIR`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker` can't create or start the container, if its `sandboxd` doesn't
+    /// connect within [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever
+    /// container `docker` created is removed first.
+    pub fn start(&self, start: &Start<'_>) -> io::Result<Container> {
+        let context = &self.context;
+        let socket = start.socket_dir.join(SOCKET_NAME);
+        let listener = Listener::bind(socket)?;
+        // Creating and starting apart gives the container's ID before anything can fail with
+        // a container left behind, so a failure removes this container by ID, and never
+        // another that has its name.
+        let id = docker(context, &create_args(start)?)?.trim().to_owned();
+        let started = docker(context, ["start", &id]).and_then(|_| connect(listener, &id));
+        match started {
+            Ok(session) => Ok(Container {
+                context: context.clone(),
+                id,
+                name: start.name.clone(),
+                session,
+                removed: false,
+            }),
+            Err(error) => {
+                let logs = log_tail(context, &id).unwrap_or_default();
+                let _ = remove(context, &id);
+                let message = match logs.trim() {
+                    "" => error.to_string(),
+                    logs => format!("{error}; the container's logs end: {logs}"),
+                };
+                Err(io::Error::new(error.kind(), message))
+            }
         }
+    }
+
+    /// The IDs of the run's containers, running or not.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker` can't list them.
+    pub fn list(&self, run: &RunTag) -> io::Result<Vec<String>> {
+        let filter = format!("label={RUN_LABEL}={}", run.as_str());
+        let ids = docker(
+            &self.context,
+            [
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                &filter,
+            ],
+        )?;
+        Ok(ids.lines().map(str::to_owned).collect())
+    }
+
+    /// Removes every container of the run, and returns their IDs. Containers of other runs
+    /// stay.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker` can't list them, or can't remove one; the others are removed
+    /// regardless.
+    pub fn destroy_all(&self, run: &RunTag) -> io::Result<Vec<String>> {
+        let ids = self.list(run)?;
+        let failures: Vec<String> = ids
+            .iter()
+            .filter_map(|id| {
+                remove(&self.context, id)
+                    .err()
+                    .map(|error| error.to_string())
+            })
+            .collect();
+        if failures.is_empty() {
+            Ok(ids)
+        } else {
+            Err(io::Error::other(failures.join("; ")))
+        }
+    }
+
+    /// The engine's version, for the run record.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker` can't reach the engine.
+    pub fn version(&self) -> io::Result<String> {
+        let version = docker(
+            &self.context,
+            ["version", "--format", "{{.Server.Version}}"],
+        )?;
+        Ok(version.trim().to_owned())
     }
 }
 
@@ -281,87 +399,55 @@ fn bind_mount(host: &Path, container: &str) -> io::Result<String> {
     ))
 }
 
-/// The IDs of the run's containers, running or not.
-///
-/// # Errors
-///
-/// Fails if `docker` can't list them.
-pub fn list(run: &RunTag) -> io::Result<Vec<String>> {
-    let filter = format!("label={RUN_LABEL}={}", run.as_str());
-    let ids = docker([
-        "container",
-        "ls",
-        "--all",
-        "--quiet",
-        "--no-trunc",
-        "--filter",
-        &filter,
-    ])?;
-    Ok(ids.lines().map(str::to_owned).collect())
-}
-
-/// Removes every container of the run, and returns their IDs. Containers of other runs stay.
-///
-/// # Errors
-///
-/// Fails if `docker` can't list them, or can't remove one; the others are removed regardless.
-pub fn destroy_all(run: &RunTag) -> io::Result<Vec<String>> {
-    let ids = list(run)?;
-    let failures: Vec<String> = ids
-        .iter()
-        .filter_map(|id| remove(id).err().map(|error| error.to_string()))
-        .collect();
-    if failures.is_empty() {
-        Ok(ids)
-    } else {
-        Err(io::Error::other(failures.join("; ")))
-    }
-}
-
 /// Removes the container with ID `id`, and its anonymous volumes. A container already gone is
 /// removed.
-fn remove(id: &str) -> io::Result<()> {
-    match docker(["rm", "--force", "--volumes", id]) {
+fn remove(context: &ContextName, id: &str) -> io::Result<()> {
+    match docker(context, ["rm", "--force", "--volumes", id]) {
         Err(error) if error.to_string().contains("No such container") => Ok(()),
         other => other.map(|_| ()),
     }
 }
 
-/// The Docker Engine's version, for the run record.
-///
-/// # Errors
-///
-/// Fails if `docker` can't reach the engine.
-pub fn engine_version() -> io::Result<String> {
-    let version = docker(["version", "--format", "{{.Server.Version}}"])?;
-    Ok(version.trim().to_owned())
-}
-
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
 /// its standard error, which `docker logs` writes to its own two streams.
-fn log_tail(id: &str) -> io::Result<String> {
-    let Output { stdout, stderr, .. } = docker_output(["logs", "--tail", "20", id])?;
+fn log_tail(context: &ContextName, id: &str) -> io::Result<String> {
+    let Output { stdout, stderr, .. } = docker_output(context, ["logs", "--tail", "20", id])?;
     Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
 }
 
-/// Runs `docker` with `args` and returns its standard output.
-fn docker<I, S>(args: I) -> io::Result<String>
+/// Runs `docker` against `context` with `args` and returns its standard output.
+fn docker<I, S>(context: &ContextName, args: I) -> io::Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = docker_output(args)?;
+    let output = docker_output(context, args)?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Runs `docker` with `args` and returns its output, or fails with its standard error.
-fn docker_output<I, S>(args: I) -> io::Result<Output>
+/// Runs `docker` against `context` alone with `args`, and returns its output, or fails with
+/// its standard error.
+///
+/// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
+/// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
+/// helpers and plugins; and `DOCKER_CONFIG`, if set, Docker's own variable for where that
+/// configuration lives. The rest of the environment is dropped, so that the context named
+/// alone steers the command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and
+/// `DOCKER_CERT_PATH`, among others, would set the endpoint and TLS of `default`. A context
+/// reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
+fn docker_output<I, S>(context: &ContextName, args: I) -> io::Result<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let args: Vec<S> = args.into_iter().collect();
+    let kept = ["HOME", "PATH", "DOCKER_CONFIG"]
+        .into_iter()
+        .filter_map(|name| Some((name, env::var_os(name)?)));
     let output = Command::new("docker")
+        .env_clear()
+        .envs(kept)
+        .args(["--context", context.as_str()])
         .args(&args)
         .stdin(Stdio::null())
         .output()

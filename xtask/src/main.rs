@@ -35,7 +35,8 @@ mod flags {
             /// fails.
             cmd ci {
                 /// Runs the Docker tests too, which are ignored otherwise, against the static
-                /// sandboxd that `sandboxd` builds.
+                /// sandboxd that `sandboxd` builds, through the Docker context
+                /// `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
                 optional --docker
             }
 
@@ -119,7 +120,8 @@ fn root() -> &'static Path {
 
 /// Runs the checks every change must pass, in order, and stops at the first that fails. With
 /// `docker`, it builds the static `sandboxd` before the tests, names it in `PUMPKIN_SANDBOXD`
-/// and runs the ignored tests too, which are the tests that need Docker.
+/// and runs the ignored tests too, which are the tests that need Docker; they inherit
+/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through.
 fn ci(sh: &Shell, docker: bool) -> Result<()> {
     cmd!(sh, "cargo fmt --check").run()?;
     let clippy = cmd!(
