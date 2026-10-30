@@ -331,6 +331,7 @@ fn confinement() {
                 for limit in cpu.max memory.max memory.swap.max pids.max; do
                     echo "$limit: $(cat /sys/fs/cgroup/$limit)"
                 done
+                echo "core file size: $(ulimit -c)"
                 echo "/pumpkin: $(stat -c '%u:%g %a' /pumpkin), $(df -k /pumpkin | awk 'NR == 2 { print $2 }') KiB"
                 for file in /tmp/x /.pumpkin/sandboxd /workspace/x /pumpkin/home/x /proc/1/fd/1; do
                     if echo > $file 2>/dev/null; then echo "$file: writable"; else echo "$file: refused"; fi
@@ -352,7 +353,7 @@ fn confinement() {
         &expect![[r#"
             Code(0)
             1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /proc/1/fd/1: Permission denied
-            1.stdout: interfaces: lo; outbound connect: exit 1; CapEff:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; /pumpkin: 4242:4243 755, 1048576 KiB; /tmp/x: refused; /.pumpkin/sandboxd: refused; /workspace/x: writable; /pumpkin/home/x: writable; /proc/1/fd/1: refused
+            1.stdout: interfaces: lo; outbound connect: exit 1; CapEff:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; /pumpkin: 4242:4243 755, 1048576 KiB; /tmp/x: refused; /.pumpkin/sandboxd: refused; /workspace/x: writable; /pumpkin/home/x: writable; /proc/1/fd/1: refused
             log config: {"Type":"json-file","Config":{"max-file":"1","max-size":"1048576"}}
             log: """#]],
     );

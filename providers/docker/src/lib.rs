@@ -7,7 +7,7 @@
 //! - no network but loopback; the session's socket, in a host directory mounted read-only,
 //!   is the only way out;
 //! - the role's user from its first process, no capabilities, and `no-new-privileges`;
-//! - CPU, memory (swap included) and process limits;
+//! - CPU, memory (swap included) and process limits, and a core file size limit of 0;
 //! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
 //!   container's log, which holds at most 1 MiB;
 //! - [`/pumpkin`](PUMPKIN_DIR), a tmpfs owned by the role's user, holding the
@@ -35,10 +35,11 @@
 //! The operator provides the engine, once, as a Docker context, which they name; the provider
 //! picks up none of its own, and nothing in its environment overrides the one named
 //! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
-//! ([`Report`]). Within it, the provider creates only containers, known by their IDs, each
-//! labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds a run's
-//! containers, and only those, even when the driver that started them is gone, and with its
-//! role's name, so that `docker ps` shows which is which.
+//! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
+//! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them.
+//! Each container is labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds
+//! a run's containers, and only those, even when the driver that started them is gone, and
+//! with its role's name, so that `docker ps` shows which is which.
 //!
 //! Rootless Docker is the setup to choose: its engine, and so every container, runs as an
 //! ordinary user, so escaping a container gains no more than that user has. A rootful engine
@@ -195,8 +196,11 @@ struct ClientInfoJson {
     version: String,
 }
 
-/// Names the containers of one run, for finding them again: 1 to 63 characters from a-z, 0-9
-/// and `-`, starting with a letter or digit.
+/// Labels the containers of one run, for finding them again.
+///
+/// One or more characters from a-z, 0-9 and `-`, starting with a letter or digit, so that it is
+/// one plain word wherever it goes, in `docker`'s label and filter arguments or in a command an
+/// operator types, which needs no quoting and can't be taken for an option.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunTag(String);
 
@@ -211,16 +215,15 @@ impl TryFrom<String> for RunTag {
 
     fn try_from(tag: String) -> Result<Self, Self::Error> {
         let mut chars = tag.chars();
-        let valid = tag.len() <= 63
-            && chars
-                .next()
-                .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        let valid = chars
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
             && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '-');
         if valid {
             Ok(Self(tag))
         } else {
             Err(format!(
-                "`{}` is not a valid run tag: use 1 to 63 characters from a-z, 0-9 and `-`, \
+                "`{}` is not a valid run tag: use one or more characters from a-z, 0-9 and `-`, \
                  starting with a letter or digit",
                 tag.escape_debug()
             ))
@@ -576,6 +579,10 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         format!("--log-opt=max-size={LOG_BYTES}"),
         "--log-opt=max-file=1".to_owned(),
         format!("--pids-limit={PIDS_LIMIT}"),
+        // A crash would otherwise dump core where the host's `core_pattern` says: into the
+        // writable layer, or to a helper that may store it on the host's disk, outside the
+        // session and every limit. A helper still runs, but is told the limit is 0.
+        "--ulimit=core=0".to_owned(),
         format!(
             "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
             *PUMPKIN_DIR
