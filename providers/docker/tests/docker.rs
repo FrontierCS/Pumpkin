@@ -79,7 +79,7 @@ impl Fixture {
         role: &str,
         sandboxd: &Path,
         image: Image,
-    ) -> std::io::Result<Container> {
+    ) -> Result<Container, String> {
         let socket_dir = self.dir.join(role);
         fs::create_dir_all(&socket_dir).unwrap();
         let sandbox = Sandbox {
@@ -390,7 +390,7 @@ fn report() {
             ];
             for name in ["pumpkin-missing", "-v"] {
                 let refused = Engine::connect(ContextName::try_from(name.to_owned()).unwrap());
-                let refused = refused.unwrap_err().to_string();
+                let refused = refused.unwrap_err();
                 let (wrong, _) = refused.split_once(": ").unwrap();
                 let (_, todo) = refused.rsplit_once(": ").unwrap();
                 lines.push(format!("{wrong}: …: {todo}"));
@@ -436,8 +436,8 @@ fn cleanup() {
     );
 }
 
-/// A container that Docker creates but can't start is removed, and an image the engine doesn't
-/// have isn't pulled.
+/// A `sandboxd` that doesn't exist is named, a container that Docker creates but can't start is
+/// removed, and an image the engine doesn't have isn't pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -446,21 +446,24 @@ fn failed_start() {
         |fixture| {
             let not_executable = fixture.dir.join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
-            let missing = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
+            let missing = fixture.dir.join("absent");
+            let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
             let attempts = [
+                ("missing", missing.as_path(), image()),
                 ("unexecutable", not_executable.as_path(), image()),
-                ("unpulled", fixture.sandboxd.as_path(), missing),
+                ("unpulled", fixture.sandboxd.as_path(), unpulled),
             ];
             let mut lines = Vec::new();
             for (role, sandboxd, image) in attempts {
                 let failed = fixture.try_start(&fixture.run, role, sandboxd, image);
-                let failed = failed.unwrap_err().to_string();
+                let failed = failed.unwrap_err();
                 lines.push(format!("{role}: {}", redact(fixture, &failed)));
             }
             lines.push(format!("left: {:?}", containers(&fixture.run, "{{.ID}}")));
             lines
         },
         &expect![[r#"
+            missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
             unexecutable: `docker start <id>` failed with exit status: 1: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/.pumpkin/sandboxd": permission denied
             failed to start containers: <id>: fix what Docker reports
             unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports

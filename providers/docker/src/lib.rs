@@ -47,7 +47,6 @@
 
 use std::env;
 use std::ffi::OsStr;
-use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
@@ -57,6 +56,7 @@ use pumpkin_schema::ir::{Resources, User};
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS};
 use pumpkin_schema::workflow::Sandbox;
 use serde::{Deserialize, Serialize};
+use stdx::Context;
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -279,12 +279,12 @@ impl Container {
     /// # Errors
     ///
     /// Fails if `docker` can't remove the container.
-    pub fn destroy(mut self) -> io::Result<()> {
-        self.teardown()
+    pub fn destroy(mut self) -> Result<(), String> {
+        self.teardown().map_err(fix_reported)
     }
 
     /// Removes the container, once. The session ends as the container drops it.
-    fn teardown(&mut self) -> io::Result<()> {
+    fn teardown(&mut self) -> Result<(), String> {
         if std::mem::replace(&mut self.removed, true) {
             return Ok(());
         }
@@ -307,35 +307,27 @@ impl Engine {
     /// Fails if the context can't be read, or the engine can't be reached through it, saying
     /// what to do; if `docker` describes either in JSON of another form; or if the engine
     /// can't enforce the CPU, memory, swap and process limits every container has.
-    pub fn connect(context: ContextName) -> io::Result<Self> {
+    pub fn connect(context: ContextName) -> Result<Self, String> {
+        let name = context.as_str();
         // After `--`, a name that begins with `-` can't be taken for an option.
-        let inspect = [
-            "context",
-            "inspect",
-            "--format",
-            "{{json .}}",
-            "--",
-            context.as_str(),
-        ];
-        let unread = |_: &str| "name one that `docker context ls` lists";
-        let inspected = docker_output(&context, inspect, unread).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "the Docker context `{}` can't be read: {error}",
-                    context.as_str()
-                ),
+        let inspect = ["context", "inspect", "--format", "{{json .}}", "--", name];
+        let inspected = docker_output(&context, inspect).map_err(|error| {
+            format!(
+                "the Docker context `{name}` can't be read: {error}: name one that \
+                 `docker context ls` lists"
             )
         })?;
         let ContextJson { endpoints } = parse_json("docker context inspect", &inspected)?;
         let reach = |args: [&str; 3]| {
-            docker_output(&context, args, unreached).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "the Docker engine isn't reachable through context `{}`: {error}",
-                        context.as_str()
-                    ),
+            docker_output(&context, args).map_err(|error| {
+                let todo = if error.contains("permission denied") {
+                    "let this user reach the engine's socket: by the `docker` group, which is \
+                     root-equivalent, or by running rootless Docker and naming its context"
+                } else {
+                    "start the engine, or name a context whose engine runs"
+                };
+                format!(
+                    "the Docker engine isn't reachable through context `{name}`: {error}: {todo}"
                 )
             })
         };
@@ -383,18 +375,26 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Fails if `docker` can't create or start the container, if its `sandboxd` doesn't
-    /// connect within [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever
-    /// container `docker` created is removed first, and the error says if that failed.
-    pub fn start(&self, start: &Start<'_>) -> io::Result<Container> {
+    /// Fails, naming the path, if the socket directory or `sandboxd` doesn't exist; if
+    /// `docker` can't create or start the container; if its `sandboxd` doesn't connect within
+    /// [`CONNECT_TIMEOUT`]; or if the directories can't be put. Whatever container `docker`
+    /// created is removed first, and the error says if that failed, and quotes the end of the
+    /// container's logs.
+    pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
-        let socket = start.socket_dir.join(SOCKET_NAME);
-        let listener = Listener::bind(socket)?;
+        let listener = Listener::bind(start.socket_dir.join(SOCKET_NAME)).map_err(|error| {
+            format!(
+                "the session's socket can't be made in {}: {error}: name a directory that \
+                 exists, which this user can write to",
+                start.socket_dir.display()
+            )
+        })?;
         // Creating and starting apart gives the container's ID before anything can fail with
         // a container left behind, so a failure removes this container by its ID.
-        let id = docker(context, &create_args(start)?)?.trim().to_owned();
-        let started = docker(context, ["start", &id]).and_then(|_| connect(listener, &id));
-        match started {
+        let created = docker(context, &create_args(start)?).map_err(fix_reported)?;
+        let id = created.trim().to_owned();
+        let started = docker(context, ["start", &id]).map_err(fix_reported);
+        match started.and_then(|_| connect(listener, &id)) {
             Ok(session) => Ok(Container {
                 context: context.clone(),
                 id,
@@ -402,23 +402,23 @@ impl Engine {
                 removed: false,
             }),
             Err(error) => {
-                let mut parts = vec![error.to_string()];
-                match log_tail(context, &id).unwrap_or_default().trim() {
-                    "" => {}
-                    logs => parts.push(format!("the container's logs end: {logs}")),
+                let mut parts = vec![error];
+                match log_tail(context, &id).context("the container's logs couldn't be read") {
+                    Ok(logs) if logs.trim().is_empty() => {}
+                    Ok(logs) => parts.push(format!("the container's logs end: {}", logs.trim())),
+                    Err(error) => parts.push(error),
                 }
-                if let Err(removal) = remove(context, &id) {
-                    parts.push(format!(
-                        "container {id} is left behind, as removing it failed: {removal}"
-                    ));
+                let left = format_args!("container {id} is left behind, as removing it failed");
+                if let Err(removal) = remove(context, &id).context(left) {
+                    parts.push(removal);
                 }
-                Err(io::Error::new(error.kind(), parts.join("; ")))
+                Err(parts.join("; "))
             }
         }
     }
 
     /// The IDs of the run's containers, running or not.
-    fn list(&self, run: &RunTag) -> io::Result<Vec<String>> {
+    fn list(&self, run: &RunTag) -> Result<Vec<String>, String> {
         let filter = format!("label={RUN_LABEL}={}", run.as_str());
         let ids = docker(
             &self.report.context,
@@ -442,20 +442,15 @@ impl Engine {
     ///
     /// Fails if `docker` can't list them, or can't remove one; the others are removed
     /// regardless.
-    pub fn destroy_all(&self, run: &RunTag) -> io::Result<Vec<String>> {
-        let ids = self.list(run)?;
-        let failures: Vec<String> = ids
-            .iter()
-            .filter_map(|id| {
-                remove(&self.report.context, id)
-                    .err()
-                    .map(|error| error.to_string())
-            })
+    pub fn destroy_all(&self, run: &RunTag) -> Result<Vec<String>, String> {
+        let ids = self.list(run).map_err(fix_reported)?;
+        let failures: Vec<String> = (ids.iter())
+            .filter_map(|id| remove(&self.report.context, id).err())
             .collect();
         if failures.is_empty() {
             Ok(ids)
         } else {
-            Err(io::Error::other(failures.join("; ")))
+            Err(fix_reported(failures.join("; ")))
         }
     }
 }
@@ -489,70 +484,56 @@ impl Security {
     }
 }
 
-/// What to do when `docker` can't reach the engine, as its standard error, `stderr`, says.
-fn unreached(stderr: &str) -> &'static str {
-    if stderr.contains("permission denied") {
-        "let this user reach the engine's socket: by the `docker` group, which is \
-         root-equivalent, or by running rootless Docker and naming its context"
-    } else {
-        "start the engine, or name a context whose engine runs"
-    }
-}
-
 /// Fails unless the engine of `context` supports each of `limits`, a name in `docker info`
 /// and whether it reports the limit supported. Those are the limits [`create_args`] sets, and
 /// the engine discards one it doesn't support with only a warning from `docker create`, so a
 /// container would start without it.
-fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> io::Result<()> {
+fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), String> {
     let unsupported: Vec<&str> = (limits.iter())
         .filter_map(|&(name, supported)| (!supported).then_some(name))
         .collect();
     if unsupported.is_empty() {
         return Ok(());
     }
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!(
-            "the Docker engine of context `{}` can't enforce every limit a sandbox has: \
-             `docker info` reports {} false: use an engine that reports MemoryLimit, SwapLimit, \
-             CpuCfsQuota and PidsLimit true",
-            context.as_str(),
-            unsupported.join(", ")
-        ),
+    Err(format!(
+        "the Docker engine of context `{}` can't enforce every limit a sandbox has: \
+         `docker info` reports {} false: use an engine that reports MemoryLimit, SwapLimit, \
+         CpuCfsQuota and PidsLimit true",
+        context.as_str(),
+        unsupported.join(", ")
     ))
 }
 
 /// Parses the JSON on `output`'s standard output, which `command` printed.
-fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, output: &Output) -> io::Result<T> {
+fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, output: &Output) -> Result<T, String> {
     serde_json::from_slice(&output.stdout).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the JSON `{command}` printed isn't of the form expected: {error}: use Docker's \
-                 own command line, which prints it"
-            ),
+        format!(
+            "the JSON `{command}` printed isn't of the form expected: {error}: use Docker's own \
+             command line, which prints it"
         )
     })
 }
 
-fn connect(listener: Listener, id: &str) -> io::Result<Session> {
-    let session = listener.accept(CONNECT_TIMEOUT)?;
+fn connect(listener: Listener, id: &str) -> Result<Session, String> {
+    let session = listener.accept(CONNECT_TIMEOUT).map_err(|error| {
+        format!(
+            "the `sandboxd` of container {id} didn't connect: {error}: expected it to connect \
+             as it starts"
+        )
+    })?;
     let root = &*PUMPKIN_DIR;
     let puts: Vec<Put<'_>> = PUMPKIN_SUBDIRS.iter().map(Put::Dir).collect();
     session.put(root, &puts).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "the directories under `{root}` can't be put in container {id}: {error}: \
-                 expected its `sandboxd` to put them, as the role's user, who owns `{root}`"
-            ),
+        format!(
+            "the directories under `{root}` can't be put in container {id}: {error}: expected \
+             its `sandboxd` to put them, as the role's user, who owns `{root}`"
         )
     })?;
     Ok(session)
 }
 
 /// The arguments of `docker create` for the container.
-fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
+fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
     let Start {
         run,
         sandbox,
@@ -611,62 +592,66 @@ fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
     ])
 }
 
-/// A read-only `--mount` of a host path, which must exist.
-fn bind_mount(host: &Path, container: &str) -> io::Result<String> {
-    let host = host.canonicalize()?;
-    let host = host
-        .to_str()
-        .filter(|path| !path.contains(','))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{} can't be mounted: use a path of UTF-8 without commas",
-                    host.display()
-                ),
-            )
-        })?;
+/// A read-only `--mount` of `host`, which must exist, at `container`.
+fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
+    let host = host.canonicalize().map_err(|error| {
+        format!(
+            "{} can't be mounted at {container}: {error}: name a path that exists",
+            host.display()
+        )
+    })?;
+    let Some(source) = host.to_str().filter(|path| !path.contains(',')) else {
+        return Err(format!(
+            "{} can't be mounted at {container}: name a path of UTF-8 without commas",
+            host.display()
+        ));
+    };
     Ok(format!(
-        "--mount=type=bind,source={host},target={container},readonly"
+        "--mount=type=bind,source={source},target={container},readonly"
     ))
 }
 
 /// Removes the container with ID `id`, and its anonymous volumes. A container already gone is
 /// removed.
-fn remove(context: &ContextName, id: &str) -> io::Result<()> {
+fn remove(context: &ContextName, id: &str) -> Result<(), String> {
     match docker(context, ["rm", "--force", "--volumes", id]) {
-        Err(error) if error.to_string().contains("No such container") => Ok(()),
+        Err(error) if error.contains("No such container") => Ok(()),
         other => other.map(|_| ()),
     }
 }
 
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
 /// its standard error, which `docker logs` writes to its own two streams.
-fn log_tail(context: &ContextName, id: &str) -> io::Result<String> {
+fn log_tail(context: &ContextName, id: &str) -> Result<String, String> {
     let logs = ["logs", "--tail", "20", id];
-    let Output { stdout, stderr, .. } = docker_output(context, logs, fix_reported)?;
+    let Output {
+        status: _,
+        stdout,
+        stderr,
+    } = docker_output(context, logs)?;
     Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
 }
 
-/// Runs `docker` against `context` with `args` and returns its standard output, or fails with
-/// its standard error, and [what to do](fix_reported).
-fn docker<I, S>(context: &ContextName, args: I) -> io::Result<String>
+/// `error`, from a `docker` command that failed for a reason the provider doesn't foresee, and
+/// what to do about it: Docker's error says what is wrong.
+fn fix_reported(error: String) -> String {
+    error + ": fix what Docker reports"
+}
+
+/// Runs `docker` against `context` with `args` and returns its standard output, or fails as
+/// [`docker_output`] does.
+fn docker<I, S>(context: &ContextName, args: I) -> Result<String, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = docker_output(context, args, fix_reported)?;
+    let output = docker_output(context, args)?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// What to do when `docker` fails for a reason the provider doesn't foresee: Docker's error
-/// says what is wrong.
-fn fix_reported(_stderr: &str) -> &'static str {
-    "fix what Docker reports"
-}
-
-/// Runs `docker` against `context` alone with `args`, and returns its output, or fails with
-/// its standard error, then what `todo` says to do about that error.
+/// Runs `docker` against `context` alone with `args`, and returns its output. If the command
+/// fails, the error says which it was and what Docker reported, and the caller adds what that
+/// means and what to do; if `docker` doesn't run, the error asks for it on `PATH`.
 ///
 /// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
 /// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
@@ -675,11 +660,7 @@ fn fix_reported(_stderr: &str) -> &'static str {
 /// alone steers the command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and
 /// `DOCKER_CERT_PATH`, among others, would set the endpoint and TLS of `default`. A context
 /// reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
-fn docker_output<I, S>(
-    context: &ContextName,
-    args: I,
-    todo: fn(&str) -> &'static str,
-) -> io::Result<Output>
+fn docker_output<I, S>(context: &ContextName, args: I) -> Result<Output, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -697,10 +678,7 @@ where
         .stdin(Stdio::null())
         .output()
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("`docker` didn't run: {error}: install Docker's command line on `PATH`"),
-            )
+            format!("`docker` didn't run: {error}: install Docker's command line on `PATH`")
         })?;
     if output.status.success() {
         Ok(output)
@@ -714,11 +692,10 @@ where
             shown.push_str(&word);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        Err(io::Error::other(format!(
-            "`docker{shown}` failed with {}: {stderr}: {}",
+        Err(format!(
+            "`docker{shown}` failed with {}: {}",
             output.status,
-            todo(stderr)
-        )))
+            stderr.trim()
+        ))
     }
 }

@@ -60,6 +60,7 @@ dependencies = [
  "pumpkin-schema",
  "serde",
  "serde_json",
+ "stdx",
 ]
 
 [[package]]
