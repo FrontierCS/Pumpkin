@@ -8,6 +8,7 @@ publish = false
 
 [workspace.dependencies]
 expect-test = "1"
+libc = "0.2.191"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.140"
 xflags = "0.3.2"
@@ -37,3 +38,12 @@ too_long_first_doc_paragraph = "warn"
 unreachable = "warn"
 unwrap_used = "warn"
 use_self = "warn"
+
+# A panic is a bug, so it ends the whole process, as `unreachable!` is meant to: under
+# unwinding, one in a thread would end only that thread. Cargo ignores `panic` for tests and
+# benches, which keep unwinding.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

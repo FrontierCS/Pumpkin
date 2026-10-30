@@ -6,6 +6,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+serde_json.workspace = true
 xflags.workspace = true
 xshell = "0.2.7"
 
