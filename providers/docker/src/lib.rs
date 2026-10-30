@@ -27,8 +27,8 @@
 //! - The provider puts no size limit on the container's writable layer, the role's
 //!   workspace, or on its image's volumes, so a role can fill the disk the Docker daemon
 //!   stores containers on.
-//! - A container whose `sandboxd` exits before connecting still costs [`CONNECT_TIMEOUT`]
-//!   before [`Engine::start`] fails.
+//! - A container whose `sandboxd` exits before connecting still costs the 30 s it has to
+//!   connect before [`Engine::start`] fails.
 //!
 //! # The envelope
 //!
@@ -60,27 +60,31 @@ use serde::{Deserialize, Serialize};
 use stdx::Context;
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
 /// host's disk, outside the container's other limits, so it is capped whatever writes there,
 /// with the `json-file` driver named, so that the cap doesn't rest on the daemon's default.
-/// It holds the output of `sandboxd` alone, a line when it stops: its commands' output goes
-/// to files, and they can't open its own, since it is non-dumpable.
+/// It holds the output of `sandboxd` alone, which is a line if it fails: its commands' output
+/// goes to files, and they can't open its own, since it is non-dumpable.
 const LOG_BYTES: u64 = 1 << 20;
 
 /// The most processes and threads a container may have.
 const PIDS_LIMIT: u32 = 4096;
 
-/// Where `sandboxd` is mounted in the container, and where the session's socket directory is.
+/// Where `sandboxd` is mounted in the container.
 const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
+
+/// Where the session's socket directory is mounted in the container.
 const GATEWAY_DIR: &str = "/.pumpkin/gateway";
 
 /// The socket's name in its directory.
 const SOCKET_NAME: &str = "s";
 
-/// The labels that carry a container's run tag and its role's name.
+/// The label that carries a container's run tag.
 const RUN_LABEL: &str = "pumpkin.run";
+
+/// The label that carries the name of a container's role.
 const ROLE_LABEL: &str = "pumpkin.role";
 
 /// The name of a Docker context, which says what engine `docker` reaches, and how. `default`
@@ -89,7 +93,7 @@ const ROLE_LABEL: &str = "pumpkin.role";
 /// Any name but the empty one, which `docker` would take for no name, and so reach the engine
 /// of the command line's current context. A name no context has is refused by
 /// [`Engine::connect`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -121,23 +125,26 @@ pub struct Engine {
 }
 
 /// The engine, as `docker` describes it before anything starts.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Report {
-    /// The context, and the endpoint it reaches the engine at.
+    /// The context `docker` reaches the engine through.
     pub context: ContextName,
+    /// The endpoint the context reaches the engine at, such as `unix:///var/run/docker.sock`.
     pub endpoint: String,
-    /// The versions of the `docker` command line and of the engine.
+    /// The version of the `docker` command line.
     pub client_version: String,
+    /// The engine's version.
     pub engine_version: String,
     /// What the engine's security options say.
     pub security: Security,
-    /// The kernel's version, and the operating system, of the engine's host.
+    /// The version of the kernel of the engine's host.
     pub kernel: String,
+    /// The operating system of the engine's host.
     pub os: String,
 }
 
 /// What the engine's security options say.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Security {
     /// Whether the engine runs as an ordinary user rather than as root: see
     /// [the envelope](crate#the-envelope).
@@ -177,16 +184,20 @@ struct EndpointJson {
     reason = "`docker info` reports whether the engine supports each limit as a boolean"
 )]
 struct InfoJson {
-    /// Whether the engine supports each limit [`create_args`] sets.
+    /// Whether the engine supports memory limits, which [`create_args`] sets.
     memory_limit: bool,
+    /// Whether the engine supports swap limits, which [`create_args`] sets.
     swap_limit: bool,
+    /// Whether the engine supports CPU limits, which [`create_args`] sets.
     cpu_cfs_quota: bool,
+    /// Whether the engine supports process limits, which [`create_args`] sets.
     pids_limit: bool,
     security_options: Option<Vec<String>>,
     kernel_version: String,
     operating_system: String,
-    /// The engine's version, and the `docker` command line's.
+    /// The engine's version.
     server_version: String,
+    /// The `docker` command line's version, among what it says of itself.
     client_info: ClientInfoJson,
 }
 
@@ -201,7 +212,7 @@ struct ClientInfoJson {
 /// One or more characters from a-z, 0-9 and `-`, starting with a letter or digit, so that it is
 /// one plain word wherever it goes, in `docker`'s label and filter arguments or in a command an
 /// operator types, which needs no quoting and can't be taken for an option.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct RunTag(String);
 
 impl RunTag {
@@ -232,7 +243,7 @@ impl TryFrom<String> for RunTag {
 }
 
 /// What [`Engine::start`] needs to start a container.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Start<'a> {
     /// The run the container belongs to.
     pub run: &'a RunTag,
@@ -371,18 +382,21 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Fails, naming the path, if the socket directory or `sandboxd` doesn't exist; if
-    /// `docker` can't create or start the container; if its `sandboxd` doesn't connect within
-    /// [`CONNECT_TIMEOUT`]; or if the directories can't be put. Whatever container `docker`
-    /// created is removed before the error returns, which quotes the end of the container's
-    /// logs, and says if removing it failed.
+    /// Fails, naming the path, if the session's socket can't be made in the socket directory,
+    /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
+    /// container; if its `sandboxd` doesn't connect within 30 s; or if the directories can't be
+    /// put. Whatever container `docker` created is removed before the error returns, which
+    /// quotes the end of the container's logs, and says if removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
-        let listener = Listener::bind(start.socket_dir.join(SOCKET_NAME)).map_err(|error| {
+        let socket = start.socket_dir.join(SOCKET_NAME);
+        let listener = Listener::bind(socket.clone()).map_err(|error| {
             format!(
-                "the session's socket can't be made in {}: {error}: name a directory that \
-                 exists, which this user can write to",
-                start.socket_dir.display()
+                "the session's socket can't be made at {}: {error}: expected a directory that \
+                 exists, which this user can write to, by a path short enough for a Unix \
+                 socket, and nothing at `{SOCKET_NAME}`, where a driver that was killed leaves \
+                 its socket",
+                socket.display()
             )
         })?;
         // Creating and starting apart gives the container's ID before anything can fail with

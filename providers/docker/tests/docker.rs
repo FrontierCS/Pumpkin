@@ -438,7 +438,7 @@ fn report() {
                 security: _,
                 kernel,
                 os,
-            } = engine().report().clone();
+            } = engine().report();
             let named = [endpoint, client_version, engine_version, kernel, os];
             let mut lines = vec![
                 format!(
@@ -520,11 +520,11 @@ fn volume(sandbox: &Container) -> String {
     name
 }
 
-/// A `sandboxd` that doesn't exist is named, and one whose path has a comma, which `--mount`
-/// would read as the start of another option, is refused; a container that Docker creates but
-/// can't start is removed, as is one whose `sandboxd` exits without connecting, after the
-/// connect timeout, with the end of its log quoted; and an image the engine doesn't have isn't
-/// pulled.
+/// A socket directory that holds something at the socket's path is refused; a `sandboxd` that
+/// doesn't exist is named, and one whose path has a comma, which `--mount` would read as the
+/// start of another option, is refused; a container that Docker creates but can't start is
+/// removed, as is one whose `sandboxd` exits without connecting, after the connect timeout,
+/// with the end of its log quoted; and an image the engine doesn't have isn't pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -534,6 +534,9 @@ fn failed_start() {
             let not_executable = fixture.dir.join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
             let missing = fixture.dir.join("absent");
+            // Something at the socket's path, as a driver that was killed leaves its socket.
+            fs::create_dir(fixture.dir.join("stale")).unwrap();
+            fs::write(fixture.dir.join("stale/s"), "").unwrap();
             let comma = fixture.dir.join("sandboxd,readonly=false");
             fs::write(&comma, "").unwrap();
             // Its standard error first, to show that the log quotes its standard output first.
@@ -544,6 +547,7 @@ fn failed_start() {
             let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
             let attempts = [
                 ("missing", missing.as_path(), image()),
+                ("stale", fixture.sandboxd.as_path(), image()),
                 ("comma", comma.as_path(), image()),
                 ("unexecutable", not_executable.as_path(), image()),
                 ("exiting", exiting.as_path(), image()),
@@ -561,6 +565,7 @@ fn failed_start() {
         },
         &expect![[r#"
             missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
+            stale: the session's socket can't be made at <dir>/stale/s: Address already in use (os error 98): expected a directory that exists, which this user can write to, by a path short enough for a Unix socket, and nothing at `s`, where a driver that was killed leaves its socket
             comma: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
             unexecutable: `docker start <id>` failed with exit status: 1: …: fix what Docker reports
             exiting: the `sandboxd` of container <id> didn't connect: no sandbox connected to <dir>/exiting/s within 30s: expected it to connect as it starts; the container's logs end: to standard output
