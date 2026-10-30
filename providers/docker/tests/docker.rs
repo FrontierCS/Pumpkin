@@ -15,6 +15,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -54,10 +55,11 @@ impl Fixture {
         let tag = |suffix: &str| {
             RunTag::try_from(format!("pk-{}-{name}{suffix}", std::process::id())).unwrap()
         };
-        // Socket paths are short: a directory in the system's temporary one.
+        // Socket paths are short: a directory in the system's temporary one, private to this
+        // user, as the parent of every socket directory must be.
         let dir = std::env::temp_dir().join(format!("pk-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         Self {
             sandboxd: PathBuf::from(sandboxd).canonicalize().unwrap(),
             dir,
@@ -68,15 +70,21 @@ impl Fixture {
 
     /// Starts a sandbox for role `role`, which runs as 4242:4243.
     fn start(&self, run: &RunTag, role: &str) -> Container {
-        self.try_start(run, role, &self.sandboxd).unwrap()
+        self.try_start(run, role, &self.sandboxd, image()).unwrap()
     }
 
-    fn try_start(&self, run: &RunTag, role: &str, sandboxd: &Path) -> std::io::Result<Container> {
+    fn try_start(
+        &self,
+        run: &RunTag,
+        role: &str,
+        sandboxd: &Path,
+        image: Image,
+    ) -> std::io::Result<Container> {
         let socket_dir = self.dir.join(role);
         fs::create_dir_all(&socket_dir).unwrap();
         let sandbox = Sandbox {
             name: Name::try_from(role.to_owned()).unwrap(),
-            image: image(),
+            image,
             user: serde_json::from_str::<User>(r#"{"uid": 4242, "gid": 4243}"#).unwrap(),
             resources: serde_json::from_value::<Resources>(serde_json::json!({
                 "cpu_millis": 500,
@@ -320,6 +328,10 @@ fn confinement() {
                 echo "outbound connect: exit $?"
                 grep -E '^(CapEff|NoNewPrivs)' /proc/self/status
                 echo "uid=$(id -u) gid=$(id -g)"
+                for limit in cpu.max memory.max memory.swap.max pids.max; do
+                    echo "$limit: $(cat /sys/fs/cgroup/$limit)"
+                done
+                echo "/pumpkin: $(stat -c '%u:%g %a' /pumpkin), $(df -k /pumpkin | awk 'NR == 2 { print $2 }') KiB"
                 for file in /tmp/x /.pumpkin/sandboxd /workspace/x /pumpkin/home/x /proc/1/fd/1; do
                     if echo > $file 2>/dev/null; then echo "$file: writable"; else echo "$file: refused"; fi
                 done"#;
@@ -340,7 +352,7 @@ fn confinement() {
         &expect![[r#"
             Code(0)
             1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /proc/1/fd/1: Permission denied
-            1.stdout: interfaces: lo; outbound connect: exit 1; CapEff:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; /tmp/x: refused; /.pumpkin/sandboxd: refused; /workspace/x: writable; /pumpkin/home/x: writable; /proc/1/fd/1: refused
+            1.stdout: interfaces: lo; outbound connect: exit 1; CapEff:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; /pumpkin: 4242:4243 755, 1048576 KiB; /tmp/x: refused; /.pumpkin/sandboxd: refused; /workspace/x: writable; /pumpkin/home/x: writable; /proc/1/fd/1: refused
             log config: {"Type":"json-file","Config":{"max-file":"1","max-size":"1048576"}}
             log: """#]],
     );
@@ -424,7 +436,8 @@ fn cleanup() {
     );
 }
 
-/// A container that Docker creates but can't start is removed, however often that happens.
+/// A container that Docker creates but can't start is removed, and an image the engine doesn't
+/// have isn't pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -433,20 +446,47 @@ fn failed_start() {
         |fixture| {
             let not_executable = fixture.dir.join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
+            let missing = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
+            let attempts = [
+                ("unexecutable", not_executable.as_path(), image()),
+                ("unpulled", fixture.sandboxd.as_path(), missing),
+            ];
             let mut lines = Vec::new();
-            for attempt in 1..=2 {
-                let started = fixture.try_start(&fixture.run, "failed", &not_executable);
-                lines.push(format!("attempt {attempt} failed: {}", started.is_err()));
+            for (role, sandboxd, image) in attempts {
+                let failed = fixture.try_start(&fixture.run, role, sandboxd, image);
+                let failed = failed.unwrap_err().to_string();
+                lines.push(format!("{role}: {}", redact(fixture, &failed)));
             }
-            lines.push(format!(
-                "left: {}",
-                containers(&fixture.run, "{{.ID}}").len()
-            ));
+            lines.push(format!("left: {:?}", containers(&fixture.run, "{{.ID}}")));
             lines
         },
         &expect![[r#"
-            attempt 1 failed: true
-            attempt 2 failed: true
-            left: 0"#]],
+            unexecutable: `docker start <id>` failed with exit status: 1: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/.pumpkin/sandboxd": permission denied
+            failed to start containers: <id>: fix what Docker reports
+            unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports
+            left: []"#]],
     );
+}
+
+/// `message`, with the fixture's directory and any container ID, 64 hexadecimal digits that
+/// aren't a digest, in placeholders.
+fn redact(fixture: &Fixture, message: &str) -> String {
+    let message = message.replace(&fixture.dir.display().to_string(), "<dir>");
+    let mut redacted = String::new();
+    let mut word = String::new();
+    // A space after the last word ends it, and is taken off again.
+    for char in message.chars().chain([' ']) {
+        if char.is_ascii_alphanumeric() {
+            word.push(char);
+            continue;
+        }
+        let id = word.len() == 64
+            && word.chars().all(|char| char.is_ascii_hexdigit())
+            && !redacted.ends_with("sha256:");
+        redacted.push_str(if id { "<id>" } else { &word });
+        redacted.push(char);
+        word.clear();
+    }
+    redacted.pop();
+    redacted
 }

@@ -13,8 +13,9 @@
 //! - [`/pumpkin`](PUMPKIN_DIR), a memory-backed filesystem of [`PUMPKIN_BYTES`] owned by the
 //!   role's user, holding the [directories](PUMPKIN_SUBDIRS) the driver puts there over the
 //!   session;
-//! - `/tmp`, a read-only mask, so the container's writable layer is the only other place on
-//!   disk a role's code can write: that layer is its workspace. Docker's `/dev/shm` and
+//! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
+//!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
+//!   `VOLUME` its image declares, which is removed with the container. Docker's `/dev/shm` and
 //!   `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so what they hold
 //!   counts against the memory limit.
 //!
@@ -23,7 +24,8 @@
 //! # Limits of this provider
 //!
 //! - The provider puts no size limit on the container's writable layer, the role's
-//!   workspace, so a role can fill the disk the Docker daemon stores containers on.
+//!   workspace, or on its image's volumes, so a role can fill the disk the Docker daemon
+//!   stores containers on.
 //! - A container that dies at once still costs [`CONNECT_TIMEOUT`] before [`Engine::start`]
 //!   fails.
 //!
@@ -50,7 +52,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
-use pumpkin_schema::ir::AbsolutePath;
+use pumpkin_schema::ir::{AbsolutePath, Resources, User};
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
 use pumpkin_schema::workflow::Sandbox;
 use serde::{Deserialize, Serialize};
@@ -240,8 +242,11 @@ pub struct Start<'a> {
     pub sandbox: &'a Sandbox,
     /// A static `sandboxd` binary, which the role's user can execute.
     pub sandboxd: &'a Path,
-    /// A directory for the session's socket, which only this container sees. Unix socket paths
-    /// are short, so keep it short too.
+    /// A directory for the session's socket, which only this container sees. Its parent must
+    /// be private to the driver's user, since the socket accepts the first connection, whoever
+    /// makes it. The container enters at the directory's mount itself, so the role's user needs
+    /// to traverse only the directory, not its parent. Unix socket paths are short, so keep it
+    /// short too.
     pub socket_dir: &'a Path,
 }
 
@@ -311,19 +316,28 @@ impl Engine {
             "--",
             context.as_str(),
         ];
-        let inspected = docker(&context, inspect).map_err(|error| {
+        let unread = |_: &str| "name one that `docker context ls` lists";
+        let inspected = docker_output(&context, inspect, unread).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!(
-                    "the Docker context `{}` can't be read: {error}: name one that `docker \
-                     context ls` lists",
+                    "the Docker context `{}` can't be read: {error}",
                     context.as_str()
                 ),
             )
         })?;
         let ContextJson { endpoints } = parse_json("docker context inspect", &inspected)?;
-        let reach =
-            |args: [&str; 3]| docker(&context, args).map_err(|error| unreached(&context, &error));
+        let reach = |args: [&str; 3]| {
+            docker_output(&context, args, unreached).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "the Docker engine isn't reachable through context `{}`: {error}",
+                        context.as_str()
+                    ),
+                )
+            })
+        };
         let version = reach(["version", "--format", "{{json .}}"])?;
         let VersionJson { client, server } = parse_json("docker version", &version)?;
         let info = reach(["info", "--format", "{{json .}}"])?;
@@ -370,7 +384,7 @@ impl Engine {
     ///
     /// Fails if `docker` can't create or start the container, if its `sandboxd` doesn't
     /// connect within [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever
-    /// container `docker` created is removed first.
+    /// container `docker` created is removed first, and the error says if that failed.
     pub fn start(&self, start: &Start<'_>) -> io::Result<Container> {
         let context = &self.report.context;
         let socket = start.socket_dir.join(SOCKET_NAME);
@@ -387,13 +401,17 @@ impl Engine {
                 removed: false,
             }),
             Err(error) => {
-                let logs = log_tail(context, &id).unwrap_or_default();
-                let _ = remove(context, &id);
-                let message = match logs.trim() {
-                    "" => error.to_string(),
-                    logs => format!("{error}; the container's logs end: {logs}"),
-                };
-                Err(io::Error::new(error.kind(), message))
+                let mut parts = vec![error.to_string()];
+                match log_tail(context, &id).unwrap_or_default().trim() {
+                    "" => {}
+                    logs => parts.push(format!("the container's logs end: {logs}")),
+                }
+                if let Err(removal) = remove(context, &id) {
+                    parts.push(format!(
+                        "container {id} is left behind, as removing it failed: {removal}"
+                    ));
+                }
+                Err(io::Error::new(error.kind(), parts.join("; ")))
             }
         }
     }
@@ -470,21 +488,14 @@ impl Security {
     }
 }
 
-/// Why the engine can't be reached through `context`, from `docker`'s `error`, and what to do.
-fn unreached(context: &ContextName, error: &io::Error) -> io::Error {
-    let todo = if error.to_string().contains("permission denied") {
+/// What to do when `docker` can't reach the engine, as its standard error, `stderr`, says.
+fn unreached(stderr: &str) -> &'static str {
+    if stderr.contains("permission denied") {
         "let this user reach the engine's socket: by the `docker` group, which is \
          root-equivalent, or by running rootless Docker and naming its context"
     } else {
         "start the engine, or name a context whose engine runs"
-    };
-    io::Error::new(
-        error.kind(),
-        format!(
-            "the Docker engine isn't reachable through context `{}`: {error}: {todo}",
-            context.as_str()
-        ),
-    )
+    }
 }
 
 /// Fails unless the engine of `context` supports each of `limits`, a name in `docker info`
@@ -510,9 +521,9 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> io::Result<
     ))
 }
 
-/// Parses `json`, which `command` printed.
-fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, json: &str) -> io::Result<T> {
-    serde_json::from_str(json).map_err(|error| {
+/// Parses the JSON on `output`'s standard output, which `command` printed.
+fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, output: &Output) -> io::Result<T> {
+    serde_json::from_slice(&output.stdout).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -536,9 +547,15 @@ fn connect(listener: Listener, id: &str) -> io::Result<Session> {
         unreachable!("`{PUMPKIN_DIR}` or one of {PUMPKIN_SUBDIRS:?} isn't a valid path")
     };
     let puts: Vec<Put<'_>> = dirs.iter().map(Put::Dir).collect();
-    session
-        .put(&root, &puts)
-        .map_err(|error| io::Error::new(error.kind(), format!("{id}: {error}")))?;
+    session.put(&root, &puts).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "the directories under `{PUMPKIN_DIR}` can't be put in container {id}: {error}: \
+                 expected its `sandboxd` to put them, as the role's user, who owns `{PUMPKIN_DIR}`"
+            ),
+        )
+    })?;
     Ok(session)
 }
 
@@ -555,11 +572,15 @@ fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
         image,
         user,
         resources,
-        ..
+        model_route: _,
+        assets: _,
     } = sandbox;
-    let (uid, gid) = (user.uid, user.gid);
-    let millis = resources.cpu_millis.get();
-    let memory = resources.memory_bytes.get();
+    let User { uid, gid } = *user;
+    let Resources {
+        cpu_millis,
+        memory_bytes,
+    } = *resources;
+    let (millis, memory) = (cpu_millis.get(), memory_bytes.get());
     Ok(vec![
         "create".to_owned(),
         format!("--label={RUN_LABEL}={}", run.as_str()),
@@ -627,22 +648,30 @@ fn remove(context: &ContextName, id: &str) -> io::Result<()> {
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
 /// its standard error, which `docker logs` writes to its own two streams.
 fn log_tail(context: &ContextName, id: &str) -> io::Result<String> {
-    let Output { stdout, stderr, .. } = docker_output(context, ["logs", "--tail", "20", id])?;
+    let logs = ["logs", "--tail", "20", id];
+    let Output { stdout, stderr, .. } = docker_output(context, logs, fix_reported)?;
     Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
 }
 
-/// Runs `docker` against `context` with `args` and returns its standard output.
+/// Runs `docker` against `context` with `args` and returns its standard output, or fails with
+/// its standard error, and [what to do](fix_reported).
 fn docker<I, S>(context: &ContextName, args: I) -> io::Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = docker_output(context, args)?;
+    let output = docker_output(context, args, fix_reported)?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// What to do when `docker` fails for a reason the provider doesn't foresee: Docker's error
+/// says what is wrong.
+fn fix_reported(_stderr: &str) -> &'static str {
+    "fix what Docker reports"
+}
+
 /// Runs `docker` against `context` alone with `args`, and returns its output, or fails with
-/// its standard error.
+/// its standard error, then what `todo` says to do about that error.
 ///
 /// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
 /// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
@@ -651,7 +680,11 @@ where
 /// alone steers the command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and
 /// `DOCKER_CERT_PATH`, among others, would set the endpoint and TLS of `default`. A context
 /// reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
-fn docker_output<I, S>(context: &ContextName, args: I) -> io::Result<Output>
+fn docker_output<I, S>(
+    context: &ContextName,
+    args: I,
+    todo: fn(&str) -> &'static str,
+) -> io::Result<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -668,19 +701,29 @@ where
         .args(&args)
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| io::Error::new(error.kind(), format!("docker didn't run: {error}")))?;
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("`docker` didn't run: {error}: install Docker's command line on `PATH`"),
+            )
+        })?;
     if output.status.success() {
         Ok(output)
     } else {
+        // The command, such as `container ls`, and its argument, as in `start <id>`, but none of
+        // its options, which can be long.
         let mut shown = String::new();
-        for arg in args.iter().take(2) {
+        let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
+        for word in words.take(2).take_while(|word| !word.starts_with('-')) {
             shown.push(' ');
-            shown.push_str(&arg.as_ref().to_string_lossy());
+            shown.push_str(&word);
         }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
         Err(io::Error::other(format!(
-            "`docker{shown}` failed with {}: {}",
+            "`docker{shown}` failed with {}: {stderr}: {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            todo(stderr)
         )))
     }
 }
