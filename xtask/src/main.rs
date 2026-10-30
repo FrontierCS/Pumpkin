@@ -121,7 +121,8 @@ fn root() -> &'static Path {
 /// Runs the checks every change must pass, in order, and stops at the first that fails. With
 /// `docker`, it builds the static `sandboxd` before the tests, names it in `PUMPKIN_SANDBOXD`
 /// and runs the ignored tests too, which are the tests that need Docker; they inherit
-/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through.
+/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
+/// Docker's own variables set to reach no engine.
 fn ci(sh: &Shell, docker: bool) -> Result<()> {
     cmd!(sh, "cargo fmt --check").run()?;
     let clippy = cmd!(
@@ -135,6 +136,13 @@ fn ci(sh: &Shell, docker: bool) -> Result<()> {
     if docker {
         let sandboxd = sandboxd(sh)?;
         let test = test.args(["--", "--include-ignored"]);
+        // These poison the variables the Docker provider must ignore: passed on to `docker`,
+        // they would steer it to an engine that doesn't exist, or to TLS without certificates,
+        // so the Docker tests fail unless the provider clears `docker`'s environment.
+        let test = test
+            .env("DOCKER_HOST", "unix:///nonexistent/pumpkin-poison.sock")
+            .env("DOCKER_CONTEXT", "pumpkin-poison-no-such-context")
+            .env("DOCKER_TLS_VERIFY", "1");
         test.env("PUMPKIN_SANDBOXD", &sandboxd).run()?;
     } else {
         test.run()?;

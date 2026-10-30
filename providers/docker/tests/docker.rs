@@ -23,7 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Start};
+use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Security, Start};
 use pumpkin_gateway::Put;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::sandbox::tree::Limits;
@@ -105,34 +105,39 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    // Nothing here panics, since a panic while a failed test unwinds would abort the test
+    // binary and hide the other tests' results: failures are printed instead. Without an
+    // engine, no test started a container.
     fn drop(&mut self) {
-        for run in [&self.run, &self.other_run] {
-            if thread::panicking() {
-                for id in containers(run, "{{.ID}}") {
-                    let logs = docker().args(["logs", &id]).output().unwrap();
-                    eprintln!(
-                        "logs of {id}:\n{}{}",
-                        String::from_utf8_lossy(&logs.stdout),
-                        String::from_utf8_lossy(&logs.stderr)
-                    );
+        if let Ok(engine) = connected() {
+            for run in [&self.run, &self.other_run] {
+                if thread::panicking()
+                    && let Err(error) = show_logs(run)
+                {
+                    eprintln!("the logs of run {} can't be shown: {error}", run.as_str());
+                }
+                if let Err(error) = engine.destroy_all(run) {
+                    eprintln!("run {} can't be cleaned up: {error}", run.as_str());
                 }
             }
-            let _ = engine().destroy_all(run);
         }
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
-/// The context the tests reach Docker through: `PUMPKIN_DOCKER_CONTEXT`, or `default`.
-fn context() -> ContextName {
-    let name = std::env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
-    ContextName::try_from(name).unwrap()
+/// The engine the tests reach Docker through, by the context `PUMPKIN_DOCKER_CONTEXT` names,
+/// or `default`, or why it can't be reached.
+fn connected() -> &'static Result<Engine, String> {
+    static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let name = std::env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
+        Engine::connect(ContextName::try_from(name)?)
+    })
 }
 
-/// The engine the tests' context reaches.
+/// The engine the tests reach Docker through.
 fn engine() -> &'static Engine {
-    static ENGINE: OnceLock<Engine> = OnceLock::new();
-    ENGINE.get_or_init(|| Engine::connect(context()).unwrap())
+    connected().as_ref().unwrap()
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
@@ -143,13 +148,13 @@ fn docker() -> Command {
         .filter_map(|name| Some((name, std::env::var_os(name)?)));
     let mut docker = Command::new("docker");
     docker.env_clear().envs(kept);
-    docker.arg(format!("--context={}", context().as_str()));
+    docker.arg(format!("--context={}", engine().report().context.as_str()));
     docker
 }
 
 /// What `format` shows of each of the run's containers, running or not, as `docker ps` finds
 /// them by their run's label, sorted.
-fn containers(run: &RunTag, format: &str) -> Vec<String> {
+fn containers(run: &RunTag, format: &str) -> Result<Vec<String>, String> {
     let filter = format!("label=pumpkin.run={}", run.as_str());
     let ps = [
         "ps",
@@ -160,24 +165,49 @@ fn containers(run: &RunTag, format: &str) -> Vec<String> {
         "--format",
         format,
     ];
-    let output = docker().args(ps).output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let mut lines: Vec<String> = (String::from_utf8(output.stdout).unwrap().lines())
+    let output = docker()
+        .args(ps)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("`docker ps` failed: {output:?}"));
+    }
+    let mut lines: Vec<String> = (String::from_utf8_lossy(&output.stdout).lines())
         .map(str::to_owned)
         .collect();
     lines.sort();
-    lines
+    Ok(lines)
+}
+
+/// Prints the logs of the run's containers, for a test that failed.
+fn show_logs(run: &RunTag) -> Result<(), String> {
+    for id in containers(run, "{{.ID}}")? {
+        let logs = docker().args(["logs", &id]).output();
+        let logs = logs.map_err(|error| error.to_string())?;
+        eprintln!(
+            "logs of {id}:\n{}{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr)
+        );
+    }
+    Ok(())
 }
 
 /// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
 /// a world-writable `/workspace`, which a role's user needs, since the writable layer is the
-/// workspace. Built once, from the pinned image.
+/// workspace. Built once, from the pinned image, and tagged, so that each build replaces the
+/// last instead of leaving it behind untagged.
 fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
         let mut build = docker()
-            .args(["build", "--quiet", "-"])
+            .args([
+                "build",
+                "--quiet",
+                "--tag=pumpkin-docker-tests:workspace",
+                "-",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -313,8 +343,9 @@ fn judge() {
     );
 }
 
-/// What the role's code can reach, seen from inside the container, and the container's log,
-/// which `sandboxd` alone writes, seen from the host.
+/// What the role's code can reach, seen from inside the container, whether the container's
+/// users map to the host's as the engine's report says, and the container's log, which
+/// `sandboxd` alone writes, seen from the host.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn confinement() {
@@ -335,10 +366,26 @@ fn confinement() {
                 echo "/pumpkin: $(stat -c '%u:%g %a' /pumpkin), $(df -k /pumpkin | awk 'NR == 2 { print $2 }') KiB"
                 for file in /tmp/x /.pumpkin/sandboxd /workspace/x /pumpkin/home/x /proc/1/fd/1; do
                     if echo > $file 2>/dev/null; then echo "$file: writable"; else echo "$file: refused"; fi
-                done"#;
+                done
+                cat /proc/self/uid_map > /pumpkin/out/uid_map"#;
             let status = sh(&sandbox, 1, script);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(collect(fixture, &sandbox, "log"));
+            // Rootless Docker and user namespaces each map the container's users to others on
+            // the host; a rootful engine without them maps every user to itself.
+            collect(fixture, &sandbox, "out");
+            let uid_map = fs::read_to_string(fixture.dir.join("collected-out/uid_map")).unwrap();
+            let identity = uid_map.split_whitespace().eq(["0", "0", "4294967295"]);
+            let Security {
+                rootless,
+                seccomp_profile: _,
+                apparmor: _,
+                userns,
+            } = engine().report().security;
+            lines.push(format!(
+                "rootless or userns, exactly when the uid map isn't the identity: {}",
+                (rootless || userns) != identity
+            ));
             let from_host = |args: &[&str]| {
                 let output = docker().args(args).arg(sandbox.id()).output();
                 let output = output.unwrap();
@@ -354,6 +401,7 @@ fn confinement() {
             Code(0)
             1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /proc/1/fd/1: Permission denied
             1.stdout: interfaces: lo; outbound connect: exit 1; CapEff:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; /pumpkin: 4242:4243 755, 1048576 KiB; /tmp/x: refused; /.pumpkin/sandboxd: refused; /workspace/x: writable; /pumpkin/home/x: writable; /proc/1/fd/1: refused
+            rootless or userns, exactly when the uid map isn't the identity: true
             log config: {"Type":"json-file","Config":{"max-file":"1","max-size":"1048576"}}
             log: """#]],
     );
@@ -369,7 +417,7 @@ fn report() {
         "report",
         |_| {
             let Report {
-                context: reached,
+                context: _,
                 endpoint,
                 client_version,
                 engine_version,
@@ -379,10 +427,6 @@ fn report() {
             } = engine().report().clone();
             let named = [endpoint, client_version, engine_version, kernel, os];
             let mut lines = vec![
-                format!(
-                    "reached through the tests' context: {}",
-                    reached == context()
-                ),
                 format!(
                     "endpoint, versions, kernel and OS named: {}",
                     named.iter().all(|named| !named.is_empty())
@@ -399,7 +443,6 @@ fn report() {
             lines
         },
         &expect![[r#"
-            reached through the tests' context: true
             endpoint, versions, kernel and OS named: true
             the Docker context's name is empty: name one that `docker context ls` lists
             the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
@@ -420,7 +463,7 @@ fn cleanup() {
             let _second = fixture.start(&fixture.run, "second");
             let _third = fixture.start(&fixture.run, "third");
             let _other = fixture.start(&fixture.other_run, "other");
-            let roles = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#);
+            let roles = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#).unwrap();
             first.destroy().unwrap();
             lines.push(format!("after destroying one: {:?}", roles(&fixture.run)));
             let removed = engine().destroy_all(&fixture.run).unwrap();
@@ -460,20 +503,21 @@ fn failed_start() {
                 let failed = failed.unwrap_err();
                 lines.push(format!("{role}: {}", redact(fixture, &failed)));
             }
-            lines.push(format!("left: {:?}", containers(&fixture.run, "{{.ID}}")));
+            let left = containers(&fixture.run, "{{.ID}}").unwrap();
+            lines.push(format!("left: {left:?}"));
             lines
         },
         &expect![[r#"
             missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
-            unexecutable: `docker start <id>` failed with exit status: 1: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/.pumpkin/sandboxd": permission denied
-            failed to start containers: <id>: fix what Docker reports
+            unexecutable: `docker start <id>` failed with exit status: 1: …: fix what Docker reports
             unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports
             left: []"#]],
     );
 }
 
 /// `message`, with the fixture's directory and any container ID, 64 hexadecimal digits that
-/// aren't a digest, in placeholders.
+/// aren't a digest, in placeholders, and with what Docker reports of a failed `docker start`
+/// elided: that comes from the container runtime, and varies with the runtime and its version.
 fn redact(fixture: &Fixture, message: &str) -> String {
     let message = message.replace(&fixture.dir.display().to_string(), "<dir>");
     let mut redacted = String::new();
@@ -492,5 +536,12 @@ fn redact(fixture: &Fixture, message: &str) -> String {
         word.clear();
     }
     redacted.pop();
-    redacted
+    let failed = "`docker start <id>` failed with exit status: ";
+    let advice = ": fix what Docker reports";
+    let Some((before, after)) = redacted.split_once(failed) else {
+        return redacted;
+    };
+    let (status, reported) = after.split_once(": ").unwrap();
+    let (_, after) = reported.split_once(advice).unwrap();
+    format!("{before}{failed}{status}: …{advice}{after}")
 }
