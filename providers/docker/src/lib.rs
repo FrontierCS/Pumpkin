@@ -613,9 +613,13 @@ fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
 }
 
 /// Removes the container with ID `id`, and its anonymous volumes. `--force` kills the container
-/// first if it runs, and has `docker` succeed if it is gone already.
+/// first if it runs. A container already gone is removed.
 fn remove(context: &ContextName, id: &str) -> Result<(), String> {
-    docker(context, ["rm", "--force", "--volumes", id]).map(|_| ())
+    match docker(context, ["rm", "--force", "--volumes", id]) {
+        // Docker 29 exits 0 here, but no minimum version is pinned, and older engines fail.
+        Err(error) if error.contains("No such container") => Ok(()),
+        other => other.map(|_| ()),
+    }
 }
 
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of

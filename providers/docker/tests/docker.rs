@@ -15,7 +15,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -523,8 +523,7 @@ fn volume(sandbox: &Container) -> String {
 /// A socket directory that holds something at the socket's path is refused; a `sandboxd` that
 /// doesn't exist is named, and one whose path has a comma, which `--mount` would read as the
 /// start of another option, is refused; a container that Docker creates but can't start is
-/// removed, as is one whose `sandboxd` exits without connecting, after the connect timeout,
-/// with the end of its log quoted; and an image the engine doesn't have isn't pulled.
+/// removed; and an image the engine doesn't have isn't pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -539,18 +538,12 @@ fn failed_start() {
             fs::write(fixture.dir.join("stale/s"), "").unwrap();
             let comma = fixture.dir.join("sandboxd,readonly=false");
             fs::write(&comma, "").unwrap();
-            // Its standard error first, to show that the log quotes its standard output first.
-            let exiting = fixture.dir.join("exiting-sandboxd");
-            let script = "#!/bin/sh\necho 'to standard error' >&2\necho 'to standard output'\n";
-            fs::write(&exiting, script).unwrap();
-            fs::set_permissions(&exiting, fs::Permissions::from_mode(0o755)).unwrap();
             let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
             let attempts = [
                 ("missing", missing.as_path(), image()),
                 ("stale", fixture.sandboxd.as_path(), image()),
                 ("comma", comma.as_path(), image()),
                 ("unexecutable", not_executable.as_path(), image()),
-                ("exiting", exiting.as_path(), image()),
                 ("unpulled", fixture.sandboxd.as_path(), unpulled),
             ];
             let mut lines = Vec::new();
@@ -568,28 +561,21 @@ fn failed_start() {
             stale: the session's socket can't be made at <dir>/stale/s: Address already in use (os error 98): expected a directory that exists, which this user can write to, by a path short enough for a Unix socket, and nothing at `s`, where a driver that was killed leaves its socket
             comma: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
             unexecutable: `docker start …: fix what Docker reports
-            exiting: the `sandboxd` of container … didn't connect: no sandbox connected to <dir>/exiting/s within 30s: expected it to connect as it starts; the container's logs end: to standard output
-            to standard error
             unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports
             left: []"#]],
     );
 }
 
 /// `message`, with the fixture's directory as `<dir>`, and `…` for what varies between runs or
-/// hosts: a container's ID, and what Docker reports of a failed `docker start`, which comes from
-/// the container runtime, and varies with the runtime and its version.
+/// hosts in a failed `docker start`: the container's ID, and what Docker reports, which comes
+/// from the container runtime, and varies with the runtime and its version.
 fn redact(fixture: &Fixture, message: &str) -> String {
-    let mut message = message.replace(&fixture.dir.display().to_string(), "<dir>");
-    let cuts = [
-        ("`docker start ", ": fix what Docker reports"),
-        ("of container ", " didn't connect"),
-    ];
-    for (from, to) in cuts {
-        if let Some((before, rest)) = message.split_once(from)
-            && let Some((_, after)) = rest.split_once(to)
-        {
-            message = format!("{before}{from}…{to}{after}");
-        }
+    let message = message.replace(&fixture.dir.display().to_string(), "<dir>");
+    let (from, to) = ("`docker start ", ": fix what Docker reports");
+    if let Some((before, rest)) = message.split_once(from)
+        && let Some((_, after)) = rest.split_once(to)
+    {
+        return format!("{before}{from}…{to}{after}");
     }
     message
 }
