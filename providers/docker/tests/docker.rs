@@ -13,7 +13,6 @@
     reason = "a failed test shows its containers' logs"
 )]
 
-use std::cell::Cell;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,14 +34,12 @@ const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
 /// The environment of one test: its run tags and a directory for sockets and collected files.
-/// Dropping it removes the containers of its runs, if it started any, after showing their logs
-/// if the test failed.
+/// Dropping it removes the containers of its runs, after showing their logs if the test failed.
 struct Fixture {
     sandboxd: PathBuf,
     dir: PathBuf,
     run: RunTag,
     other_run: RunTag,
-    started: Cell<bool>,
 }
 
 impl Fixture {
@@ -66,21 +63,19 @@ impl Fixture {
             dir,
             run: tag(""),
             other_run: tag("-other"),
-            started: Cell::new(false),
         }
     }
 
-    /// Starts a sandbox for a role that runs as 4242:4243.
-    fn start(&self, run: &RunTag, name: &str) -> Container {
-        self.try_start(run, name, &self.sandboxd).unwrap()
+    /// Starts a sandbox for role `role`, which runs as 4242:4243.
+    fn start(&self, run: &RunTag, role: &str) -> Container {
+        self.try_start(run, role, &self.sandboxd).unwrap()
     }
 
-    fn try_start(&self, run: &RunTag, name: &str, sandboxd: &Path) -> std::io::Result<Container> {
-        let socket_dir = self.dir.join(name);
+    fn try_start(&self, run: &RunTag, role: &str, sandboxd: &Path) -> std::io::Result<Container> {
+        let socket_dir = self.dir.join(role);
         fs::create_dir_all(&socket_dir).unwrap();
-        let name = Name::try_from(format!("{}-{name}", run.as_str())).unwrap();
         let sandbox = Sandbox {
-            name: Name::try_from("role".to_owned()).unwrap(),
+            name: Name::try_from(role.to_owned()).unwrap(),
             image: image(),
             user: serde_json::from_str::<User>(r#"{"uid": 4242, "gid": 4243}"#).unwrap(),
             resources: serde_json::from_value::<Resources>(serde_json::json!({
@@ -93,26 +88,19 @@ impl Fixture {
         };
         let start = Start {
             run,
-            name: &name,
             sandbox: &sandbox,
             sandboxd,
             socket_dir: &socket_dir,
         };
-        self.started.set(true);
         engine().start(&start)
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let runs = if self.started.get() {
-            vec![&self.run, &self.other_run]
-        } else {
-            Vec::new()
-        };
-        for run in runs {
+        for run in [&self.run, &self.other_run] {
             if thread::panicking() {
-                for id in engine().list(run).unwrap_or_default() {
+                for id in containers(run, "{{.ID}}") {
                     let logs = docker().args(["logs", &id]).output().unwrap();
                     eprintln!(
                         "logs of {id}:\n{}{}",
@@ -147,8 +135,30 @@ fn docker() -> Command {
         .filter_map(|name| Some((name, std::env::var_os(name)?)));
     let mut docker = Command::new("docker");
     docker.env_clear().envs(kept);
-    docker.args(["--context", context().as_str()]);
+    docker.arg(format!("--context={}", context().as_str()));
     docker
+}
+
+/// What `format` shows of each of the run's containers, running or not, as `docker ps` finds
+/// them by their run's label, sorted.
+fn containers(run: &RunTag, format: &str) -> Vec<String> {
+    let filter = format!("label=pumpkin.run={}", run.as_str());
+    let ps = [
+        "ps",
+        "--all",
+        "--no-trunc",
+        "--filter",
+        &filter,
+        "--format",
+        format,
+    ];
+    let output = docker().args(ps).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let mut lines: Vec<String> = (String::from_utf8(output.stdout).unwrap().lines())
+        .map(str::to_owned)
+        .collect();
+    lines.sort();
+    lines
 }
 
 /// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
@@ -337,8 +347,8 @@ fn confinement() {
 }
 
 /// What the provider reports of the engine before anything starts, as far as every engine it
-/// takes shows the same, and how it refuses a context name `docker` wouldn't take, or one that
-/// doesn't exist.
+/// takes shows the same, and how it refuses an empty context name, and names no context has,
+/// one that begins with `-` among them.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn report() {
@@ -355,11 +365,7 @@ fn report() {
                 os,
             } = engine().report().clone();
             let named = [endpoint, client_version, engine_version, kernel, os];
-            let missing = ContextName::try_from("pumpkin-missing".to_owned()).unwrap();
-            let missing = Engine::connect(missing).unwrap_err().to_string();
-            let (wrong, _) = missing.split_once(": ").unwrap();
-            let (_, todo) = missing.rsplit_once(": ").unwrap();
-            vec![
+            let mut lines = vec![
                 format!(
                     "reached through the tests' context: {}",
                     reached == context()
@@ -368,15 +374,23 @@ fn report() {
                     "endpoint, versions, kernel and OS named: {}",
                     named.iter().all(|named| !named.is_empty())
                 ),
-                format!("{wrong}: …: {todo}"),
-                ContextName::try_from("-v".to_owned()).unwrap_err(),
-            ]
+                ContextName::try_from(String::new()).unwrap_err(),
+            ];
+            for name in ["pumpkin-missing", "-v"] {
+                let refused = Engine::connect(ContextName::try_from(name.to_owned()).unwrap());
+                let refused = refused.unwrap_err().to_string();
+                let (wrong, _) = refused.split_once(": ").unwrap();
+                let (_, todo) = refused.rsplit_once(": ").unwrap();
+                lines.push(format!("{wrong}: …: {todo}"));
+            }
+            lines
         },
         &expect![[r#"
             reached through the tests' context: true
             endpoint, versions, kernel and OS named: true
+            the Docker context's name is empty: name one that `docker context ls` lists
             the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
-            `-v` is not a valid Docker context name: use a letter or digit, then at least one more letter, digit, `_`, `.`, `+` or `-`, as `docker context ls` lists them"#]],
+            the Docker context `-v` can't be read: …: name one that `docker context ls` lists"#]],
     );
 }
 
@@ -393,30 +407,24 @@ fn cleanup() {
             let _second = fixture.start(&fixture.run, "second");
             let _third = fixture.start(&fixture.run, "third");
             let _other = fixture.start(&fixture.other_run, "other");
+            let roles = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#);
             first.destroy().unwrap();
-            lines.push(format!(
-                "listed after destroying one: {}",
-                engine().list(&fixture.run).unwrap().len()
-            ));
+            lines.push(format!("after destroying one: {:?}", roles(&fixture.run)));
             let removed = engine().destroy_all(&fixture.run).unwrap();
             lines.push(format!("removed: {}", removed.len()));
-            lines.push(format!(
-                "left: {}",
-                engine().list(&fixture.run).unwrap().len()
-            ));
-            let others = engine().list(&fixture.other_run).unwrap();
-            lines.push(format!("other run's: {}", others.len()));
+            lines.push(format!("left: {:?}", roles(&fixture.run)));
+            lines.push(format!("other run's: {:?}", roles(&fixture.other_run)));
             lines
         },
         &expect![[r#"
-            listed after destroying one: 2
+            after destroying one: ["second", "third"]
             removed: 2
-            left: 0
-            other run's: 1"#]],
+            left: []
+            other run's: ["other"]"#]],
     );
 }
 
-/// A container that Docker creates but can't start is removed, and its name is free again.
+/// A container that Docker creates but can't start is removed, however often that happens.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -432,7 +440,7 @@ fn failed_start() {
             }
             lines.push(format!(
                 "left: {}",
-                engine().list(&fixture.run).unwrap().len()
+                containers(&fixture.run, "{{.ID}}").len()
             ));
             lines
         },

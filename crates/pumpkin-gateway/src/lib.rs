@@ -184,12 +184,6 @@ impl Session {
         })
     }
 
-    /// Ends the session, which stops the sandbox. Requests after it, and any waiting, fail.
-    pub fn end(&self) {
-        let reason = "the gateway ended the session".to_owned();
-        end(&self.routes, &self.connection, reason);
-    }
-
     /// Writes `entries` below `dir` in the sandbox, creating `dir` and its missing parents.
     /// Each entry's parent is `dir` or comes earlier in `entries`, unless it exists already.
     ///

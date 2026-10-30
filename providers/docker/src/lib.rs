@@ -32,9 +32,10 @@
 //! The operator provides the engine, once, as a Docker context, which they name; the provider
 //! picks up none of its own, and nothing in its environment overrides the one named
 //! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
-//! ([`Report`]). Within it, the provider creates only containers, each labelled with its run's
-//! [`RunTag`], so that [`Engine::list`] and [`Engine::destroy_all`] find a run's containers,
-//! and only those, even when the driver that started them is gone.
+//! ([`Report`]). Within it, the provider creates only containers, known by their IDs, each
+//! labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds a run's
+//! containers, and only those, even when the driver that started them is gone, and with its
+//! role's name, so that `docker ps` shows which is which.
 //!
 //! Rootless Docker is the setup to choose: its engine, and so every container, runs as an
 //! ordinary user, so escaping a container gains no more than that user has. A rootful engine
@@ -49,7 +50,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
-use pumpkin_schema::ir::{AbsolutePath, Name};
+use pumpkin_schema::ir::AbsolutePath;
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
 use pumpkin_schema::workflow::Sandbox;
 use serde::{Deserialize, Serialize};
@@ -74,14 +75,16 @@ const GATEWAY_DIR: &str = "/.pumpkin/gateway";
 /// The socket's name in its directory.
 const SOCKET_NAME: &str = "s";
 
-/// The label that carries a container's run tag.
+/// The labels that carry a container's run tag and its role's name.
 const RUN_LABEL: &str = "pumpkin.run";
+const ROLE_LABEL: &str = "pumpkin.role";
 
-/// The name of a Docker context, which says what engine `docker` reaches, and how.
+/// The name of a Docker context, which says what engine `docker` reaches, and how. `default`
+/// is Docker's own context, which reaches the engine at Docker's default socket.
 ///
-/// It is a letter or digit, then at least one more letter, digit, `_`, `.`, `+` or `-`, as
-/// `docker context create` requires. `default` is Docker's own context, which reaches the
-/// engine at Docker's default socket.
+/// Any name but the empty one, which `docker` would take for no name, and so reach the engine
+/// of the command line's current context. A name no context has is refused by
+/// [`Engine::connect`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct ContextName(String);
 
@@ -95,20 +98,13 @@ impl TryFrom<String> for ContextName {
     type Error = String;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
-        let mut chars = name.chars();
-        let valid = chars
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-            && !chars.as_str().is_empty()
-            && chars.all(|char| char.is_ascii_alphanumeric() || "_.+-".contains(char));
-        if valid {
-            Ok(Self(name))
+        if name.is_empty() {
+            Err(
+                "the Docker context's name is empty: name one that `docker context ls` lists"
+                    .to_owned(),
+            )
         } else {
-            Err(format!(
-                "`{}` is not a valid Docker context name: use a letter or digit, then at least \
-                 one more letter, digit, `_`, `.`, `+` or `-`, as `docker context ls` lists them",
-                name.escape_debug()
-            ))
+            Ok(Self(name))
         }
     }
 }
@@ -239,9 +235,7 @@ impl TryFrom<String> for RunTag {
 pub struct Start<'a> {
     /// The run the container belongs to.
     pub run: &'a RunTag,
-    /// The container's name, which must not be taken.
-    pub name: &'a Name,
-    /// The role's image, user and resources. The image must be in the engine already: the
+    /// The role's name, image, user and resources. The image must be in the engine already: the
     /// provider never pulls one.
     pub sandbox: &'a Sandbox,
     /// A static `sandboxd` binary, which the role's user can execute.
@@ -253,13 +247,12 @@ pub struct Start<'a> {
 
 /// A sandbox's container and the session with the `sandboxd` inside.
 ///
-/// Dropping it, or calling [`destroy`](Self::destroy), ends the session and removes the
-/// container.
+/// Dropping it, or calling [`destroy`](Self::destroy), removes the container and ends the
+/// session.
 #[derive(Debug)]
 pub struct Container {
     context: ContextName,
     id: String,
-    name: Name,
     session: Session,
     removed: bool,
 }
@@ -270,15 +263,12 @@ impl Container {
         &self.id
     }
 
-    pub fn name(&self) -> &Name {
-        &self.name
-    }
-
     pub fn session(&self) -> &Session {
         &self.session
     }
 
-    /// Ends the session and removes the container, reporting a failure to remove it.
+    /// Removes the container and ends the session, reporting a failure to remove the
+    /// container.
     ///
     /// # Errors
     ///
@@ -287,11 +277,11 @@ impl Container {
         self.teardown()
     }
 
+    /// Removes the container, once. The session ends as the container drops it.
     fn teardown(&mut self) -> io::Result<()> {
         if std::mem::replace(&mut self.removed, true) {
             return Ok(());
         }
-        self.session.end();
         remove(&self.context, &self.id)
     }
 }
@@ -312,11 +302,13 @@ impl Engine {
     /// what to do; if `docker` describes either in JSON of another form; or if the engine
     /// can't enforce the CPU, memory, swap and process limits every container has.
     pub fn connect(context: ContextName) -> io::Result<Self> {
+        // After `--`, a name that begins with `-` can't be taken for an option.
         let inspect = [
             "context",
             "inspect",
             "--format",
             "{{json .}}",
+            "--",
             context.as_str(),
         ];
         let inspected = docker(&context, inspect).map_err(|error| {
@@ -384,15 +376,13 @@ impl Engine {
         let socket = start.socket_dir.join(SOCKET_NAME);
         let listener = Listener::bind(socket)?;
         // Creating and starting apart gives the container's ID before anything can fail with
-        // a container left behind, so a failure removes this container by ID, and never
-        // another that has its name.
+        // a container left behind, so a failure removes this container by its ID.
         let id = docker(context, &create_args(start)?)?.trim().to_owned();
         let started = docker(context, ["start", &id]).and_then(|_| connect(listener, &id));
         match started {
             Ok(session) => Ok(Container {
                 context: context.clone(),
                 id,
-                name: start.name.clone(),
                 session,
                 removed: false,
             }),
@@ -409,11 +399,7 @@ impl Engine {
     }
 
     /// The IDs of the run's containers, running or not.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `docker` can't list them.
-    pub fn list(&self, run: &RunTag) -> io::Result<Vec<String>> {
+    fn list(&self, run: &RunTag) -> io::Result<Vec<String>> {
         let filter = format!("label={RUN_LABEL}={}", run.as_str());
         let ids = docker(
             &self.report.context,
@@ -560,12 +546,12 @@ fn connect(listener: Listener, id: &str) -> io::Result<Session> {
 fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
     let Start {
         run,
-        name,
         sandbox,
         sandboxd,
         socket_dir,
     } = *start;
     let Sandbox {
+        name,
         image,
         user,
         resources,
@@ -576,8 +562,8 @@ fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
     let memory = resources.memory_bytes.get();
     Ok(vec![
         "create".to_owned(),
-        format!("--name={name}"),
         format!("--label={RUN_LABEL}={}", run.as_str()),
+        format!("--label={ROLE_LABEL}={name}"),
         "--network=none".to_owned(),
         format!("--user={uid}:{gid}"),
         "--cap-drop=ALL".to_owned(),
@@ -677,7 +663,8 @@ where
     let output = Command::new("docker")
         .env_clear()
         .envs(kept)
-        .args(["--context", context.as_str()])
+        // One argument, so that a name that begins with `-` can't be taken for an option.
+        .arg(format!("--context={}", context.as_str()))
         .args(&args)
         .stdin(Stdio::null())
         .output()
