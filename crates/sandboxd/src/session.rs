@@ -1,19 +1,16 @@
-//! Serving a session: the gateway's requests, handled in the order they arrive.
+//! Serving a session: the gateway's requests, handled in the order they arrive, each by
+//! [`files`] or [`commands`](crate::commands).
 
-use std::collections::HashMap;
-use std::fs;
 use std::io::{self, BufReader, Read};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use pumpkin_schema::ir::AbsolutePath;
-use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
 use stdx::Context;
 
-use crate::collect;
 use crate::commands::Commands;
+use crate::files::{self, Puts};
 
 /// Connects to the gateway at `socket` and serves the session until the gateway ends it.
 pub(crate) fn serve(socket: &Path) -> Result<(), String> {
@@ -29,7 +26,7 @@ pub(crate) fn serve(socket: &Path) -> Result<(), String> {
     let mut session = Session {
         sender,
         commands,
-        puts: HashMap::new(),
+        puts: Puts::default(),
     };
     let served = session.serve(&mut BufReader::new(stream));
     session.commands.kill_all();
@@ -66,8 +63,7 @@ impl Sender {
 struct Session {
     sender: Sender,
     commands: Commands,
-    /// The trees being put, by stream: `None` once one has failed, until its end arrives.
-    puts: HashMap<u32, Option<tree::Writer>>,
+    puts: Puts,
 }
 
 impl Session {
@@ -82,71 +78,15 @@ impl Session {
     /// the session itself failed.
     fn handle(&mut self, message: ToSandbox, body: &[u8]) -> io::Result<()> {
         match message {
-            ToSandbox::Put { stream, dir } => self.begin_put(stream, &dir),
-            ToSandbox::Entry { stream, entry } => self.put(stream, |tree| tree.entry(&entry)),
-            ToSandbox::Data { stream } => self.put(stream, |tree| tree.data(body)),
-            ToSandbox::End { stream } => self.end_put(stream),
+            ToSandbox::Put { stream, dir } => self.puts.begin(&self.sender, stream, &dir),
+            ToSandbox::Entry { stream, entry } => self.puts.entry(&self.sender, stream, &entry),
+            ToSandbox::Data { stream } => self.puts.data(&self.sender, stream, body),
+            ToSandbox::End { stream } => self.puts.end(&self.sender, stream),
             ToSandbox::Start { stream, launch } => self.commands.start(stream, &launch),
             ToSandbox::Freeze { stream } => self.sender.reply(stream, self.commands.freeze()),
             ToSandbox::Collect { stream, dir } => {
-                collect::send(&self.sender, stream, Path::new(dir.as_str()))
+                files::collect(&self.sender, stream, Path::new(dir.as_str()))
             }
         }
     }
-
-    fn begin_put(&mut self, stream: u32, dir: &AbsolutePath) -> io::Result<()> {
-        if self.puts.contains_key(&stream) {
-            return Err(protocol_error(stream, "is already putting a tree"));
-        }
-        match fs::create_dir_all(dir.as_str()).context(dir) {
-            Ok(()) => {
-                let tree = tree::Writer::new(dir.as_str().into(), Limits::NONE);
-                self.puts.insert(stream, Some(tree));
-                Ok(())
-            }
-            Err(message) => {
-                self.puts.insert(stream, None);
-                self.sender.reply(stream, Err(message))
-            }
-        }
-    }
-
-    /// Writes a part of the tree being put on `stream`, unless an earlier part failed.
-    fn put(
-        &mut self,
-        stream: u32,
-        part: impl FnOnce(&mut tree::Writer) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let Some(slot) = self.puts.get_mut(&stream) else {
-            return Err(protocol_error(stream, "is putting no tree"));
-        };
-        let Some(tree) = slot else {
-            return Ok(());
-        };
-        match part(tree) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                *slot = None;
-                self.sender.reply(stream, Err(error.to_string()))
-            }
-        }
-    }
-
-    fn end_put(&mut self, stream: u32) -> io::Result<()> {
-        match self.puts.remove(&stream) {
-            None => Err(protocol_error(stream, "is putting no tree")),
-            Some(None) => Ok(()),
-            Some(Some(tree)) => {
-                let outcome = tree.finish().map_err(|error| error.to_string());
-                self.sender.reply(stream, outcome)
-            }
-        }
-    }
-}
-
-fn protocol_error(stream: u32, what: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("the gateway broke the protocol: stream {stream} {what}"),
-    )
 }

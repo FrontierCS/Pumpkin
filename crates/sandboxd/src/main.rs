@@ -19,8 +19,8 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-mod collect;
 mod commands;
+mod files;
 mod session;
 mod sys;
 

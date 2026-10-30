@@ -1,23 +1,113 @@
-//! Sending the tree in a directory to the gateway.
+//! Moving trees between the gateway and the sandbox: writing the trees the gateway puts, and
+//! sending the trees it collects.
 //!
-//! The whole directory is listed before anything is sent, so a tree that can't be sent, such
-//! as one holding a link, fails before its first entry. Files are expected not to change
-//! while they are sent, as after the sandbox is frozen.
+//! A tree being put is written as its parts arrive, so [`Puts`] holds each tree in progress,
+//! by its stream. A tree being collected is listed whole before anything is sent, so a tree
+//! that can't be sent, such as one holding a link, fails before its first entry. Files are
+//! expected not to change while they are sent, as after the sandbox is frozen.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use pumpkin_schema::ir::AbsolutePath;
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
+use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{Entry, FromSandbox, RelativePath};
 use stdx::Context;
 
 use crate::session::Sender;
 use crate::sys;
 
+/// The trees being put, each written as its parts arrive.
+#[derive(Default)]
+pub(crate) struct Puts {
+    /// The tree being put on each stream: `None` once it has failed, until its end arrives.
+    trees: HashMap<u32, Option<tree::Writer>>,
+}
+
+impl Puts {
+    /// Begins putting a tree in `dir` on `stream`, creating `dir` if need be.
+    pub(crate) fn begin(
+        &mut self,
+        sender: &Sender,
+        stream: u32,
+        dir: &AbsolutePath,
+    ) -> io::Result<()> {
+        if self.trees.contains_key(&stream) {
+            return Err(protocol_error(stream, "is already putting a tree"));
+        }
+        match fs::create_dir_all(dir.as_str()).context(dir) {
+            Ok(()) => {
+                let tree = tree::Writer::new(dir.as_str().into(), Limits::NONE);
+                self.trees.insert(stream, Some(tree));
+                Ok(())
+            }
+            Err(message) => {
+                self.trees.insert(stream, None);
+                sender.reply(stream, Err(message))
+            }
+        }
+    }
+
+    /// Writes an entry of the tree being put on `stream` ([`tree::Writer::entry`]).
+    pub(crate) fn entry(&mut self, sender: &Sender, stream: u32, entry: &Entry) -> io::Result<()> {
+        self.write(sender, stream, |tree| tree.entry(entry))
+    }
+
+    /// Writes bytes of the current file of the tree being put on `stream`
+    /// ([`tree::Writer::data`]).
+    pub(crate) fn data(&mut self, sender: &Sender, stream: u32, bytes: &[u8]) -> io::Result<()> {
+        self.write(sender, stream, |tree| tree.data(bytes))
+    }
+
+    /// Writes a part of the tree being put on `stream`, unless an earlier part failed.
+    fn write(
+        &mut self,
+        sender: &Sender,
+        stream: u32,
+        part: impl FnOnce(&mut tree::Writer) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let Some(slot) = self.trees.get_mut(&stream) else {
+            return Err(protocol_error(stream, "is putting no tree"));
+        };
+        let Some(tree) = slot else {
+            return Ok(());
+        };
+        match part(tree) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *slot = None;
+                sender.reply(stream, Err(error.to_string()))
+            }
+        }
+    }
+
+    /// Finishes the tree being put on `stream` and replies with the outcome, unless an earlier
+    /// part failed, which has been replied to already.
+    pub(crate) fn end(&mut self, sender: &Sender, stream: u32) -> io::Result<()> {
+        match self.trees.remove(&stream) {
+            None => Err(protocol_error(stream, "is putting no tree")),
+            Some(None) => Ok(()),
+            Some(Some(tree)) => {
+                let outcome = tree.finish().map_err(|error| error.to_string());
+                sender.reply(stream, outcome)
+            }
+        }
+    }
+}
+
+fn protocol_error(stream: u32, what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("the gateway broke the protocol: stream {stream} {what}"),
+    )
+}
+
 /// Sends the tree in `dir` on `stream`, or a failure.
-pub(crate) fn send(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
+pub(crate) fn collect(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
     let mut entries = Vec::new();
     if let Err(message) = list(dir, None, &mut entries) {
         return sender.reply(stream, Err(message));
