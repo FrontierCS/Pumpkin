@@ -142,7 +142,7 @@ fn engine() -> &'static Engine {
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
 fn docker() -> Command {
-    // Only what the provider's `docker_output` keeps of the environment, for the reasons it gives.
+    // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = ["HOME", "PATH", "DOCKER_CONFIG"]
         .into_iter()
         .filter_map(|name| Some((name, std::env::var_os(name)?)));
@@ -567,41 +567,29 @@ fn failed_start() {
             missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
             stale: the session's socket can't be made at <dir>/stale/s: Address already in use (os error 98): expected a directory that exists, which this user can write to, by a path short enough for a Unix socket, and nothing at `s`, where a driver that was killed leaves its socket
             comma: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
-            unexecutable: `docker start <id>` failed with exit status: 1: …: fix what Docker reports
-            exiting: the `sandboxd` of container <id> didn't connect: no sandbox connected to <dir>/exiting/s within 30s: expected it to connect as it starts; the container's logs end: to standard output
+            unexecutable: `docker start …: fix what Docker reports
+            exiting: the `sandboxd` of container … didn't connect: no sandbox connected to <dir>/exiting/s within 30s: expected it to connect as it starts; the container's logs end: to standard output
             to standard error
             unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports
             left: []"#]],
     );
 }
 
-/// `message`, with the fixture's directory and any container ID, 64 hexadecimal digits that
-/// aren't a digest, in placeholders, and with what Docker reports of a failed `docker start`
-/// elided: that comes from the container runtime, and varies with the runtime and its version.
+/// `message`, with the fixture's directory as `<dir>`, and `…` for what varies between runs or
+/// hosts: a container's ID, and what Docker reports of a failed `docker start`, which comes from
+/// the container runtime, and varies with the runtime and its version.
 fn redact(fixture: &Fixture, message: &str) -> String {
-    let message = message.replace(&fixture.dir.display().to_string(), "<dir>");
-    let mut redacted = String::new();
-    let mut word = String::new();
-    // A space after the last word ends it, and is taken off again.
-    for char in message.chars().chain([' ']) {
-        if char.is_ascii_alphanumeric() {
-            word.push(char);
-            continue;
+    let mut message = message.replace(&fixture.dir.display().to_string(), "<dir>");
+    let cuts = [
+        ("`docker start ", ": fix what Docker reports"),
+        ("of container ", " didn't connect"),
+    ];
+    for (from, to) in cuts {
+        if let Some((before, rest)) = message.split_once(from)
+            && let Some((_, after)) = rest.split_once(to)
+        {
+            message = format!("{before}{from}…{to}{after}");
         }
-        let id = word.len() == 64
-            && word.chars().all(|char| char.is_ascii_hexdigit())
-            && !redacted.ends_with("sha256:");
-        redacted.push_str(if id { "<id>" } else { &word });
-        redacted.push(char);
-        word.clear();
     }
-    redacted.pop();
-    let failed = "`docker start <id>` failed with exit status: ";
-    let advice = ": fix what Docker reports";
-    let Some((before, after)) = redacted.split_once(failed) else {
-        return redacted;
-    };
-    let (status, reported) = after.split_once(": ").unwrap();
-    let (_, after) = reported.split_once(advice).unwrap();
-    format!("{before}{failed}{status}: …{advice}{after}")
+    message
 }

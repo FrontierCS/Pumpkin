@@ -158,24 +158,6 @@ pub struct Security {
     pub userns: bool,
 }
 
-/// What `docker context inspect` prints of a context, as JSON.
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ContextJson {
-    endpoints: EndpointsJson,
-}
-
-#[derive(Deserialize)]
-struct EndpointsJson {
-    docker: EndpointJson,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct EndpointJson {
-    host: String,
-}
-
 /// What `docker info` prints, as JSON.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -314,31 +296,29 @@ impl Engine {
     /// # Errors
     ///
     /// Fails if the context can't be read, or the engine can't be reached through it, saying
-    /// what to do; if `docker` describes either in JSON of another form; or if the engine
+    /// what to do; if `docker` describes the engine in JSON of another form; or if the engine
     /// can't enforce the CPU, memory, swap and process limits every container has.
     pub fn connect(context: ContextName) -> Result<Self, String> {
         let name = context.as_str();
+        let template = "{{.Endpoints.docker.Host}}";
         // After `--`, a name that begins with `-` can't be taken for an option.
-        let inspect = ["context", "inspect", "--format", "{{json .}}", "--", name];
-        let inspected = docker_output(&context, inspect).map_err(|error| {
+        let inspect = ["context", "inspect", "--format", template, "--", name];
+        let inspected = docker(&context, inspect).map_err(|error| {
             format!(
                 "the Docker context `{name}` can't be read: {error}: name one that \
                  `docker context ls` lists"
             )
         })?;
-        let ContextJson { endpoints } = parse_json("docker context inspect", &inspected)?;
-        let info =
-            docker_output(&context, ["info", "--format", "{{json .}}"]).map_err(|error| {
-                let todo = if error.contains("permission denied") {
-                    "let this user reach the engine's socket: by the `docker` group, which is \
+        let endpoint = String::from_utf8_lossy(&inspected.stdout).trim().to_owned();
+        let info = docker(&context, ["info", "--format", "{{json .}}"]).map_err(|error| {
+            let todo = if error.contains("permission denied") {
+                "let this user reach the engine's socket: by the `docker` group, which is \
                  root-equivalent, or by running rootless Docker and naming its context"
-                } else {
-                    "start the engine, or name a context whose engine runs"
-                };
-                format!(
-                    "the Docker engine isn't reachable through context `{name}`: {error}: {todo}"
-                )
-            })?;
+            } else {
+                "start the engine, or name a context whose engine runs"
+            };
+            format!("the Docker engine isn't reachable through context `{name}`: {error}: {todo}")
+        })?;
         let InfoJson {
             memory_limit,
             swap_limit,
@@ -362,7 +342,7 @@ impl Engine {
         Ok(Self {
             report: Report {
                 context,
-                endpoint: endpoints.docker.host,
+                endpoint,
                 client_version: client_info.version,
                 engine_version: server_version,
                 security: Security::parse(&security_options.unwrap_or_default()),
@@ -402,7 +382,7 @@ impl Engine {
         // Creating and starting apart gives the container's ID before anything can fail with
         // a container left behind, so a failure removes this container by its ID.
         let created = docker(context, &create_args(start)?).map_err(fix_reported)?;
-        let id = created.trim().to_owned();
+        let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
         let started = docker(context, ["start", &id]).map_err(fix_reported);
         match started.and_then(|_| connect(listener, &id)) {
             Ok(session) => Ok(Container {
@@ -430,7 +410,7 @@ impl Engine {
     /// The IDs of the run's containers, running or not.
     fn list(&self, run: &RunTag) -> Result<Vec<String>, String> {
         let filter = format!("label={RUN_LABEL}={}", run.as_str());
-        let ids = docker(
+        let listed = docker(
             &self.report.context,
             [
                 "container",
@@ -442,6 +422,7 @@ impl Engine {
                 &filter,
             ],
         )?;
+        let ids = String::from_utf8_lossy(&listed.stdout);
         Ok(ids.lines().map(str::to_owned).collect())
     }
 
@@ -645,7 +626,7 @@ fn log_tail(context: &ContextName, id: &str) -> Result<String, String> {
         status: _,
         stdout,
         stderr,
-    } = docker_output(context, logs)?;
+    } = docker(context, logs)?;
     Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
 }
 
@@ -655,29 +636,18 @@ fn fix_reported(error: String) -> String {
     error + ": fix what Docker reports"
 }
 
-/// Runs `docker` against `context` with `args` and returns its standard output, or fails as
-/// [`docker_output`] does.
-fn docker<I, S>(context: &ContextName, args: I) -> Result<String, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = docker_output(context, args)?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// Runs `docker` against `context` alone with `args`, and returns its output. If the command
 /// fails, the error says which it was and what Docker reported, and the caller adds what that
 /// means and what to do; if `docker` doesn't run, the error asks for it on `PATH`.
 ///
 /// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
 /// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
-/// helpers; and `DOCKER_CONFIG`, if set, Docker's own variable for where that
-/// configuration lives. The rest of the environment is dropped, so that the context named
-/// alone steers the command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and
-/// `DOCKER_CERT_PATH`, among others, would set the endpoint and TLS of `default`. A context
-/// reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
-fn docker_output<I, S>(context: &ContextName, args: I) -> Result<Output, String>
+/// helpers; and `DOCKER_CONFIG`, if set, Docker's own variable for where that configuration
+/// lives. The rest of the environment is dropped, so that the context named alone steers the
+/// command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`, among
+/// others, would set the endpoint and TLS of `default`. A context reached over `ssh://` would
+/// need `SSH_AUTH_SOCK` too, which isn't passed.
+fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
