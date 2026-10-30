@@ -8,8 +8,7 @@
       "user": { "uid": 10001, "gid": 10001 },
       "resources": {
         "cpu_millis": 8000,
-        "memory_bytes": 34359738368,
-        "workspace_bytes": 34359738368
+        "memory_bytes": 34359738368
       },
       "runtime": {
         "agent": {
@@ -29,8 +28,7 @@
       "user": { "uid": 65532, "gid": 65532 },
       "resources": {
         "cpu_millis": 8000,
-        "memory_bytes": 2147483648,
-        "workspace_bytes": 34359738368
+        "memory_bytes": 2147483648
       },
       "runtime": {
         "judge": {
@@ -54,8 +52,7 @@
       "user": { "uid": 65532, "gid": 65532 },
       "resources": {
         "cpu_millis": 8000,
-        "memory_bytes": 2147483648,
-        "workspace_bytes": 34359738368
+        "memory_bytes": 2147483648
       },
       "runtime": {
         "judge": {

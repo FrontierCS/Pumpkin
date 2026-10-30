@@ -65,18 +65,11 @@ impl Fixture {
     }
 
     /// Starts a sandbox for a role that runs as 4242:4243.
-    fn start(&self, run: &RunTag, name: &str, workspace_bytes: u64) -> Container {
-        self.try_start(run, name, workspace_bytes, &self.sandboxd)
-            .unwrap()
+    fn start(&self, run: &RunTag, name: &str) -> Container {
+        self.try_start(run, name, &self.sandboxd).unwrap()
     }
 
-    fn try_start(
-        &self,
-        run: &RunTag,
-        name: &str,
-        workspace_bytes: u64,
-        sandboxd: &Path,
-    ) -> std::io::Result<Container> {
+    fn try_start(&self, run: &RunTag, name: &str, sandboxd: &Path) -> std::io::Result<Container> {
         let socket_dir = self.dir.join(name);
         fs::create_dir_all(&socket_dir).unwrap();
         let name = Name::try_from(format!("{}-{name}", run.as_str())).unwrap();
@@ -87,7 +80,6 @@ impl Fixture {
             resources: serde_json::from_value::<Resources>(serde_json::json!({
                 "cpu_millis": 500,
                 "memory_bytes": 256 << 20,
-                "workspace_bytes": workspace_bytes,
             }))
             .unwrap(),
             model_route: None,
@@ -231,7 +223,7 @@ fn judge() {
     check(
         "judge",
         |fixture| {
-            let sandbox = fixture.start(&fixture.run, "judge", 1 << 30);
+            let sandbox = fixture.start(&fixture.run, "judge");
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let put = [Put::Dir(&slot), Put::File(&payload, b"ledger")];
             sandbox.session().put(&absolute("/pumpkin"), &put).unwrap();
@@ -268,7 +260,7 @@ fn confinement() {
     check(
         "confinement",
         |fixture| {
-            let sandbox = fixture.start(&fixture.run, "confined", 1 << 30);
+            let sandbox = fixture.start(&fixture.run, "confined");
             let script = r#"
                 echo "interfaces: $(ls /sys/class/net)"
                 nc -w 2 1.1.1.1 80 </dev/null >/dev/null 2>&1
@@ -301,44 +293,6 @@ fn confinement() {
     );
 }
 
-/// A sandbox that outgrows its workspace is destroyed, and says why.
-#[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn workspace_limit() {
-    check(
-        "workspace",
-        |fixture| {
-            let limit = 1 << 20;
-            let sandbox = fixture.start(&fixture.run, "workspace", limit);
-            let status = sh(
-                &sandbox,
-                1,
-                "dd if=/dev/zero of=/workspace/big bs=1M count=8",
-            );
-            let mut lines = vec![format!("{status:?}")];
-            let mut breach = None;
-            for _ in 0..60 {
-                breach = sandbox.workspace_breach();
-                if breach.is_some() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(500));
-            }
-            let breach = breach.unwrap();
-            lines.push(format!("used more than the limit: {}", breach.used > limit));
-            lines.push(format!("limit: {}", breach.limit));
-            let after = sandbox.session().freeze();
-            lines.push(format!("session: {}", after.unwrap_err()));
-            lines
-        },
-        &expect![[r#"
-            Code(0)
-            used more than the limit: true
-            limit: 1048576
-            session: the gateway ended the session"#]],
-    );
-}
-
 /// Destroying a sandbox removes its container, and cleaning up a run removes the rest of its
 /// containers and no others.
 #[test]
@@ -349,10 +303,10 @@ fn cleanup() {
         |fixture| {
             let version = docker::engine_version().unwrap();
             let mut lines = vec![format!("engine version recorded: {}", !version.is_empty())];
-            let first = fixture.start(&fixture.run, "first", 1 << 30);
-            let _second = fixture.start(&fixture.run, "second", 1 << 30);
-            let _third = fixture.start(&fixture.run, "third", 1 << 30);
-            let _other = fixture.start(&fixture.other_run, "other", 1 << 30);
+            let first = fixture.start(&fixture.run, "first");
+            let _second = fixture.start(&fixture.run, "second");
+            let _third = fixture.start(&fixture.run, "third");
+            let _other = fixture.start(&fixture.other_run, "other");
             first.destroy().unwrap();
             lines.push(format!(
                 "listed after destroying one: {}",
@@ -388,7 +342,7 @@ fn failed_start() {
             fs::write(&not_executable, "not a program").unwrap();
             let mut lines = Vec::new();
             for attempt in 1..=2 {
-                let started = fixture.try_start(&fixture.run, "failed", 1 << 30, &not_executable);
+                let started = fixture.try_start(&fixture.run, "failed", &not_executable);
                 lines.push(format!("attempt {attempt} failed: {}", started.is_err()));
             }
             lines.push(format!(

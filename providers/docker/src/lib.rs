@@ -20,23 +20,11 @@
 //!
 //! Files move only over the session, never through the Docker daemon.
 //!
-//! The workspace limit is soft. A thread per container reads the writable layer's size every
-//! [`WORKSPACE_POLL`] and destroys the container once it passes the role's
-//! `workspace_bytes`; [`Container::workspace_breach`] then says so.
-//!
 //! # Limits of this provider
 //!
-//! - The workspace limit is advisory against hostile code. The writable layer's size misses
-//!   data in files that are unlinked but still open, anonymous volumes an image declares with
-//!   `VOLUME`, and inodes used up by many empty files; and a breach is seen up to one poll
-//!   interval late. A hard limit needs a storage quota, which the host lacks. The platform
-//!   this replaces, which evicts a pod that outgrows its volume, has gaps of the same kind.
-//! - The workspace limit fails open. A measurement that fails is tried again at the next poll,
-//!   so a daemon that never reports the writable layer's size as a number never enforces the
-//!   limit, and nothing says so. Destroying the container instead would end sandboxes
-//!   whenever the daemon is briefly unavailable.
+//! - The provider puts no size limit on the container's writable layer, the role's
+//!   workspace, so a role can fill the disk the Docker daemon stores containers on.
 //! - A container that dies at once still costs [`CONNECT_TIMEOUT`] before [`start`] fails.
-//! - Destroying a container waits for its watcher thread, and so for an `inspect` in flight.
 //!
 //! Every container carries a [`RunTag`] label, so that [`list`] and [`destroy_all`] find a
 //! run's containers, and only those, even when the driver that started them is gone.
@@ -45,9 +33,6 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, OnceLock};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
@@ -55,16 +40,8 @@ use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
 use pumpkin_schema::workflow::Sandbox;
 
-/// How often a container's writable layer is measured.
-pub const WORKSPACE_POLL: Duration = Duration::from_secs(5);
-
 /// How long a new container has to connect its `sandboxd` to the session's socket.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How often the watcher tries to remove a container it destroys, and how long it waits
-/// between tries.
-const REMOVE_ATTEMPTS: u32 = 3;
-const REMOVE_RETRY: Duration = Duration::from_secs(1);
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
 /// host's disk, outside the container's other limits, so it is capped whatever writes there,
@@ -143,26 +120,8 @@ pub struct Start<'a> {
 pub struct Container {
     id: String,
     name: Name,
-    session: Arc<Session>,
-    breach: Arc<OnceLock<WorkspaceBreach>>,
-    watcher: Option<Watcher>,
+    session: Session,
     removed: bool,
-}
-
-/// The thread that measures a container's workspace, and the way to stop it.
-#[derive(Debug)]
-struct Watcher {
-    stop: Sender<()>,
-    thread: JoinHandle<()>,
-}
-
-/// A container destroyed for outgrowing its workspace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkspaceBreach {
-    /// The writable layer's size when it was measured, in bytes.
-    pub used: u64,
-    /// The role's `workspace_bytes`.
-    pub limit: u64,
 }
 
 impl Container {
@@ -179,36 +138,13 @@ impl Container {
         &self.session
     }
 
-    /// Whether the container was destroyed for outgrowing its workspace. When the session
-    /// ends and this is `Some`, that is why.
-    pub fn workspace_breach(&self) -> Option<WorkspaceBreach> {
-        self.breach.get().copied()
-    }
-
     /// Ends the session and removes the container, reporting a failure to remove it.
     ///
     /// # Errors
     ///
     /// Fails if `docker` can't remove the container.
     pub fn destroy(mut self) -> io::Result<()> {
-        self.stop_watching();
         self.teardown()
-    }
-
-    fn stop_watching(&mut self) {
-        // Dropping the sender wakes the watcher, which then returns. Stopping it before the
-        // container goes keeps a destroyed container from also being blamed for its workspace.
-        if let Some(Watcher { stop, thread }) = self.watcher.take() {
-            drop(stop);
-            #[expect(
-                clippy::unreachable,
-                reason = "a panic is a bug, which ends the whole process under `panic = \
-                          \"abort\"`, so `join` sees one only in tests, which unwind"
-            )]
-            let Ok(()) = thread.join() else {
-                unreachable!("the watcher of {} panicked", self.id)
-            };
-        }
     }
 
     fn teardown(&mut self) -> io::Result<()> {
@@ -222,7 +158,6 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
-        self.stop_watching();
         // Best effort: `destroy` is the way to learn that removing failed.
         let _ = self.teardown();
     }
@@ -245,7 +180,12 @@ pub fn start(start: &Start<'_>) -> io::Result<Container> {
     let id = docker(&create_args(start)?)?.trim().to_owned();
     let started = docker(["start", &id]).and_then(|_| connect(listener, &id));
     match started {
-        Ok(session) => Ok(spawn_watcher(start, id, session)),
+        Ok(session) => Ok(Container {
+            id,
+            name: start.name.clone(),
+            session,
+            removed: false,
+        }),
         Err(error) => {
             let logs = log_tail(&id).unwrap_or_default();
             let _ = remove(&id);
@@ -275,94 +215,6 @@ fn connect(listener: Listener, id: &str) -> io::Result<Session> {
         .put(&root, &puts)
         .map_err(|error| io::Error::new(error.kind(), format!("{id}: {error}")))?;
     Ok(session)
-}
-
-fn spawn_watcher(start: &Start<'_>, id: String, session: Session) -> Container {
-    let breach = Arc::new(OnceLock::new());
-    let session = Arc::new(session);
-    let (stop, stopped) = mpsc::channel();
-    let watched = Watched {
-        id: id.clone(),
-        limit: start.sandbox.resources.workspace_bytes.get(),
-        session: Arc::clone(&session),
-        breach: Arc::clone(&breach),
-    };
-    let thread = thread::spawn(move || watch(&watched, &stopped));
-    Container {
-        id,
-        name: start.name.clone(),
-        session,
-        breach,
-        watcher: Some(Watcher { stop, thread }),
-        removed: false,
-    }
-}
-
-/// What the watcher thread of a container shares with it.
-struct Watched {
-    id: String,
-    limit: u64,
-    session: Arc<Session>,
-    breach: Arc<OnceLock<WorkspaceBreach>>,
-}
-
-/// Measures the container's writable layer until `stopped` disconnects or the layer passes the
-/// limit, which destroys the container.
-///
-/// The breach is recorded, then the session ends, and only then is the container removed: so a
-/// caller whose session fails and who then looks for a breach finds it, and can't use the
-/// session in between. A removal that keeps failing is left to [`Container::destroy`], which
-/// tries again; the session has ended, which stops `sandboxd` meanwhile.
-fn watch(watched: &Watched, stopped: &Receiver<()>) {
-    let Watched {
-        id,
-        limit,
-        session,
-        breach,
-    } = watched;
-    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(WORKSPACE_POLL) {
-        // A failed measurement is retried: the daemon may be busy, or the container gone.
-        let Ok(used) = workspace_bytes(id) else {
-            continue;
-        };
-        if used > *limit {
-            #[expect(
-                clippy::unreachable,
-                reason = "only this thread records the breach, and it returns right after"
-            )]
-            let Ok(()) = breach.set(WorkspaceBreach {
-                used,
-                limit: *limit,
-            }) else {
-                unreachable!("{id}'s workspace breach was recorded twice")
-            };
-            session.end();
-            for _ in 0..REMOVE_ATTEMPTS {
-                if remove(id).is_ok() {
-                    break;
-                }
-                thread::sleep(REMOVE_RETRY);
-            }
-            return;
-        }
-    }
-}
-
-fn workspace_bytes(id: &str) -> io::Result<u64> {
-    let size = docker([
-        "container",
-        "inspect",
-        "--size",
-        "--format",
-        "{{.SizeRw}}",
-        id,
-    ])?;
-    size.trim().parse().map_err(|_| {
-        io::Error::other(format!(
-            "docker reported the size of {id}'s writable layer as `{}`: expected a number of bytes",
-            size.trim()
-        ))
-    })
 }
 
 /// The arguments of `docker create` for the container.

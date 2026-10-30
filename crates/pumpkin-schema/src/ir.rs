@@ -29,8 +29,7 @@
 //!       "user": { "uid": 1000, "gid": 1000 },
 //!       "resources": {
 //!         "cpu_millis": 2000,
-//!         "memory_bytes": 4294967296,
-//!         "workspace_bytes": 4294967296
+//!         "memory_bytes": 4294967296
 //!       },
 //!       "runtime": {
 //!         "agent": { "command": { "argv": ["/usr/local/bin/agent"], "cwd": "/workspace" } }
@@ -42,8 +41,7 @@
 //!       "user": { "uid": 1000, "gid": 1000 },
 //!       "resources": {
 //!         "cpu_millis": 2000,
-//!         "memory_bytes": 4294967296,
-//!         "workspace_bytes": 1073741824
+//!         "memory_bytes": 4294967296
 //!       },
 //!       "runtime": {
 //!         "judge": {
@@ -160,8 +158,6 @@ pub struct Resources {
     /// The CPU limit, in thousandths of a CPU.
     pub cpu_millis: NonZeroU64,
     pub memory_bytes: NonZeroU64,
-    /// The size limit of the role's writable storage.
-    pub workspace_bytes: NonZeroU64,
 }
 
 /// Whether the workflow's author vouches for a role's own code.
