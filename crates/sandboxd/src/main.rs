@@ -18,6 +18,7 @@
 
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::LockResult;
 
 mod commands;
 mod files;
@@ -98,4 +99,17 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The guard from locking a mutex, or from waiting on a condition variable with one.
+fn unpoisoned<T>(locked: LockResult<T>) -> T {
+    #[expect(
+        clippy::unreachable,
+        reason = "only a thread that panics while holding a lock poisons it, and a panic aborts \
+                  the process (`panic = \"abort\"`), so no thread is left to see the lock"
+    )]
+    let Ok(guard) = locked else {
+        unreachable!("a thread panicked while holding a lock")
+    };
+    guard
 }

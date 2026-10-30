@@ -11,6 +11,7 @@ use stdx::Context;
 
 use crate::commands::Commands;
 use crate::files::{self, Puts};
+use crate::unpoisoned;
 
 /// Connects to the gateway at `socket` and serves the session until the gateway ends it.
 pub(crate) fn serve(socket: &Path) -> Result<(), String> {
@@ -39,14 +40,7 @@ pub(crate) struct Sender(Arc<Mutex<UnixStream>>);
 
 impl Sender {
     pub(crate) fn send(&self, message: &FromSandbox, body: &[u8]) -> io::Result<()> {
-        #[expect(
-            clippy::unreachable,
-            reason = "only a thread that panics while holding the lock poisons it, and sandboxd \
-                      panics only through a bug"
-        )]
-        let Ok(mut stream) = self.0.lock() else {
-            unreachable!("a thread panicked while sending to the gateway")
-        };
+        let mut stream = unpoisoned(self.0.lock());
         frame::write(&mut *stream, message, body)
     }
 

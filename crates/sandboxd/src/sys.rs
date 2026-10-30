@@ -16,7 +16,7 @@ use stdx::Context;
 
 /// Waits until a child has exited, or a child that made this process its tracer has stopped,
 /// without reaping it, and returns its process ID: `None` if there are no children.
-pub(crate) fn wait_for_exit() -> Option<i32> {
+pub(crate) fn wait_for_child() -> Option<i32> {
     loop {
         // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -66,18 +66,27 @@ pub(crate) fn reap(pid: i32) -> Option<i32> {
     }
 }
 
-/// Kills the process group `group`, if any of it is left.
+/// Kills the process group `group`, if any of it is left. Fails if this process may kill none
+/// of the group's processes.
 pub(crate) fn kill_group(group: i32) -> io::Result<()> {
     // SAFETY: killpg takes only integers and touches no memory of this process.
-    signalled(unsafe { libc::killpg(group, libc::SIGKILL) })
+    killed(unsafe { libc::killpg(group, libc::SIGKILL) })
 }
 
-/// Kills every process this one may signal. As the first process of its namespace, that is
-/// every other process in it: the kernel never sends a signal for `-1` to the sender itself
-/// or to PID 1.
-pub(crate) fn kill_all_others() -> io::Result<()> {
+/// Kills every process this one may signal, and skips the others. As the first process of its
+/// namespace, that is every other process in it: the kernel never sends a signal for `-1` to
+/// the sender itself or to PID 1.
+pub(crate) fn kill_all_others() {
     // SAFETY: kill takes only integers and touches no memory of this process.
-    signalled(unsafe { libc::kill(-1, libc::SIGKILL) })
+    match killed(unsafe { libc::kill(-1, libc::SIGKILL) }) {
+        Ok(()) => {}
+        #[expect(
+            clippy::unreachable,
+            reason = "Linux's kill(-1) skips each process it may not signal, and returns success, \
+                      or ESRCH when it found nothing to signal: never EPERM"
+        )]
+        Err(error) => unreachable!("kill(-1, SIGKILL) failed: {error}"),
+    }
 }
 
 /// Whether this is the first process of its PID namespace, as `sandboxd` is in a sandbox.
@@ -140,9 +149,10 @@ pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<Fil
     }
 }
 
-/// The outcome of a `kill` or `killpg` that returned `result`: finding no process left to
-/// kill is no failure, and lacking the permission to kill is the only one.
-fn signalled(result: libc::c_int) -> io::Result<()> {
+/// The outcome of a `kill` or `killpg` that sent `SIGKILL` and returned `result`: finding no
+/// process left to kill is no failure, and lacking the permission to kill is the only one,
+/// which only [`kill_group`] can report.
+fn killed(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         return Ok(());
     }

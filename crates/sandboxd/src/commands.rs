@@ -19,7 +19,7 @@ use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
 use stdx::Context;
 
 use crate::session::Sender;
-use crate::sys;
+use crate::{sys, unpoisoned};
 
 /// The commands started in this sandbox.
 pub(crate) struct Commands {
@@ -47,28 +47,12 @@ struct State {
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
-        #[expect(
-            clippy::unreachable,
-            reason = "only a thread that panics while holding the lock poisons it, and sandboxd \
-                      panics only through a bug"
-        )]
-        let Ok(state) = self.state.lock() else {
-            unreachable!("a thread panicked while holding the commands' state")
-        };
-        state
+        unpoisoned(self.state.lock())
     }
 
     /// Waits for `changed` to be signalled, releasing `state` meanwhile.
     fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
-        #[expect(
-            clippy::unreachable,
-            reason = "only a thread that panics while holding the lock poisons it, and sandboxd \
-                      panics only through a bug"
-        )]
-        let Ok(state) = self.changed.wait(state) else {
-            unreachable!("a thread panicked while holding the commands' state")
-        };
-        state
+        unpoisoned(self.changed.wait(state))
     }
 }
 
@@ -86,10 +70,10 @@ impl Commands {
             changed: Condvar::new(),
             sender,
         });
-        let reaper = Arc::clone(&shared);
-        thread::Builder::new()
-            .name("reaper".to_owned())
-            .spawn(move || reap(&reaper))?;
+        thread::Builder::new().name("reaper".to_owned()).spawn({
+            let shared = Arc::clone(&shared);
+            move || reaper(&shared)
+        })?;
         Ok(Self { shared })
     }
 
@@ -136,7 +120,8 @@ impl Commands {
 /// can't be killed leaves no other alive, and the first failure is returned.
 fn kill_everything(state: &State) -> io::Result<()> {
     if sys::is_first_process() {
-        return sys::kill_all_others();
+        sys::kill_all_others();
+        return Ok(());
     }
     let killed = state.running.keys().map(|&group| sys::kill_group(group));
     killed.fold(Ok(()), Result::and)
@@ -194,10 +179,10 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 /// and [`sys::reap`] consumes the report of its stop, so that it doesn't come back. `sandboxd`
 /// never resumes the child, which stays stopped until freezing or the end of the session kills
 /// it.
-fn reap(shared: &Shared) {
+fn reaper(shared: &Shared) {
     let mut seen = 0;
     loop {
-        if let Some(pid) = sys::wait_for_exit() {
+        if let Some(pid) = sys::wait_for_child() {
             let mut state = shared.lock();
             let Some(raw) = sys::reap(pid) else {
                 continue;
