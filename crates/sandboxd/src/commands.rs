@@ -100,6 +100,9 @@ impl Commands {
         let mut state = self.shared.lock();
         state.frozen = true;
         kill_everything(&state).context("the sandbox's processes couldn't be killed")?;
+        // Wake the reaper: orphans of processes sandboxd didn't start (a `docker exec`)
+        // become its children with no start to announce them.
+        self.shared.changed.notify_all();
         // A running command is a child until the reaper reaps it, which it reports before
         // letting go of the lock, so once no children are left, every exit has been reported.
         while sys::has_children() {
