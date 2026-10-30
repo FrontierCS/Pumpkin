@@ -10,9 +10,10 @@
 //! - CPU, memory (swap included) and process limits;
 //! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
 //!   container's log, which holds at most 1 MiB;
-//! - [`/pumpkin`](PUMPKIN_DIR), a memory-backed filesystem of [`PUMPKIN_BYTES`] owned by the
-//!   role's user, holding the [directories](PUMPKIN_SUBDIRS) the driver puts there over the
-//!   session;
+//! - [`/pumpkin`](PUMPKIN_DIR), a tmpfs owned by the role's user, holding the
+//!   [directories](PUMPKIN_SUBDIRS) the driver puts there over the session. It holds at most
+//!   [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's memory limit,
+//!   so a role can keep there no more than that limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
 //!   `VOLUME` its image declares, which is removed with the container. Docker's `/dev/shm` and
@@ -52,8 +53,8 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
-use pumpkin_schema::ir::{AbsolutePath, Resources, User};
-use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
+use pumpkin_schema::ir::{Resources, User};
+use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS};
 use pumpkin_schema::workflow::Sandbox;
 use serde::{Deserialize, Serialize};
 
@@ -536,23 +537,14 @@ fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, output: &Output) -> i
 
 fn connect(listener: Listener, id: &str) -> io::Result<Session> {
     let session = listener.accept(CONNECT_TIMEOUT)?;
-    let root = AbsolutePath::try_from(PUMPKIN_DIR.to_owned());
-    let dirs = PUMPKIN_SUBDIRS.map(|dir| RelativePath::try_from(dir.to_owned()));
-    #[expect(
-        clippy::unreachable,
-        reason = "`PUMPKIN_DIR` is an absolute path, and each of `PUMPKIN_SUBDIRS` one \
-                  component, neither empty, `.` nor `..`"
-    )]
-    let (Ok(root), Ok(dirs)) = (root, dirs.into_iter().collect::<Result<Vec<_>, _>>()) else {
-        unreachable!("`{PUMPKIN_DIR}` or one of {PUMPKIN_SUBDIRS:?} isn't a valid path")
-    };
-    let puts: Vec<Put<'_>> = dirs.iter().map(Put::Dir).collect();
-    session.put(&root, &puts).map_err(|error| {
+    let root = &*PUMPKIN_DIR;
+    let puts: Vec<Put<'_>> = PUMPKIN_SUBDIRS.iter().map(Put::Dir).collect();
+    session.put(root, &puts).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
-                "the directories under `{PUMPKIN_DIR}` can't be put in container {id}: {error}: \
-                 expected its `sandboxd` to put them, as the role's user, who owns `{PUMPKIN_DIR}`"
+                "the directories under `{root}` can't be put in container {id}: {error}: \
+                 expected its `sandboxd` to put them, as the role's user, who owns `{root}`"
             ),
         )
     })?;
@@ -605,7 +597,10 @@ fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
         format!("--log-opt=max-size={LOG_BYTES}"),
         "--log-opt=max-file=1".to_owned(),
         format!("--pids-limit={PIDS_LIMIT}"),
-        format!("--tmpfs={PUMPKIN_DIR}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}"),
+        format!(
+            "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
+            *PUMPKIN_DIR
+        ),
         "--tmpfs=/tmp:ro,size=4k".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(socket_dir, GATEWAY_DIR)?,
