@@ -14,8 +14,8 @@ use std::path::Path;
 
 use stdx::Context;
 
-/// Waits until a child has exited, without reaping it, and returns its process ID: `None` if
-/// there are no children.
+/// Waits until a child has exited, or a child that made this process its tracer has stopped,
+/// without reaping it, and returns its process ID: `None` if there are no children.
 pub(crate) fn wait_for_exit() -> Option<i32> {
     loop {
         // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
@@ -23,7 +23,8 @@ pub(crate) fn wait_for_exit() -> Option<i32> {
         let options = libc::WEXITED | libc::WNOWAIT;
         // SAFETY: waitid writes only to `info`, which outlives the call.
         if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
-            // SAFETY: waitid filled `info` for an exited child, so it holds a process ID.
+            // SAFETY: waitid filled `info` for a child that exited or stopped, so it holds a
+            // process ID.
             return Some(unsafe { info.si_pid() });
         }
         let error = io::Error::last_os_error();
@@ -41,7 +42,8 @@ pub(crate) fn wait_for_exit() -> Option<i32> {
 }
 
 /// Reaps child `pid` if it has exited and returns its raw status: `None` if it hasn't exited
-/// yet, or was already reaped.
+/// yet, or was already reaped. For a child that made this process its tracer, it also returns
+/// the status of a stop, and consumes the report of it, so that no wait returns it again.
 pub(crate) fn reap(pid: i32) -> Option<i32> {
     let mut status = 0;
     // SAFETY: waitpid writes only to `status`, which outlives the call.

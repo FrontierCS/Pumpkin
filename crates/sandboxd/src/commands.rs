@@ -187,14 +187,25 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 
 /// Reaps children forever, reporting the exits of started commands. With no children, it
 /// waits until another command starts.
+///
+/// A child may also stop. The kernel reports the stops of a child that made `sandboxd` its
+/// tracer, as any command may with `ptrace(PTRACE_TRACEME)`, to `sandboxd`'s waits, though they
+/// ask only for exits. A stopped child is still running, so the reaper reports nothing for it,
+/// and [`sys::reap`] consumes the report of its stop, so that it doesn't come back. `sandboxd`
+/// never resumes the child, which stays stopped until freezing or the end of the session kills
+/// it.
 fn reap(shared: &Shared) {
     let mut seen = 0;
     loop {
         if let Some(pid) = sys::wait_for_exit() {
             let mut state = shared.lock();
-            let Some(status) = sys::reap(pid) else {
+            let Some(raw) = sys::reap(pid) else {
                 continue;
             };
+            let status = std::process::ExitStatus::from_raw(raw);
+            if status.stopped_signal().is_some() {
+                continue;
+            }
             if let Some(stream) = state.running.remove(&pid) {
                 let status = exit_status(status);
                 // A report that can't be sent has nobody left to read it.
@@ -217,13 +228,21 @@ fn reap(shared: &Shared) {
     }
 }
 
-/// Decodes a status from `waitpid`, which, called without `WUNTRACED`, reports exits and deaths
-/// by signal, and also the stops of a child that made `sandboxd` its tracer, as any command may
-/// with `ptrace(PTRACE_TRACEME)`. A stop reads as signal 0.
-fn exit_status(raw: i32) -> ExitStatus {
-    let status = std::process::ExitStatus::from_raw(raw);
-    match status.code() {
-        Some(code) => ExitStatus::Code(code),
-        None => ExitStatus::Signal(status.signal().unwrap_or_default()),
+/// Decodes the status of a child that exited or was killed by a signal.
+fn exit_status(status: std::process::ExitStatus) -> ExitStatus {
+    if let Some(code) = status.code() {
+        return ExitStatus::Code(code);
     }
+    #[expect(
+        clippy::unreachable,
+        reason = "waitpid reports an exit, a death by signal, a stop or a continuation; the \
+                  reaper skips stops before decoding, and asks for no continuations"
+    )]
+    let Some(signal) = status.signal() else {
+        unreachable!(
+            "the status {:#x} is neither an exit nor a death by signal",
+            status.into_raw()
+        )
+    };
+    ExitStatus::Signal(signal)
 }
