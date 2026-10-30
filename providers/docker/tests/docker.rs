@@ -23,7 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Security, Start};
+use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Start};
 use pumpkin_gateway::Put;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::sandbox::tree::Limits;
@@ -336,8 +336,9 @@ fn confinement() {
     );
 }
 
-/// What the provider reports of the engine before anything starts, but its versions, and how
-/// it refuses a context name `docker` wouldn't take, or one that doesn't exist.
+/// What the provider reports of the engine before anything starts, as far as every engine it
+/// takes shows the same, and how it refuses a context name `docker` wouldn't take, or one that
+/// doesn't exist.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn report() {
@@ -345,56 +346,35 @@ fn report() {
         "report",
         |_| {
             let Report {
-                context,
+                context: reached,
                 endpoint,
                 client_version,
                 engine_version,
-                client_proxies,
-                cgroup_version,
-                cgroup_driver,
-                storage_driver,
-                containerd_store,
-                security,
+                security: _,
                 kernel,
                 os,
             } = engine().report().clone();
-            let Security {
-                rootless,
-                seccomp_profile,
-                apparmor,
-                userns,
-            } = security;
-            let named = [client_version, engine_version, kernel, os];
+            let named = [endpoint, client_version, engine_version, kernel, os];
             let missing = ContextName::try_from("pumpkin-missing".to_owned()).unwrap();
             let missing = Engine::connect(missing).unwrap_err().to_string();
             let (wrong, _) = missing.split_once(": ").unwrap();
             let (_, todo) = missing.rsplit_once(": ").unwrap();
             vec![
-                format!("context: {} at {endpoint}", context.as_str()),
                 format!(
-                    "versions, kernel and OS named: {}",
+                    "reached through the tests' context: {}",
+                    reached == context()
+                ),
+                format!(
+                    "endpoint, versions, kernel and OS named: {}",
                     named.iter().all(|named| !named.is_empty())
                 ),
-                format!(
-                    "proxies in the client's config.json: {}",
-                    if client_proxies { "set" } else { "not set" }
-                ),
-                format!("rootless: {rootless}"),
-                format!("cgroup: {cgroup_version}, {cgroup_driver}"),
-                format!("storage: {storage_driver}, containerd store: {containerd_store}"),
-                format!("seccomp: {seccomp_profile:?}, AppArmor: {apparmor}, userns: {userns}"),
                 format!("{wrong}: …: {todo}"),
                 ContextName::try_from("-v".to_owned()).unwrap_err(),
             ]
         },
         &expect![[r#"
-            context: default at unix:///var/run/docker.sock
-            versions, kernel and OS named: true
-            proxies in the client's config.json: not set
-            rootless: false
-            cgroup: 2, systemd
-            storage: overlayfs, containerd store: true
-            seccomp: Some("builtin"), AppArmor: true, userns: false
+            reached through the tests' context: true
+            endpoint, versions, kernel and OS named: true
             the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
             `-v` is not a valid Docker context name: use a letter or digit, then at least one more letter, digit, `_`, `.`, `+` or `-`, as `docker context ls` lists them"#]],
     );

@@ -41,12 +41,10 @@
 //! runs as root, and whoever may use its socket, as the `docker` group may, can make it do
 //! anything root can. The provider runs on either, and its report says which.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -54,7 +52,6 @@ use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS, RelativePath};
 use pumpkin_schema::workflow::Sandbox;
-use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
@@ -132,18 +129,6 @@ pub struct Report {
     /// The versions of the `docker` command line and of the engine.
     pub client_version: String,
     pub engine_version: String,
-    /// Whether the `docker` command line's configuration, `config.json`, sets `proxies`, from
-    /// which `docker` gives every container it creates, and every build it runs, proxy
-    /// variables such as `HTTP_PROXY`: an input to the sandboxes' environment that no workflow
-    /// names.
-    pub client_proxies: bool,
-    /// The cgroup version, `1` or `2`, and the driver of containers' cgroups.
-    pub cgroup_version: String,
-    pub cgroup_driver: String,
-    /// The storage driver, which holds containers' writable layers, and whether images are in
-    /// containerd's store, the driver being one of its snapshotters.
-    pub storage_driver: String,
-    pub containerd_store: bool,
     /// What the engine's security options say.
     pub security: Security,
     /// The kernel's version, and the operating system, of the engine's host.
@@ -211,11 +196,6 @@ struct InfoJson {
     swap_limit: bool,
     cpu_cfs_quota: bool,
     pids_limit: bool,
-    cgroup_version: String,
-    cgroup_driver: String,
-    driver: String,
-    /// Pairs of a name and a value, such as `driver-type` and `io.containerd.snapshotter.v1`.
-    driver_status: Option<Vec<(String, String)>>,
     security_options: Option<Vec<String>>,
     kernel_version: String,
     operating_system: String,
@@ -329,9 +309,8 @@ impl Engine {
     /// # Errors
     ///
     /// Fails if the context can't be read, or the engine can't be reached through it, saying
-    /// what to do; if `docker` describes either in JSON of another form; if the engine can't
-    /// enforce the CPU, memory, swap and process limits every container has; or if the
-    /// `docker` command line's configuration can't be read, or isn't JSON.
+    /// what to do; if `docker` describes either in JSON of another form; or if the engine
+    /// can't enforce the CPU, memory, swap and process limits every container has.
     pub fn connect(context: ContextName) -> io::Result<Self> {
         let inspect = [
             "context",
@@ -361,10 +340,6 @@ impl Engine {
             swap_limit,
             cpu_cfs_quota,
             pids_limit,
-            cgroup_version,
-            cgroup_driver,
-            driver,
-            driver_status,
             security_options,
             kernel_version,
             operating_system,
@@ -378,19 +353,12 @@ impl Engine {
                 ("PidsLimit", pids_limit),
             ],
         )?;
-        let containerd_store = (driver_status.unwrap_or_default().iter())
-            .any(|(name, value)| name == "driver-type" && value == "io.containerd.snapshotter.v1");
         Ok(Self {
             report: Report {
                 context,
                 endpoint: endpoints.docker.host,
                 client_version: client.version,
                 engine_version: server.version,
-                client_proxies: client_proxies()?,
-                cgroup_version,
-                cgroup_driver,
-                storage_driver: driver,
-                containerd_store,
                 security: Security::parse(&security_options.unwrap_or_default()),
                 kernel: kernel_version,
                 os: operating_system,
@@ -567,59 +535,6 @@ fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, json: &str) -> io::Re
             ),
         )
     })
-}
-
-/// Whether the `docker` command line's configuration has a `proxies` key.
-///
-/// The file is `config.json` in `DOCKER_CONFIG`, if that is set and not empty, or else in
-/// `.docker` in the home directory: `HOME`, if that is set and not empty, or else the user's in
-/// the user database. That is where `docker` looks, given the variables [`docker_output`]
-/// passes it; a missing file is no configuration. The file is read as `docker` reads it: its
-/// first JSON value, if it has one, with `null` as no configuration, and keys matched
-/// regardless of case (here, of ASCII case). Only the names of its keys are kept, never their
-/// values, which may be a registry's credentials.
-fn client_proxies() -> io::Result<bool> {
-    let dir = (env::var_os("DOCKER_CONFIG").filter(|dir| !dir.is_empty())).map_or_else(
-        || env::home_dir().unwrap_or_default().join(".docker"),
-        PathBuf::from,
-    );
-    let path = dir.join("config.json");
-    let json = match fs::read(&path) {
-        Ok(json) => json,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "the Docker command line's configuration {} can't be read: {error}: make it \
-                     readable by this user, as `docker` reads it",
-                    path.display()
-                ),
-            ));
-        }
-    };
-    #[expect(
-        clippy::zero_sized_map_values,
-        reason = "a JSON object's keys are read as a map's, whose values are skipped"
-    )]
-    let first = (serde_json::Deserializer::from_slice(&json))
-        .into_iter::<Option<BTreeMap<String, IgnoredAny>>>()
-        .next();
-    match first {
-        None | Some(Ok(None)) => Ok(false),
-        Some(Ok(Some(keys))) => Ok(keys.keys().any(|key| key.eq_ignore_ascii_case("proxies"))),
-        // serde_json's message may quote the file, so only where it went wrong is said.
-        Some(Err(error)) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the Docker command line's configuration {} isn't a JSON object, at line {}, \
-                 column {}: make it one, as `docker` reads it",
-                path.display(),
-                error.line(),
-                error.column()
-            ),
-        )),
-    }
 }
 
 fn connect(listener: Listener, id: &str) -> io::Result<Session> {
