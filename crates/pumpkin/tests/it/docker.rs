@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Once;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -30,10 +30,6 @@ use pumpkin_schema::workflow::Sandbox;
 /// A small public image, pinned by digest.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
-
-/// What the tests share: `busybox` with a world-writable `/workspace`, which a role's user
-/// needs, since the writable layer is the workspace. Built once, from the pinned image.
-static IMAGE: Once = Once::new();
 
 /// The environment of one test: its run tags and a directory for sockets and collected files.
 /// Dropping it removes the containers of its runs, after showing their logs if the test failed.
@@ -127,10 +123,12 @@ impl Drop for Fixture {
     }
 }
 
-/// The test image's ID, which the IR accepts as a pinned image.
+/// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
+/// a world-writable `/workspace`, which a role's user needs, since the writable layer is the
+/// workspace. Built once, from the pinned image.
 fn image() -> Image {
-    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    IMAGE.call_once(|| {
+    static ID: OnceLock<String> = OnceLock::new();
+    let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
         let build = Command::new("sh")
             .args(["-c", "printf '%s' \"$0\" | docker build --quiet -"])
@@ -138,10 +136,9 @@ fn image() -> Image {
             .output()
             .unwrap();
         assert!(build.status.success(), "{build:?}");
-        let id = String::from_utf8(build.stdout).unwrap().trim().to_owned();
-        ID.set(id).unwrap();
+        String::from_utf8(build.stdout).unwrap().trim().to_owned()
     });
-    Image::try_from(ID.get().unwrap().clone()).unwrap()
+    Image::try_from(id.clone()).unwrap()
 }
 
 /// Runs `scenario` against a new fixture, and checks what it reported against `expect`.
@@ -211,7 +208,23 @@ fn list(base: &Path, dir: &Path, lines: &mut Vec<String>) {
     }
 }
 
-/// What a judge does: reads its payload, writes a result and evidence, and exits.
+/// The commands of the container's processes, from the host, by process ID.
+fn processes(sandbox: &Container) -> String {
+    let top = Command::new("docker")
+        .args(["top", sandbox.id(), "-o", "pid,args"])
+        .output()
+        .unwrap();
+    let top = String::from_utf8(top.stdout).unwrap();
+    let commands = top.lines().skip(1).map(|line| {
+        let (_pid, command) = line.trim_start().split_once(' ').unwrap();
+        command.trim_start().to_owned()
+    });
+    commands.collect::<Vec<_>>().join(", ")
+}
+
+/// What a judge does: reads its payload, writes a result and evidence, and exits, leaving
+/// processes behind that freezing kills: one orphaned to `sandboxd`, and one in a session of
+/// its own, outside its command's process group.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn judge() {
@@ -226,15 +239,20 @@ fn judge() {
                 printf '{"bytes": %s}' "$(wc -c < ../in/payload/raw)" > ../out/result.json
                 mkdir ../out/evidence && echo kept > ../out/evidence/evidence.txt
                 echo "user $(id -u):$(id -g) home=$HOME in $(pwd)"
+                (sleep 600 &); setsid sleep 600 &
                 exit 3"#;
             let mut lines = vec![format!("{:?}", sh(&sandbox, 1, script))];
+            lines.push(format!("before freezing: {}", processes(&sandbox)));
             sandbox.session().freeze().unwrap();
+            lines.push(format!("after freezing: {}", processes(&sandbox)));
             lines.extend(collect(fixture, &sandbox, "out"));
             lines.extend(collect(fixture, &sandbox, "log"));
             lines
         },
         &expect![[r#"
             Code(3)
+            before freezing: /.pumpkin/sandboxd /.pumpkin/gateway/s, sleep 600, sleep 600
+            after freezing: /.pumpkin/sandboxd /.pumpkin/gateway/s
             evidence/evidence.txt: kept
             result.json: {"bytes": 6}
             1.stderr: 
@@ -321,7 +339,8 @@ fn workspace_limit() {
     );
 }
 
-/// Cleaning up a run removes its containers and no others.
+/// Destroying a sandbox removes its container, and cleaning up a run removes the rest of its
+/// containers and no others.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn cleanup() {
@@ -330,11 +349,13 @@ fn cleanup() {
         |fixture| {
             let version = docker::engine_version().unwrap();
             let mut lines = vec![format!("engine version recorded: {}", !version.is_empty())];
-            let _first = fixture.start(&fixture.run, "first", 1 << 30);
+            let first = fixture.start(&fixture.run, "first", 1 << 30);
             let _second = fixture.start(&fixture.run, "second", 1 << 30);
+            let _third = fixture.start(&fixture.run, "third", 1 << 30);
             let _other = fixture.start(&fixture.other_run, "other", 1 << 30);
+            first.destroy().unwrap();
             lines.push(format!(
-                "listed: {}",
+                "listed after destroying one: {}",
                 docker::list(&fixture.run).unwrap().len()
             ));
             let removed = docker::destroy_all(&fixture.run).unwrap();
@@ -349,7 +370,7 @@ fn cleanup() {
         },
         &expect![[r#"
             engine version recorded: true
-            listed: 2
+            listed after destroying one: 2
             removed: 2
             left: 0
             other run's: 1"#]],

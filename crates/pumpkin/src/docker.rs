@@ -12,8 +12,10 @@
 //!   container's log, which holds at most 1 MiB;
 //! - `/pumpkin`, a memory-backed filesystem owned by the role's user, holding the `in`, `out`,
 //!   `home` and `log` directories the driver puts there over the session;
-//! - `/tmp`, a read-only mask, so the container's writable layer is the only other place a
-//!   role's code can write: that layer is its workspace.
+//! - `/tmp`, a read-only mask, so the container's writable layer is the only other place on
+//!   disk a role's code can write: that layer is its workspace. Docker's `/dev/shm` and
+//!   `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so what they hold
+//!   counts against the memory limit.
 //!
 //! Files move only over the session, never through the Docker daemon.
 //!
@@ -28,6 +30,10 @@
 //!   `VOLUME`, and inodes used up by many empty files; and a breach is seen up to one poll
 //!   interval late. A hard limit needs a storage quota, which the host lacks. The platform
 //!   this replaces, which evicts a pod that outgrows its volume, has gaps of the same kind.
+//! - The workspace limit fails open. A measurement that fails is tried again at the next poll,
+//!   so a daemon that never reports the writable layer's size as a number never enforces the
+//!   limit, and nothing says so. Destroying the container instead would end sandboxes
+//!   whenever the daemon is briefly unavailable.
 //! - A container that dies at once still costs [`CONNECT_TIMEOUT`] before [`start`] fails.
 //! - Destroying a container waits for its watcher thread, and so for an `inspect` in flight.
 //!
@@ -35,10 +41,9 @@
 //! run's containers, and only those, even when the driver that started them is gone.
 
 use std::ffi::OsStr;
-use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -201,7 +206,14 @@ impl Container {
         // container goes keeps a destroyed container from also being blamed for its workspace.
         if let Some(Watcher { stop, thread }) = self.watcher.take() {
             drop(stop);
-            let _ = thread.join();
+            #[expect(
+                clippy::unreachable,
+                reason = "a panic is a bug, which ends the whole process under `panic = \
+                          \"abort\"`, so `join` sees one only in tests, which unwind"
+            )]
+            let Ok(()) = thread.join() else {
+                unreachable!("the watcher of {} panicked", self.id)
+            };
         }
     }
 
@@ -227,44 +239,43 @@ impl Drop for Container {
 ///
 /// # Errors
 ///
-/// Fails if `docker` can't create or start the container, if its `sandboxd` doesn't connect within
-/// [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever container `docker` created is removed first.
+/// Fails if `docker` can't create or start the container, if its `sandboxd` doesn't connect
+/// within [`CONNECT_TIMEOUT`], or if the directories can't be put. Whatever container `docker`
+/// created is removed first.
 pub fn start(start: &Start<'_>) -> io::Result<Container> {
     let socket = start.socket_dir.join(SOCKET_NAME);
     let listener = Listener::bind(socket)?;
-    let name = start.name.as_str();
-    let id = match docker(&run_args(start)?) {
-        Ok(id) => id.trim().to_owned(),
-        Err(error) => {
-            // `docker run` leaves a container behind when it creates one but can't start it,
-            // and its name taken. A name already in use belongs to someone else.
-            if !error.to_string().contains("is already in use") {
-                let _ = remove(name);
-            }
-            return Err(error);
-        }
-    };
-    match connect(listener, &id) {
+    // Creating and starting apart gives the container's ID before anything can fail with a
+    // container left behind, so a failure removes this container by ID, and never another
+    // that has its name.
+    let id = docker(&create_args(start)?)?.trim().to_owned();
+    let started = docker(["start", &id]).and_then(|_| connect(listener, &id));
+    match started {
         Ok(session) => Ok(spawn_watcher(start, id, session)),
         Err(error) => {
-            let logs = docker(["logs", "--tail", "20", &id]).unwrap_or_default();
+            let logs = log_tail(&id).unwrap_or_default();
             let _ = remove(&id);
-            Err(io::Error::new(
-                error.kind(),
-                format!("{error}; the container's logs end: {}", logs.trim()),
-            ))
+            let message = match logs.trim() {
+                "" => error.to_string(),
+                logs => format!("{error}; the container's logs end: {logs}"),
+            };
+            Err(io::Error::new(error.kind(), message))
         }
     }
 }
 
 fn connect(listener: Listener, id: &str) -> io::Result<Session> {
     let session = listener.accept(CONNECT_TIMEOUT)?;
-    let root = AbsolutePath::try_from("/pumpkin".to_owned()).map_err(io::Error::other)?;
+    let root = AbsolutePath::try_from("/pumpkin".to_owned());
     let dirs = DIRS.map(|dir| RelativePath::try_from(dir.to_owned()));
-    let dirs: Vec<RelativePath> = dirs
-        .into_iter()
-        .collect::<Result<_, _>>()
-        .map_err(io::Error::other)?;
+    #[expect(
+        clippy::unreachable,
+        reason = "`/pumpkin` is an absolute path, and each of `DIRS` one component, neither \
+                  empty, `.` nor `..`"
+    )]
+    let (Ok(root), Ok(dirs)) = (root, dirs.into_iter().collect::<Result<Vec<_>, _>>()) else {
+        unreachable!("`/pumpkin` or one of {DIRS:?} isn't a valid path")
+    };
     let puts: Vec<Put<'_>> = dirs.iter().map(Put::Dir).collect();
     session
         .put(&root, &puts)
@@ -304,10 +315,10 @@ struct Watched {
 /// Measures the container's writable layer until `stopped` disconnects or the layer passes the
 /// limit, which destroys the container.
 ///
-/// The session ends and the breach is recorded before the container is removed, so a caller
-/// whose session fails and who then looks for a breach finds it, and can't use the session in
-/// between. A removal that keeps failing is left to [`Container::destroy`], which tries again;
-/// the session has ended, which stops `sandboxd` meanwhile.
+/// The breach is recorded, then the session ends, and only then is the container removed: so a
+/// caller whose session fails and who then looks for a breach finds it, and can't use the
+/// session in between. A removal that keeps failing is left to [`Container::destroy`], which
+/// tries again; the session has ended, which stops `sandboxd` meanwhile.
 fn watch(watched: &Watched, stopped: &Receiver<()>) {
     let Watched {
         id,
@@ -321,11 +332,17 @@ fn watch(watched: &Watched, stopped: &Receiver<()>) {
             continue;
         };
         if used > *limit {
-            session.end();
-            let _ = breach.set(WorkspaceBreach {
+            #[expect(
+                clippy::unreachable,
+                reason = "only this thread records the breach, and it returns right after"
+            )]
+            let Ok(()) = breach.set(WorkspaceBreach {
                 used,
                 limit: *limit,
-            });
+            }) else {
+                unreachable!("{id}'s workspace breach was recorded twice")
+            };
+            session.end();
             for _ in 0..REMOVE_ATTEMPTS {
                 if remove(id).is_ok() {
                     break;
@@ -354,8 +371,8 @@ fn workspace_bytes(id: &str) -> io::Result<u64> {
     })
 }
 
-/// The arguments of `docker run` for the container.
-fn run_args(start: &Start<'_>) -> io::Result<Vec<String>> {
+/// The arguments of `docker create` for the container.
+fn create_args(start: &Start<'_>) -> io::Result<Vec<String>> {
     let Start {
         run,
         name,
@@ -373,8 +390,7 @@ fn run_args(start: &Start<'_>) -> io::Result<Vec<String>> {
     let millis = resources.cpu_millis.get();
     let memory = resources.memory_bytes.get();
     Ok(vec![
-        "run".to_owned(),
-        "--detach".to_owned(),
+        "create".to_owned(),
         format!("--name={name}"),
         format!("--label={RUN_LABEL}={}", run.as_str()),
         "--network=none".to_owned(),
@@ -456,10 +472,10 @@ pub fn destroy_all(run: &RunTag) -> io::Result<Vec<String>> {
     }
 }
 
-/// Removes a container by ID or name, and its anonymous volumes. A container already gone is
+/// Removes the container with ID `id`, and its anonymous volumes. A container already gone is
 /// removed.
-fn remove(container: &str) -> io::Result<()> {
-    match docker(["rm", "--force", "--volumes", container]) {
+fn remove(id: &str) -> io::Result<()> {
+    match docker(["rm", "--force", "--volumes", id]) {
         Err(error) if error.to_string().contains("No such container") => Ok(()),
         other => other.map(|_| ()),
     }
@@ -475,8 +491,25 @@ pub fn engine_version() -> io::Result<String> {
     Ok(version.trim().to_owned())
 }
 
+/// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
+/// its standard error, which `docker logs` writes to its own two streams.
+fn log_tail(id: &str) -> io::Result<String> {
+    let Output { stdout, stderr, .. } = docker_output(["logs", "--tail", "20", id])?;
+    Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
+}
+
 /// Runs `docker` with `args` and returns its standard output.
 fn docker<I, S>(args: I) -> io::Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = docker_output(args)?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs `docker` with `args` and returns its output, or fails with its standard error.
+fn docker_output<I, S>(args: I) -> io::Result<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -488,11 +521,12 @@ where
         .output()
         .map_err(|error| io::Error::new(error.kind(), format!("docker didn't run: {error}")))?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(output)
     } else {
         let mut shown = String::new();
         for arg in args.iter().take(2) {
-            let _ = write!(shown, " {}", arg.as_ref().to_string_lossy());
+            shown.push(' ');
+            shown.push_str(&arg.as_ref().to_string_lossy());
         }
         Err(io::Error::other(format!(
             "`docker{shown}` failed with {}: {}",
