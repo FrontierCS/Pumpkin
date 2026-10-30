@@ -102,7 +102,15 @@ fn send_file(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Ok(Err(error).context(path.display())),
         };
-        sent += u64::try_from(read).map_err(io::Error::other)?;
+        #[expect(
+            clippy::unreachable,
+            reason = "a read returns at most the buffer's length, a frame's body of 1 MiB, which \
+                      fits a u64"
+        )]
+        let Ok(read_bytes) = u64::try_from(read) else {
+            unreachable!("a read of {read} bytes overflows a u64")
+        };
+        sent += read_bytes;
         if sent > size {
             break;
         }

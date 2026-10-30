@@ -76,10 +76,7 @@ mod flags {
     reason = "sandboxd reports why it stopped on its standard error, which the provider keeps"
 )]
 fn main() -> ExitCode {
-    if let Err(error) = sys::make_non_dumpable() {
-        eprintln!("sandboxd: the process couldn't be made non-dumpable: {error}");
-        return ExitCode::FAILURE;
-    }
+    sys::make_non_dumpable();
     let flags::Sandboxd { gateway } = match flags::Sandboxd::from_env() {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {

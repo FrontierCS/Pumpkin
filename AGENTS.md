@@ -12,6 +12,9 @@
 - PREFER exhaustive `match` without wildcard arms, and destructuring structs in full when
   converting them
 - PREFER `#[expect(lint, reason = "...")]` over `#[allow(lint)]`
+- WRITE `unreachable!` for a path only a bug can reach, under
+  `#[expect(clippy::unreachable, reason = "…")]` saying why it can't happen; never handle such a
+  path. Handle, or return, only errors the world can cause
 - WRITE error messages as what is wrong, then what is expected (`the program is empty: name one`)
 - WRITE few tests, at the public boundary, through one `check` helper per test file that
   compares against an `expect![[...]]` snapshot; do not test what the type system or serde

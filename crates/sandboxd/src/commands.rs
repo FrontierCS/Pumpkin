@@ -7,13 +7,12 @@
 //! failed to start, and must find it unreaped.
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
@@ -44,13 +43,32 @@ struct State {
     /// Whether the reaper has found no children since the last command started.
     childless: bool,
     frozen: bool,
-    /// Why reaping failed, once it has: the reaper has stopped then, and ended the session.
-    failure: Option<String>,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        #[expect(
+            clippy::unreachable,
+            reason = "only a thread that panics while holding the lock poisons it, and sandboxd \
+                      panics only through a bug"
+        )]
+        let Ok(state) = self.state.lock() else {
+            unreachable!("a thread panicked while holding the commands' state")
+        };
+        state
+    }
+
+    /// Waits for `changed` to be signalled, releasing `state` meanwhile.
+    fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        #[expect(
+            clippy::unreachable,
+            reason = "only a thread that panics while holding the lock poisons it, and sandboxd \
+                      panics only through a bug"
+        )]
+        let Ok(state) = self.changed.wait(state) else {
+            unreachable!("a thread panicked while holding the commands' state")
+        };
+        state
     }
 }
 
@@ -62,7 +80,6 @@ impl Commands {
             started: 0,
             childless: true,
             frozen: false,
-            failure: None,
         };
         let shared = Arc::new(Shared {
             state: Mutex::new(state),
@@ -101,11 +118,7 @@ impl Commands {
         state.frozen = true;
         kill_everything(&state).context("the sandbox's processes couldn't be killed")?;
         while !(state.running.is_empty() && state.childless) {
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
+            state = self.shared.wait(state);
         }
         Ok(())
     }
@@ -114,11 +127,6 @@ impl Commands {
     pub(crate) fn kill_all(&self) {
         // The session is over, so there is nobody left to tell about a failure.
         let _ = kill_everything(&self.shared.lock());
-    }
-
-    /// Fails with why reaping failed, if it has, which ends the session ([`reap`] says how).
-    pub(crate) fn reaping(&self) -> Result<(), String> {
-        self.shared.lock().failure.clone().map_or(Ok(()), Err)
     }
 }
 
@@ -143,8 +151,12 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         stdout,
         stderr,
     } = launch;
+    #[expect(
+        clippy::unreachable,
+        reason = "an Argv holds a program: its only constructor refuses an empty one"
+    )]
     let Some((program, args)) = argv.as_slice().split_first() else {
-        return Err("the command is empty: it needs a program".to_owned());
+        unreachable!("the command's Argv is empty")
     };
     let mut output = OpenOptions::new();
     output.write(true).create(true).truncate(true);
@@ -161,30 +173,26 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         .spawn()
         .context(format_args!("`{program}` didn't start in {cwd}"))?;
     // The reaper waits for it, so its handle is dropped without waiting.
-    i32::try_from(child.id()).map_err(|error| error.to_string())
+    let id = child.id();
+    #[expect(
+        clippy::unreachable,
+        reason = "the standard library casts the child's pid_t, a positive i32, to the u32 it \
+                  returns"
+    )]
+    let Ok(pid) = i32::try_from(id) else {
+        unreachable!("the child's process ID {id} overflows an i32")
+    };
+    Ok(pid)
 }
 
-/// Reaps children until reaping fails, reporting the exits of started commands. With no
-/// children, it waits until another command starts.
-///
-/// Once interruptions and finding no child are ruled out, waiting for and reaping a child fail
-/// only through a bug, past which the reaper can't go on. Its failure ends the session instead:
-/// it is kept for [`Commands::reaping`], and the connection is shut down, which ends the
-/// session's read.
+/// Reaps children forever, reporting the exits of started commands. With no children, it
+/// waits until another command starts.
 fn reap(shared: &Shared) {
-    let Err(error) = reap_children(shared);
-    shared.lock().failure = Some(format!("reaping failed: {error}"));
-    // Linux fails a Unix socket's shutdown only for an invalid argument.
-    let _ = shared.sender.shut_down();
-}
-
-/// Reaps children and reports exits, as [`reap`] says, until reaping fails.
-fn reap_children(shared: &Shared) -> io::Result<Infallible> {
     let mut seen = 0;
     loop {
-        if let Some(pid) = sys::wait_for_exit()? {
+        if let Some(pid) = sys::wait_for_exit() {
             let mut state = shared.lock();
-            let Some(status) = sys::reap(pid)? else {
+            let Some(status) = sys::reap(pid) else {
                 continue;
             };
             if let Some(stream) = state.running.remove(&pid) {
@@ -201,10 +209,7 @@ fn reap_children(shared: &Shared) -> io::Result<Infallible> {
                 state.childless = true;
                 shared.changed.notify_all();
                 while state.started == seen {
-                    state = shared
-                        .changed
-                        .wait(state)
-                        .unwrap_or_else(PoisonError::into_inner);
+                    state = shared.wait(state);
                 }
             }
             seen = state.started;
@@ -212,8 +217,9 @@ fn reap_children(shared: &Shared) -> io::Result<Infallible> {
     }
 }
 
-/// Decodes a status from `waitpid`, which, called without `WUNTRACED`, reports only exits and
-/// deaths by signal.
+/// Decodes a status from `waitpid`, which, called without `WUNTRACED`, reports exits and deaths
+/// by signal, and also the stops of a child that made `sandboxd` its tracer, as any command may
+/// with `ptrace(PTRACE_TRACEME)`. A stop reads as signal 0.
 fn exit_status(raw: i32) -> ExitStatus {
     let status = std::process::ExitStatus::from_raw(raw);
     match status.code() {

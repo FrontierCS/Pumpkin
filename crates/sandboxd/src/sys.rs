@@ -16,7 +16,7 @@ use stdx::Context;
 
 /// Waits until a child has exited, without reaping it, and returns its process ID: `None` if
 /// there are no children.
-pub(crate) fn wait_for_exit() -> io::Result<Option<i32>> {
+pub(crate) fn wait_for_exit() -> Option<i32> {
     loop {
         // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -24,32 +24,41 @@ pub(crate) fn wait_for_exit() -> io::Result<Option<i32>> {
         // SAFETY: waitid writes only to `info`, which outlives the call.
         if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
             // SAFETY: waitid filled `info` for an exited child, so it holds a process ID.
-            return Ok(Some(unsafe { info.si_pid() }));
+            return Some(unsafe { info.si_pid() });
         }
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ECHILD) {
-            return Ok(None);
-        }
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+        match error.raw_os_error() {
+            Some(libc::ECHILD) => return None,
+            Some(libc::EINTR) => {}
+            #[expect(
+                clippy::unreachable,
+                reason = "waitid fails otherwise only for invalid options or a nonblocking \
+                          pidfd, and these options are valid and name no pidfd"
+            )]
+            _ => unreachable!("waitid(P_ALL, WEXITED | WNOWAIT) failed: {error}"),
         }
     }
 }
 
 /// Reaps child `pid` if it has exited and returns its raw status: `None` if it hasn't exited
 /// yet, or was already reaped.
-pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
+pub(crate) fn reap(pid: i32) -> Option<i32> {
     let mut status = 0;
     // SAFETY: waitpid writes only to `status`, which outlives the call.
     match unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) } {
-        reaped if reaped == pid => Ok(Some(status)),
-        0 => Ok(None),
-        _ => {
+        reaped if reaped == pid => Some(status),
+        0 => None,
+        returned => {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ECHILD) {
-                Ok(None)
-            } else {
-                Err(error)
+            match error.raw_os_error() {
+                Some(libc::ECHILD) => None,
+                #[expect(
+                    clippy::unreachable,
+                    reason = "given a child's process ID and WNOHANG, waitpid returns that ID or \
+                              0, or fails with ECHILD: EINTR needs a wait that blocks, EINVAL \
+                              invalid options, and ESRCH a pid of INT_MIN"
+                )]
+                _ => unreachable!("waitpid({pid}, WNOHANG) returned {returned}: {error}"),
             }
         }
     }
@@ -82,14 +91,21 @@ pub(crate) fn is_first_process() -> bool {
 /// a command that could open them could write there, outside the session.
 ///
 /// The commands it starts don't inherit the flag, since `execve` resets it.
-pub(crate) fn make_non_dumpable() -> io::Result<()> {
+pub(crate) fn make_non_dumpable() {
     let off: libc::c_ulong = 0;
     // SAFETY: `PR_SET_DUMPABLE` takes integer arguments only, each passed as the
     // `unsigned long` the kernel reads.
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, off, off, off, off) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    match unsafe { libc::prctl(libc::PR_SET_DUMPABLE, off, off, off, off) } {
+        0 => {}
+        #[expect(
+            clippy::unreachable,
+            reason = "PR_SET_DUMPABLE fails only for a value other than SUID_DUMP_DISABLE (0) or \
+                      SUID_DUMP_USER (1), and this passes 0"
+        )]
+        _ => unreachable!(
+            "prctl(PR_SET_DUMPABLE, 0) failed: {}",
+            io::Error::last_os_error()
+        ),
     }
 }
 
@@ -123,15 +139,20 @@ pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<Fil
 }
 
 /// The outcome of a `kill` or `killpg` that returned `result`: finding no process left to
-/// kill is no failure.
+/// kill is no failure, and lacking the permission to kill is the only one.
 fn signalled(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) => Err(error),
+        #[expect(
+            clippy::unreachable,
+            reason = "kill and killpg fail otherwise only with EINVAL, for an invalid signal, and \
+                      both send SIGKILL"
+        )]
+        _ => unreachable!("sending SIGKILL failed: {error}"),
     }
 }

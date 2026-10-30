@@ -3,10 +3,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufReader, Read};
-use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use pumpkin_schema::ir::AbsolutePath;
 use pumpkin_schema::sandbox::tree::{self, Limits};
@@ -16,8 +15,7 @@ use stdx::Context;
 use crate::collect;
 use crate::commands::Commands;
 
-/// Connects to the gateway at `socket` and serves the session until the gateway ends it, or
-/// until reaping fails ([`Commands::reaping`]).
+/// Connects to the gateway at `socket` and serves the session until the gateway ends it.
 pub(crate) fn serve(socket: &Path) -> Result<(), String> {
     let stream = UnixStream::connect(socket).context(format_args!(
         "connecting to the gateway at {} failed",
@@ -35,9 +33,7 @@ pub(crate) fn serve(socket: &Path) -> Result<(), String> {
     };
     let served = session.serve(&mut BufReader::new(stream));
     session.commands.kill_all();
-    // A reaper that failed ended the session itself, so its failure is the session's.
-    let served = served.context("the session with the gateway failed");
-    session.commands.reaping().and(served)
+    served.context("the session with the gateway failed")
 }
 
 /// Sends frames to the gateway, from the session and from the thread that reports exits.
@@ -46,7 +42,14 @@ pub(crate) struct Sender(Arc<Mutex<UnixStream>>);
 
 impl Sender {
     pub(crate) fn send(&self, message: &FromSandbox, body: &[u8]) -> io::Result<()> {
-        let mut stream = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        #[expect(
+            clippy::unreachable,
+            reason = "only a thread that panics while holding the lock poisons it, and sandboxd \
+                      panics only through a bug"
+        )]
+        let Ok(mut stream) = self.0.lock() else {
+            unreachable!("a thread panicked while sending to the gateway")
+        };
         frame::write(&mut *stream, message, body)
     }
 
@@ -57,13 +60,6 @@ impl Sender {
             Err(message) => FromSandbox::Failed { stream, message },
         };
         self.send(&message, &[])
-    }
-
-    /// Shuts the connection down both ways, which ends the session: its read finds the
-    /// connection's end, and every later send fails.
-    pub(crate) fn shut_down(&self) -> io::Result<()> {
-        let stream = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        stream.shutdown(Shutdown::Both)
     }
 }
 
