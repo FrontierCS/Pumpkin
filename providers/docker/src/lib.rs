@@ -49,11 +49,10 @@ use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::RelativePath;
 use pumpkin_schema::workflow::Sandbox;
-
-use crate::gateway::{Listener, Put, Session};
 
 /// How often a container's writable layer is measured.
 pub const WORKSPACE_POLL: Duration = Duration::from_secs(5);

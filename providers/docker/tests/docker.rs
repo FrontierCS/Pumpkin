@@ -20,8 +20,8 @@ use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin::docker::{self, Container, RunTag, Start};
-use pumpkin::gateway::Put;
+use pumpkin_docker::{self as docker, Container, RunTag, Start};
+use pumpkin_gateway::Put;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{ExitStatus, Launch, RelativePath};

@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin::gateway::{Listener, Session};
+use pumpkin_gateway::{Listener, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env};
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{Launch, ToSandbox, frame};

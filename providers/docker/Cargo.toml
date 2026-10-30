@@ -1,0 +1,17 @@
+[package]
+name = "pumpkin-docker"
+version = "0.0.0"
+description = "Pumpkin's Docker provider: a sandbox for a role as a container that needs no root to start"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+pumpkin-gateway = { path = "../../crates/pumpkin-gateway" }
+pumpkin-schema = { path = "../../crates/pumpkin-schema" }
+
+[dev-dependencies]
+expect-test.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
