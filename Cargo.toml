@@ -39,6 +39,11 @@ unreachable = "warn"
 unwrap_used = "warn"
 use_self = "warn"
 
+# Dependencies get line tables only, which backtraces need, and build faster without the rest of
+# their debug info; the workspace's crates keep it all.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 # A panic is a bug, so it ends the whole process, as `unreachable!` is meant to: under
 # unwinding, one in a thread would end only that thread. Release builds abort. Dev builds
 # unwind, which Cargo forces on tests anyway, so that `cargo test` builds each library once for
