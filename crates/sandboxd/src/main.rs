@@ -77,6 +77,7 @@ mod flags {
     reason = "sandboxd reports why it stopped on its standard error, which the provider keeps"
 )]
 fn main() -> ExitCode {
+    stdx::abort_on_panic();
     sys::make_non_dumpable();
     let flags::Sandboxd { gateway } = match flags::Sandboxd::from_env() {
         Ok(flags) => flags,
@@ -106,7 +107,8 @@ fn unpoisoned<T>(locked: LockResult<T>) -> T {
     #[expect(
         clippy::unreachable,
         reason = "only a thread that panics while holding a lock poisons it, and a panic aborts \
-                  the process (`panic = \"abort\"`), so no thread is left to see the lock"
+                  the process before it unwinds (`stdx::abort_on_panic`), so no thread is left \
+                  to see the lock"
     )]
     let Ok(guard) = locked else {
         unreachable!("a thread panicked while holding a lock")

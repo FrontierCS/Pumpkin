@@ -40,10 +40,9 @@ unwrap_used = "warn"
 use_self = "warn"
 
 # A panic is a bug, so it ends the whole process, as `unreachable!` is meant to: under
-# unwinding, one in a thread would end only that thread. Cargo ignores `panic` for tests and
-# benches, which keep unwinding.
-[profile.dev]
-panic = "abort"
-
+# unwinding, one in a thread would end only that thread. Release builds abort. Dev builds
+# unwind, which Cargo forces on tests anyway, so that `cargo test` builds each library once for
+# both the tests and the binaries they run; the binaries abort from a panic hook instead
+# (`stdx::abort_on_panic`).
 [profile.release]
 panic = "abort"
