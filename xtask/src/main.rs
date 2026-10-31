@@ -8,11 +8,13 @@
     reason = "a command line reports on its standard output and error"
 )]
 
+use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use xshell::{Shell, cmd};
+use xshell::{Cmd, Shell};
 
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -99,14 +101,49 @@ fn main() -> ExitCode {
 /// command line it can't parse, with 2.
 fn try_main() -> Result<()> {
     let flags = flags::Xtask::from_env_or_exit();
-    let sh = Shell::new()?;
-    sh.change_dir(root());
+    let cargo = Cargo::new()?;
     match flags.subcommand {
-        flags::XtaskCmd::Ci(flags::Ci { docker }) => ci(&sh, docker),
+        flags::XtaskCmd::Ci(flags::Ci { docker }) => ci(&cargo, docker),
         flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
-            println!("{}", sandboxd(&sh)?.display());
+            println!("{}", sandboxd(&cargo)?.display());
             Ok(())
         }
+    }
+}
+
+/// Builds the cargo commands xtask runs, at the workspace's root, without the variables that
+/// `cargo run` sets for xtask's own package: `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and
+/// `CARGO_PKG_*`. Some build scripts, such as ring's, rerun when one of them changes, so each
+/// switch between `cargo xtask` and a direct `cargo` command would rebuild such a crate and every
+/// crate that depends on it. The others stay, such as `CARGO` and rustup's, which name the
+/// toolchain a child cargo is to use. xshell's `Shell` can set a variable for all its commands
+/// but not remove one, so each command removes them.
+struct Cargo {
+    sh: Shell,
+    /// The names of the package variables in xtask's environment.
+    package_vars: Vec<OsString>,
+}
+
+impl Cargo {
+    fn new() -> Result<Self> {
+        let sh = Shell::new()?;
+        sh.change_dir(root());
+        let package_vars = env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| {
+                key.to_str().is_some_and(|key| {
+                    key.starts_with("CARGO_PKG_")
+                        || matches!(key, "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH")
+                })
+            })
+            .collect();
+        Ok(Self { sh, package_vars })
+    }
+
+    /// A `cargo` command with `args`.
+    fn cmd(&self, args: &[&str]) -> Cmd<'_> {
+        let cmd = self.sh.cmd("cargo").args(args);
+        self.package_vars.iter().fold(cmd, Cmd::env_remove)
     }
 }
 
@@ -123,18 +160,15 @@ fn root() -> &'static Path {
 /// and runs the ignored tests too, which are the tests that need Docker; they inherit
 /// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
 /// Docker's own variables set to reach no engine.
-fn ci(sh: &Shell, docker: bool) -> Result<()> {
-    cmd!(sh, "cargo fmt --check").run()?;
-    let clippy = cmd!(
-        sh,
-        "cargo clippy --workspace --all-targets --locked -- --deny warnings"
-    );
-    clippy.run()?;
-    let doc = cmd!(sh, "cargo doc --no-deps --workspace --locked");
+fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
+    cargo.cmd(&["fmt", "--check"]).run()?;
+    let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
+    clippy.args(["--", "--deny", "warnings"]).run()?;
+    let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
-    let test = cmd!(sh, "cargo test --workspace --locked");
+    let test = cargo.cmd(&["test", "--workspace", "--locked"]);
     if docker {
-        let sandboxd = sandboxd(sh)?;
+        let sandboxd = sandboxd(cargo)?;
         let test = test.args(["--", "--include-ignored"]);
         // These poison the variables the Docker provider must ignore: passed on to `docker`,
         // they would steer it to an engine that doesn't exist, or to TLS without certificates,
@@ -152,11 +186,10 @@ fn ci(sh: &Shell, docker: bool) -> Result<()> {
 
 /// Builds the static `sandboxd` that every sandbox runs, and returns the path cargo reports
 /// for it, so that the path is right wherever cargo's configuration puts the target directory.
-fn sandboxd(sh: &Shell) -> Result<PathBuf> {
-    let build = cmd!(
-        sh,
-        "cargo build --release --locked --package pumpkin-sandboxd --target {MUSL} --message-format json-render-diagnostics"
-    );
+fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
+    let build = cargo.cmd(&["build", "--release", "--locked"]);
+    let build = build.args(["--package", "pumpkin-sandboxd", "--target", MUSL]);
+    let build = build.args(["--message-format", "json-render-diagnostics"]);
     // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {
         let message: serde_json::Value = serde_json::from_str(line)?;
