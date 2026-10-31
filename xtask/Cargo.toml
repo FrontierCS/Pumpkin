@@ -5,6 +5,11 @@ description = "Contributor tasks, run as `cargo xtask <command>`"
 edition.workspace = true
 publish = false
 
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 serde_json.workspace = true
 xflags.workspace = true
