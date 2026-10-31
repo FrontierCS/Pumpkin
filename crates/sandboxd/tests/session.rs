@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin::gateway::{Listener, Process, Put, Session};
+use pumpkin_gateway::{Listener, Process, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;

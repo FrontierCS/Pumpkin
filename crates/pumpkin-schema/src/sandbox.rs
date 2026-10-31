@@ -13,6 +13,10 @@
 //! `Data` frames, every entry after its parent's, then an `End`. A tree holds nothing else, so
 //! no link or special file crosses a session, and every path in it is a [`RelativePath`],
 //! which can't leave the directory the tree is written to; [`tree::Writer`] writes one there.
+//!
+//! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
+//! sandboxes it starts: the driver and a task's commands rely on them in any sandbox. It holds
+//! at most [`PUMPKIN_BYTES`], or less where a provider backs it with the role's memory.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +25,43 @@ use crate::ir::{AbsolutePath, Argv, Env};
 
 pub mod frame;
 pub mod tree;
+
+/// The directory that holds Pumpkin's files in every sandbox, `/pumpkin`, and belongs to the
+/// role's user.
+///
+/// The driver puts a role's inputs there and collects its results from there; a task's
+/// commands read and write them at the paths below it.
+pub fn pumpkin_dir() -> AbsolutePath {
+    valid("/pumpkin")
+}
+
+/// The directories below [`pumpkin_dir()`], there before a role's first command starts: `in`
+/// holds what the driver puts in, `out` what it collects, `home` the commands' home, and `log`
+/// their output.
+pub fn pumpkin_subdirs() -> [RelativePath; 4] {
+    ["in", "out", "home", "log"].map(valid)
+}
+
+/// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the driver collects from below
+/// it fits in this many.
+///
+/// A provider may back it with the role's memory, as the Docker provider does, so that its
+/// files and the role's processes share the role's memory limit: a role can keep there at most
+/// the smaller of the two.
+pub const PUMPKIN_BYTES: u64 = 1 << 30;
+
+/// `path`, one of this module's constant paths, as the path type it is.
+fn valid<T: TryFrom<String, Error = String>>(path: &str) -> T {
+    match T::try_from(path.to_owned()) {
+        Ok(path) => path,
+        #[expect(
+            clippy::unreachable,
+            reason = "each of this module's paths is normalized: `/pumpkin` is absolute, and \
+                      each of its directories one plain component"
+        )]
+        Err(error) => unreachable!("{error}"),
+    }
+}
 
 /// What the gateway sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

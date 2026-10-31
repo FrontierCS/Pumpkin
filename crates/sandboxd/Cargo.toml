@@ -16,7 +16,7 @@ libc.workspace = true
 xflags.workspace = true
 
 [dev-dependencies]
-pumpkin = { path = "../pumpkin" }
+pumpkin-gateway = { path = "../pumpkin-gateway" }
 expect-test.workspace = true
 
 [lints]

@@ -33,7 +33,12 @@ mod flags {
         cmd xtask {
             /// Runs the checks every change must pass, in order, and stops at the first that
             /// fails.
-            cmd ci {}
+            cmd ci {
+                /// Runs the Docker tests too, which are ignored otherwise, against the static
+                /// sandboxd that `sandboxd` builds, through the Docker context
+                /// `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
+                optional --docker
+            }
 
             /// Builds the static sandboxd that every sandbox runs, and prints its path.
             cmd sandboxd {}
@@ -54,7 +59,9 @@ mod flags {
     }
 
     #[derive(Debug)]
-    pub struct Ci;
+    pub struct Ci {
+        pub docker: bool,
+    }
 
     #[derive(Debug)]
     pub struct Sandboxd;
@@ -95,7 +102,7 @@ fn try_main() -> Result<()> {
     let sh = Shell::new()?;
     sh.change_dir(root());
     match flags.subcommand {
-        flags::XtaskCmd::Ci(flags::Ci) => ci(&sh),
+        flags::XtaskCmd::Ci(flags::Ci { docker }) => ci(&sh, docker),
         flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
             println!("{}", sandboxd(&sh)?.display());
             Ok(())
@@ -111,8 +118,12 @@ fn root() -> &'static Path {
         .expect("xtask/ has a parent directory")
 }
 
-/// Runs the checks every change must pass, in order, and stops at the first that fails.
-fn ci(sh: &Shell) -> Result<()> {
+/// Runs the checks every change must pass, in order, and stops at the first that fails. With
+/// `docker`, it builds the static `sandboxd` before the tests, names it in `PUMPKIN_SANDBOXD`
+/// and runs the ignored tests too, which are the tests that need Docker; they inherit
+/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
+/// Docker's own variables set to reach no engine.
+fn ci(sh: &Shell, docker: bool) -> Result<()> {
     cmd!(sh, "cargo fmt --check").run()?;
     let clippy = cmd!(
         sh,
@@ -121,7 +132,21 @@ fn ci(sh: &Shell) -> Result<()> {
     clippy.run()?;
     let doc = cmd!(sh, "cargo doc --no-deps --workspace --locked");
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
-    cmd!(sh, "cargo test --workspace --locked").run()?;
+    let test = cmd!(sh, "cargo test --workspace --locked");
+    if docker {
+        let sandboxd = sandboxd(sh)?;
+        let test = test.args(["--", "--include-ignored"]);
+        // These poison the variables the Docker provider must ignore: passed on to `docker`,
+        // they would steer it to an engine that doesn't exist, or to TLS without certificates,
+        // so the Docker tests fail unless the provider clears `docker`'s environment.
+        let test = test
+            .env("DOCKER_HOST", "unix:///nonexistent/pumpkin-poison.sock")
+            .env("DOCKER_CONTEXT", "pumpkin-poison-no-such-context")
+            .env("DOCKER_TLS_VERIFY", "1");
+        test.env("PUMPKIN_SANDBOXD", &sandboxd).run()?;
+    } else {
+        test.run()?;
+    }
     Ok(())
 }
 
