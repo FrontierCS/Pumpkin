@@ -40,7 +40,8 @@ unwrap_used = "warn"
 use_self = "warn"
 
 # Dependencies get line tables only, which backtraces need, and build faster without the rest of
-# their debug info; the workspace's crates keep it all.
+# their debug info; the workspace's crates keep it all. Build scripts and proc macros, which Cargo
+# otherwise builds without debug info, get line tables too, since this setting takes precedence.
 [profile.dev.package."*"]
 debug = "line-tables-only"
 

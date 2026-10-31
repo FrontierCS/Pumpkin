@@ -30,9 +30,10 @@ impl<T, E: Display> Context<T> for Result<T, E> {
 /// Makes a panic in any thread abort the whole process once the default hook has reported it,
 /// as `panic = "abort"` does.
 ///
-/// A binary calls it first in `main`, so that it aborts on a panic in dev builds too, which
-/// unwind: the workspace's `Cargo.toml` says why a panic ends the process, and why dev builds
-/// unwind.
+/// A binary that runs threads calls it first in `main`, so that it aborts on a panic in dev
+/// builds too, which unwind: the workspace's `Cargo.toml` says why a panic ends the process, and
+/// why dev builds unwind. A single-threaded binary needs none, since a panic there already ends
+/// it.
 pub fn abort_on_panic() {
     let report = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
