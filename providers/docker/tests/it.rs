@@ -52,9 +52,7 @@ impl Fixture {
                  which builds sandboxd and sets it"
             );
         };
-        let tag = |suffix: &str| {
-            RunTag::try_from(format!("pk-{}-{name}{suffix}", std::process::id())).unwrap()
-        };
+        let tag = |suffix: &str| RunTag::from(format!("pk-{}-{name}{suffix}", std::process::id()));
         // Socket paths are short: a directory in the system's temporary one, private to this
         // user, as the parent of every socket directory must be.
         let dir = std::env::temp_dir().join(format!("pk-{}-{name}", std::process::id()));

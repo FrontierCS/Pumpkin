@@ -189,11 +189,8 @@ struct ClientInfoJson {
     version: String,
 }
 
-/// Labels the containers of one run, for finding them again.
-///
-/// One or more characters from a-z, 0-9 and `-`, starting with a letter or digit, so that it is
-/// one plain word wherever it goes, in `docker`'s label and filter arguments or in a command an
-/// operator types, which needs no quoting and can't be taken for an option.
+/// The value of the label that finds a run's containers: every container of the run carries
+/// it, and [`Engine::destroy_all`] removes the containers that do.
 #[derive(Debug)]
 pub struct RunTag(String);
 
@@ -203,24 +200,9 @@ impl RunTag {
     }
 }
 
-impl TryFrom<String> for RunTag {
-    type Error = String;
-
-    fn try_from(tag: String) -> Result<Self, Self::Error> {
-        let mut chars = tag.chars();
-        let valid = chars
-            .next()
-            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
-            && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '-');
-        if valid {
-            Ok(Self(tag))
-        } else {
-            Err(format!(
-                "`{}` is not a valid run tag: use one or more characters from a-z, 0-9 and `-`, \
-                 starting with a letter or digit",
-                tag.escape_debug()
-            ))
-        }
+impl From<String> for RunTag {
+    fn from(tag: String) -> Self {
+        Self(tag)
     }
 }
 
