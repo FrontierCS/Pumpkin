@@ -10,8 +10,8 @@
 //! - CPU, memory (swap included) and process limits, and a core file size limit of 0;
 //! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
 //!   container's log, which holds at most 1 MiB;
-//! - [`/pumpkin`](PUMPKIN_DIR), a tmpfs owned by the role's user, holding the
-//!   [directories](PUMPKIN_SUBDIRS) the driver puts there over the session. It holds at most
+//! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, holding the
+//!   [directories](pumpkin_subdirs) the driver puts there over the session. It holds at most
 //!   [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's memory limit,
 //!   so a role can keep there no more than that limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
@@ -54,7 +54,7 @@ use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{Resources, User};
-use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS};
+use pumpkin_schema::sandbox::{PUMPKIN_BYTES, pumpkin_dir, pumpkin_subdirs};
 use pumpkin_schema::workflow::Sandbox;
 use serde::Deserialize;
 use stdx::Context;
@@ -344,8 +344,8 @@ impl Engine {
         &self.report
     }
 
-    /// Starts a container for the role, connects its session, and puts [`PUMPKIN_SUBDIRS`]
-    /// under [`PUMPKIN_DIR`].
+    /// Starts a container for the role, connects its session, and puts [`pumpkin_subdirs()`]
+    /// under [`pumpkin_dir()`].
     ///
     /// # Errors
     ///
@@ -489,9 +489,9 @@ fn connect(listener: Listener, id: &str) -> Result<Session, String> {
              as it starts"
         )
     })?;
-    let root = &*PUMPKIN_DIR;
-    let puts: Vec<Put<'_>> = PUMPKIN_SUBDIRS.iter().map(Put::Dir).collect();
-    session.put(root, &puts).map_err(|error| {
+    let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
+    let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
+    session.put(&root, &puts).map_err(|error| {
         format!(
             "the directories under `{root}` can't be put in container {id}: {error}: expected \
              its `sandboxd` to put them, as the role's user, who owns `{root}`"
@@ -553,7 +553,7 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         "--ulimit=core=0".to_owned(),
         format!(
             "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
-            *PUMPKIN_DIR
+            pumpkin_dir()
         ),
         "--tmpfs=/tmp:ro".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,

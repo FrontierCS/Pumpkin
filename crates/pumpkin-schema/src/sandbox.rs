@@ -14,11 +14,9 @@
 //! no link or special file crosses a session, and every path in it is a [`RelativePath`],
 //! which can't leave the directory the tree is written to; [`tree::Writer`] writes one there.
 //!
-//! Every provider presents [`PUMPKIN_DIR`], with [`PUMPKIN_SUBDIRS`] below it, in the sandboxes
-//! it starts: the driver and a task's commands rely on them in any sandbox. It holds at most
-//! [`PUMPKIN_BYTES`], or less where a provider backs it with the role's memory.
-
-use std::sync::LazyLock;
+//! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
+//! sandboxes it starts: the driver and a task's commands rely on them in any sandbox. It holds
+//! at most [`PUMPKIN_BYTES`], or less where a provider backs it with the role's memory.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,16 +31,19 @@ pub mod tree;
 ///
 /// The driver puts a role's inputs there and collects its results from there; a task's
 /// commands read and write them at the paths below it.
-pub static PUMPKIN_DIR: LazyLock<AbsolutePath> = LazyLock::new(|| valid("/pumpkin"));
+pub fn pumpkin_dir() -> AbsolutePath {
+    valid("/pumpkin")
+}
 
-/// The directories below [`PUMPKIN_DIR`], there before a role's first command starts: `in`
+/// The directories below [`pumpkin_dir()`], there before a role's first command starts: `in`
 /// holds what the driver puts in, `out` what it collects, `home` the commands' home, and `log`
 /// their output.
-pub static PUMPKIN_SUBDIRS: LazyLock<[RelativePath; 4]> =
-    LazyLock::new(|| ["in", "out", "home", "log"].map(valid));
+pub fn pumpkin_subdirs() -> [RelativePath; 4] {
+    ["in", "out", "home", "log"].map(valid)
+}
 
-/// The most [`PUMPKIN_DIR`] holds, in bytes, so that whatever the driver collects from below it
-/// fits in this many.
+/// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the driver collects from below
+/// it fits in this many.
 ///
 /// A provider may back it with the role's memory, as the Docker provider does, so that its
 /// files and the role's processes share the role's memory limit: a role can keep there at most
