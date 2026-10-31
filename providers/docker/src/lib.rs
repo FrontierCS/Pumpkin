@@ -56,7 +56,7 @@ use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{Resources, User};
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, PUMPKIN_DIR, PUMPKIN_SUBDIRS};
 use pumpkin_schema::workflow::Sandbox;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use stdx::Context;
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
@@ -93,7 +93,7 @@ const ROLE_LABEL: &str = "pumpkin.role";
 /// Any name but the empty one, which `docker` would take for no name, and so reach the engine
 /// of the command line's current context. A name no context has is refused by
 /// [`Engine::connect`].
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -125,7 +125,7 @@ pub struct Engine {
 }
 
 /// The engine, as `docker` describes it before anything starts.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct Report {
     /// The context `docker` reaches the engine through.
     pub context: ContextName,
@@ -144,7 +144,7 @@ pub struct Report {
 }
 
 /// What the engine's security options say.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct Security {
     /// Whether the engine runs as an ordinary user rather than as root: see
     /// [the envelope](crate#the-envelope).
@@ -329,7 +329,12 @@ impl Engine {
             operating_system,
             server_version,
             client_info,
-        } = parse_json("docker info", &info)?;
+        } = serde_json::from_slice(&info.stdout).map_err(|error| {
+            format!(
+                "the JSON `docker info` printed isn't of the form expected: {error}: use \
+                 Docker's own command line, which prints it"
+            )
+        })?;
         check_limits(
             &context,
             [
@@ -407,25 +412,6 @@ impl Engine {
         }
     }
 
-    /// The IDs of the run's containers, running or not.
-    fn list(&self, run: &RunTag) -> Result<Vec<String>, String> {
-        let filter = format!("label={RUN_LABEL}={}", run.as_str());
-        let listed = docker(
-            &self.report.context,
-            [
-                "container",
-                "ls",
-                "--all",
-                "--quiet",
-                "--no-trunc",
-                "--filter",
-                &filter,
-            ],
-        )?;
-        let ids = String::from_utf8_lossy(&listed.stdout);
-        Ok(ids.lines().map(str::to_owned).collect())
-    }
-
     /// Removes every container of the run, and returns their IDs. Containers of other runs
     /// stay.
     ///
@@ -434,9 +420,23 @@ impl Engine {
     /// Fails if `docker` can't list them, or can't remove one; the others are removed
     /// regardless.
     pub fn destroy_all(&self, run: &RunTag) -> Result<Vec<String>, String> {
-        let ids = self.list(run).map_err(fix_reported)?;
+        let context = &self.report.context;
+        // The IDs of the run's containers, running or not.
+        let filter = format!("label={RUN_LABEL}={}", run.as_str());
+        let ls = [
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            &filter,
+        ];
+        let listed = docker(context, ls).map_err(fix_reported)?;
+        let ids = String::from_utf8_lossy(&listed.stdout);
+        let ids: Vec<String> = ids.lines().map(str::to_owned).collect();
         let failures: Vec<String> = (ids.iter())
-            .filter_map(|id| remove(&self.report.context, id).err())
+            .filter_map(|id| remove(context, id).err())
             .collect();
         if failures.is_empty() {
             Ok(ids)
@@ -498,16 +498,6 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
         context.as_str(),
         unsupported.join(", ")
     ))
-}
-
-/// Parses the JSON on `output`'s standard output, which `command` printed.
-fn parse_json<T: for<'de> Deserialize<'de>>(command: &str, output: &Output) -> Result<T, String> {
-    serde_json::from_slice(&output.stdout).map_err(|error| {
-        format!(
-            "the JSON `{command}` printed isn't of the form expected: {error}: use Docker's own \
-             command line, which prints it"
-        )
-    })
 }
 
 fn connect(listener: Listener, id: &str) -> Result<Session, String> {
