@@ -5,5 +5,8 @@ description = "Small extensions to the standard library that Pumpkin's crates sh
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+test = false
+
 [lints]
 workspace = true

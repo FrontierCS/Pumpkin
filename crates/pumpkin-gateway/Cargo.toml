@@ -5,6 +5,9 @@ description = "The gateway: the host's end of the sessions that Pumpkin's sandbo
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+test = false
+
 [dependencies]
 pumpkin-schema = { path = "../pumpkin-schema" }
 

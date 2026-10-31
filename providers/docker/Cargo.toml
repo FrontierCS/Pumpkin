@@ -5,6 +5,9 @@ description = "Pumpkin's Docker provider: a sandbox for a role as a container th
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+test = false
+
 [dependencies]
 pumpkin-gateway = { path = "../../crates/pumpkin-gateway" }
 pumpkin-schema = { path = "../../crates/pumpkin-schema" }

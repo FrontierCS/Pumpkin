@@ -8,6 +8,7 @@ publish.workspace = true
 [[bin]]
 name = "sandboxd"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 pumpkin-schema = { path = "../pumpkin-schema" }
