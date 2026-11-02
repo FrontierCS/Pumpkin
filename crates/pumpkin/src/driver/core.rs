@@ -3,18 +3,10 @@
 //! [`Core`] holds a run's state, does no I/O and reads no clock, so the same [`Event`]s give the
 //! same [`Action`]s; [`Core`] says how a runtime drives it.
 //!
-//! The core runs [`SoloThenJudge`], the only pattern. The work phase starts with the run: the
-//! core asks for the agent ([`Action::StartAgent`]), and answers its ops while it works. It ends
-//! at the deadline, or when the agent exits, its sandbox fails, or the grace after an accepted
-//! finalize runs out ([`WorkEnd`]). An accepted finalize locks the selection and refuses every
-//! later op, and the agent then has the pattern's
-//! [`finalize_grace_seconds`](SoloThenJudge::finalize_grace_seconds) to exit by itself, so that
-//! its harness can wind down. The core then stops the jobs queued or running, freezes the agent
-//! and collects its outputs, and destroys it; a job whose command has already ended is left to
-//! finish. Once all of that is confirmed, the final phase starts: the pattern's
-//! [`score`](SoloThenJudge::score) judges the selected submission, the finalized one, else the
-//! latest stored. The run finishes with an [`Outcome`] ([`Action::Finish`]), without a score if
-//! there was no submission.
+//! The core implements [`SoloThenJudge`]. Its [`Action`]s ask the runtime to start the agent,
+//! answer ops, run judge calls, collect outputs and destroy sandboxes; the corresponding
+//! [`Event`]s confirm their completion. [`WorkEnd`] names why the work phase ended, and
+//! [`Action::Finish`] carries the run's [`Outcome`].
 //!
 //! The rules by which the core authorizes ops and fills in their replies are in its `ops`
 //! module, and how it meters judge calls in its `jobs` module.
