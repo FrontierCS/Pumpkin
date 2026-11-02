@@ -328,18 +328,26 @@ fn list(base: &Path, dir: &Path, lines: &mut Vec<String>) {
     }
 }
 
-/// The commands of the container's processes, from the host, by process ID.
-fn processes(sandbox: &Container) -> String {
-    let top = docker()
-        .args(["top", sandbox.id(), "-o", "pid,args"])
-        .output()
-        .unwrap();
-    let top = String::from_utf8(top.stdout).unwrap();
-    let commands = top.lines().skip(1).map(|line| {
-        let (_pid, command) = line.trim_start().split_once(' ').unwrap();
-        command.trim_start().to_owned()
-    });
-    commands.collect::<Vec<_>>().join(", ")
+/// The commands of the container's processes, from the host, by process ID, listed every
+/// 10 ms until `done` holds of the list or 30 s pass.
+fn processes(sandbox: &Container, done: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let top = docker()
+            .args(["top", sandbox.id(), "-o", "pid,args"])
+            .output()
+            .unwrap();
+        let top = String::from_utf8(top.stdout).unwrap();
+        let commands = top.lines().skip(1).map(|line| {
+            let (_pid, command) = line.trim_start().split_once(' ').unwrap();
+            command.trim_start().to_owned()
+        });
+        let listed = commands.collect::<Vec<_>>().join(", ");
+        if done(&listed) || Instant::now() >= deadline {
+            return listed;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// What a judge does: reads its payload, writes a result and evidence, and exits, leaving
@@ -362,9 +370,15 @@ fn judge() {
                 (sleep 600 &); setsid sleep 600 &
                 exit 3"#;
             let mut lines = vec![format!("{:?}", sh(&mut sandbox, 1, script))];
-            lines.push(format!("before freezing: {}", processes(&sandbox)));
+            // The script exits without waiting for its sleeps, which may not run yet: until
+            // then, each shows as the command that starts it.
+            let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
+            let before = processes(&sandbox, |listed| sleeping(listed) == 2);
+            lines.push(format!("before freezing: {before}"));
             sandbox.session().freeze().unwrap();
-            lines.push(format!("after freezing: {}", processes(&sandbox)));
+            // Freezing returns once the processes it kills are gone.
+            let after = processes(&sandbox, |_| true);
+            lines.push(format!("after freezing: {after}"));
             lines.extend(collect(fixture, &mut sandbox, "out"));
             lines.extend(collect(fixture, &mut sandbox, "log"));
             lines
