@@ -47,9 +47,12 @@ use pumpkin_schema::sandbox::{
 /// by its [`Limits`] times this.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How many frames of a tree may wait for the request writing it. While they wait, the session
-/// reads nothing more.
-const QUEUED_TREE_FRAMES: usize = 64;
+/// How many frames of a tree may wait for the request writing it. While that many wait, the
+/// session reads nothing more.
+// One: the frame the reader reads while the request writes the one before, so that reading the
+// socket and writing to disk overlap. More would each hold up to a frame's body, 1 MiB, without
+// speeding the transfer, which goes at the pace of the slower of the two.
+const QUEUED_TREE_FRAMES: usize = 1;
 
 /// How many frames may wait for any other request: its reply and, for a command, its exit.
 const QUEUED_REPLIES: usize = 2;
