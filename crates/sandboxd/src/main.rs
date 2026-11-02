@@ -1,11 +1,15 @@
-//! `sandboxd`, the supervisor that runs in every sandbox. [`flags`] holds its grammar, as
-//! `sandboxd --help` prints it.
+//! `sandboxd`, the supervisor that runs in every sandbox, and, run under the file name
+//! `sandboxctl`, the shim through which callers in the sandbox make ops ([`ctl`]). [`flags`]
+//! holds `sandboxd`'s grammar, as `sandboxd --help` prints it.
 //!
-//! It connects to the gateway at the Unix socket named by its one argument and serves the
-//! session ([`pumpkin_schema::sandbox`]) until the gateway closes it: it writes the trees it is
-//! put, starts commands and reports their exits, freezes the sandbox, and sends
-//! the trees it is asked to collect. When the session ends it kills its commands and exits,
-//! which stops a sandbox whose first process it is.
+//! It connects to the gateway at its Unix socket and serves the session
+//! ([`pumpkin_schema::sandbox`]) until the gateway closes it: it writes the trees it is put,
+//! starts commands and reports their exits, freezes the sandbox, and sends the trees it is
+//! asked to collect. When the session ends it kills its commands and exits, which
+//! stops a sandbox whose first process it is.
+//!
+//! With `--ops`, it also serves [ops], which it carries to the session's owner; without it,
+//! nothing in its sandbox can make one.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
 //! kills every other process in the sandbox. Run as any other process, as in tests, it kills
@@ -16,12 +20,16 @@
 //! runs untrusted code. It does make itself non-dumpable first, so that the role's code can't
 //! reach it through `/proc` ([`sys::make_non_dumpable`] says why).
 
+use std::ffi::OsString;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::LockResult;
 
 mod commands;
+mod ctl;
 mod files;
+mod ops;
 mod session;
 mod sys;
 
@@ -43,6 +51,11 @@ mod flags {
         cmd sandboxd {
             /// The gateway's Unix socket, over which the session runs.
             required gateway: PathBuf
+            /// Serves ops, which callers in the sandbox make through `sandboxctl`, at
+            /// /pumpkin/sandboxctl/socket. sandboxd makes its directory, which must not exist
+            /// yet, closed to all but its own user. Without it, nothing in the sandbox can make
+            /// an op.
+            optional --ops
         }
     }
     // generated start
@@ -51,6 +64,8 @@ mod flags {
     #[derive(Debug)]
     pub struct Sandboxd {
         pub gateway: PathBuf,
+
+        pub ops: bool,
     }
 
     impl Sandboxd {
@@ -78,8 +93,14 @@ mod flags {
 )]
 fn main() -> ExitCode {
     stdx::abort_on_panic();
+    let mut args = std::env::args_os();
+    let name = args.next().unwrap_or_default();
+    let args: Vec<OsString> = args.collect();
+    if Path::new(&name).file_name() == Some("sandboxctl".as_ref()) {
+        return ctl::main(args);
+    }
     sys::make_non_dumpable();
-    let flags::Sandboxd { gateway } = match flags::Sandboxd::from_env() {
+    let flags::Sandboxd { gateway, ops } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {
             // Help that can't be written changes nothing.
@@ -93,7 +114,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match session::serve(&gateway) {
+    match session::serve(&gateway, ops) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sandboxd: {error}");

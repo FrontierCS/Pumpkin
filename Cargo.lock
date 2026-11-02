@@ -80,6 +80,7 @@ dependencies = [
  "libc",
  "pumpkin-gateway",
  "pumpkin-schema",
+ "serde_json",
  "stdx",
  "xflags",
 ]

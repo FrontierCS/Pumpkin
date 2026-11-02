@@ -1,6 +1,7 @@
 //! `sandboxd` and the gateway's end of its session, together. `sandboxd` runs here as an
 //! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
-//! the sandbox.
+//! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
+//! `/pumpkin`: the Docker provider's tests make ops, in real sandboxes.
 
 #![expect(
     clippy::unwrap_used,

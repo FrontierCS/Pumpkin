@@ -18,7 +18,10 @@
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
 //!   `VOLUME` its image declares, which is removed with the container. Docker's `/dev/shm` and
 //!   `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so what they hold
-//!   counts against the memory limit.
+//!   counts against the memory limit;
+//! - for a role that makes ops ([`Start::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
+//!   read-only, and `sandboxd` serving ops; any other sandbox is
+//!   [passive](pumpkin_schema::sandbox).
 //!
 //! Files move only over the session, never through the Docker daemon.
 //!
@@ -54,7 +57,9 @@ use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{Resources, User};
-use pumpkin_schema::sandbox::{PUMPKIN_BYTES, pumpkin_dir, pumpkin_subdirs};
+use pumpkin_schema::sandbox::{
+    OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir, pumpkin_subdirs,
+};
 use pumpkin_schema::workflow::Sandbox;
 use serde::Deserialize;
 use stdx::Context;
@@ -222,6 +227,11 @@ pub struct Start<'a> {
     /// to traverse only the directory, not its parent. Unix socket paths are short, so keep it
     /// short too.
     pub socket_dir: &'a Path,
+    /// For a role whose commands make ops through `sandboxctl`, as an agent's do, the most
+    /// bytes an op's payload may hold, which [`Engine::start`] enables ops with
+    /// ([`Session::enable_ops`]) before it returns. `None` for a
+    /// [passive](pumpkin_schema::sandbox) sandbox.
+    pub ops: Option<OpPayloadLimit>,
 }
 
 /// A sandbox's container and the session with the `sandboxd` inside.
@@ -345,8 +355,9 @@ impl Engine {
         &self.report
     }
 
-    /// Starts a container for the role, connects its session, and puts [`pumpkin_subdirs()`]
-    /// under [`pumpkin_dir()`].
+    /// Starts a container for the role, connects its session, enables ops on it with
+    /// [`Start::ops`]'s limit, if it gives one, and puts [`pumpkin_subdirs()`] under
+    /// [`pumpkin_dir()`].
     ///
     /// # Errors
     ///
@@ -372,7 +383,7 @@ impl Engine {
         let created = docker(context, &create_args(start)?).map_err(fix_reported)?;
         let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
         let started = docker(context, ["start", &id]).map_err(fix_reported);
-        match started.and_then(|_| connect(listener, &id)) {
+        match started.and_then(|_| connect(listener, &id, start.ops)) {
             Ok(session) => Ok(Container {
                 context: context.clone(),
                 id,
@@ -483,13 +494,18 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
     ))
 }
 
-fn connect(listener: Listener, id: &str) -> Result<Session, String> {
+/// Accepts the session of container `id`'s `sandboxd`, enables ops on it with `ops`, the
+/// payload limit, if any, and puts the directories a role expects.
+fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
     let mut session = listener.accept(CONNECT_TIMEOUT).map_err(|error| {
         format!(
             "the `sandboxd` of container {id} didn't connect: {error}: expected it to connect \
              as it starts"
         )
     })?;
+    if let Some(payload_limit) = ops {
+        session.enable_ops(payload_limit);
+    }
     let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
     let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
     session.put(&root, &puts).map_err(|error| {
@@ -508,6 +524,7 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         sandbox,
         sandboxd,
         socket_dir,
+        ops,
     } = start;
     let Sandbox {
         name,
@@ -523,7 +540,7 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         memory_bytes,
     } = *resources;
     let (millis, memory) = (cpu_millis.get(), memory_bytes.get());
-    Ok(vec![
+    let mut args = vec![
         "create".to_owned(),
         format!("--label={RUN_LABEL}={}", run.as_str()),
         format!("--label={ROLE_LABEL}={name}"),
@@ -559,11 +576,20 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         "--tmpfs=/tmp:ro".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(socket_dir, GATEWAY_DIR)?,
+    ];
+    if ops.is_some() {
+        args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
+    }
+    args.extend([
         format!("--entrypoint={SANDBOXD_PATH}"),
         "--".to_owned(),
         image.to_string(),
         format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
-    ])
+    ]);
+    if ops.is_some() {
+        args.push("--ops".to_owned());
+    }
+    Ok(args)
 }
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.

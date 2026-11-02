@@ -1,16 +1,18 @@
 //! The system calls the standard library doesn't offer, and the flags it doesn't name: waiting
 //! for any child or finding whether there is one, killing a process group or every process,
-//! making the process non-dumpable, and opening only a regular file, at a path the role's code
-//! can write.
+//! making the process non-dumpable, opening only a regular file, at a path the role's code can
+//! write, and finding whether a connection's other end has closed it, without reading from it.
 
 #![expect(
     unsafe_code,
-    reason = "libc has no safe wrappers for the wait, kill and prctl calls"
+    reason = "libc has no safe wrappers for the wait, kill, prctl and recv calls"
 )]
 
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use stdx::Context;
@@ -169,6 +171,19 @@ pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<Fil
             "{} is not a regular file: name one",
             path.display()
         ))
+    }
+}
+
+/// Whether the other end of `connection` has closed it, as a killed process's sockets close:
+/// whether reading it would find its end, or fail. It reads nothing, and doesn't wait.
+pub(crate) fn peer_closed(connection: &UnixStream) -> bool {
+    let mut byte = 0_u8;
+    let flags = libc::MSG_PEEK | libc::MSG_DONTWAIT;
+    // SAFETY: recv writes at most one byte, to `byte`, which outlives the call.
+    match unsafe { libc::recv(connection.as_raw_fd(), (&raw mut byte).cast(), 1, flags) } {
+        0 => true,
+        1.. => false,
+        _ => io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock,
     }
 }
 

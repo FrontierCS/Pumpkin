@@ -15,19 +15,26 @@
 
 use std::fs;
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
 use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Security, Start};
-use pumpkin_gateway::Put;
+use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, RefusedOp, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
+use pumpkin_schema::sandbox::op::{
+    Failed, Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
+    StatusReply, SubmitReply, SubmitState,
+};
 use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{ExitStatus, Launch, RelativePath};
+use pumpkin_schema::sandbox::{
+    ExitStatus, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
+};
 use pumpkin_schema::workflow::Sandbox;
 
 /// A small public image, pinned by digest.
@@ -66,9 +73,10 @@ impl Fixture {
         }
     }
 
-    /// Starts a sandbox for role `role`, which runs as 4242:4243.
+    /// Starts a passive sandbox for role `role`, which runs as 4242:4243.
     fn start(&self, run: &RunTag, role: &str) -> Container {
-        self.try_start(run, role, &self.sandboxd, image()).unwrap()
+        self.try_start(run, role, &self.sandboxd, image(), None)
+            .unwrap()
     }
 
     fn try_start(
@@ -77,6 +85,7 @@ impl Fixture {
         role: &str,
         sandboxd: &Path,
         image: Image,
+        ops: Option<OpPayloadLimit>,
     ) -> Result<Container, String> {
         let socket_dir = self.dir.join(role);
         fs::create_dir_all(&socket_dir).unwrap();
@@ -97,6 +106,7 @@ impl Fixture {
             sandbox: &sandbox,
             sandboxd,
             socket_dir: &socket_dir,
+            ops,
         };
         engine().start(&start)
     }
@@ -238,10 +248,10 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
-/// Runs `script` as the n-th command, in `/pumpkin/home`, with its output in `/pumpkin/log`,
-/// and returns how it exited.
-fn sh(sandbox: &mut Container, n: u32, script: &str) -> ExitStatus {
-    let launch = Launch {
+/// How to run `script` as the n-th command, in `/pumpkin/home`, with its output in
+/// `/pumpkin/log`. It may call `sandboxctl` if the sandbox serves ops.
+fn launch(n: u32, script: &str) -> Launch {
+    Launch {
         argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
         env: Env::try_from(vec![
             EnvVar::try_from("HOME=/pumpkin/home".to_owned()).unwrap(),
@@ -250,11 +260,38 @@ fn sh(sandbox: &mut Container, n: u32, script: &str) -> ExitStatus {
         cwd: absolute("/pumpkin/home"),
         stdout: absolute(&format!("/pumpkin/log/{n}.stdout")),
         stderr: absolute(&format!("/pumpkin/log/{n}.stderr")),
-    };
+    }
+}
+
+/// Runs `script` as the n-th command ([`launch`]), and returns how it exited, which it has 30 s
+/// to.
+fn sh(sandbox: &mut Container, n: u32, script: &str) -> ExitStatus {
     let session = sandbox.session();
-    let mut process = session.start(launch).unwrap();
+    let mut process = session.start(launch(n, script)).unwrap();
     let status = session.wait(&mut process, Duration::from_secs(30));
     status.unwrap().unwrap()
+}
+
+/// Waits for `process` to exit as the session's owner does, answering each op that arrives
+/// meanwhile ([`reply`]). Returns how it exited, which it has 30 s to, and what each op asked.
+fn serve(
+    session: &mut Session,
+    process: &mut Process,
+    payload: &[u8],
+) -> (ExitStatus, Vec<String>) {
+    // How long each wait lasts before the other's turn: what arrives meanwhile waits for it.
+    let tick = Duration::from_millis(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut asked = Vec::new();
+    while Instant::now() < deadline {
+        if let Some(status) = session.wait(process, tick).unwrap() {
+            return (status, asked);
+        }
+        if let Some(arrival) = session.next_op(tick).unwrap() {
+            asked.push(reply(session, arrival, payload));
+        }
+    }
+    panic!("the command ran on for 30 s, having made ops that asked {asked:?}");
 }
 
 /// Collects the sandbox's `dir` into the fixture's directory and returns the files' contents.
@@ -360,6 +397,9 @@ fn confinement() {
                 echo "outbound connect: exit $?"
                 grep -E '^(Cap|NoNewPrivs)' /proc/self/status
                 echo "uid=$(id -u) gid=$(id -g)"
+                echo "/.pumpkin holds:" $(ls /.pumpkin)
+                echo "/pumpkin holds:" $(ls -A /pumpkin)
+                ln -s /.pumpkin/sandboxd sandboxctl && echo "sandboxctl ops: $(./sandboxctl ops 2>&1)"
                 for limit in cpu.max memory.max memory.swap.max pids.max; do
                     echo "$limit: $(cat /sys/fs/cgroup/$limit)"
                 done
@@ -409,7 +449,7 @@ fn confinement() {
         &expect![[r#"
             Code(0)
             1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /.pumpkin/gateway/x: Read-only file system; sh: can't create /etc/hosts: Permission denied; sh: can't create /proc/1/fd/1: Permission denied
-            1.stdout: interfaces: lo; outbound connect: exit 1; CapInh:	0000000000000000; CapPrm:	0000000000000000; CapEff:	0000000000000000; CapBnd:	0000000000000000; CapAmb:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; mqueue at /dev/mqueue; tmpfs at /dev/shm; tmpfs at /pumpkin; tmpfs at /tmp; /pumpkin: 4242:4243 755, 1048576 KiB; a program in /pumpkin: ran; /tmp/x: refused; /.pumpkin/sandboxd: refused; /.pumpkin/gateway/x: refused; /etc/hosts: refused; /workspace/x: writable; /volume/x: writable; /pumpkin/home/x: writable; /dev/shm/x: writable; /proc/1/fd/1: refused; /dev/mqueue/x: made
+            1.stdout: interfaces: lo; outbound connect: exit 1; CapInh:	0000000000000000; CapPrm:	0000000000000000; CapEff:	0000000000000000; CapBnd:	0000000000000000; CapAmb:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; /.pumpkin holds: gateway sandboxd; /pumpkin holds: home in log out; sandboxctl ops: sandboxctl: sandboxd at /pumpkin/sandboxctl/socket can't be reached: No such file or directory (os error 2): run sandboxctl in a sandbox that serves ops; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; mqueue at /dev/mqueue; tmpfs at /dev/shm; tmpfs at /pumpkin; tmpfs at /tmp; /pumpkin: 4242:4243 755, 1048576 KiB; a program in /pumpkin: ran; /tmp/x: refused; /.pumpkin/sandboxd: refused; /.pumpkin/gateway/x: refused; /etc/hosts: refused; /workspace/x: writable; /volume/x: writable; /pumpkin/home/x: writable; /dev/shm/x: writable; /proc/1/fd/1: refused; /dev/mqueue/x: made
             rootless or userns, exactly when the uid map isn't the identity: true
             log config: {"Type":"json-file","Config":{"max-file":"1","max-size":"1048576"}}
             init: false
@@ -546,7 +586,7 @@ fn failed_start() {
             ];
             let mut lines = Vec::new();
             for (role, sandboxd, image) in attempts {
-                let failed = fixture.try_start(&fixture.run, role, sandboxd, image);
+                let failed = fixture.try_start(&fixture.run, role, sandboxd, image, None);
                 let failed = failed.unwrap_err();
                 lines.push(format!("{role}: {}", redact(fixture, &failed)));
             }
@@ -576,4 +616,333 @@ fn redact(fixture: &Fixture, message: &str) -> String {
         return format!("{before}{from}…{to}{after}");
     }
     message
+}
+
+/// A shell function, `ctl`, that runs `sandboxctl` with its arguments, and shows how it exited
+/// and what it printed.
+const CTL: &str = r#"
+    ctl() { out=$(/.pumpkin/bin/sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
+
+/// Commands in a sandbox that serves ops make them through `sandboxctl`, which a stand-in for
+/// the session's owner answers ([`reply`]), and the gateway refuses a payload over the limit
+/// the sandbox was started with. `sandboxd` made the control socket's directory closed to all
+/// but the role's user, and `sandboxctl` is read-only, so writing it fails the last command.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn ops() {
+    check(
+        "ops",
+        |fixture| {
+            let payload = payload();
+            let limit = OpPayloadLimit::try_from(u64::try_from(payload.len()).unwrap()).unwrap();
+            let sandbox =
+                fixture.try_start(&fixture.run, "ops", &fixture.sandboxd, image(), Some(limit));
+            let mut sandbox = sandbox.unwrap();
+            let session = sandbox.session();
+            let put = [Put::File(&relative("payload"), &payload)];
+            session.put(&absolute("/pumpkin/home"), &put).unwrap();
+            let script = format!(
+                r#"{CTL}
+                cp payload big && printf '!' >> big && ln -s payload link
+                ctl ops
+                /.pumpkin/bin/sandboxctl ops > /dev/full; echo "\$ sandboxctl ops > /dev/full: exit $?"
+                ctl judge train payload
+                ctl submit submit ../home/payload --finalize
+                ctl submit submit payload
+                ctl judge train link
+                ctl status 1
+                ctl status 2
+                ctl status 3
+                ctl judge train big
+                echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10)"
+                echo > /.pumpkin/bin/sandboxctl"#
+            );
+            let mut process = session.start(launch(1, &script)).unwrap();
+            let (status, arrived) = serve(session, &mut process, &payload);
+            let mut lines = vec![format!("{status:?}")];
+            lines.extend(log(fixture, &mut sandbox));
+            lines.extend(arrived.iter().map(|arrived| format!("owner: {arrived}")));
+            lines
+        },
+        &expect![[r#"
+            Code(1)
+            $ sandboxctl ops: exit 0
+              {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+            $ sandboxctl ops > /dev/full: exit 0
+            $ sandboxctl judge train payload: exit 0
+              {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl submit submit ../home/payload --finalize: exit 0
+              {"kind":"submit","state":"accepted","remaining_seconds":60}
+            $ sandboxctl submit submit payload: exit 0
+              {"kind":"submit","state":"stored","remaining_seconds":60}
+            $ sandboxctl judge train link: exit 0
+              {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl status 1: exit 0
+              {"kind":"status","job":1,"state":"passed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl status 2: exit 2
+              {"kind":"status","job":2,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl status 3: exit 1
+              {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
+            $ sandboxctl judge train big: exit 1
+              {"kind":"refused","message":"the payload is 2621441 bytes, more than the limit of 2621440: send at most 2621440"}
+            control socket's directory: drwx------
+            stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
+            owner: ops
+            owner: ops
+            owner: judge train: 2621440 bytes, intact: true
+            owner: submit submit, finalize true: 2621440 bytes, intact: true
+            owner: submit submit, finalize false: 2621440 bytes, intact: true
+            owner: judge train: 2621440 bytes, intact: true
+            owner: status 1
+            owner: status 2
+            owner: status 3
+            owner: refused Judge { grant: Name("train") }, over 2621440 bytes"#]],
+    );
+}
+
+/// Calls that `sandboxctl` or `sandboxd` refuse before an op opens, each failing its caller
+/// alone, so that the session serves the next call: among them one with `/proc/1/mem`, the
+/// memory of `sandboxd`, which can't open it, being non-dumpable. And a second `sandboxd`,
+/// connected to a session of its own, is refused the control socket's directory, since the
+/// first made it.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn refused_calls() {
+    check(
+        "refused",
+        |fixture| {
+            let ops = Some(OpPayloadLimit::try_from(64).unwrap());
+            let sandbox =
+                fixture.try_start(&fixture.run, "refused", &fixture.sandboxd, image(), ops);
+            let mut sandbox = sandbox.unwrap();
+            // A session for the second `sandboxd`, which it connects to and never serves.
+            let second = Listener::bind(fixture.dir.join("refused/second")).unwrap();
+            let script = format!(
+                r#"{CTL}
+                truncate -s {huge} huge
+                mkfifo fifo
+                ctl submit submit huge
+                ctl judge train missing
+                ctl judge train .
+                ctl judge train fifo
+                ctl judge train /proc/1/mem
+                ctl judge train ''
+                ctl judge Train huge
+                ctl status soon
+                ctl call train huge
+                ctl status 1
+                second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
+                echo "a second sandboxd: exit $?: $second""#,
+                huge = MAX_OP_PAYLOAD_BYTES + 1,
+            );
+            let session = sandbox.session();
+            let mut process = session.start(launch(1, &script)).unwrap();
+            let (status, arrived) = serve(session, &mut process, &[]);
+            drop(second);
+            let mut lines = vec![format!("{status:?}")];
+            lines.extend(log(fixture, &mut sandbox));
+            lines.extend(arrived.iter().map(|arrived| format!("owner: {arrived}")));
+            lines
+        },
+        &expect![[r#"
+            Code(0)
+            $ sandboxctl submit submit huge: exit 1
+              sandboxctl: /pumpkin/home/huge holds more than 67108864 bytes: send at most that
+            $ sandboxctl judge train missing: exit 1
+              sandboxctl: missing: No such file or directory (os error 2): name a file this user can reach
+            $ sandboxctl judge train .: exit 1
+              sandboxctl: /pumpkin/home is not a regular file: name one
+            $ sandboxctl judge train fifo: exit 1
+              sandboxctl: /pumpkin/home/fifo is not a regular file: name one
+            $ sandboxctl judge train /proc/1/mem: exit 1
+              sandboxctl: /proc/1/mem: Permission denied (os error 13)
+            $ sandboxctl judge train : exit 1
+              sandboxctl: the payload file's path is empty: name a file
+            $ sandboxctl judge Train huge: exit 1
+              sandboxctl: `Train` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
+            $ sandboxctl status soon: exit 1
+              sandboxctl: `soon` is not a job: name one by the number a judge call returned
+            $ sandboxctl call train huge: exit 1
+              sandboxctl: unexpected argument: "call": see `sandboxctl --help`
+            $ sandboxctl status 1: exit 0
+              {"kind":"status","job":1,"state":"passed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
+            a second sandboxd: exit 1: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: File exists (os error 17): expected nothing there yet, in a directory this user can write to
+            owner: status 1"#]],
+    );
+}
+
+/// Callers whose ops arrive while one is in flight wait their turns, and each is carried once
+/// the op before it is answered. A caller that has left when its turn comes is dropped, its op
+/// unsent; one that leaves after its op was sent has it carried out. A payload's file is read
+/// in its caller's turn, so one replaced by a symbolic link while its caller waits is refused,
+/// as `sandboxd` opens no link.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn turns() {
+    check(
+        "turns",
+        |fixture| {
+            let ops = Some(OpPayloadLimit::try_from(64).unwrap());
+            let sandbox = fixture.try_start(&fixture.run, "turns", &fixture.sandboxd, image(), ops);
+            let mut sandbox = sandbox.unwrap();
+            // The owner holds the first op, and puts `in/held`, while the other callers arrive.
+            // `sent` waits until a caller's `sandboxctl` sleeps, which it does only as it waits
+            // for its answer, since connecting to a Unix socket waits only on a full backlog.
+            // Once each has sent its call, the script touches `ready`, which the second command
+            // waits for, and the owner answers the first op.
+            let script = r#"
+                exec 2>&1
+                ctl=/.pumpkin/bin/sandboxctl
+                sent() { until grep -q '(sandboxctl) S' /proc/$1/stat; do sleep 0.01; done; }
+                $ctl status 1 & first=$!
+                until [ -e ../in/held ]; do sleep 0.01; done
+                kill $first; wait $first 2>/dev/null
+                echo "the caller of status 1, which left with its op in flight: exit $?"
+                $ctl status 4 & sent $!; kill $!; wait $! 2>/dev/null
+                echo "the caller of status 4, which left as it waited its turn: exit $?"
+                printf ledger > payload && cp payload swapped
+                $ctl status 2 > 2.out 2>&1 & second=$!
+                $ctl status 3 > 3.out 2>&1 & third=$!
+                $ctl judge train swapped > swapped.out 2>&1 & fourth=$!
+                sent $second; sent $third; sent $fourth
+                ln -sf payload swapped
+                touch ready
+                wait $second; echo "status 2: exit $?: $(cat 2.out)"
+                wait $third; echo "status 3: exit $?: $(cat 3.out)"
+                wait $fourth; echo "judge train swapped: exit $?: $(cat swapped.out)"
+                ninth=$($ctl status 9 2>&1); echo "status 9: exit $?: $ninth""#;
+            let session = sandbox.session();
+            let mut callers = session.start(launch(1, script)).unwrap();
+            let first = session.next_op(Duration::from_secs(30)).unwrap().unwrap();
+            let held = [Put::Dir(&relative("held"))];
+            session.put(&absolute("/pumpkin/in"), &held).unwrap();
+            // No op can arrive while the first is in flight.
+            sh(&mut sandbox, 2, "until [ -e ready ]; do sleep 0.01; done");
+            let session = sandbox.session();
+            let mut arrived = vec![reply(session, first, &[])];
+            let (status, rest) = serve(session, &mut callers, &[]);
+            arrived.extend(rest);
+            // The callers of status 2 and 3 may take their turns in either order.
+            arrived.sort();
+            let mut lines = vec![format!("{status:?}")];
+            lines.extend(log(fixture, &mut sandbox));
+            lines.extend(arrived.iter().map(|arrived| format!("owner: {arrived}")));
+            lines
+        },
+        &expect![[r#"
+            Code(0)
+            the caller of status 1, which left with its op in flight: exit 143
+            the caller of status 4, which left as it waited its turn: exit 143
+            status 2: exit 2: {"kind":"status","job":2,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
+            status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
+            judge train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
+            status 9: exit 1: {"kind":"refused","message":"there is no job 9: name one a judge call returned"}
+            owner: status 1
+            owner: status 2
+            owner: status 3
+            owner: status 9"#]],
+    );
+}
+
+/// The lines of the first command's standard output, from the sandbox's `/pumpkin/log`, and
+/// its standard error, if anything was written there.
+fn log(fixture: &Fixture, sandbox: &mut Container) -> Vec<String> {
+    collect(fixture, sandbox, "log");
+    let stdout = fs::read_to_string(fixture.dir.join("collected-log/1.stdout")).unwrap();
+    let stderr = fs::read_to_string(fixture.dir.join("collected-log/1.stderr")).unwrap();
+    let stderr = (!stderr.is_empty()).then(|| format!("stderr: {}", stderr.trim_end()));
+    stdout.lines().map(str::to_owned).chain(stderr).collect()
+}
+
+/// A payload of 2.5 MiB, over two frames, whose bytes are not UTF-8.
+fn payload() -> Vec<u8> {
+    (0..5 << 19)
+        .map(|n: u32| n.to_le_bytes()[0] | 0x80)
+        .collect()
+}
+
+/// Answers `arrival` as a stand-in for the session's owner, unless the gateway refused it: ops
+/// with no grants; a judge call with job 1; a submission as stored, or accepted if final; and
+/// the status of job 1, which passed, of job 2, which failed, or else a refusal. Returns what
+/// it asked, saying whether its payload is `payload`.
+fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
+    let incoming = match arrival {
+        Arrival::Op(incoming) => incoming,
+        Arrival::Refused(RefusedOp {
+            call,
+            payload_limit,
+            ..
+        }) => return format!("refused {call:?}, over {} bytes", payload_limit.bytes()),
+    };
+    let remaining = Remaining {
+        calls: Some(1),
+        seconds: None,
+    };
+    let intact = |bytes: &[u8]| format!("{} bytes, intact: {}", bytes.len(), bytes == payload);
+    let (asked, answer) = match &incoming.op {
+        Op::Ops => {
+            let resources = Resources {
+                cpu_millis: NonZeroU64::MIN,
+                memory_bytes: NonZeroU64::MIN,
+            };
+            let ops = OpsReply {
+                remaining_seconds: 0,
+                resources,
+                grants: Vec::new(),
+            };
+            ("ops".to_owned(), OpReply::Ops(ops))
+        }
+        Op::Judge { grant, payload } => {
+            let asked = format!("judge {grant}: {}", intact(payload));
+            (asked, OpReply::Judge(JudgeReply { job: 1, remaining }))
+        }
+        Op::Submit {
+            grant,
+            finalize,
+            payload,
+        } => {
+            let asked = format!("submit {grant}, finalize {finalize}: {}", intact(payload));
+            let state = if *finalize {
+                SubmitState::Accepted
+            } else {
+                SubmitState::Stored
+            };
+            let remaining_seconds = 60;
+            let submitted = SubmitReply {
+                state,
+                remaining_seconds,
+            };
+            (asked, OpReply::Submit(submitted))
+        }
+        &Op::Status { job } => (format!("status {job}"), status(job, remaining)),
+    };
+    session.reply(incoming, answer).unwrap();
+    asked
+}
+
+/// The status of job `job`, with `remaining`: job 1 passed, job 2 failed, and any other is
+/// refused.
+fn status(job: u64, remaining: Remaining) -> OpReply {
+    let state = match job {
+        1 => {
+            let returned = Returned::from_iter([("score".to_owned(), 1.into())]);
+            JobState::Passed { returned }
+        }
+        2 => {
+            let failure = Failure {
+                code: FailureCode::JudgeTimeout,
+                message: "the judge ran past its timeout".to_owned(),
+            };
+            JobState::Failed(Failed::NoResult { failure })
+        }
+        _ => {
+            let message = format!("there is no job {job}: name one a judge call returned");
+            return OpReply::Refused { message };
+        }
+    };
+    OpReply::Status(StatusReply {
+        job,
+        state,
+        remaining,
+    })
 }
