@@ -380,9 +380,15 @@ fn untrusted_answers() {
             }),
             (collect, |s| vec![file(s, "f", 2), end(s)]),
             (collect, |s| vec![reply("failed", s)]),
-            // The command takes its start's `done` and its exit, so a `done` more fills its
-            // queue, which holds two frames, and the next is one too many.
+            // `start` takes at most the first `done` and the command's queue holds two frames,
+            // so the fourth overflows it, however the reader and the owner interleave.
             (start_and_freeze, |s| vec![done(s); 4]),
+            // The command's route goes at its exit, its stream's last frame, so later ones drop.
+            (start_and_freeze, |s| {
+                let mut flood = vec![done(s)];
+                flood.extend((0..3).map(|_| reply("exited", s)));
+                flood
+            }),
         ],
         &expect![[r#"
             ok; arrived ["a/b=hi"]
@@ -397,7 +403,8 @@ fn untrusted_answers() {
             InvalidData: file data is empty: send at least one byte in each frame; arrived ["f="]
             InvalidData: a file ended 2 bytes short: send all of its bytes before the next part; arrived ["f="]
             Other: no; arrived []
-            start: ok; freeze: ConnectionAborted: the sandbox broke the protocol: it sent more on stream 1 than a request takes"#]],
+            start: ok; freeze: ConnectionAborted: the sandbox broke the protocol: it sent more on stream 1 than a request takes
+            start: ok; freeze: ConnectionAborted: the sandbox ended the session"#]],
     );
 }
 
