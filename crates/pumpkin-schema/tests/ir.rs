@@ -1,6 +1,7 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a
 //! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
 //! policy. Its image digests, the agent's command and the judges' environment are placeholders.
+//! Also the JSON of ops' replies, which `sandboxctl` prints.
 
 #![expect(
     clippy::unwrap_used,
@@ -9,6 +10,7 @@
 
 use expect_test::{Expect, expect};
 use pumpkin_schema::ir;
+use pumpkin_schema::sandbox::op::OpReply;
 use pumpkin_schema::workflow::{Holder, Main, RoleId, Workflow};
 use serde_json::{Value, json};
 
@@ -29,20 +31,97 @@ fn lwe_with(pointer: &str, value: Value) -> Value {
     ir
 }
 
-/// Deserializes and parses each IR, and checks what becomes of them against `expect`: each
-/// parses, or fails to deserialize, or breaks rules.
-fn check(irs: impl IntoIterator<Item = Value>, expect: &Expect) {
-    let actual: Vec<String> = irs
-        .into_iter()
-        .map(|ir| match serde_json::from_value::<ir::Workflow>(ir) {
+/// Checks what becomes of each case against `expect`, a line each.
+fn check<C: Case>(cases: impl IntoIterator<Item = C>, expect: &Expect) {
+    let actual: Vec<String> = cases.into_iter().map(Case::outcome).collect();
+    expect.assert_eq(&actual.join("\n"));
+}
+
+/// A case whose outcome [`check`] shows.
+trait Case {
+    fn outcome(self) -> String;
+}
+
+/// An IR, which parses, or fails to deserialize, or breaks rules.
+impl Case for Value {
+    fn outcome(self) -> String {
+        match serde_json::from_value::<ir::Workflow>(self) {
             Err(error) => error.to_string(),
             Ok(ir) => match Workflow::parse(&ir) {
                 Ok(_) => "parsed".to_owned(),
                 Err(errors) => errors.to_string(),
             },
-        })
-        .collect();
-    expect.assert_eq(&actual.join("\n"));
+        }
+    }
+}
+
+/// An op's reply as JSON, which reads as the reply shown and writes back as itself, or fails to
+/// read.
+struct Reply(&'static str);
+
+impl Case for Reply {
+    fn outcome(self) -> String {
+        match serde_json::from_str::<OpReply>(self.0) {
+            Err(error) => error.to_string(),
+            Ok(reply) => match serde_json::to_string(&reply).unwrap() {
+                json if json == self.0 => format!("{reply:?}"),
+                json => format!("{reply:?}, written back as {json}"),
+            },
+        }
+    }
+}
+
+/// Each reply's JSON form, a status's in each of its job's states; and statuses whose fields
+/// don't match their states, which are refused.
+#[test]
+fn op_replies() {
+    check(
+        [
+            Reply(
+                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"concurrency":1,"call_timeout_seconds":600},{"kind":"submit","name":"submit","max_bytes":4194304}]}"#,
+            ),
+            Reply(r#"{"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}"#),
+            Reply(
+                r#"{"kind":"status","job":1,"state":"queued","remaining":{"calls":99,"seconds":null}}"#,
+            ),
+            Reply(
+                r#"{"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}"#,
+            ),
+            Reply(
+                r#"{"kind":"status","job":1,"state":"passed","returned":{"metrics":{"solved":3},"raw_score":3},"remaining":{"calls":99,"seconds":11993}}"#,
+            ),
+            Reply(
+                r#"{"kind":"status","job":2,"state":"failed","returned":{"failure":"wrong answer","raw_score":null},"remaining":{"calls":98,"seconds":11990}}"#,
+            ),
+            Reply(
+                r#"{"kind":"status","job":3,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
+            ),
+            Reply(r#"{"kind":"submit","state":"accepted","remaining_seconds":60}"#),
+            Reply(r#"{"kind":"refused","message":"`train` has no calls left: it allows 100"}"#),
+            Reply(
+                r#"{"kind":"status","job":1,"state":"running","returned":{},"remaining":{"calls":null,"seconds":null}}"#,
+            ),
+            Reply(
+                r#"{"kind":"status","job":1,"state":"passed","remaining":{"calls":null,"seconds":null}}"#,
+            ),
+            Reply(
+                r#"{"kind":"status","job":1,"state":"failed","returned":{},"failure":{"code":"judge_error","message":"the judge failed"},"remaining":{"calls":null,"seconds":null}}"#,
+            ),
+        ],
+        &expect![[r#"
+            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Judge(JudgeGrant { name: Name("train"), max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), concurrency: 1, call_timeout_seconds: 600 }), Submit(SubmitGrant { name: Name("submit"), max_bytes: 4194304 })] })
+            Judge(JudgeReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
+            Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
+            Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
+            Status(StatusReply { job: 1, state: Passed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}) }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
+            Status(StatusReply { job: 2, state: Failed(Judged { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }), remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
+            Status(StatusReply { job: 3, state: Failed(NoResult { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }), remaining: Remaining { calls: Some(97), seconds: Some(0) } })
+            Submit(SubmitReply { state: Accepted, remaining_seconds: 60 })
+            Refused { message: "`train` has no calls left: it allows 100" }
+            a job that hasn't finished has no result: give it neither `returned` nor `failure`
+            a passed job has a result: give it `returned`, and no `failure`
+            a failed job has a result or a failure: give it exactly one of `returned` and `failure`"#]],
+    );
 }
 
 #[test]

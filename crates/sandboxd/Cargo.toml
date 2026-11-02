@@ -14,6 +14,7 @@ test = false
 pumpkin-schema = { path = "../pumpkin-schema" }
 stdx = { path = "../stdx" }
 libc.workspace = true
+serde_json.workspace = true
 xflags.workspace = true
 
 [dev-dependencies]

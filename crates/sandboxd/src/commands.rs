@@ -29,6 +29,8 @@ use crate::{sys, unpoisoned};
 
 /// The commands started in this sandbox.
 pub(crate) struct Commands {
+    // Shared with the reaper thread, which reaps children while the session starts commands
+    // and freezes them.
     shared: Arc<Shared>,
 }
 

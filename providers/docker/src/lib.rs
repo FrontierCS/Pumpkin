@@ -16,19 +16,15 @@
 //!   so a role can keep there no more than that limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
-//!   `VOLUME` its image declares, which is removed with the container. Docker's `/dev/shm` and
-//!   `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so what they hold
-//!   counts against the memory limit.
+//!   `VOLUME` its image declares, which is removed with the container. Neither has a size
+//!   limit, so a role can fill the disk the Docker daemon stores containers on. Docker's
+//!   `/dev/shm` and `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so
+//!   what they hold counts against the memory limit;
+//! - for a role that makes ops ([`Start::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
+//!   read-only, and `sandboxd` serving ops; any other sandbox is
+//!   [passive](pumpkin_schema::sandbox).
 //!
 //! Files move only over the session, never through the Docker daemon.
-//!
-//! # Limits of this provider
-//!
-//! - The provider puts no size limit on the container's writable layer, the role's
-//!   workspace, or on its image's volumes, so a role can fill the disk the Docker daemon
-//!   stores containers on.
-//! - A container whose `sandboxd` exits before connecting still costs the 30 s it has to
-//!   connect before [`Engine::start`] fails.
 //!
 //! # The envelope
 //!
@@ -39,12 +35,8 @@
 //! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them.
 //! Each container is labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds
 //! a run's containers, and only those, even when the driver that started them is gone, and
-//! with its role's name, so that `docker ps` shows which is which.
-//!
-//! Rootless Docker is the setup to choose: its engine, and so every container, runs as an
-//! ordinary user, so escaping a container gains no more than that user has. A rootful engine
-//! runs as root, and whoever may use its socket, as the `docker` group may, can make it do
-//! anything root can. The provider runs on either, and its report says which.
+//! with its role's name, so that `docker ps` shows which is which. The provider runs on a
+//! rootful engine or a rootless one, and its report says which ([`Security::rootless`]).
 
 use std::env;
 use std::ffi::OsStr;
@@ -54,7 +46,9 @@ use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{Resources, User};
-use pumpkin_schema::sandbox::{PUMPKIN_BYTES, pumpkin_dir, pumpkin_subdirs};
+use pumpkin_schema::sandbox::{
+    OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir, pumpkin_subdirs,
+};
 use pumpkin_schema::workflow::Sandbox;
 use serde::Deserialize;
 use stdx::Context;
@@ -146,8 +140,11 @@ pub struct Report {
 /// What the engine's security options say.
 #[derive(Debug)]
 pub struct Security {
-    /// Whether the engine runs as an ordinary user rather than as root: see
-    /// [the envelope](crate#the-envelope).
+    /// Whether the engine runs as an ordinary user rather than as root.
+    // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
+    // ordinary user, so escaping a container gains no more than that user has. A rootful engine
+    // runs as root, and whoever may use its socket, as the `docker` group may, can make it do
+    // anything root can.
     pub rootless: bool,
     /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own,
     /// or `None` if the engine has no seccomp.
@@ -222,6 +219,10 @@ pub struct Start<'a> {
     /// to traverse only the directory, not its parent. Unix socket paths are short, so keep it
     /// short too.
     pub socket_dir: &'a Path,
+    /// For a role whose commands make ops through `sandboxctl`, as an agent's do, the most
+    /// bytes an op's payload may hold, which [`Engine::start`] accepts the session with
+    /// ([`Listener::accept`]). `None` for a [passive](pumpkin_schema::sandbox) sandbox.
+    pub ops: Option<OpPayloadLimit>,
 }
 
 /// A sandbox's container and the session with the `sandboxd` inside.
@@ -242,8 +243,9 @@ impl Container {
         &self.id
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
+    /// The session with the container's `sandboxd`, which the container's owner drives.
+    pub fn session(&mut self) -> &mut Session {
+        &mut self.session
     }
 
     /// Removes the container and ends the session, reporting a failure to remove the
@@ -344,16 +346,18 @@ impl Engine {
         &self.report
     }
 
-    /// Starts a container for the role, connects its session, and puts [`pumpkin_subdirs()`]
-    /// under [`pumpkin_dir()`].
+    /// Starts a container for the role, connects its session, which takes ops within
+    /// [`Start::ops`]'s limit, if it gives one, and puts [`pumpkin_subdirs()`] under
+    /// [`pumpkin_dir()`].
     ///
     /// # Errors
     ///
     /// Fails, naming the path, if the session's socket can't be made in the socket directory,
     /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
-    /// container; if its `sandboxd` doesn't connect within 30 s; or if the directories can't be
-    /// put. Whatever container `docker` created is removed before the error returns, which
-    /// quotes the end of the container's logs, and says if removing it failed.
+    /// container; if its `sandboxd` doesn't connect within 30 s, which a `sandboxd` that exits
+    /// at once still costs; or if the directories can't be put. Whatever container `docker`
+    /// created is removed before the error returns, which quotes the end of the container's
+    /// logs, and says if removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
         let socket = start.socket_dir.join(SOCKET_NAME);
@@ -371,7 +375,7 @@ impl Engine {
         let created = docker(context, &create_args(start)?).map_err(fix_reported)?;
         let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
         let started = docker(context, ["start", &id]).map_err(fix_reported);
-        match started.and_then(|_| connect(listener, &id)) {
+        match started.and_then(|_| connect(listener, &id, start.ops)) {
             Ok(session) => Ok(Container {
                 context: context.clone(),
                 id,
@@ -482,8 +486,10 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
     ))
 }
 
-fn connect(listener: Listener, id: &str) -> Result<Session, String> {
-    let session = listener.accept(CONNECT_TIMEOUT).map_err(|error| {
+/// Accepts the session of container `id`'s `sandboxd`, which takes ops within `ops`, the
+/// payload limit, if any, and puts the directories a role expects.
+fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
+    let mut session = listener.accept(CONNECT_TIMEOUT, ops).map_err(|error| {
         format!(
             "the `sandboxd` of container {id} didn't connect: {error}: expected it to connect \
              as it starts"
@@ -507,6 +513,7 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         sandbox,
         sandboxd,
         socket_dir,
+        ops,
     } = start;
     let Sandbox {
         name,
@@ -522,7 +529,7 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         memory_bytes,
     } = *resources;
     let (millis, memory) = (cpu_millis.get(), memory_bytes.get());
-    Ok(vec![
+    let mut args = vec![
         "create".to_owned(),
         format!("--label={RUN_LABEL}={}", run.as_str()),
         format!("--label={ROLE_LABEL}={name}"),
@@ -558,11 +565,20 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         "--tmpfs=/tmp:ro".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(socket_dir, GATEWAY_DIR)?,
+    ];
+    if ops.is_some() {
+        args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
+    }
+    args.extend([
         format!("--entrypoint={SANDBOXD_PATH}"),
         "--".to_owned(),
         image.to_string(),
         format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
-    ])
+    ]);
+    if ops.is_some() {
+        args.push("--ops".to_owned());
+    }
+    Ok(args)
 }
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.

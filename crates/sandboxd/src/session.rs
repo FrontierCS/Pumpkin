@@ -1,5 +1,5 @@
-//! Serving a session: the gateway's requests, handled in the order they arrive, each by
-//! [`files`] or [`commands`](crate::commands).
+//! Serving a session: the gateway's requests, handled in the order they arrive by [`files`]
+//! or [`commands`](crate::commands), and the replies to [ops](crate::ops).
 
 use std::io::{self, BufReader, Read};
 use std::os::unix::net::UnixStream;
@@ -11,10 +11,12 @@ use stdx::Context;
 
 use crate::commands::Commands;
 use crate::files::{self, Puts};
+use crate::ops::Ops;
 use crate::unpoisoned;
 
-/// Connects to the gateway at `socket` and serves the session until the gateway ends it.
-pub(crate) fn serve(socket: &Path) -> Result<(), String> {
+/// Connects to the gateway at `socket` and serves the session until the gateway ends it. With
+/// `serve_ops`, it also serves ops, from before the first request.
+pub(crate) fn serve(socket: &Path, serve_ops: bool) -> Result<(), String> {
     let stream = UnixStream::connect(socket).context(format_args!(
         "connecting to the gateway at {} failed",
         socket.display()
@@ -23,18 +25,26 @@ pub(crate) fn serve(socket: &Path) -> Result<(), String> {
         .try_clone()
         .context("cloning the connection to the gateway failed")?;
     let sender = Sender(Arc::new(Mutex::new(sender)));
+    let ops = Ops::default();
+    if serve_ops {
+        ops.serve(sender.clone()).context("serving ops failed")?;
+    }
     let commands = Commands::start_reaping(sender.clone()).context("starting the reaper failed")?;
     let mut session = Session {
         sender,
         commands,
+        ops,
         puts: Puts::default(),
     };
     let served = session.serve(&mut BufReader::new(stream));
     session.commands.kill_all();
+    // The op in flight, and the callers waiting their turns, end as `sandboxd` exits, which
+    // closes their connections.
     served.context("the session with the gateway failed")
 }
 
-/// Sends frames to the gateway, from the session and from the thread that reports exits.
+/// Sends frames to the gateway, from the session, from the thread that reports exits, and from
+/// the threads that carry ops.
 #[derive(Clone)]
 pub(crate) struct Sender(Arc<Mutex<UnixStream>>);
 
@@ -57,6 +67,7 @@ impl Sender {
 struct Session {
     sender: Sender,
     commands: Commands,
+    ops: Ops,
     puts: Puts,
 }
 
@@ -81,6 +92,7 @@ impl Session {
             ToSandbox::Collect { stream, dir } => {
                 files::collect(&self.sender, stream, Path::new(dir.as_str()))
             }
+            ToSandbox::OpReply { op, reply } => self.ops.reply(op, reply),
         }
     }
 }

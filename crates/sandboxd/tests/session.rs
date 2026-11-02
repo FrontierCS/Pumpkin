@@ -1,6 +1,7 @@
 //! `sandboxd` and the gateway's end of its session, together. `sandboxd` runs here as an
 //! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
-//! the sandbox.
+//! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
+//! `/pumpkin`: the Docker provider's tests make ops, in real sandboxes.
 
 #![expect(
     clippy::unwrap_used,
@@ -17,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin_gateway::{Listener, Process, Put, Session};
+use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
@@ -49,7 +50,7 @@ impl Sandbox {
             .arg(&socket)
             .spawn()
             .unwrap();
-        let session = listener.accept(Duration::from_secs(10)).unwrap();
+        let mut session = listener.accept(Duration::from_secs(10), None).unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
             .put(&absolute(&root), &dirs.each_ref().map(Put::Dir))
@@ -83,13 +84,8 @@ impl Sandbox {
         }
     }
 
-    fn wait(&self, process: &mut Process) -> String {
-        let status = self.session.wait(process, Duration::from_secs(10));
-        format!("exited: {:?}", status.unwrap().unwrap())
-    }
-
     /// Collects the sandbox's `dir` and lists what arrived.
-    fn collect(&self, dir: &str) -> Result<Vec<String>, String> {
+    fn collect(&mut self, dir: &str) -> Result<Vec<String>, String> {
         let collected = self.root.join("collected");
         fs::create_dir_all(&collected).unwrap();
         let limits = Limits {
@@ -186,9 +182,9 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 /// Runs `scenario` against a new sandbox, ends the session, and checks what the scenario
 /// reported, how `sandboxd` exited, and how many processes were left running in the sandbox,
 /// against `expect`. Those left get 2 s to exit, and are then killed.
-fn check(name: &str, scenario: impl FnOnce(&Sandbox) -> Vec<String>, expect: &Expect) {
-    let sandbox = Sandbox::start(name);
-    let mut lines = scenario(&sandbox);
+fn check(name: &str, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
+    let mut sandbox = Sandbox::start(name);
+    let mut lines = scenario(&mut sandbox);
     let Sandbox {
         root,
         session,
@@ -238,7 +234,8 @@ fn judge() {
                 exit 3"#;
             let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
             let mut judge = sandbox.session.start(launch).unwrap();
-            let mut lines = vec![sandbox.wait(&mut judge)];
+            let exited = judge.wait(Duration::from_secs(10)).unwrap().unwrap();
+            let mut lines = vec![format!("exited: {exited:?}")];
             sandbox.session.freeze().unwrap();
             lines.extend(sandbox.collect("out").unwrap());
             let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
@@ -272,7 +269,7 @@ fn freezing() {
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
             sandbox.session.freeze().unwrap();
-            let exited = sandbox.session.wait(&mut group, Duration::ZERO).unwrap();
+            let exited = group.wait(Duration::ZERO).unwrap();
             let mut lines = vec![
                 format!("running before freezing: {}", running.len()),
                 format!("exited when frozen: {exited:?}"),
@@ -321,7 +318,8 @@ fn refusals() {
                 .map(|_| {
                     let mut by_name = sandbox.sh("", &["PATH=/usr/bin:/bin"]);
                     by_name.argv = Argv::try_from(vec!["no-such-program".to_owned()]).unwrap();
-                    show_error(sandbox, sandbox.session.start(by_name).map(|_| ()))
+                    let started = sandbox.session.start(by_name).map(|_| ());
+                    show_error(sandbox, started)
                 })
                 .collect();
             failures.dedup();
