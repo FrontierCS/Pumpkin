@@ -7,7 +7,7 @@
 //! is talking.
 //!
 //! Everything a session receives is untrusted, since the sandbox may run an agent's code. A
-//! message that fails to parse or comes out of turn, more replies than a request takes,
+//! message that fails to parse or comes out of turn, more replies than a waiting request takes,
 //! silence for [`REPLY_TIMEOUT`] while a request waits, or a write the sandbox doesn't read
 //! within it ends the session, which stops the sandbox. A collected tree is written into a
 //! new directory of its own, within [`Limits`].
@@ -50,9 +50,12 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How many frames of a tree may wait for the request writing it. While that many wait, the
 /// session reads nothing more.
-// One: the frame the reader reads while the request writes the one before, so that reading the
-// socket and writing to disk overlap. More would each hold up to a frame's body, 1 MiB, without
-// speeding the transfer, which goes at the pace of the slower of the two.
+// One frame of slack. Reading the socket and writing to disk overlap without any, as the reader
+// reads a frame while the request writes the one before; the slack lets the reader hand over
+// the frame it has read and go on reading before that write ends. The gateway then holds at
+// most three frames of a tree, one being written, one waiting and one being read, each with up
+// to a frame's 1 MiB body; more would hold more without speeding the transfer, which goes at
+// the pace of the slower side.
 const QUEUED_TREE_FRAMES: usize = 1;
 
 /// How many frames may wait for any other request: its reply and, for a command, its exit.
@@ -674,8 +677,8 @@ impl Drop for Ending<'_> {
 }
 
 /// Hands a reply to the request waiting on `stream`. A reply for no waiting request is
-/// dropped: its request has given up. Removes the route after a command's exit, its stream's
-/// last frame, or once its request has given up.
+/// dropped: its request has given up. Removes the route after a command's exit (its stream's
+/// last frame) or once its receiver is gone.
 fn route_reply(routes: &Mutex<Routes>, stream: u32, reply: Reply) -> Result<(), String> {
     let Some(route) = lock(routes).open.get(&stream).cloned() else {
         return Ok(());
