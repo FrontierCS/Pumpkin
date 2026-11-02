@@ -184,6 +184,8 @@ pub enum Put<'a> {
 /// An op a caller in the sandbox made, whole, and in flight until [`Session::reply`] answers
 /// it, on the session that handed it out.
 #[derive(Debug)]
+#[must_use = "an op dropped unanswered wedges the sandbox's ops, which wait on it for good: \
+              answer it with `Session::reply`"]
 pub struct IncomingOp {
     /// The number of the session the op arrived on.
     session: u64,
@@ -213,6 +215,8 @@ pub enum Op {
 /// What arrived for the session's owner, as [`Session::next_op`] hands it out: an op to answer,
 /// or word of one that the gateway refused itself.
 #[derive(Debug)]
+#[must_use = "an arrival may hold an op, and an op dropped unanswered wedges the sandbox's ops: \
+              answer each with `Session::reply`"]
 pub enum Arrival {
     /// An op that arrived whole, for the owner to answer.
     Op(IncomingOp),
