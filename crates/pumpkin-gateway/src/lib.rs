@@ -20,7 +20,6 @@
 //! but bounds what ops cost the host, and ends a session whose sandbox breaks the ops' rules.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io::{self, BufReader};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
@@ -31,6 +30,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::{fs, mem};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
@@ -294,7 +294,7 @@ impl Session {
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         thread::Builder::new()
             .name("session".to_owned())
-            .spawn(move || route(reader, &reader_routes, &reader_ended, assembler))?;
+            .spawn(move || route(&reader, &reader_routes, &reader_ended, assembler))?;
         Ok(Self {
             id,
             connection: stream,
@@ -617,13 +617,21 @@ impl Drop for Session {
 /// Reads frames from the sandbox until the session ends: each reply goes to the request
 /// waiting on its stream, and each op's frames to `ops`.
 fn route(
-    connection: UnixStream,
+    connection: &UnixStream,
     routes: &Mutex<Routes>,
     ended: &OnceLock<String>,
     mut ops: Assembler,
 ) {
+    // Dropped before `ops`, a parameter, whose sender to the owner closes as `ops` drops: the
+    // owner, seeing it closed, asks why the session ended, which must be known by then.
+    let mut ending = Ending {
+        routes,
+        ended,
+        connection,
+        reason: "the session's reader thread panicked".to_owned(),
+    };
     let mut reader = BufReader::new(connection);
-    let reason = loop {
+    ending.reason = loop {
         let (message, body) = match frame::read::<FromSandbox>(&mut reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => break "the sandbox ended the session".to_owned(),
@@ -643,7 +651,22 @@ fn route(
             break reason;
         }
     };
-    end(routes, ended, reader.get_ref(), reason);
+}
+
+/// Ends the session for `reason` as it drops. The reader thread holds one, so that the session
+/// ends however the thread leaves, unwinding from a panic included.
+struct Ending<'a> {
+    routes: &'a Mutex<Routes>,
+    ended: &'a OnceLock<String>,
+    connection: &'a UnixStream,
+    reason: String,
+}
+
+impl Drop for Ending<'_> {
+    fn drop(&mut self) {
+        let reason = mem::take(&mut self.reason);
+        end(self.routes, self.ended, self.connection, reason);
+    }
 }
 
 /// Hands a reply to the request waiting on `stream`. A reply for no waiting request is
@@ -894,8 +917,19 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The error of a request on a session that has ended, for the reason in `ended`.
 fn ended(ended: &OnceLock<String>) -> io::Error {
-    let reason = ended.get().map_or("the session is ending", String::as_str);
-    io::Error::new(io::ErrorKind::ConnectionAborted, reason.to_owned())
+    #[expect(
+        clippy::unreachable,
+        reason = "every way to learn that the session ended follows the reason's recording: \
+                  `end` records it before it closes the routes, which close otherwise only \
+                  after a frame that ends their request or once nothing receives from them; \
+                  the ops' sender closes only after the reader thread's `Ending` has ended the \
+                  session, even as a panic unwinds it; and the rest call `end` or check the \
+                  reason first"
+    )]
+    let Some(reason) = ended.get() else {
+        unreachable!("the session ended without a reason")
+    };
+    io::Error::new(io::ErrorKind::ConnectionAborted, reason.clone())
 }
 
 fn unexpected(message: &FromSandbox) -> io::Error {
