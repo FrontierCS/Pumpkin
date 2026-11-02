@@ -242,8 +242,9 @@ impl Container {
         &self.id
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
+    /// The session with the container's `sandboxd`, which the container's owner drives.
+    pub fn session(&mut self) -> &mut Session {
+        &mut self.session
     }
 
     /// Removes the container and ends the session, reporting a failure to remove the
@@ -483,7 +484,7 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
 }
 
 fn connect(listener: Listener, id: &str) -> Result<Session, String> {
-    let session = listener.accept(CONNECT_TIMEOUT).map_err(|error| {
+    let mut session = listener.accept(CONNECT_TIMEOUT).map_err(|error| {
         format!(
             "the `sandboxd` of container {id} didn't connect: {error}: expected it to connect \
              as it starts"

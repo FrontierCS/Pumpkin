@@ -240,7 +240,7 @@ fn relative(path: &str) -> RelativePath {
 
 /// Runs `script` as the n-th command, in `/pumpkin/home`, with its output in `/pumpkin/log`,
 /// and returns how it exited.
-fn sh(sandbox: &Container, n: u32, script: &str) -> ExitStatus {
+fn sh(sandbox: &mut Container, n: u32, script: &str) -> ExitStatus {
     let launch = Launch {
         argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
         env: Env::try_from(vec![
@@ -258,7 +258,7 @@ fn sh(sandbox: &Container, n: u32, script: &str) -> ExitStatus {
 }
 
 /// Collects the sandbox's `dir` into the fixture's directory and returns the files' contents.
-fn collect(fixture: &Fixture, sandbox: &Container, dir: &str) -> Vec<String> {
+fn collect(fixture: &Fixture, sandbox: &mut Container, dir: &str) -> Vec<String> {
     let into = fixture.dir.join(format!("collected-{dir}"));
     let limits = Limits {
         bytes: 1 << 20,
@@ -314,7 +314,7 @@ fn judge() {
     check(
         "judge",
         |fixture| {
-            let sandbox = fixture.start(&fixture.run, "judge");
+            let mut sandbox = fixture.start(&fixture.run, "judge");
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let put = [Put::Dir(&slot), Put::File(&payload, b"ledger")];
             sandbox.session().put(&absolute("/pumpkin"), &put).unwrap();
@@ -324,12 +324,12 @@ fn judge() {
                 echo "user $(id -u):$(id -g) home=$HOME in $(pwd)"
                 (sleep 600 &); setsid sleep 600 &
                 exit 3"#;
-            let mut lines = vec![format!("{:?}", sh(&sandbox, 1, script))];
+            let mut lines = vec![format!("{:?}", sh(&mut sandbox, 1, script))];
             lines.push(format!("before freezing: {}", processes(&sandbox)));
             sandbox.session().freeze().unwrap();
             lines.push(format!("after freezing: {}", processes(&sandbox)));
-            lines.extend(collect(fixture, &sandbox, "out"));
-            lines.extend(collect(fixture, &sandbox, "log"));
+            lines.extend(collect(fixture, &mut sandbox, "out"));
+            lines.extend(collect(fixture, &mut sandbox, "log"));
             lines
         },
         &expect![[r#"
@@ -353,7 +353,7 @@ fn confinement() {
     check(
         "confinement",
         |fixture| {
-            let sandbox = fixture.start(&fixture.run, "confined");
+            let mut sandbox = fixture.start(&fixture.run, "confined");
             let script = r#"
                 echo "interfaces: $(ls /sys/class/net)"
                 nc -w 2 1.1.1.1 80 </dev/null >/dev/null 2>&1
@@ -374,12 +374,12 @@ fn confinement() {
                 done
                 touch /dev/mqueue/x && echo "/dev/mqueue/x: made"
                 cat /proc/self/uid_map > /pumpkin/out/uid_map"#;
-            let status = sh(&sandbox, 1, script);
+            let status = sh(&mut sandbox, 1, script);
             let mut lines = vec![format!("{status:?}")];
-            lines.extend(collect(fixture, &sandbox, "log"));
+            lines.extend(collect(fixture, &mut sandbox, "log"));
             // Rootless Docker and user namespaces each map the container's users to others on
             // the host; a rootful engine without them maps every user to itself.
-            collect(fixture, &sandbox, "out");
+            collect(fixture, &mut sandbox, "out");
             let uid_map = fs::read_to_string(fixture.dir.join("collected-out/uid_map")).unwrap();
             let identity = uid_map.split_whitespace().eq(["0", "0", "4294967295"]);
             let Security {

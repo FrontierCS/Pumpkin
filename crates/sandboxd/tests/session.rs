@@ -49,7 +49,7 @@ impl Sandbox {
             .arg(&socket)
             .spawn()
             .unwrap();
-        let session = listener.accept(Duration::from_secs(10)).unwrap();
+        let mut session = listener.accept(Duration::from_secs(10)).unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
             .put(&absolute(&root), &dirs.each_ref().map(Put::Dir))
@@ -89,7 +89,7 @@ impl Sandbox {
     }
 
     /// Collects the sandbox's `dir` and lists what arrived.
-    fn collect(&self, dir: &str) -> Result<Vec<String>, String> {
+    fn collect(&mut self, dir: &str) -> Result<Vec<String>, String> {
         let collected = self.root.join("collected");
         fs::create_dir_all(&collected).unwrap();
         let limits = Limits {
@@ -186,9 +186,9 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 /// Runs `scenario` against a new sandbox, ends the session, and checks what the scenario
 /// reported, how `sandboxd` exited, and how many processes were left running in the sandbox,
 /// against `expect`. Those left get 2 s to exit, and are then killed.
-fn check(name: &str, scenario: impl FnOnce(&Sandbox) -> Vec<String>, expect: &Expect) {
-    let sandbox = Sandbox::start(name);
-    let mut lines = scenario(&sandbox);
+fn check(name: &str, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
+    let mut sandbox = Sandbox::start(name);
+    let mut lines = scenario(&mut sandbox);
     let Sandbox {
         root,
         session,
@@ -321,7 +321,8 @@ fn refusals() {
                 .map(|_| {
                     let mut by_name = sandbox.sh("", &["PATH=/usr/bin:/bin"]);
                     by_name.argv = Argv::try_from(vec!["no-such-program".to_owned()]).unwrap();
-                    show_error(sandbox, sandbox.session.start(by_name).map(|_| ()))
+                    let started = sandbox.session.start(by_name).map(|_| ());
+                    show_error(sandbox, started)
                 })
                 .collect();
             failures.dedup();

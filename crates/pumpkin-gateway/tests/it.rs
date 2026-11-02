@@ -20,7 +20,7 @@ use pumpkin_schema::sandbox::{Launch, ToSandbox, frame};
 use serde_json::{Value, json};
 
 /// What the gateway asks of the fake sandbox, and what came of it.
-type Action = fn(&Session, &Path) -> String;
+type Action = fn(&mut Session, &Path) -> String;
 
 /// The frames the fake sandbox sends in answer to the request on `stream`.
 type Answer = fn(stream: u32) -> Vec<(Value, Vec<u8>)>;
@@ -59,10 +59,10 @@ fn run(dir: &Path, action: Action, answer: Answer) -> String {
         // Answer nothing more, until the gateway ends the session.
         while let Ok(Some(_)) = frame::read::<ToSandbox>(&mut connection) {}
     });
-    let session = listener.accept(Duration::from_secs(10)).unwrap();
+    let mut session = listener.accept(Duration::from_secs(10)).unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
-    let outcome = action(&session, dir);
+    let outcome = action(&mut session, dir);
     drop(session);
     sandbox.join().unwrap();
     outcome
@@ -81,7 +81,7 @@ fn stream_of(request: &ToSandbox) -> u32 {
 }
 
 /// Collects `/out` within small limits, and lists the files that arrived.
-fn collect(session: &Session, dir: &Path) -> String {
+fn collect(session: &mut Session, dir: &Path) -> String {
     let into = dir.join("collected");
     let limits = Limits {
         bytes: 8,
@@ -102,7 +102,7 @@ fn outcome(outcome: std::io::Result<()>) -> String {
 }
 
 /// Starts a command and, while it runs, freezes the sandbox.
-fn start_and_freeze(session: &Session, _: &Path) -> String {
+fn start_and_freeze(session: &mut Session, _: &Path) -> String {
     let path = |path: &str| AbsolutePath::try_from(path.to_owned()).unwrap();
     let launch = Launch {
         argv: Argv::try_from(vec!["true".to_owned()]).unwrap(),

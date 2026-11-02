@@ -19,7 +19,6 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -104,17 +103,17 @@ impl Drop for Listener {
     }
 }
 
-/// A sandbox's session.
+/// A sandbox's session, which one owner drives: it alone writes to the sandbox.
 ///
 /// Requests on it block until `sandboxd` answers or the session ends. Dropping it ends the
 /// session, which stops the sandbox.
 #[derive(Debug)]
 pub struct Session {
-    writer: Mutex<UnixStream>,
-    /// The connection, for ending the session without waiting for a write in progress.
     connection: UnixStream,
+    // Shared with the reader thread, which routes the sandbox's frames, and with each
+    // `Process`, which closes its route as it drops.
     routes: Arc<Mutex<Routes>>,
-    next_stream: AtomicU32,
+    next_stream: u32,
 }
 
 /// Where frames from the sandbox go: the requests waiting for them, by stream.
@@ -128,6 +127,7 @@ struct Routes {
 /// The way to a request waiting for frames.
 #[derive(Clone, Debug)]
 struct Route {
+    // The reader thread sends the request's frames, which the session's owner receives.
     sender: SyncSender<Reply>,
     queue: Queue,
 }
@@ -155,6 +155,7 @@ pub enum Put<'a> {
 pub struct Process {
     stream: u32,
     replies: Receiver<Reply>,
+    // Shared with the session and its reader thread: the process closes its route as it drops.
     routes: Arc<Mutex<Routes>>,
     exited: Option<ExitStatus>,
 }
@@ -170,17 +171,16 @@ impl Session {
         // A socket option, so it holds for every handle on the connection.
         stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
         let routes = Arc::new(Mutex::new(Routes::default()));
-        let connection = stream.try_clone()?;
         let reader = stream.try_clone()?;
         let reader_routes = Arc::clone(&routes);
+        // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         thread::Builder::new()
             .name("session".to_owned())
             .spawn(move || route(reader, &reader_routes))?;
         Ok(Self {
-            connection,
-            writer: Mutex::new(stream),
+            connection: stream,
             routes,
-            next_stream: AtomicU32::new(1),
+            next_stream: 1,
         })
     }
 
@@ -190,7 +190,7 @@ impl Session {
     /// # Errors
     ///
     /// Fails if `sandboxd` can't write them or the session ends.
-    pub fn put(&self, dir: &AbsolutePath, entries: &[Put<'_>]) -> io::Result<()> {
+    pub fn put(&mut self, dir: &AbsolutePath, entries: &[Put<'_>]) -> io::Result<()> {
         let (stream, replies) = self.open(Queue::Replies)?;
         let put = self
             .send_tree(stream, dir, entries)
@@ -204,7 +204,7 @@ impl Session {
     /// # Errors
     ///
     /// Fails if the command doesn't start or the session ends.
-    pub fn start(&self, launch: Launch) -> io::Result<Process> {
+    pub fn start(&mut self, launch: Launch) -> io::Result<Process> {
         let (stream, replies) = self.open(Queue::Replies)?;
         let started = self
             .send(&ToSandbox::Start { stream, launch }, &[])
@@ -250,7 +250,7 @@ impl Session {
     /// # Errors
     ///
     /// Fails if `sandboxd` can't kill them or the session ends.
-    pub fn freeze(&self) -> io::Result<()> {
+    pub fn freeze(&mut self) -> io::Result<()> {
         self.request(|stream| ToSandbox::Freeze { stream })
     }
 
@@ -261,7 +261,7 @@ impl Session {
     ///
     /// Fails if `into` exists, if `sandboxd` can't send the tree, if the tree breaks the
     /// protocol or passes a limit, or if the session ends.
-    pub fn collect(&self, dir: &AbsolutePath, into: &Path, limits: Limits) -> io::Result<()> {
+    pub fn collect(&mut self, dir: &AbsolutePath, into: &Path, limits: Limits) -> io::Result<()> {
         let (stream, replies) = self.open(Queue::Tree)?;
         let collected = fs::create_dir(into).and_then(|()| {
             let tree = tree::Writer::new(into.to_owned(), limits);
@@ -278,7 +278,12 @@ impl Session {
         collected
     }
 
-    fn send_tree(&self, stream: u32, dir: &AbsolutePath, entries: &[Put<'_>]) -> io::Result<()> {
+    fn send_tree(
+        &mut self,
+        stream: u32,
+        dir: &AbsolutePath,
+        entries: &[Put<'_>],
+    ) -> io::Result<()> {
         self.send(
             &ToSandbox::Put {
                 stream,
@@ -323,7 +328,7 @@ impl Session {
     }
 
     /// Sends the request `message` builds for a new stream, and waits for its reply.
-    fn request(&self, message: impl FnOnce(u32) -> ToSandbox) -> io::Result<()> {
+    fn request(&mut self, message: impl FnOnce(u32) -> ToSandbox) -> io::Result<()> {
         let (stream, replies) = self.open(Queue::Replies)?;
         let done = self
             .send(&message(stream), &[])
@@ -332,8 +337,9 @@ impl Session {
         done
     }
 
-    fn open(&self, queue: Queue) -> io::Result<(u32, Receiver<Reply>)> {
-        let stream = self.next_stream.fetch_add(1, Ordering::Relaxed);
+    fn open(&mut self, queue: Queue) -> io::Result<(u32, Receiver<Reply>)> {
+        let stream = self.next_stream;
+        self.next_stream = stream.wrapping_add(1);
         let (sender, replies) = mpsc::sync_channel(match queue {
             Queue::Replies => QUEUED_REPLIES,
             Queue::Tree => QUEUED_TREE_FRAMES,
@@ -353,8 +359,8 @@ impl Session {
     /// Sends a frame. A write that fails, or that the sandbox doesn't read within
     /// [`REPLY_TIMEOUT`], may leave part of a frame on the connection, so it ends the session.
     /// The session's reason is the error: the failed write's, unless it had ended already.
-    fn send(&self, message: &ToSandbox, body: &[u8]) -> io::Result<()> {
-        frame::write(&mut *lock(&self.writer), message, body).map_err(|error| {
+    fn send(&mut self, message: &ToSandbox, body: &[u8]) -> io::Result<()> {
+        frame::write(&mut self.connection, message, body).map_err(|error| {
             let reason = if matches!(
                 error.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
