@@ -27,7 +27,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -125,9 +125,12 @@ impl Drop for Listener {
 #[derive(Debug)]
 pub struct Session {
     connection: UnixStream,
-    // Shared with the reader thread, which routes the sandbox's frames, and with each
-    // `Process`, which closes its route as it drops.
+    // Shared with the reader thread, which routes the sandbox's frames by them, and removes a
+    // route once its command has exited or nothing receives from it.
     routes: Arc<Mutex<Routes>>,
+    // Shared with the reader thread, which may end the session, and with each `Process`, which
+    // reports why it ended. Set under the routes' lock, which `end` explains.
+    ended: Arc<OnceLock<String>>,
     next_stream: u32,
     /// The op that has arrived whole, or that the gateway refuses, if any, from the reader
     /// thread.
@@ -141,8 +144,6 @@ struct Routes {
     open: HashMap<u32, Route>,
     /// The op in flight, by number: opened, and not yet answered.
     op: Option<u32>,
-    /// Why the session ended, once it has.
-    ended: Option<String>,
 }
 
 /// The way to a request waiting for frames.
@@ -156,7 +157,8 @@ struct Route {
 /// What a request waits for.
 #[derive(Clone, Copy, Debug)]
 enum Queue {
-    /// A reply and, for a command, its exit: a frame more breaks the protocol.
+    /// A reply and, for a command, its exit: a frame that finds the queue full breaks the
+    /// protocol.
     Replies,
     /// A tree, whose frames wait for the request to write them.
     Tree,
@@ -230,16 +232,31 @@ pub struct RefusedOp {
 /// A command started in a sandbox.
 #[derive(Debug)]
 pub struct Process {
-    stream: u32,
     replies: Receiver<Reply>,
-    // Shared with the session and its reader thread: the process closes its route as it drops.
-    routes: Arc<Mutex<Routes>>,
+    // Shared with the session and its reader thread, which record why the session ended.
+    ended: Arc<OnceLock<String>>,
     exited: Option<ExitStatus>,
 }
 
-impl Drop for Process {
-    fn drop(&mut self) {
-        lock(&self.routes).open.remove(&self.stream);
+impl Process {
+    /// Waits up to `timeout` for the command to exit: `None` if it is still running.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the session ends first.
+    pub fn wait(&mut self, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+        if let Some(status) = self.exited {
+            return Ok(Some(status));
+        }
+        match self.replies.recv_timeout(timeout) {
+            Ok((FromSandbox::Exited { status, .. }, _)) => {
+                self.exited = Some(status);
+                Ok(Some(status))
+            }
+            Ok((other, _)) => Err(unexpected(&other)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(ended(&self.ended)),
+        }
     }
 }
 
@@ -250,20 +267,21 @@ impl Session {
         let routes = Arc::new(Mutex::new(Routes {
             open: HashMap::new(),
             op: None,
-            ended: None,
         }));
+        let ended = Arc::new(OnceLock::new());
         // From the reader thread to the owner. Every arrival is the op in flight, so the queue
         // never holds more than one.
         let (arrivals, ops) = mpsc::sync_channel(1);
         let reader = stream.try_clone()?;
-        let reader_routes = Arc::clone(&routes);
+        let (reader_routes, reader_ended) = (Arc::clone(&routes), Arc::clone(&ended));
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         thread::Builder::new()
             .name("session".to_owned())
-            .spawn(move || route(reader, &reader_routes, arrivals, limit))?;
+            .spawn(move || route(reader, &reader_routes, &reader_ended, arrivals, limit))?;
         Ok(Self {
             connection: stream,
             routes,
+            ended,
             next_stream: 1,
             ops,
         })
@@ -295,37 +313,16 @@ impl Session {
             .send(&ToSandbox::Start { stream, launch }, &[])
             .and_then(|()| self.done(&replies));
         match started {
+            // The reader removes the command's route, which outlives this call.
             Ok(()) => Ok(Process {
-                stream,
                 replies,
-                routes: Arc::clone(&self.routes),
+                ended: Arc::clone(&self.ended),
                 exited: None,
             }),
             Err(error) => {
                 self.close(stream);
                 Err(error)
             }
-        }
-    }
-
-    /// Waits up to `timeout` for a command to exit: `None` if it is still running.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the session ends first.
-    pub fn wait(&self, process: &mut Process, timeout: Duration) -> io::Result<Option<ExitStatus>> {
-        if let Some(status) = process.exited {
-            return Ok(Some(status));
-        }
-        match process.replies.recv_timeout(timeout) {
-            Ok((FromSandbox::Exited { status, .. }, _)) => {
-                self.close(process.stream);
-                process.exited = Some(status);
-                Ok(Some(status))
-            }
-            Ok((other, _)) => Err(unexpected(&other)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Err(self.ended()),
         }
     }
 
@@ -375,7 +372,7 @@ impl Session {
         let arrival = match self.ops.recv_timeout(timeout) {
             Ok(arrival) => arrival,
             Err(RecvTimeoutError::Timeout) => return Ok(None),
-            Err(RecvTimeoutError::Disconnected) => return Err(self.ended()),
+            Err(RecvTimeoutError::Disconnected) => return Err(ended(&self.ended)),
         };
         match &arrival {
             Arrival::Op(_) => {}
@@ -512,8 +509,8 @@ impl Session {
             Queue::Tree => QUEUED_TREE_FRAMES,
         });
         let mut routes = lock(&self.routes);
-        if let Some(reason) = &routes.ended {
-            return Err(ended(reason));
+        if self.ended.get().is_some() {
+            return Err(ended(&self.ended));
         }
         routes.open.insert(stream, Route { sender, queue });
         Ok((stream, replies))
@@ -542,8 +539,8 @@ impl Session {
         } else {
             format!("writing to the sandbox failed: {error}")
         };
-        end(&self.routes, &self.connection, reason);
-        self.ended()
+        end(&self.routes, &self.ended, &self.connection, reason);
+        ended(&self.ended)
     }
 
     fn receive(&self, replies: &Receiver<Reply>) -> io::Result<Reply> {
@@ -551,10 +548,10 @@ impl Session {
             Ok(reply) => Ok(reply),
             Err(RecvTimeoutError::Timeout) => {
                 let silent = format!("the sandbox sent nothing for {REPLY_TIMEOUT:?}");
-                end(&self.routes, &self.connection, silent);
-                Err(self.ended())
+                end(&self.routes, &self.ended, &self.connection, silent);
+                Err(ended(&self.ended))
             }
-            Err(RecvTimeoutError::Disconnected) => Err(self.ended()),
+            Err(RecvTimeoutError::Disconnected) => Err(ended(&self.ended)),
         }
     }
 
@@ -573,11 +570,6 @@ impl Session {
             ) => Err(unexpected(&other)),
         }
     }
-
-    fn ended(&self) -> io::Error {
-        let routes = lock(&self.routes);
-        ended(routes.ended.as_deref().unwrap_or("the session is ending"))
-    }
 }
 
 impl Drop for Session {
@@ -593,6 +585,7 @@ impl Drop for Session {
 fn route(
     connection: UnixStream,
     routes: &Mutex<Routes>,
+    ended: &OnceLock<String>,
     arrivals: SyncSender<Arrival>,
     limit: Option<OpPayloadLimit>,
 ) {
@@ -623,26 +616,33 @@ fn route(
             break reason;
         }
     };
-    end(routes, reader.get_ref(), reason);
+    end(routes, ended, reader.get_ref(), reason);
 }
 
 /// Hands a reply to the request waiting on `stream`. A reply for no waiting request is
-/// dropped: its request has given up.
+/// dropped: its request has given up. Removes the route after a command's exit, its stream's
+/// last frame, or once its request has given up.
 fn route_reply(routes: &Mutex<Routes>, stream: u32, reply: Reply) -> Result<(), String> {
     let Some(route) = lock(routes).open.get(&stream).cloned() else {
         return Ok(());
     };
-    match route.queue {
+    let exited = matches!(reply.0, FromSandbox::Exited { .. });
+    let given_up = match route.queue {
         // The request writes the tree as it reads it, or drops the queue when it fails.
-        Queue::Tree => drop(route.sender.send(reply)),
+        Queue::Tree => route.sender.send(reply).is_err(),
         Queue::Replies => match route.sender.try_send(reply) {
-            Ok(()) | Err(TrySendError::Disconnected(_)) => {}
+            Ok(()) => false,
+            Err(TrySendError::Disconnected(_)) => true,
             Err(TrySendError::Full(_)) => {
                 return Err(broke(&format!(
                     "it sent more on stream {stream} than a request takes"
                 )));
             }
         },
+    };
+    // A command's `Process` outlives the call that started it, so no call closes its route.
+    if exited || given_up {
+        lock(routes).open.remove(&stream);
     }
     Ok(())
 }
@@ -841,14 +841,15 @@ fn whole(call: OpCall, payload: Vec<u8>) -> Op {
 }
 
 /// Ends the session, unless it has ended already: closes the connection, which stops the
-/// sandbox, records why, and wakes every request waiting on it.
-fn end(routes: &Mutex<Routes>, connection: &UnixStream, reason: String) {
+/// sandbox, records why in `ended`, and wakes every request waiting on it.
+fn end(routes: &Mutex<Routes>, ended: &OnceLock<String>, connection: &UnixStream, reason: String) {
     let mut routes = lock(routes);
     // Closed first, under the lock, so that no write reaches the sandbox once anything can
     // learn the session ended: an owner woken by the end may still answer an op. A connection
-    // already closed is fine.
+    // already closed is fine. The reason is set under the lock too, so that no route opens
+    // after the routes are cleared. A reason already set is the session's.
     let _ = connection.shutdown(Shutdown::Both);
-    routes.ended.get_or_insert(reason);
+    let _ = ended.set(reason);
     routes.open.clear();
 }
 
@@ -856,7 +857,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn ended(reason: &str) -> io::Error {
+/// The error of a request on a session that has ended, for the reason in `ended`.
+fn ended(ended: &OnceLock<String>) -> io::Error {
+    let reason = ended.get().map_or("the session is ending", String::as_str);
     io::Error::new(io::ErrorKind::ConnectionAborted, reason.to_owned())
 }
 

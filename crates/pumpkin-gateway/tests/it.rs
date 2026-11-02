@@ -334,11 +334,9 @@ fn untrusted_answers() {
             }),
             (collect, |s| vec![file(s, "f", 2), end(s)]),
             (collect, |s| vec![reply("failed", s)]),
-            (start_and_freeze, |s| {
-                let mut flood = vec![done(s)];
-                flood.extend((0..3).map(|_| reply("exited", s)));
-                flood
-            }),
+            // The command takes its start's `done` and its exit, so a `done` more fills its
+            // queue, which holds two frames, and the next is one too many.
+            (start_and_freeze, |s| vec![done(s); 4]),
         ],
         &expect![[r#"
             ok; arrived ["a/b=hi"]

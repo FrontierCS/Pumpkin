@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin_gateway::{Listener, Process, Put, Session};
+use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
@@ -82,11 +82,6 @@ impl Sandbox {
             stdout: self.at(&format!("log/{n}.stdout")),
             stderr: self.at(&format!("log/{n}.stderr")),
         }
-    }
-
-    fn wait(&self, process: &mut Process) -> String {
-        let status = self.session.wait(process, Duration::from_secs(10));
-        format!("exited: {:?}", status.unwrap().unwrap())
     }
 
     /// Collects the sandbox's `dir` and lists what arrived.
@@ -239,7 +234,8 @@ fn judge() {
                 exit 3"#;
             let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
             let mut judge = sandbox.session.start(launch).unwrap();
-            let mut lines = vec![sandbox.wait(&mut judge)];
+            let exited = judge.wait(Duration::from_secs(10)).unwrap().unwrap();
+            let mut lines = vec![format!("exited: {exited:?}")];
             sandbox.session.freeze().unwrap();
             lines.extend(sandbox.collect("out").unwrap());
             let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
@@ -273,7 +269,7 @@ fn freezing() {
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
             sandbox.session.freeze().unwrap();
-            let exited = sandbox.session.wait(&mut group, Duration::ZERO).unwrap();
+            let exited = group.wait(Duration::ZERO).unwrap();
             let mut lines = vec![
                 format!("running before freezing: {}", running.len()),
                 format!("exited when frozen: {exited:?}"),

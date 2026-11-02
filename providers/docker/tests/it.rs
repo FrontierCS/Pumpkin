@@ -268,8 +268,7 @@ fn launch(n: u32, script: &str) -> Launch {
 fn sh(sandbox: &mut Container, n: u32, script: &str) -> ExitStatus {
     let session = sandbox.session();
     let mut process = session.start(launch(n, script)).unwrap();
-    let status = session.wait(&mut process, Duration::from_secs(30));
-    status.unwrap().unwrap()
+    process.wait(Duration::from_secs(30)).unwrap().unwrap()
 }
 
 /// Waits for `process` to exit as the session's owner does, answering each op that arrives
@@ -284,7 +283,7 @@ fn serve(
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut asked = Vec::new();
     while Instant::now() < deadline {
-        if let Some(status) = session.wait(process, tick).unwrap() {
+        if let Some(status) = process.wait(tick).unwrap() {
             return (status, asked);
         }
         if let Some(arrival) = session.next_op(tick).unwrap() {
