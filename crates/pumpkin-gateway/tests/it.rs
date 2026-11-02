@@ -12,8 +12,9 @@ use std::fs;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
@@ -56,6 +57,19 @@ fn check(name: &str, ops: Option<OpPayloadLimit>, cases: &[(Action, Answer)], ex
 
 /// What came of `action`, and the op replies the fake sandbox heard, if any.
 fn run(dir: &Path, ops: Option<OpPayloadLimit>, action: Action, answer: Answer) -> String {
+    let (mut session, sandbox) = connect(dir, ops, answer);
+    let outcome = action(&mut session, dir);
+    heard(outcome, session, sandbox)
+}
+
+/// A session, accepted with `ops`, with a fake sandbox in the new directory `dir` that answers
+/// the session's first request with `answer`'s frames, and the sandbox's thread, which returns
+/// the op replies it heard.
+fn connect(
+    dir: &Path,
+    ops: Option<OpPayloadLimit>,
+    answer: Answer,
+) -> (Session, JoinHandle<Vec<String>>) {
     fs::create_dir(dir).unwrap();
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
@@ -82,10 +96,14 @@ fn run(dir: &Path, ops: Option<OpPayloadLimit>, action: Action, answer: Answer) 
         while hear_reply(&mut connection, &mut replies) {}
         replies
     });
-    let mut session = listener.accept(Duration::from_secs(10), ops).unwrap();
+    let session = listener.accept(Duration::from_secs(10), ops).unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
-    let outcome = action(&mut session, dir);
+    (session, sandbox)
+}
+
+/// `outcome`, and the op replies that `sandbox` heard by the end of `session`, if any.
+fn heard(outcome: String, session: Session, sandbox: JoinHandle<Vec<String>>) -> String {
     drop(session);
     let replies = sandbox.join().unwrap();
     if replies.is_empty() {
@@ -177,15 +195,7 @@ fn ops(session: &mut Session, _: &Path) -> String {
         match session.next_op(HUNG) {
             Ok(Some(Arrival::Op(op))) => {
                 lines.push(format!("{:?}", op.op));
-                let reply = OpReply::Ops(OpsReply {
-                    remaining_seconds: 0,
-                    resources: Resources {
-                        cpu_millis: NonZeroU64::MIN,
-                        memory_bytes: NonZeroU64::MIN,
-                    },
-                    grants: Vec::new(),
-                });
-                if let Err(error) = session.reply(op, reply) {
+                if let Err(error) = session.reply(op, no_grants()) {
                     lines.push(format!("reply: {:?}: {error}", error.kind()));
                 }
             }
@@ -210,6 +220,42 @@ fn ops(session: &mut Session, _: &Path) -> String {
         }
     }
     lines.join("; ")
+}
+
+/// An `ops` reply with no grants.
+fn no_grants() -> OpReply {
+    OpReply::Ops(OpsReply {
+        remaining_seconds: 0,
+        resources: Resources {
+            cpu_millis: NonZeroU64::MIN,
+            memory_bytes: NonZeroU64::MIN,
+        },
+        grants: Vec::new(),
+    })
+}
+
+/// Freezes the sandbox, whose answer carries op 0, and another session's, whose answer does
+/// too, takes each op, and answers the first on the other session, then the other's own.
+fn answer_elsewhere(session: &mut Session, dir: &Path) -> String {
+    let ops = Some(OpPayloadLimit::try_from(0).unwrap());
+    let (mut other, sandbox) = connect(&dir.join("other"), ops, |s| {
+        vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
+    });
+    let [mine, own] = [&mut *session, &mut other].map(|session| {
+        session.freeze().unwrap();
+        match session.next_op(HUNG).unwrap() {
+            Some(Arrival::Op(op)) => op,
+            arrival => panic!("an op was to arrive, not {arrival:?}"),
+        }
+    });
+    let message = "from another session".to_owned();
+    let elsewhere = panic::catch_unwind(AssertUnwindSafe(|| {
+        other.reply(mine, OpReply::Refused { message })
+    }));
+    let elsewhere = elsewhere.unwrap_err().downcast::<String>().unwrap();
+    let own = outcome(other.reply(own, no_grants()));
+    let outcome = format!("op 0 on another session: {elsewhere}; that session's own op 0: {own}");
+    heard(outcome, other, sandbox)
 }
 
 /// Freezes the sandbox, whose answer carries two ops, one after the other, then answers the
@@ -437,5 +483,22 @@ fn untrusted_ops() {
         &expect![
             "op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 7, but the session takes no ops"
         ],
+    );
+}
+
+/// An op answered on a session other than the one it arrived on panics before anything is
+/// sent: every sandbox numbers its ops from 0, so the other's would take the answer for its own
+/// op 0's.
+#[test]
+fn another_sessions_op() {
+    check(
+        "elsewhere",
+        Some(OpPayloadLimit::try_from(0).unwrap()),
+        &[(answer_elsewhere, |s| {
+            vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
+        })],
+        &expect![[
+            r#"op 0 on another session: internal error: entered unreachable code: op 0 was answered on a session other than the one it arrived on; that session's own op 0: ok; the sandbox heard op 0: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
+        ]],
     );
 }

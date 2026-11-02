@@ -26,6 +26,7 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
@@ -56,6 +57,11 @@ const QUEUED_TREE_FRAMES: usize = 1;
 
 /// How many frames may wait for any other request: its reply and, for a command, its exit.
 const QUEUED_REPLIES: usize = 2;
+
+/// The number of the next session the process makes, which tells it apart from every other, so
+/// that an op is answered only on the session it arrived on.
+// Shared by every session the process makes, on whatever thread makes it.
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
 /// The socket one sandbox connects to.
 #[derive(Debug)]
@@ -124,6 +130,8 @@ impl Drop for Listener {
 /// session, which stops the sandbox.
 #[derive(Debug)]
 pub struct Session {
+    /// The session's number, from [`NEXT_SESSION`], which its ops carry.
+    id: u64,
     connection: UnixStream,
     // Shared with the reader thread, which routes the sandbox's frames by them, and removes a
     // route once its command has exited or nothing receives from it.
@@ -174,9 +182,11 @@ pub enum Put<'a> {
 }
 
 /// An op a caller in the sandbox made, whole, and in flight until [`Session::reply`] answers
-/// it.
+/// it, on the session that handed it out.
 #[derive(Debug)]
 pub struct IncomingOp {
+    /// The number of the session the op arrived on.
+    session: u64,
     /// The sandbox's number for the op, which the reply names.
     number: u32,
     pub op: Op,
@@ -274,11 +284,19 @@ impl Session {
         let (arrivals, ops) = mpsc::sync_channel(1);
         let reader = stream.try_clone()?;
         let (reader_routes, reader_ended) = (Arc::clone(&routes), Arc::clone(&ended));
+        let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        let assembler = Assembler {
+            session: id,
+            arrivals,
+            limit,
+            open: None,
+        };
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         thread::Builder::new()
             .name("session".to_owned())
-            .spawn(move || route(reader, &reader_routes, &reader_ended, arrivals, limit))?;
+            .spawn(move || route(reader, &reader_routes, &reader_ended, assembler))?;
         Ok(Self {
+            id,
             connection: stream,
             routes,
             ended,
@@ -405,8 +423,25 @@ impl Session {
     /// # Errors
     ///
     /// Fails if the reply is too long for a frame, or the session has ended.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `op` arrived on another session.
     pub fn reply(&mut self, op: IncomingOp, reply: OpReply) -> io::Result<()> {
-        let IncomingOp { number, op } = op;
+        let IncomingOp {
+            session,
+            number,
+            op,
+        } = op;
+        #[expect(
+            clippy::unreachable,
+            reason = "the owner answers each op on the session that handed it out, as this \
+                      method's contract requires: on another, the op's number would name an op \
+                      that sandbox may not have made"
+        )]
+        if session != self.id {
+            unreachable!("op {number} was answered on a session other than the one it arrived on")
+        }
         // The op leaves the flight once, before its answer is written: the sandbox may open the
         // next as soon as it reads an answer, which a second clearing would drop. Its payload
         // goes first, so that the next op's buffer is never held beside it while the write waits.
@@ -580,22 +615,14 @@ impl Drop for Session {
 }
 
 /// Reads frames from the sandbox until the session ends: each reply goes to the request
-/// waiting on its stream, and each op's frames to the [`Assembler`], with the session's op
-/// payload `limit`, if it takes ops.
+/// waiting on its stream, and each op's frames to `ops`.
 fn route(
     connection: UnixStream,
     routes: &Mutex<Routes>,
     ended: &OnceLock<String>,
-    arrivals: SyncSender<Arrival>,
-    limit: Option<OpPayloadLimit>,
+    mut ops: Assembler,
 ) {
     let mut reader = BufReader::new(connection);
-    let mut ops = Assembler {
-        routes,
-        arrivals,
-        limit,
-        open: None,
-    };
     let reason = loop {
         let (message, body) = match frame::read::<FromSandbox>(&mut reader) {
             Ok(Some(frame)) => frame,
@@ -603,7 +630,7 @@ fn route(
             Err(error) => break format!("the session failed: {error}"),
         };
         let outcome = match message {
-            FromSandbox::Op { op, call, size } => ops.open(op, call, size),
+            FromSandbox::Op { op, call, size } => ops.open(routes, op, call, size),
             FromSandbox::OpData { op } => ops.data(op, &body),
             reply @ (FromSandbox::Done { stream }
             | FromSandbox::Failed { stream, .. }
@@ -648,8 +675,9 @@ fn route_reply(routes: &Mutex<Routes>, stream: u32, reply: Reply) -> Result<(), 
 }
 
 /// Assembles the op the sandbox sends, on the reader thread, and passes it on whole.
-struct Assembler<'a> {
-    routes: &'a Mutex<Routes>,
+struct Assembler {
+    /// The number of the session the ops arrive on.
+    session: u64,
     // To the session's owner, which takes each op with `Session::next_op`.
     arrivals: SyncSender<Arrival>,
     /// The most bytes an op's payload may hold, if the session takes ops.
@@ -675,16 +703,22 @@ enum Payload {
     Dropped { size: u64, limit: OpPayloadLimit },
 }
 
-impl Assembler<'_> {
-    /// Puts op `number`, whose payload is `size` bytes, in flight, if the session takes ops and
-    /// none is in flight, and passes it on at once if it has no payload.
-    fn open(&mut self, number: u32, call: OpCall, size: u64) -> Result<(), String> {
+impl Assembler {
+    /// Puts op `number`, whose payload is `size` bytes, in flight in `routes`, if the session
+    /// takes ops and none is in flight, and passes it on at once if it has no payload.
+    fn open(
+        &mut self,
+        routes: &Mutex<Routes>,
+        number: u32,
+        call: OpCall,
+        size: u64,
+    ) -> Result<(), String> {
         let Some(limit) = self.limit else {
             return Err(broke(&format!(
                 "it opened op {number}, but the session takes no ops"
             )));
         };
-        let mut routes = lock(self.routes);
+        let mut routes = lock(routes);
         if let Some(in_flight) = routes.op {
             return Err(broke(&format!(
                 "it opened op {number} while op {in_flight} is in flight"
@@ -751,6 +785,7 @@ impl Assembler<'_> {
         } = assembly;
         let arrival = match payload {
             Payload::Kept(payload) => Arrival::Op(IncomingOp {
+                session: self.session,
                 number,
                 op: whole(call, payload),
             }),
