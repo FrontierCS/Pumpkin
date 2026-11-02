@@ -16,6 +16,8 @@ use std::process::ExitCode;
 
 use xshell::{Cmd, Shell};
 
+mod docs;
+
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -162,6 +164,7 @@ fn root() -> &'static Path {
 /// Docker's own variables set to reach no engine.
 fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
     cargo.cmd(&["fmt", "--check"]).run()?;
+    docs::check(&cargo.sh)?;
     let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
     clippy.args(["--", "--deny", "warnings"]).run()?;
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);

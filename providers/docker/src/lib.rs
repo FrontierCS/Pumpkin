@@ -16,22 +16,15 @@
 //!   so a role can keep there no more than that limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
-//!   `VOLUME` its image declares, which is removed with the container. Docker's `/dev/shm` and
-//!   `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so what they hold
-//!   counts against the memory limit;
+//!   `VOLUME` its image declares, which is removed with the container. Neither has a size
+//!   limit, so a role can fill the disk the Docker daemon stores containers on. Docker's
+//!   `/dev/shm` and `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so
+//!   what they hold counts against the memory limit;
 //! - for a role that makes ops ([`Start::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
 //!   read-only, and `sandboxd` serving ops; any other sandbox is
 //!   [passive](pumpkin_schema::sandbox).
 //!
 //! Files move only over the session, never through the Docker daemon.
-//!
-//! # Limits of this provider
-//!
-//! - The provider puts no size limit on the container's writable layer, the role's
-//!   workspace, or on its image's volumes, so a role can fill the disk the Docker daemon
-//!   stores containers on.
-//! - A container whose `sandboxd` exits before connecting still costs the 30 s it has to
-//!   connect before [`Engine::start`] fails.
 //!
 //! # The envelope
 //!
@@ -42,12 +35,8 @@
 //! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them.
 //! Each container is labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds
 //! a run's containers, and only those, even when the driver that started them is gone, and
-//! with its role's name, so that `docker ps` shows which is which.
-//!
-//! Rootless Docker is the setup to choose: its engine, and so every container, runs as an
-//! ordinary user, so escaping a container gains no more than that user has. A rootful engine
-//! runs as root, and whoever may use its socket, as the `docker` group may, can make it do
-//! anything root can. The provider runs on either, and its report says which.
+//! with its role's name, so that `docker ps` shows which is which. The provider runs on a
+//! rootful engine or a rootless one, and its report says which ([`Security::rootless`]).
 
 use std::env;
 use std::ffi::OsStr;
@@ -151,8 +140,11 @@ pub struct Report {
 /// What the engine's security options say.
 #[derive(Debug)]
 pub struct Security {
-    /// Whether the engine runs as an ordinary user rather than as root: see
-    /// [the envelope](crate#the-envelope).
+    /// Whether the engine runs as an ordinary user rather than as root.
+    // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
+    // ordinary user, so escaping a container gains no more than that user has. A rootful engine
+    // runs as root, and whoever may use its socket, as the `docker` group may, can make it do
+    // anything root can.
     pub rootless: bool,
     /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own,
     /// or `None` if the engine has no seccomp.
@@ -363,9 +355,10 @@ impl Engine {
     ///
     /// Fails, naming the path, if the session's socket can't be made in the socket directory,
     /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
-    /// container; if its `sandboxd` doesn't connect within 30 s; or if the directories can't be
-    /// put. Whatever container `docker` created is removed before the error returns, which
-    /// quotes the end of the container's logs, and says if removing it failed.
+    /// container; if its `sandboxd` doesn't connect within 30 s, which a `sandboxd` that exits
+    /// at once still costs; or if the directories can't be put. Whatever container `docker`
+    /// created is removed before the error returns, which quotes the end of the container's
+    /// logs, and says if removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
         let socket = start.socket_dir.join(SOCKET_NAME);
