@@ -21,7 +21,7 @@
 //! with [`ToSandbox::OpReply`]. A sandbox has at most one op in flight, from its `Op` to its
 //! reply, so its callers take turns, and the owner answers each promptly: an op that starts
 //! long work, as a judge call does, with a job that later ops ask about. A session takes ops
-//! only once its owner enables them, before the sandbox's first command.
+//! only if the gateway accepts it with an [`OpPayloadLimit`].
 //!
 //! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
 //! sandboxes it starts: the driver and a task's commands rely on them in any sandbox. It holds
@@ -44,8 +44,8 @@ pub mod tree;
 /// opens the op, and no session's [`OpPayloadLimit`] is higher.
 pub const MAX_OP_PAYLOAD_BYTES: u64 = 64 << 20;
 
-/// The most bytes an op's payload may hold in a session, which its owner enables ops with: at
-/// most [`MAX_OP_PAYLOAD_BYTES`].
+/// The most bytes an op's payload may hold in a session that takes ops, which the gateway
+/// accepts it with: at most [`MAX_OP_PAYLOAD_BYTES`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpPayloadLimit(u64);
 

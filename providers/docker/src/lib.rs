@@ -220,9 +220,8 @@ pub struct Start<'a> {
     /// short too.
     pub socket_dir: &'a Path,
     /// For a role whose commands make ops through `sandboxctl`, as an agent's do, the most
-    /// bytes an op's payload may hold, which [`Engine::start`] enables ops with
-    /// ([`Session::enable_ops`]) before it returns. `None` for a
-    /// [passive](pumpkin_schema::sandbox) sandbox.
+    /// bytes an op's payload may hold, which [`Engine::start`] accepts the session with
+    /// ([`Listener::accept`]). `None` for a [passive](pumpkin_schema::sandbox) sandbox.
     pub ops: Option<OpPayloadLimit>,
 }
 
@@ -347,7 +346,7 @@ impl Engine {
         &self.report
     }
 
-    /// Starts a container for the role, connects its session, enables ops on it with
+    /// Starts a container for the role, connects its session, which takes ops within
     /// [`Start::ops`]'s limit, if it gives one, and puts [`pumpkin_subdirs()`] under
     /// [`pumpkin_dir()`].
     ///
@@ -487,18 +486,15 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
     ))
 }
 
-/// Accepts the session of container `id`'s `sandboxd`, enables ops on it with `ops`, the
+/// Accepts the session of container `id`'s `sandboxd`, which takes ops within `ops`, the
 /// payload limit, if any, and puts the directories a role expects.
 fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
-    let mut session = listener.accept(CONNECT_TIMEOUT).map_err(|error| {
+    let mut session = listener.accept(CONNECT_TIMEOUT, ops).map_err(|error| {
         format!(
             "the `sandboxd` of container {id} didn't connect: {error}: expected it to connect \
              as it starts"
         )
     })?;
-    if let Some(payload_limit) = ops {
-        session.enable_ops(payload_limit);
-    }
     let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
     let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
     session.put(&root, &puts).map_err(|error| {

@@ -35,9 +35,10 @@ type Answer = fn(stream: u32) -> Vec<(Value, Vec<u8>)>;
 /// fails: only a test that hangs waits this long, so no outcome rests on it.
 const HUNG: Duration = Duration::from_secs(60);
 
-/// Runs each case against a fake sandbox of its own, in a directory named after `name`, and
-/// checks what came of them against `expect`.
-fn check(name: &str, cases: &[(Action, Answer)], expect: &Expect) {
+/// Runs each case against a fake sandbox of its own, whose session takes ops within `ops`, if
+/// it gives a limit, in a directory named after `name`, and checks what came of them against
+/// `expect`.
+fn check(name: &str, ops: Option<OpPayloadLimit>, cases: &[(Action, Answer)], expect: &Expect) {
     let id = std::process::id();
     let dir = std::env::temp_dir().join(format!("pumpkin-gateway-{id}-{name}"));
     if dir.exists() {
@@ -47,14 +48,14 @@ fn check(name: &str, cases: &[(Action, Answer)], expect: &Expect) {
     let outcomes: Vec<String> = cases
         .iter()
         .enumerate()
-        .map(|(n, (action, answer))| run(&dir.join(n.to_string()), *action, *answer))
+        .map(|(n, (action, answer))| run(&dir.join(n.to_string()), ops, *action, *answer))
         .collect();
     expect.assert_eq(&outcomes.join("\n"));
     fs::remove_dir_all(dir).unwrap();
 }
 
 /// What came of `action`, and the op replies the fake sandbox heard, if any.
-fn run(dir: &Path, action: Action, answer: Answer) -> String {
+fn run(dir: &Path, ops: Option<OpPayloadLimit>, action: Action, answer: Answer) -> String {
     fs::create_dir(dir).unwrap();
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
@@ -81,7 +82,7 @@ fn run(dir: &Path, action: Action, answer: Answer) -> String {
         while hear_reply(&mut connection, &mut replies) {}
         replies
     });
-    let mut session = listener.accept(Duration::from_secs(10)).unwrap();
+    let mut session = listener.accept(Duration::from_secs(10), ops).unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
     let outcome = action(&mut session, dir);
@@ -161,22 +162,16 @@ fn start_and_freeze(session: &mut Session, _: &Path) -> String {
     )
 }
 
-/// Enables ops whose payloads hold at most 4 bytes, then answers them as [`answer_ops`] does.
-fn ops(session: &mut Session, _: &Path) -> String {
-    session.enable_ops(OpPayloadLimit::try_from(4).unwrap());
-    answer_ops(session)
-}
-
 /// Asks for an op payload limit over the protocol's, which is refused, then answers ops as
-/// [`answer_ops`] does, on a session that takes none.
-fn over_the_cap(session: &mut Session, _: &Path) -> String {
+/// [`ops`] does.
+fn over_the_cap(session: &mut Session, dir: &Path) -> String {
     let refused = OpPayloadLimit::try_from(MAX_OP_PAYLOAD_BYTES + 1).unwrap_err();
-    format!("op payload limit: {refused}; {}", answer_ops(session))
+    format!("op payload limit: {refused}; {}", ops(session, dir))
 }
 
 /// Freezes the sandbox, whose answer may carry ops, then answers each op that arrives whole,
 /// and notes each the gateway refused, until the session ends.
-fn answer_ops(session: &mut Session) -> String {
+fn ops(session: &mut Session, _: &Path) -> String {
     let mut lines = vec![format!("freeze: {}", outcome(session.freeze()))];
     loop {
         match session.next_op(HUNG) {
@@ -220,7 +215,6 @@ fn answer_ops(session: &mut Session) -> String {
 /// Freezes the sandbox, whose answer carries two ops, one after the other, then answers the
 /// first with a reply too long for a frame, and the second with a short one.
 fn too_long_reply(session: &mut Session, _: &Path) -> String {
-    session.enable_ops(OpPayloadLimit::try_from(0).unwrap());
     let mut lines = vec![format!("freeze: {}", outcome(session.freeze()))];
     for message in ["x".repeat(frame::MAX_MESSAGE_BYTES), "no".to_owned()] {
         lines.push(match session.next_op(HUNG).unwrap().unwrap() {
@@ -316,6 +310,7 @@ fn reply(kind: &str, stream: u32) -> (Value, Vec<u8>) {
 fn untrusted_answers() {
     check(
         "answers",
+        None,
         &[
             (collect, |s| {
                 vec![dir(s, "a"), file(s, "a/b", 2), data(s, b"hi"), end(s)]
@@ -362,11 +357,13 @@ fn untrusted_answers() {
     );
 }
 
-/// Ops the sandbox makes, which the gateway passes on whole, refuses, or ends the session for.
+/// Ops the sandbox makes, which the gateway passes on whole, refuses, or ends the session for,
+/// in a session that takes ops whose payloads hold at most 4 bytes, and in one that takes none.
 #[test]
 fn untrusted_ops() {
     check(
         "ops",
+        Some(OpPayloadLimit::try_from(4).unwrap()),
         &[
             // A payload over the limit is refused once all of its bytes have arrived, and the
             // next op follows; an op without a payload is whole at once.
@@ -412,7 +409,6 @@ fn untrusted_ops() {
             (ops, |_| {
                 vec![train(7, 5), op_data(7, b"abcde"), op_data(99, b"x")]
             }),
-            (over_the_cap, |s| vec![done(s), train(7, 0)]),
             (too_long_reply, |s| {
                 let ops = json!({ "kind": "ops" });
                 vec![
@@ -434,7 +430,14 @@ fn untrusted_ops() {
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; Judge { grant: Name("train"), payload: [97] }; reply: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open
             freeze: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; Judge { grant: Name("train"), payload: [] }; reply: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open
-            op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 7, but the session takes no ops
             freeze: ok; InvalidInput: the message is 65602 bytes: a frame's message holds at most 65536; ok; the sandbox heard op 7: {"kind":"refused","message":"the reply was too long to send: the message is 65602 bytes: a frame's message holds at most 65536"}, op 8: {"kind":"refused","message":"no"}"#]],
+    );
+    check(
+        "passive",
+        None,
+        &[(over_the_cap, |s| vec![done(s), train(7, 0)])],
+        &expect![
+            "op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 7, but the session takes no ops"
+        ],
     );
 }

@@ -50,7 +50,7 @@ impl Sandbox {
             .arg(&socket)
             .spawn()
             .unwrap();
-        let mut session = listener.accept(Duration::from_secs(10)).unwrap();
+        let mut session = listener.accept(Duration::from_secs(10), None).unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
             .put(&absolute(&root), &dirs.each_ref().map(Put::Dir))

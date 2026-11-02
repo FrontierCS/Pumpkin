@@ -14,7 +14,7 @@
 //!
 //! # Ops
 //!
-//! Once its owner enables them ([`Session::enable_ops`]), a sandbox may make ops, as
+//! A sandbox whose session takes ops ([`Listener::accept`]) may make them, as
 //! [the protocol](pumpkin_schema::sandbox) describes: the owner takes each with
 //! [`Session::next_op`] and answers it with [`Session::reply`]. The gateway authorizes nothing,
 //! but bounds what ops cost the host, and ends a session whose sandbox breaks the ops' rules.
@@ -77,12 +77,15 @@ impl Listener {
         Ok(Self { listener, path })
     }
 
-    /// Waits up to `timeout` for the sandbox to connect, then removes the socket.
+    /// Waits up to `timeout` for the sandbox to connect, then removes the socket. The session
+    /// takes ops if `ops` gives the most bytes an op's payload may hold: it holds one payload at
+    /// most, and refuses a payload over the limit ([`Arrival::Refused`]), keeping none of its
+    /// bytes. With `None`, an op breaks the protocol.
     ///
     /// # Errors
     ///
     /// Fails if nothing connects in time or accepting fails.
-    pub fn accept(self, timeout: Duration) -> io::Result<Session> {
+    pub fn accept(self, timeout: Duration, ops: Option<OpPayloadLimit>) -> io::Result<Session> {
         self.listener.set_nonblocking(true)?;
         let deadline = Instant::now() + timeout;
         let stream = loop {
@@ -104,7 +107,7 @@ impl Listener {
             }
         };
         stream.set_nonblocking(false)?;
-        Session::new(stream)
+        Session::new(stream, ops)
     }
 }
 
@@ -138,9 +141,6 @@ struct Routes {
     open: HashMap<u32, Route>,
     /// The op in flight, by number: opened, and not yet answered.
     op: Option<u32>,
-    /// The most bytes an op's payload may hold, once the owner has enabled ops: until then,
-    /// the session takes none.
-    op_payload_limit: Option<OpPayloadLimit>,
     /// Why the session ended, once it has.
     ended: Option<String>,
 }
@@ -221,7 +221,7 @@ pub struct RefusedOp {
     pub call: OpCall,
     /// The payload's size, in bytes, which all arrived and was dropped.
     pub size: u64,
-    /// The limit the payload was over, which the owner enabled ops with.
+    /// The limit the payload was over, which the session was accepted with.
     pub payload_limit: OpPayloadLimit,
     /// Why the op was refused: the message its refusal carries.
     pub message: String,
@@ -244,13 +244,12 @@ impl Drop for Process {
 }
 
 impl Session {
-    fn new(stream: UnixStream) -> io::Result<Self> {
+    fn new(stream: UnixStream, limit: Option<OpPayloadLimit>) -> io::Result<Self> {
         // A socket option, so it holds for every handle on the connection.
         stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
         let routes = Arc::new(Mutex::new(Routes {
             open: HashMap::new(),
             op: None,
-            op_payload_limit: None,
             ended: None,
         }));
         // From the reader thread to the owner. Every arrival is the op in flight, so the queue
@@ -261,7 +260,7 @@ impl Session {
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         thread::Builder::new()
             .name("session".to_owned())
-            .spawn(move || route(reader, &reader_routes, arrivals))?;
+            .spawn(move || route(reader, &reader_routes, arrivals, limit))?;
         Ok(Self {
             connection: stream,
             routes,
@@ -362,14 +361,6 @@ impl Session {
         });
         self.close(stream);
         collected
-    }
-
-    /// Enables ops, whose payloads may hold at most `payload_limit`: call it before the
-    /// sandbox's first command, since an op before it breaks the protocol. The session holds
-    /// one payload at most, and refuses a payload over the limit ([`Arrival::Refused`]),
-    /// keeping none of its bytes.
-    pub fn enable_ops(&self, payload_limit: OpPayloadLimit) {
-        lock(&self.routes).op_payload_limit = Some(payload_limit);
     }
 
     /// Waits up to `timeout` for the next op whose payload has all arrived: `None` if none did.
@@ -597,12 +588,19 @@ impl Drop for Session {
 }
 
 /// Reads frames from the sandbox until the session ends: each reply goes to the request
-/// waiting on its stream, and each op's frames to the [`Assembler`].
-fn route(connection: UnixStream, routes: &Mutex<Routes>, arrivals: SyncSender<Arrival>) {
+/// waiting on its stream, and each op's frames to the [`Assembler`], with the session's op
+/// payload `limit`, if it takes ops.
+fn route(
+    connection: UnixStream,
+    routes: &Mutex<Routes>,
+    arrivals: SyncSender<Arrival>,
+    limit: Option<OpPayloadLimit>,
+) {
     let mut reader = BufReader::new(connection);
     let mut ops = Assembler {
         routes,
         arrivals,
+        limit,
         open: None,
     };
     let reason = loop {
@@ -654,6 +652,8 @@ struct Assembler<'a> {
     routes: &'a Mutex<Routes>,
     // To the session's owner, which takes each op with `Session::next_op`.
     arrivals: SyncSender<Arrival>,
+    /// The most bytes an op's payload may hold, if the session takes ops.
+    limit: Option<OpPayloadLimit>,
     /// The op whose payload is arriving, by number.
     open: Option<(u32, Assembly)>,
 }
@@ -679,12 +679,12 @@ impl Assembler<'_> {
     /// Puts op `number`, whose payload is `size` bytes, in flight, if the session takes ops and
     /// none is in flight, and passes it on at once if it has no payload.
     fn open(&mut self, number: u32, call: OpCall, size: u64) -> Result<(), String> {
-        let mut routes = lock(self.routes);
-        let Some(limit) = routes.op_payload_limit else {
+        let Some(limit) = self.limit else {
             return Err(broke(&format!(
                 "it opened op {number}, but the session takes no ops"
             )));
         };
+        let mut routes = lock(self.routes);
         if let Some(in_flight) = routes.op {
             return Err(broke(&format!(
                 "it opened op {number} while op {in_flight} is in flight"
