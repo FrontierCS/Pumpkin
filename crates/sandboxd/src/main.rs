@@ -21,6 +21,7 @@
 //! reach it through `/proc` ([`sys::make_non_dumpable`] says why).
 
 use std::ffi::OsString;
+use std::fmt::Display;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -103,8 +104,7 @@ fn main() -> ExitCode {
     let flags::Sandboxd { gateway, ops } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {
-            // Help that can't be written changes nothing.
-            let _ = writeln!(io::stdout(), "{error}");
+            print_line(io::stdout(), error);
             return ExitCode::SUCCESS;
         }
         // Bad arguments exit with 1, as sandboxd's other errors do, and not with the 2 that
@@ -121,6 +121,13 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Writes `line` to `stream`, standard output or standard error, and ignores a failed write:
+/// what `sandboxd` and `sandboxctl` print never changes their outcome, which their exit code
+/// reports even when nobody reads their output.
+fn print_line(mut stream: impl Write, line: impl Display) {
+    let _ = writeln!(stream, "{line}");
 }
 
 /// The guard from locking a mutex, or from waiting on a condition variable with one.

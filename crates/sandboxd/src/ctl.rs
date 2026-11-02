@@ -8,7 +8,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -17,6 +17,8 @@ use std::process::ExitCode;
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use pumpkin_schema::sandbox::{CONTROL_SOCKET, frame};
+
+use crate::print_line;
 
 /// What a caller is told when the connection to `sandboxd` closes without an answer, as
 /// [`crate::ops`] says it may.
@@ -128,14 +130,13 @@ mod flags {
     // generated end
 }
 
-/// Runs `sandboxctl` with `args`, its arguments after its name. Its exit code is the op's
-/// outcome even when its output can't be written, as when the reader has gone.
+/// Runs `sandboxctl` with `args`, its arguments after its name: its exit code is the op's
+/// outcome, which its output doesn't change ([`print_line`]).
 pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
-    // An output nobody reads changes nothing about the op, so a failed write is ignored.
     let reply = match flags::Sandboxctl::from_vec(args) {
         Ok(flags) => run(flags),
         Err(error) if error.is_help() => {
-            let _ = writeln!(io::stdout(), "{error}");
+            print_line(io::stdout(), error);
             return ExitCode::SUCCESS;
         }
         // Bad arguments exit with 1, as sandboxctl's other errors do, and not with the 2 that
@@ -153,11 +154,11 @@ pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
             let Ok(json) = serde_json::to_string(&reply) else {
                 unreachable!("{reply:?} can't be written as JSON")
             };
-            let _ = writeln!(io::stdout(), "{json}");
+            print_line(io::stdout(), json);
             ExitCode::from(exit_code(&reply))
         }
         Err(message) => {
-            let _ = writeln!(io::stderr(), "sandboxctl: {message}");
+            print_line(io::stderr(), format_args!("sandboxctl: {message}"));
             ExitCode::FAILURE
         }
     }
