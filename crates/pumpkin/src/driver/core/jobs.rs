@@ -13,6 +13,8 @@
 //! The quota ledger is not kept apart: what each grant has used is counted from its jobs
 //! ([`Jobs::usage`]), so the two can't disagree.
 
+use std::time::Duration;
+
 use pumpkin_schema::sandbox::op::{self, FailureCode};
 use pumpkin_schema::workflow::{JudgeCall, JudgeGrantId};
 
@@ -77,8 +79,8 @@ pub(super) struct Job {
 pub(super) enum State {
     /// Accepted; its command has not started.
     Queued,
-    /// Its command started at `started_ms`.
-    Running { started_ms: u64 },
+    /// Its command started at `started`.
+    Running { started: Duration },
     /// Its command has ended, or the core stopped the job; its sandbox is being collected and
     /// destroyed. `ran` is when its command ran, if it started.
     Ending { ran: Option<Span>, end: End },
@@ -89,16 +91,16 @@ pub(super) enum State {
     },
 }
 
-/// When a job's command ran, in milliseconds since the run started.
+/// When a job's command ran, as times since the run started.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Span {
-    started_ms: u64,
-    ended_ms: u64,
+    started: Duration,
+    ended: Duration,
 }
 
 impl Span {
-    fn ms(self) -> u64 {
-        self.ended_ms.saturating_sub(self.started_ms)
+    fn duration(self) -> Duration {
+        self.ended.saturating_sub(self.started)
     }
 }
 
@@ -125,8 +127,8 @@ pub(super) enum Report {
 pub(super) struct Usage {
     /// The calls accepted.
     pub(super) calls: u64,
-    /// The time the commands that have ended ran, in milliseconds.
-    pub(super) used_ms: u64,
+    /// The time the commands that have ended ran.
+    pub(super) used: Duration,
     /// The calls whose jobs haven't ended.
     pub(super) running: u64,
 }
@@ -152,26 +154,23 @@ impl Jobs {
     }
 
     /// Notes that a queued job's command started.
-    pub(super) fn started(&mut self, job: JobId, at_ms: u64) {
+    pub(super) fn started(&mut self, job: JobId, at: Duration) {
         if let Some(job) = self.get_mut(job)
             && let State::Queued = job.state
         {
-            job.state = State::Running { started_ms: at_ms };
+            job.state = State::Running { started: at };
         }
     }
 
     /// Notes that a job's command ended. A job whose start wasn't reported ran for no time
     /// the core saw, but ends all the same, so that a timeout still leaves no result.
-    pub(super) fn ended(&mut self, job: JobId, at_ms: u64, end: End) {
+    pub(super) fn ended(&mut self, job: JobId, at: Duration, end: End) {
         let Some(job) = self.get_mut(job) else {
             return;
         };
         let ran = match job.state {
             State::Queued => None,
-            State::Running { started_ms } => Some(Span {
-                started_ms,
-                ended_ms: at_ms,
-            }),
+            State::Running { started } => Some(Span { started, ended: at }),
             State::Ending { .. } | State::Ended { .. } => return,
         };
         job.state = State::Ending { ran, end };
@@ -180,22 +179,13 @@ impl Jobs {
     /// Ends a job with its last report. A report that skips a step, such as a failure before
     /// the command started, ends the job all the same, its command's time running until the
     /// report if it had started.
-    pub(super) fn report(&mut self, job: JobId, at_ms: u64, report: Report) {
+    pub(super) fn report(&mut self, job: JobId, at: Duration, report: Report) {
         let Some(job) = self.get_mut(job) else {
             return;
         };
         let (ran, end) = match job.state {
             State::Queued => (None, None),
-            State::Running { started_ms } => {
-                let ended_ms = at_ms;
-                (
-                    Some(Span {
-                        started_ms,
-                        ended_ms,
-                    }),
-                    None,
-                )
-            }
+            State::Running { started } => (Some(Span { started, ended: at }), None),
             State::Ending { ran, end } => (ran, Some(end)),
             State::Ended { .. } => return,
         };
@@ -211,16 +201,16 @@ impl Jobs {
         job.state = State::Ended { ran, outcome };
     }
 
-    /// Stops every job that is queued or running at `now_ms`, and returns them. A job whose
+    /// Stops every job that is queued or running at `now`, and returns them. A job whose
     /// command has already ended is left to finish collecting.
-    pub(super) fn stop_unfinished(&mut self, now_ms: u64) -> Vec<JobId> {
+    pub(super) fn stop_unfinished(&mut self, now: Duration) -> Vec<JobId> {
         let mut stopped = Vec::new();
         for (index, job) in self.0.iter_mut().enumerate() {
             let ran = match job.state {
                 State::Queued => None,
-                State::Running { started_ms } => Some(Span {
-                    started_ms,
-                    ended_ms: now_ms,
+                State::Running { started } => Some(Span {
+                    started,
+                    ended: now,
                 }),
                 State::Ending { .. } | State::Ended { .. } => continue,
             };
@@ -256,9 +246,11 @@ impl Jobs {
                 State::Queued | State::Running { .. } => usage.running += 1,
                 State::Ending { ran, .. } => {
                     usage.running += 1;
-                    usage.used_ms += ran.map_or(0, Span::ms);
+                    usage.used += ran.map_or(Duration::ZERO, Span::duration);
                 }
-                State::Ended { ran, .. } => usage.used_ms += ran.map_or(0, Span::ms),
+                State::Ended { ran, .. } => {
+                    usage.used += ran.map_or(Duration::ZERO, Span::duration);
+                }
             }
         }
         usage

@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::core::{
@@ -45,11 +46,11 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         workflow: &workflow,
         ops: 0,
         jobs: HashMap::new(),
-        tick_due_ms: None,
+        tick_due: None,
         transcript: String::new(),
     };
     let (mut core, actions) = Core::start(&workflow);
-    run.note("start", &actions, core.tick_due_ms());
+    run.note("start", &actions, core.tick_due());
     for line in script
         .lines()
         .map(str::trim)
@@ -57,8 +58,8 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     {
         let (at, event) = line.split_once(' ').unwrap();
         let event = run.event(event);
-        let actions = core.handle(at.parse().unwrap(), event);
-        run.note(line, &actions, core.tick_due_ms());
+        let actions = core.handle(Duration::from_millis(at.parse().unwrap()), event);
+        run.note(line, &actions, core.tick_due());
     }
     expect.assert_eq(&run.transcript);
 }
@@ -71,7 +72,7 @@ struct Run<'w> {
     /// What each job was made under, for its result's spec.
     jobs: HashMap<JobId, JudgeCall>,
     /// When the core last said it next wants a tick.
-    tick_due_ms: Option<u64>,
+    tick_due: Option<Duration>,
     transcript: String,
 }
 
@@ -149,16 +150,17 @@ impl Run<'_> {
 
     /// Notes an event, the actions it called for, and when the next tick is due if that
     /// changed.
-    fn note(&mut self, event: &str, actions: &[Action], tick_due_ms: Option<u64>) {
+    fn note(&mut self, event: &str, actions: &[Action], tick_due: Option<Duration>) {
         writeln!(self.transcript, "{event}").unwrap();
         for action in actions {
             let action = self.action(action);
             writeln!(self.transcript, "  {action}").unwrap();
         }
-        if tick_due_ms != self.tick_due_ms {
-            self.tick_due_ms = tick_due_ms;
-            let due =
-                tick_due_ms.map_or("no tick due".to_owned(), |ms| format!("tick due at {ms}"));
+        if tick_due != self.tick_due {
+            self.tick_due = tick_due;
+            let due = tick_due.map_or("no tick due".to_owned(), |due| {
+                format!("tick due at {}", due.as_millis())
+            });
             writeln!(self.transcript, "  ({due})").unwrap();
         }
     }
