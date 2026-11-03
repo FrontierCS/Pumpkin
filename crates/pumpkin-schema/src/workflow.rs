@@ -6,7 +6,7 @@
 //! example, the role a [`JudgeGrant`] judges with is known to be a [`Judge`]. Ids are only
 //! valid for the workflow that issued them.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use crate::ir::{
@@ -169,8 +169,6 @@ pub struct JudgeGrant {
     pub calls: Option<NonZeroU64>,
     /// See [`ir::JudgeGrant::cumulative_seconds`](crate::ir::JudgeGrant::cumulative_seconds).
     pub cumulative_seconds: Option<NonZeroU64>,
-    /// See [`ir::JudgeGrant::concurrency`](crate::ir::JudgeGrant::concurrency).
-    pub concurrency: NonZeroU32,
     /// See
     /// [`ir::JudgeGrant::call_timeout_seconds`](crate::ir::JudgeGrant::call_timeout_seconds).
     pub call_timeout_seconds: NonZeroU64,

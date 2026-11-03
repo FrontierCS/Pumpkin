@@ -8,8 +8,8 @@
 //! - A judge call names one of the agent's judge grants, and a submission its submit grant.
 //! - Its payload isn't empty, and fits its slot's
 //!   [`max_bytes`](pumpkin_schema::ir::Slot::max_bytes), the score's for a submission.
-//! - A judge grant has calls left, fewer calls running than its concurrency, and judge time
-//!   left. A refused call is not charged.
+//! - A judge grant has calls left, none of its calls queued or running, and judge time left.
+//!   A refused call is not charged.
 //! - A status names one of the agent's jobs.
 //!
 //! A judge call that passes becomes a job, which the reply names, and runs in the background
@@ -182,11 +182,10 @@ impl Core<'_> {
         {
             return Err(format!("`{name}` has no calls left: it allows {calls}"));
         }
-        if usage.running >= u64::from(grant.concurrency.get()) {
+        if usage.running {
             return Err(format!(
-                "`{name}` already has {} call(s) running, as many as it allows at once: call \
-                 again once one has finished; this call is not charged",
-                usage.running
+                "`{name}` runs one call at a time, and already has one queued or running: call \
+                 again once it has finished; this call is not charged"
             ));
         }
         if let Some(total) = grant.cumulative()
@@ -255,7 +254,6 @@ impl Core<'_> {
             slot,
             calls,
             cumulative_seconds,
-            concurrency,
             call_timeout_seconds,
         } = grant;
         op::JudgeGrant {
@@ -263,7 +261,6 @@ impl Core<'_> {
             max_bytes: self.workflow.slot(*slot).max_bytes,
             calls: *calls,
             cumulative_seconds: *cumulative_seconds,
-            concurrency: *concurrency,
             call_timeout_seconds: *call_timeout_seconds,
         }
     }

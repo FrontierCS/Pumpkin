@@ -87,7 +87,6 @@
             "slot": "payload",
             "calls": 100,
             "cumulative_seconds": 12000,
-            "concurrency": 1,
             "call_timeout_seconds": 12000
           }
         },

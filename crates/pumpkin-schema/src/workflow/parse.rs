@@ -229,7 +229,6 @@ impl<'ir> Parser<'ir> {
             slot,
             calls,
             cumulative_seconds,
-            concurrency,
             call_timeout_seconds,
         } = grant;
         let slot = self.judge_slot(&format!("{path}.judge"), role, slot)?;
@@ -238,7 +237,6 @@ impl<'ir> Parser<'ir> {
             slot,
             calls: *calls,
             cumulative_seconds: *cumulative_seconds,
-            concurrency: *concurrency,
             call_timeout_seconds: *call_timeout_seconds,
         })
     }

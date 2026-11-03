@@ -27,7 +27,7 @@
 //! whether the job passed or failed, and `failure` only if the job failed without one. The
 //! crate's tests pin an example of each form.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -94,7 +94,6 @@ pub struct JudgeGrant {
     pub max_bytes: NonZeroU64,
     pub calls: Option<NonZeroU64>,
     pub cumulative_seconds: Option<NonZeroU64>,
-    pub concurrency: NonZeroU32,
     pub call_timeout_seconds: NonZeroU64,
 }
 
