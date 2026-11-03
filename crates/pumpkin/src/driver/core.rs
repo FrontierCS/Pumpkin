@@ -4,8 +4,8 @@
 //! same [`Action`]s; [`Core`] says how a runtime drives it.
 //!
 //! The core implements [`SoloThenJudge`]. Its [`Action`]s ask the runtime to start the agent,
-//! answer ops, run judge calls, collect outputs and destroy sandboxes; the corresponding
-//! [`Event`]s confirm their completion. [`WorkEnd`] names why the work phase ended, and
+//! answer ops, run judge calls, collect outputs and destroy sandboxes, and [`Event`]s report
+//! what the runtime observed. [`WorkEnd`] names why the work phase ended, and
 //! [`Action::Finish`] carries the run's [`Outcome`].
 //!
 //! The rules by which the core authorizes ops and fills in their replies are in its `ops`
@@ -74,8 +74,6 @@ pub enum Event {
     AgentExited { status: ExitStatus },
     /// The agent's sandbox failed: it could not start, or its session ended.
     AgentFailed { reason: String },
-    /// The agent's sandbox is gone, as [`Action::TearDownAgent`] asked.
-    AgentDestroyed,
     /// The agent's sandbox made an op. The core answers it with an [`Action::Reply`] naming
     /// `op`.
     OpArrived { op: OpId, request: Request },
@@ -121,7 +119,8 @@ pub enum Action {
     /// Stops a job wherever it is, and destroys its sandbox. Its last report follows as usual.
     StopJudge { job: JobId },
     /// Freezes the agent's sandbox, collects its outputs, its trajectory among them, and
-    /// destroys it, then reports [`Event::AgentDestroyed`].
+    /// destroys it, before the runtime performs the next action: the core takes the agent as
+    /// gone once it asks.
     TearDownAgent,
     /// Ends the run with its outcome. The core takes no further action.
     Finish { outcome: Outcome },
@@ -195,8 +194,7 @@ pub enum Verdict {
 /// [`Event::Tick`] when [`Core::tick_due`] says. An event that doesn't apply to the run's
 /// state, such as a second report on a job that has ended, changes nothing, and one observed
 /// before an earlier one, as a report from a job's thread can be, doesn't move the core's
-/// clock back. [`Event::AgentDestroyed`] is the exception: the runtime reports it only as
-/// [`Action::TearDownAgent`] asks, once the work phase has ended.
+/// clock back.
 #[derive(Debug)]
 pub struct Core<'w> {
     workflow: &'w Workflow,
@@ -222,18 +220,18 @@ enum Phase {
         submission: Submission,
         grace_end: Duration,
     },
-    /// The work phase has ended. The agent's jobs are being stopped, and its sandbox frozen,
-    /// collected and destroyed.
+    /// The work phase has ended, and the agent has been torn down. The jobs it left, stopped or
+    /// collecting, are ending.
     Teardown {
         work_end: WorkEnd,
-        agent_destroyed: bool,
         submission: Option<Submission>,
     },
-    /// The final judge judges the selected submission in job `job`.
+    /// The final judge judges the selected submission in job `job`, which is at `state`.
     Final {
         work_end: WorkEnd,
         submission: Submission,
         job: JobId,
+        state: jobs::State,
     },
     /// The run has finished.
     Finished { work_end: WorkEnd },
@@ -276,36 +274,21 @@ impl<'w> Core<'w> {
             Event::AgentFailed { reason } => {
                 self.end_work(WorkEnd::AgentFailed(reason), &mut actions);
             }
-            Event::AgentDestroyed => match &mut self.phase {
-                Phase::Teardown {
-                    agent_destroyed, ..
-                } => *agent_destroyed = true,
-                #[expect(
-                    clippy::unreachable,
-                    reason = "the runtime reports the agent destroyed only as \
-                              `Action::TearDownAgent` asks, which the core asks once, as it \
-                              enters the teardown, and the teardown lasts until then"
-                )]
-                phase @ (Phase::Work { .. }
-                | Phase::Finalized { .. }
-                | Phase::Final { .. }
-                | Phase::Finished { .. }) => {
-                    unreachable!(
-                        "the agent was reported destroyed outside the teardown, in {phase:?}"
-                    )
-                }
-            },
             Event::OpArrived { op, request } => self.op(op, request, &mut actions),
-            Event::JudgeStarted { job } => self.jobs.started(job, at),
+            Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
             Event::JudgeExited { job, status: _ } => {
-                self.jobs.ended(job, at, jobs::End::Exited);
+                self.on_job(job, |state| state.ended(at, jobs::End::Exited));
             }
-            Event::JudgeTimedOut { job } => self.jobs.ended(job, at, jobs::End::TimedOut),
+            Event::JudgeTimedOut { job } => {
+                self.on_job(job, |state| state.ended(at, jobs::End::TimedOut));
+            }
             Event::JudgeCollected { job, result } => {
-                self.jobs.report(job, at, jobs::Report::Collected(result));
+                let report = jobs::Report::Collected(result);
+                self.on_job(job, |state| state.report(at, report));
             }
             Event::JudgeFailed { job, reason } => {
-                self.jobs.report(job, at, jobs::Report::Failed(reason));
+                let report = jobs::Report::Failed(reason);
+                self.on_job(job, |state| state.report(at, report));
             }
         }
         self.advance(&mut actions);
@@ -346,7 +329,6 @@ impl<'w> Core<'w> {
         };
         self.phase = Phase::Teardown {
             work_end,
-            agent_destroyed: false,
             submission,
         };
         let stopped = self.jobs.stop_unfinished(self.now);
@@ -354,13 +336,12 @@ impl<'w> Core<'w> {
         actions.push(Action::TearDownAgent);
     }
 
-    /// Moves the run on once what it waits for is done: the final phase once the teardown is
-    /// confirmed, and the run's end once the final job has ended.
+    /// Moves the run on once what it waits for is done: the final phase once nothing the agent
+    /// started runs on, and the run's end once the final job has ended.
     fn advance(&mut self, actions: &mut Vec<Action>) {
         match &self.phase {
             Phase::Teardown {
                 work_end,
-                agent_destroyed: true,
                 submission,
             } if self.jobs.all_ended() => {
                 let (work_end, submission) = (work_end.clone(), submission.clone());
@@ -369,9 +350,10 @@ impl<'w> Core<'w> {
             Phase::Final {
                 work_end,
                 submission,
-                job,
+                job: _,
+                state,
             } => {
-                let Some(outcome) = self.jobs.outcome(*job) else {
+                let Some(outcome) = state.outcome() else {
                     return;
                 };
                 let submission = submission.clone();
@@ -405,7 +387,7 @@ impl<'w> Core<'w> {
             return self.finish(Outcome { work_end, verdict }, actions);
         };
         // The final phase comes after the deadline, so the time left before it doesn't count.
-        let job = self.jobs.add(JudgeCall::Score);
+        let job = self.jobs.score_job();
         actions.push(Action::StartJudge {
             job,
             call: JudgeCall::Score,
@@ -416,7 +398,26 @@ impl<'w> Core<'w> {
             work_end,
             submission,
             job,
+            state: jobs::State::Queued,
         };
+    }
+
+    /// Applies a report on job `job` to its state: the score's job's in the final phase, else
+    /// the agent's job's by that number, if it has one.
+    fn on_job(&mut self, job: JobId, apply: impl FnOnce(&mut jobs::State)) {
+        let state = match &mut self.phase {
+            Phase::Final {
+                job: score, state, ..
+            } if *score == job => Some(state),
+            Phase::Work { .. }
+            | Phase::Finalized { .. }
+            | Phase::Teardown { .. }
+            | Phase::Final { .. }
+            | Phase::Finished { .. } => self.jobs.state_mut(job),
+        };
+        if let Some(state) = state {
+            apply(state);
+        }
     }
 
     fn finish(&mut self, outcome: Outcome, actions: &mut Vec<Action>) {
