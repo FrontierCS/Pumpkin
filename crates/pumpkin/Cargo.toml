@@ -1,0 +1,20 @@
+[package]
+name = "pumpkin"
+version = "0.0.0"
+description = "Pumpkin's host side: the driver"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+pumpkin-schema = { path = "../pumpkin-schema" }
+stdx = { path = "../stdx" }
+serde_json.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

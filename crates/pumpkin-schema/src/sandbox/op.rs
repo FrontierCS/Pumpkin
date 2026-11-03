@@ -132,7 +132,9 @@ pub struct Remaining {
 #[serde(deny_unknown_fields)]
 pub struct SubmitReply {
     pub state: SubmitState,
-    /// The time left before the deadline, in whole seconds rounded down.
+    /// The time left to work, in whole seconds rounded down: until the deadline, or, once a
+    /// final submission is accepted, until the end of the grace to wind down, if that comes
+    /// first.
     pub remaining_seconds: u64,
 }
 
@@ -205,7 +207,7 @@ pub struct Failure {
 pub enum FailureCode {
     /// The judge ran past its timeout.
     JudgeTimeout,
-    /// The judge failed, or was stopped, before giving a result.
+    /// The judge failed before giving a result.
     JudgeError,
     /// The judge wrote no valid result.
     InvalidResult,

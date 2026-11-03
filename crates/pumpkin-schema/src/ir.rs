@@ -21,7 +21,7 @@ pub(crate) mod values;
 
 pub use values::{
     AbsolutePath, Argv, Env, EnvVar, Image, JsonPointer, ModelName, Models, Name, Returns,
-    WorkflowName,
+    Sha256Digest, WorkflowName,
 };
 
 /// A workflow.
@@ -238,7 +238,9 @@ pub struct JudgeGrant {
     /// The most calls the agent may make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calls: Option<NonZeroU64>,
-    /// The most judge command time the agent's calls may use in all.
+    /// The most judge command time the agent's calls may use in all. A command's time counts
+    /// against it once the command has ended, so calls that run at once may together overshoot
+    /// it, by up to `concurrency` − 1 call timeouts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_seconds: Option<NonZeroU64>,
     /// The most calls that may run at once. A call beyond it is refused.

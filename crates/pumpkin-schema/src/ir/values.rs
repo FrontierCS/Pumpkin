@@ -65,6 +65,12 @@ checked_string!(
 );
 
 checked_string!(
+    /// A content digest: `sha256:` and 64 lowercase hexadecimal digits.
+    Sha256Digest,
+    check_sha256_digest
+);
+
+checked_string!(
     /// An absolute path without empty, `.` or `..` components.
     AbsolutePath,
     check_absolute_path
