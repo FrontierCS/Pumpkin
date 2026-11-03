@@ -227,6 +227,9 @@ impl Grant {
 }
 
 /// Runs a payload in a fresh instance of a judge role and collects its result.
+///
+/// The grant runs one call at a time: a call made while one of its calls is queued or running
+/// is refused.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeGrant {
@@ -238,13 +241,9 @@ pub struct JudgeGrant {
     /// The most calls the agent may make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calls: Option<NonZeroU64>,
-    /// The most judge command time the agent's calls may use in all. A command's time counts
-    /// against it once the command has ended, so calls that run at once may together overshoot
-    /// it, by up to `concurrency` − 1 call timeouts.
+    /// The most judge command time the agent's calls may use in all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_seconds: Option<NonZeroU64>,
-    /// The most calls that may run at once. A call beyond it is refused.
-    pub concurrency: NonZeroU32,
     /// The timeout of each call, counted from the start of the judge command. A call also
     /// ends with the grant's cumulative time, or with the work phase, if either comes first.
     pub call_timeout_seconds: NonZeroU64,

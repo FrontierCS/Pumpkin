@@ -281,7 +281,7 @@ fn lwe() {
               (tick due at 18000000)
             0 agent_started
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"concurrency":1,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             2000 judge train 10240
               reply to op 2: {"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}
               start job 1 of train on op 2's payload of 10240 bytes, with a timeout of 12000s
@@ -380,10 +380,11 @@ fn quotas() {
     );
 }
 
-/// A call made while another runs is refused and not charged. A call counts once accepted,
-/// even if its job fails before its command starts.
+/// A grant runs one call at a time: a call made while another is queued or running is refused
+/// and not charged. A call counts once accepted, even if its job fails before its command
+/// starts.
 #[test]
-fn concurrency_and_calls() {
+fn one_call_at_a_time() {
     check(
         |ir| ir["main"]["solo_then_judge"]["grants"][0]["judge"]["calls"] = json!(2),
         r#"
@@ -410,13 +411,13 @@ fn concurrency_and_calls() {
               reply to op 1: {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":12000}}
               start job 1 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1100 judge train 10
-              refuse op 2: `train` already has 1 call(s) running, as many as it allows at once: call again once one has finished; this call is not charged
+              refuse op 2: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             1200 status 1
               reply to op 3: {"kind":"status","job":1,"state":"queued","remaining":{"calls":1,"seconds":12000}}
             2000 judge_started 1
             3000 judge_exited 1 0
             3100 judge train 10
-              refuse op 4: `train` already has 1 call(s) running, as many as it allows at once: call again once one has finished; this call is not charged
+              refuse op 4: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             3200 collected 1 {"status": "passed"}
             3300 status 1
               reply to op 5: {"kind":"status","job":1,"state":"failed","failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"remaining":{"calls":1,"seconds":11999}}

@@ -3,12 +3,14 @@
 //! A call counts from when it is accepted, even if its job fails before its command starts.
 //! Its seconds run from its command's start to the command's exit, to its stop at the timeout,
 //! to the job's failure, or to the core stopping it when the work phase ends, each as the
-//! runtime observed it. A call's place under the concurrency stays taken until its job has
-//! ended, once its outputs are collected and its sandbox destroyed.
+//! runtime observed it. A call keeps its grant, which
+//! [runs one call at a time](pumpkin_schema::ir::JudgeGrant), busy until its job has ended,
+//! once its outputs are collected and its sandbox destroyed.
 //!
-//! The cumulative seconds left are what the grant allows less what ended commands used, so
-//! calls that run at once may overshoot the grant, by as much as
-//! [`cumulative_seconds`](pumpkin_schema::ir::JudgeGrant::cumulative_seconds) says.
+//! The cumulative seconds left are what the grant allows less what ended commands used. A call
+//! is accepted only once the grant's earlier calls have all ended, and its timeout is at most
+//! the time left then, so the grant's calls stay within
+//! [`cumulative_seconds`](pumpkin_schema::ir::JudgeGrant::cumulative_seconds).
 //!
 //! The quota ledger is not kept apart: what each grant has used is counted from its jobs
 //! ([`Jobs::usage`]), so the two can't disagree.
@@ -123,8 +125,8 @@ pub(super) struct Usage {
     pub(super) calls: u64,
     /// The time the commands that have ended ran.
     pub(super) used: Duration,
-    /// The calls whose jobs haven't ended.
-    pub(super) running: u64,
+    /// Whether a call's job hasn't ended: it is queued, running, or ending.
+    pub(super) running: bool,
 }
 
 impl State {
@@ -239,9 +241,9 @@ impl Jobs {
         for job in (self.0.iter()).filter(|job| job.grant == grant) {
             usage.calls += 1;
             match job.state {
-                State::Queued | State::Running { .. } => usage.running += 1,
+                State::Queued | State::Running { .. } => usage.running = true,
                 State::Ending { ran, .. } => {
-                    usage.running += 1;
+                    usage.running = true;
                     usage.used += ran.map_or(Duration::ZERO, Span::duration);
                 }
                 State::Ended { ran, .. } => {
