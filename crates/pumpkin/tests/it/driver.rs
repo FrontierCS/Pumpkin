@@ -5,7 +5,7 @@
 //! A script has one event per line: the time in milliseconds since the run started, then one
 //! of these:
 //!
-//! - `agent_started`, `agent_exited <code>`, `agent_failed <reason>`, `agent_destroyed`;
+//! - `agent_started`, `agent_exited <code>`, `agent_failed <reason>`;
 //! - `ops`, `judge <grant> <bytes>`, `submit <grant> <bytes> [final]` and `status <job>`,
 //!   each an op from the agent, whose payload is named by the op's number;
 //! - `judge_started <job>`, `judge_exited <job> <code>`, `judge_timed_out <job>`,
@@ -89,7 +89,6 @@ impl Run<'_> {
             "agent_failed" => Event::AgentFailed {
                 reason: words[1..].join(" "),
             },
-            "agent_destroyed" => Event::AgentDestroyed,
             "ops" => self.op(Request::Ops),
             "judge" => {
                 let (grant, payload, _) = self.call(&words[1..]);
@@ -272,7 +271,6 @@ fn lwe() {
         11000 submit submit 10240
         12000 submit submit 10240 final
         12100 agent_exited 0
-        13000 agent_destroyed
         13500 judge_started 2
         20000 judge_exited 2 0
         20100 collected 2 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}}
@@ -303,9 +301,8 @@ fn lwe() {
               (tick due at 72000)
             12100 agent_exited 0
               tear down the agent
-              (no tick due)
-            13000 agent_destroyed
               start job 2 of score on op 7's payload of 10240 bytes, with a timeout of 120s
+              (no tick due)
             13500 judge_started 2
             20000 judge_exited 2 0
             20100 collected 2 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}}
@@ -451,7 +448,6 @@ fn deadline() {
         60000 tick
         60100 status 1
         60200 agent_exited 137
-        60300 agent_destroyed
         60400 judge_failed 1 stopped
         60500 judge_started 2
         180500 judge_timed_out 2
@@ -476,7 +472,6 @@ fn deadline() {
             60100 status 1
               refuse op 3: the work phase has ended: no more ops are taken
             60200 agent_exited 137
-            60300 agent_destroyed
             60400 judge_failed 1 stopped
               start job 2 of score on op 1's payload of 10 bytes, with a timeout of 120s
             60500 judge_started 2
@@ -501,7 +496,6 @@ fn agent_ends() {
         3000 judge_exited 1 0
         3100 submit submit 10
         3200 agent_exited 0
-        3300 agent_destroyed
         3400 collected 1 {"status": "passed", "raw_score": 1}
         3500 judge_started 2
         5000 judge_exited 2 0
@@ -522,7 +516,6 @@ fn agent_ends() {
             3200 agent_exited 0
               tear down the agent
               (no tick due)
-            3300 agent_destroyed
             3400 collected 1 {"status": "passed", "raw_score": 1}
               start job 2 of score on op 2's payload of 10 bytes, with a timeout of 120s
             3500 judge_started 2
@@ -535,7 +528,6 @@ fn agent_ends() {
         |_| {},
         r"
         30000 agent_failed the agent's sandbox did not connect
-        30100 agent_destroyed
         ",
         &expect![[r#"
             start
@@ -543,9 +535,8 @@ fn agent_ends() {
               (tick due at 18000000)
             30000 agent_failed the agent's sandbox did not connect
               tear down the agent
-              (no tick due)
-            30100 agent_destroyed
               finish: no score; work ended at the agent's failure, the agent's sandbox did not connect; no submission
+              (no tick due)
         "#]],
     );
 }
@@ -567,7 +558,6 @@ fn finalize_lock() {
         2300 submit submit 10
         61999 tick
         62000 tick
-        62100 agent_destroyed
         62200 judge_failed 1 stopped
         ",
         &expect![[r#"
@@ -593,7 +583,6 @@ fn finalize_lock() {
               stop job 1
               tear down the agent
               (no tick due)
-            62100 agent_destroyed
             62200 judge_failed 1 stopped
               start job 2 of score on op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
@@ -613,6 +602,7 @@ fn finalize_lock() {
             2000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":0}
               tear down the agent
+              start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
               (no tick due)
             2100 ops
               refuse op 2: a final submission was accepted: no more ops are taken

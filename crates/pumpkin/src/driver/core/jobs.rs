@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use pumpkin_schema::sandbox::op::{self, FailureCode};
-use pumpkin_schema::workflow::{JudgeCall, JudgeGrantId};
+use pumpkin_schema::workflow::JudgeGrantId;
 
 use super::{JobId, JudgeResult};
 
@@ -30,8 +30,6 @@ pub enum Failure {
     Error(String),
     /// Its `result.json` was missing or invalid, for this reason.
     InvalidResult(String),
-    /// The core stopped it when the work phase ended.
-    Stopped,
 }
 
 impl Failure {
@@ -49,12 +47,6 @@ impl Failure {
                 FailureCode::InvalidResult,
                 "the judge wrote no valid result",
             ),
-            #[expect(
-                clippy::unreachable,
-                reason = "the core stops jobs only as the work phase ends, and answers a status \
-                          only during it"
-            )]
-            Self::Stopped => unreachable!("a status asked about a job the core stopped"),
         };
         op::Failure {
             code,
@@ -63,14 +55,16 @@ impl Failure {
     }
 }
 
-/// A run's jobs, numbered from 1 in the order they were added.
+/// The agent's jobs, numbered from 1 in the order they were added. The score's job takes the
+/// number after theirs, and the final phase holds it, so a number the agent asks about never
+/// names it.
 #[derive(Debug, Default)]
 pub(super) struct Jobs(Vec<Job>);
 
 #[derive(Debug)]
 pub(super) struct Job {
-    /// The agent's grant the call was made under, or the pattern's score.
-    pub(super) call: JudgeCall,
+    /// The agent's grant the call was made under.
+    pub(super) grant: JudgeGrantId,
     pub(super) state: State,
 }
 
@@ -133,14 +127,72 @@ pub(super) struct Usage {
     pub(super) running: u64,
 }
 
+impl State {
+    /// Notes that a queued job's command started.
+    pub(super) fn started(&mut self, at: Duration) {
+        if let Self::Queued = self {
+            *self = Self::Running { started: at };
+        }
+    }
+
+    /// Notes that a job's command ended. A job whose start wasn't reported ran for no time
+    /// the core saw, but ends all the same, so that a timeout still leaves no result.
+    pub(super) fn ended(&mut self, at: Duration, end: End) {
+        let ran = match *self {
+            Self::Queued => None,
+            Self::Running { started } => Some(Span { started, ended: at }),
+            Self::Ending { .. } | Self::Ended { .. } => return,
+        };
+        *self = Self::Ending { ran, end };
+    }
+
+    /// Ends a job with its last report. A report that skips a step, such as a failure before
+    /// the command started, ends the job all the same, its command's time running until the
+    /// report if it had started.
+    pub(super) fn report(&mut self, at: Duration, report: Report) {
+        let (ran, end) = match *self {
+            Self::Queued => (None, None),
+            Self::Running { started } => (Some(Span { started, ended: at }), None),
+            Self::Ending { ran, end } => (ran, Some(end)),
+            Self::Ended { .. } => return,
+        };
+        // A stopped job ends as its report says, as after an exit: the core stops jobs only as
+        // the work phase ends, after which no status asks what came of them.
+        let outcome = match (end, report) {
+            (Some(End::TimedOut), _) => Err(Failure::Timeout),
+            (Some(End::Exited | End::Stopped) | None, Report::Collected(Ok(result))) => Ok(result),
+            (Some(End::Exited | End::Stopped) | None, Report::Collected(Err(reason))) => {
+                Err(Failure::InvalidResult(reason))
+            }
+            (Some(End::Exited | End::Stopped) | None, Report::Failed(reason)) => {
+                Err(Failure::Error(reason))
+            }
+        };
+        *self = Self::Ended { ran, outcome };
+    }
+
+    /// What came of the job, once it has ended.
+    pub(super) fn outcome(&self) -> Option<&Result<JudgeResult, Failure>> {
+        match self {
+            Self::Ended { outcome, .. } => Some(outcome),
+            Self::Queued | Self::Running { .. } | Self::Ending { .. } => None,
+        }
+    }
+}
+
 impl Jobs {
-    /// Adds a job, queued.
-    pub(super) fn add(&mut self, call: JudgeCall) -> JobId {
+    /// Adds a job, queued, made under `grant`.
+    pub(super) fn add(&mut self, grant: JudgeGrantId) -> JobId {
         self.0.push(Job {
-            call,
+            grant,
             state: State::Queued,
         });
         JobId(self.0.len() as u64)
+    }
+
+    /// The number the score's job takes: the one after the agent's jobs'.
+    pub(super) fn score_job(&self) -> JobId {
+        JobId(self.0.len() as u64 + 1)
     }
 
     pub(super) fn get(&self, job: JobId) -> Option<&Job> {
@@ -148,57 +200,9 @@ impl Jobs {
         self.0.get(index)
     }
 
-    fn get_mut(&mut self, job: JobId) -> Option<&mut Job> {
+    pub(super) fn state_mut(&mut self, job: JobId) -> Option<&mut State> {
         let index = usize::try_from(job.0.checked_sub(1)?).ok()?;
-        self.0.get_mut(index)
-    }
-
-    /// Notes that a queued job's command started.
-    pub(super) fn started(&mut self, job: JobId, at: Duration) {
-        if let Some(job) = self.get_mut(job)
-            && let State::Queued = job.state
-        {
-            job.state = State::Running { started: at };
-        }
-    }
-
-    /// Notes that a job's command ended. A job whose start wasn't reported ran for no time
-    /// the core saw, but ends all the same, so that a timeout still leaves no result.
-    pub(super) fn ended(&mut self, job: JobId, at: Duration, end: End) {
-        let Some(job) = self.get_mut(job) else {
-            return;
-        };
-        let ran = match job.state {
-            State::Queued => None,
-            State::Running { started } => Some(Span { started, ended: at }),
-            State::Ending { .. } | State::Ended { .. } => return,
-        };
-        job.state = State::Ending { ran, end };
-    }
-
-    /// Ends a job with its last report. A report that skips a step, such as a failure before
-    /// the command started, ends the job all the same, its command's time running until the
-    /// report if it had started.
-    pub(super) fn report(&mut self, job: JobId, at: Duration, report: Report) {
-        let Some(job) = self.get_mut(job) else {
-            return;
-        };
-        let (ran, end) = match job.state {
-            State::Queued => (None, None),
-            State::Running { started } => (Some(Span { started, ended: at }), None),
-            State::Ending { ran, end } => (ran, Some(end)),
-            State::Ended { .. } => return,
-        };
-        let outcome = match (end, report) {
-            (Some(End::Stopped), _) => Err(Failure::Stopped),
-            (Some(End::TimedOut), _) => Err(Failure::Timeout),
-            (Some(End::Exited) | None, Report::Collected(Ok(result))) => Ok(result),
-            (Some(End::Exited) | None, Report::Collected(Err(reason))) => {
-                Err(Failure::InvalidResult(reason))
-            }
-            (Some(End::Exited) | None, Report::Failed(reason)) => Err(Failure::Error(reason)),
-        };
-        job.state = State::Ended { ran, outcome };
+        Some(&mut self.0.get_mut(index)?.state)
     }
 
     /// Stops every job that is queued or running at `now`, and returns them. A job whose
@@ -229,18 +233,10 @@ impl Jobs {
             .all(|job| matches!(job.state, State::Ended { .. }))
     }
 
-    /// What came of a job, once it has ended.
-    pub(super) fn outcome(&self, job: JobId) -> Option<&Result<JudgeResult, Failure>> {
-        match &self.get(job)?.state {
-            State::Ended { outcome, .. } => Some(outcome),
-            State::Queued | State::Running { .. } | State::Ending { .. } => None,
-        }
-    }
-
     /// What `grant`'s calls have used so far.
     pub(super) fn usage(&self, grant: JudgeGrantId) -> Usage {
         let mut usage = Usage::default();
-        for job in (self.0.iter()).filter(|job| job.call == JudgeCall::Grant(grant)) {
+        for job in (self.0.iter()).filter(|job| job.grant == grant) {
             usage.calls += 1;
             match job.state {
                 State::Queued | State::Running { .. } => usage.running += 1,

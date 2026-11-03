@@ -35,16 +35,17 @@ use super::{Action, Core, JobId, OpId, PayloadRef, Phase, Request, Submission, W
 
 /// An op the core has authorized: its request, parsed against the workflow and the run's
 /// state.
-enum Authorized<'c> {
+enum Authorized {
     Ops,
-    /// A job of the agent's, made under one of its grants.
-    Status(JobId, JudgeGrantId, &'c Job),
+    /// The reply about a job of the agent's.
+    Status(StatusReply),
     Judge {
         grant: JudgeGrantId,
         payload: PayloadRef,
         timeout: Duration,
     },
-    Submit(Submission),
+    /// A submission, and the reply that accepts or stores it.
+    Submit(Submission, SubmitReply),
 }
 
 /// A grant of the agent's.
@@ -56,7 +57,11 @@ enum Held {
 impl Core<'_> {
     /// Answers an op, and acts on it.
     pub(super) fn op(&mut self, op: OpId, request: Request, actions: &mut Vec<Action>) {
-        let authorized = match self.authorize(request) {
+        // The request is authorized before the phase is matched, so that the match can hand back
+        // the work phase's latest submission; a phase that takes no ops still refuses first.
+        let authorized = self.authorize(request);
+        let authorized = (self.taking_ops()).and_then(|latest| Ok((authorized?, latest)));
+        let (authorized, latest) = match authorized {
             Ok(authorized) => authorized,
             Err(message) => {
                 let reply = OpReply::Refused { message };
@@ -69,8 +74,8 @@ impl Core<'_> {
                 let reply = OpReply::Ops(self.ops());
                 actions.push(Action::Reply { op, reply });
             }
-            Authorized::Status(job, grant, found) => {
-                let reply = OpReply::Status(self.status(job, grant, found));
+            Authorized::Status(reply) => {
+                let reply = OpReply::Status(reply);
                 actions.push(Action::Reply { op, reply });
             }
             Authorized::Judge {
@@ -78,7 +83,7 @@ impl Core<'_> {
                 payload,
                 timeout,
             } => {
-                let job = self.jobs.add(JudgeCall::Grant(grant));
+                let job = self.jobs.add(grant);
                 let remaining = self.remaining(grant);
                 let reply = OpReply::Judge(JudgeReply {
                     job: job.0,
@@ -92,52 +97,38 @@ impl Core<'_> {
                     timeout,
                 });
             }
-            Authorized::Submit(submission) => {
-                let (state, end) = if submission.finalized {
-                    let grace_end = self.now.saturating_add(self.pattern.finalize_grace);
-                    (SubmitState::Accepted, grace_end.min(self.pattern.deadline))
-                } else {
-                    (SubmitState::Stored, self.pattern.deadline)
-                };
-                let remaining_seconds = end.saturating_sub(self.now).as_secs();
-                let reply = OpReply::Submit(SubmitReply {
-                    state,
-                    remaining_seconds,
-                });
+            Authorized::Submit(submission, reply) => {
+                let reply = OpReply::Submit(reply);
                 actions.push(Action::Reply { op, reply });
                 if submission.finalized {
                     self.finalize(submission, actions);
                 } else {
-                    #[expect(
-                        clippy::unreachable,
-                        reason = "only the work phase authorizes a submission"
-                    )]
-                    let Phase::Work { submission: latest } = &mut self.phase else {
-                        unreachable!("a submission was authorized in {:?}", self.phase)
-                    };
                     *latest = Some(submission);
                 }
             }
         }
     }
 
-    fn authorize(&self, request: Request) -> Result<Authorized<'_>, String> {
-        let work_end = match &self.phase {
-            Phase::Work { .. } => None,
-            Phase::Finalized { .. } => Some(&WorkEnd::Finalized),
+    /// The work phase's latest submission, or why the run takes no more ops.
+    fn taking_ops(&mut self) -> Result<&mut Option<Submission>, String> {
+        let work_end = match &mut self.phase {
+            Phase::Work { submission } => return Ok(submission),
+            Phase::Finalized { .. } => &WorkEnd::Finalized,
             Phase::Teardown { work_end, .. }
             | Phase::Final { work_end, .. }
-            | Phase::Finished { work_end } => Some(work_end),
+            | Phase::Finished { work_end } => work_end,
         };
         match work_end {
-            None => {}
-            Some(WorkEnd::Finalized) => {
-                return Err("a final submission was accepted: no more ops are taken".to_owned());
+            WorkEnd::Finalized => {
+                Err("a final submission was accepted: no more ops are taken".to_owned())
             }
-            Some(WorkEnd::Deadline | WorkEnd::AgentExited(_) | WorkEnd::AgentFailed(_)) => {
-                return Err("the work phase has ended: no more ops are taken".to_owned());
+            WorkEnd::Deadline | WorkEnd::AgentExited(_) | WorkEnd::AgentFailed(_) => {
+                Err("the work phase has ended: no more ops are taken".to_owned())
             }
         }
+    }
+
+    fn authorize(&self, request: Request) -> Result<Authorized, String> {
         match request {
             Request::Ops => Ok(Authorized::Ops),
             Request::Status { job } => self.own_job(job),
@@ -160,23 +151,15 @@ impl Core<'_> {
         }
     }
 
-    /// The agent's job `number`.
-    fn own_job(&self, number: u64) -> Result<Authorized<'_>, String> {
+    /// The reply about the agent's job `number`.
+    fn own_job(&self, number: u64) -> Result<Authorized, String> {
         let job = JobId(number);
         let Some(found) = self.jobs.get(job) else {
             return Err(format!(
                 "you have no job {number}: ask about a job that one of your calls returned"
             ));
         };
-        match found.call {
-            JudgeCall::Grant(grant) => Ok(Authorized::Status(job, grant, found)),
-            #[expect(
-                clippy::unreachable,
-                reason = "the score's job starts once the work phase has ended, and only the work \
-                          phase takes ops"
-            )]
-            JudgeCall::Score => unreachable!("job {number}, the score's, was asked about"),
-        }
+        Ok(Authorized::Status(self.status(job, found)))
     }
 
     /// The agent's grant named `name`.
@@ -189,11 +172,7 @@ impl Core<'_> {
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
     }
 
-    fn authorize_judge(
-        &self,
-        id: JudgeGrantId,
-        payload: PayloadRef,
-    ) -> Result<Authorized<'_>, String> {
+    fn authorize_judge(&self, id: JudgeGrantId, payload: PayloadRef) -> Result<Authorized, String> {
         let grant = self.workflow.judge_grant(id);
         let name = &grant.name;
         fits(name, &payload, self.workflow.slot(grant.slot).max_bytes)?;
@@ -228,17 +207,25 @@ impl Core<'_> {
         })
     }
 
-    fn authorize_submit(
-        &self,
-        finalize: bool,
-        payload: PayloadRef,
-    ) -> Result<Authorized<'_>, String> {
+    fn authorize_submit(&self, finalize: bool, payload: PayloadRef) -> Result<Authorized, String> {
         let name = &self.workflow.submit_grant().name;
         fits(name, &payload, self.submission_max_bytes())?;
-        Ok(Authorized::Submit(Submission {
+        let (state, end) = if finalize {
+            let grace_end = self.now.saturating_add(self.pattern.finalize_grace);
+            (SubmitState::Accepted, grace_end.min(self.pattern.deadline))
+        } else {
+            (SubmitState::Stored, self.pattern.deadline)
+        };
+        let remaining_seconds = end.saturating_sub(self.now).as_secs();
+        let submission = Submission {
             payload,
             finalized: finalize,
-        }))
+        };
+        let reply = SubmitReply {
+            state,
+            remaining_seconds,
+        };
+        Ok(Authorized::Submit(submission, reply))
     }
 
     /// The most bytes a submission may hold: the score slot's, so that whatever is selected
@@ -281,8 +268,8 @@ impl Core<'_> {
         }
     }
 
-    /// The reply to `status`, of a job made under `grant`.
-    fn status(&self, id: JobId, grant: JudgeGrantId, job: &Job) -> StatusReply {
+    /// The reply to `status`, of the agent's job `id`.
+    fn status(&self, id: JobId, job: &Job) -> StatusReply {
         let state = match &job.state {
             State::Queued => JobState::Queued,
             State::Running { .. } | State::Ending { .. } => JobState::Running,
@@ -300,7 +287,7 @@ impl Core<'_> {
         StatusReply {
             job: id.0,
             state,
-            remaining: self.remaining(grant),
+            remaining: self.remaining(job.grant),
         }
     }
 
@@ -320,7 +307,8 @@ fn limit_seconds(limit: Duration) -> NonZeroU64 {
     #[expect(
         clippy::unreachable,
         reason = "the workflow's parser makes a grant's limits of time from non-zero counts of \
-                  seconds"
+                  seconds; no type excludes zero here, since the workflow keeps each limit once, \
+                  as the `Duration` the core's clock compares, and `Duration` has no non-zero form"
     )]
     let Some(seconds) = NonZeroU64::new(limit.as_secs()) else {
         unreachable!("a judge grant's limit of time is {limit:?}, under a second")
