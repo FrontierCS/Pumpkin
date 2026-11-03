@@ -234,7 +234,8 @@ impl Grant {
 #[serde(deny_unknown_fields)]
 pub struct JudgeGrant {
     pub name: Name,
-    /// The judge role.
+    /// The judge role, which no other judge grant names, so that the judge, like the grant,
+    /// runs one call at a time.
     pub role: Name,
     /// The judge's slot that receives the payload.
     pub slot: Name,

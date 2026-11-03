@@ -229,8 +229,9 @@ fn broken_references() {
     );
 }
 
-/// A workflow has one agent, which alone has a model route and holds one submit grant, and the
-/// score judges with a judge no grant names, even a grant that fails to parse.
+/// A workflow has one agent, which alone has a model route and holds one submit grant, a judge
+/// grant names a judge no other grant names, and the score judges with a judge no grant names,
+/// even a grant that fails to parse.
 #[test]
 fn broken_pattern() {
     let mut ir = lwe_json();
@@ -240,7 +241,12 @@ fn broken_pattern() {
     ir["roles"][2]["egress"] = ir["roles"][0]["egress"].clone();
     let pattern = &mut ir["main"]["solo_then_judge"];
     let submit = json!({ "submit": { "name": "resubmit" } });
-    pattern["grants"].as_array_mut().unwrap().push(submit);
+    let mut retrain = pattern["grants"][0].clone();
+    retrain["judge"]["name"] = json!("retrain");
+    pattern["grants"]
+        .as_array_mut()
+        .unwrap()
+        .extend([submit, retrain]);
     pattern["grants"][0]["judge"]["slot"] = json!("submission");
     pattern["score"]["role"] = json!("train_judge");
     let mut none = lwe_json();
@@ -260,6 +266,7 @@ fn broken_pattern() {
             roles[final_judge].egress.model: `final_judge` is a judge, and only the agent has a model route: remove it
             roles[helper].runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             main.solo_then_judge.grants[train].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
+            main.solo_then_judge.grants[retrain].judge.role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
             main.solo_then_judge.grants[resubmit].submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
             main.solo_then_judge.score.role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
             roles: no role is an agent: a workflow has exactly one

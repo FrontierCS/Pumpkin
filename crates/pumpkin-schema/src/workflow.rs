@@ -175,6 +175,8 @@ pub struct JudgeGrant {
 }
 
 impl JudgeGrant {
+    /// The judge, which no other judge grant names; see
+    /// [`ir::JudgeGrant::role`](crate::ir::JudgeGrant::role).
     pub fn judge(&self) -> JudgeId {
         self.slot.judge
     }
