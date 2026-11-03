@@ -145,7 +145,11 @@ impl<'ir> Parser<'ir> {
     }
 
     fn judge(&mut self, path: &str, sandbox: Sandbox, judge: &ir::JudgeRuntime) -> RoleId {
-        let ir::JudgeRuntime { command, slots } = judge;
+        let ir::JudgeRuntime {
+            command,
+            slots,
+            result,
+        } = judge;
         let labels = self.errors.unique(
             &format!("{path}.runtime.judge.slots"),
             slots.iter().map(|slot| &slot.name),
@@ -168,6 +172,7 @@ impl<'ir> Parser<'ir> {
             sandbox,
             command: command.clone(),
             slots: slots.clone(),
+            result: result.clone(),
         });
         RoleId::Judge(JudgeId(self.judges.len() - 1))
     }
@@ -177,6 +182,7 @@ impl<'ir> Parser<'ir> {
             grants,
             score,
             deadline_seconds,
+            finalize_grace_seconds,
         } = pattern;
         let (judge_grants, submit_grant) = self.grants(grants);
         let score = self.score(score, grants);
@@ -186,6 +192,7 @@ impl<'ir> Parser<'ir> {
             main: SoloThenJudge {
                 score: score?,
                 deadline_seconds: *deadline_seconds,
+                finalize_grace_seconds: *finalize_grace_seconds,
             },
         })
     }
@@ -262,7 +269,11 @@ impl<'ir> Parser<'ir> {
     /// The score: a slot of a judge that none of the agent's `grants` names, so that the judge
     /// that scores the selection returns nothing to the agent.
     fn score(&mut self, score: &ir::Score, grants: &[ir::Grant]) -> Result<Score, Reported> {
-        let ir::Score { role, slot } = score;
+        let ir::Score {
+            role,
+            slot,
+            timeout_seconds,
+        } = score;
         let path = format!("{PATTERN}.score");
         // The grants are compared by the role they name in the IR, so that the rule holds even
         // where a grant or the score's slot fails to resolve.
@@ -282,7 +293,10 @@ impl<'ir> Parser<'ir> {
             Some(_) | None => Ok(()),
         };
         let slot = self.judge_slot(&path, role, slot)?;
-        shared.map(|()| Score { slot })
+        shared.map(|()| Score {
+            slot,
+            timeout_seconds: *timeout_seconds,
+        })
     }
 
     /// Resolves a judge call's slot, `slot` of the judge `role`, with the call at `path`.

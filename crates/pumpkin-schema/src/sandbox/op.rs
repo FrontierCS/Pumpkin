@@ -178,7 +178,9 @@ pub enum Failed {
     NoResult { failure: Failure },
 }
 
-/// The fields of a judge's result that its caller sees, by name, each with the result's value.
+/// The fields of a judge's result that its caller sees, by name: those the judge declares
+/// ([`ResultSpec::returns`](crate::ir::ResultSpec::returns)) and the result holds, each with
+/// the result's value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Returned(Map<String, Value>);

@@ -146,6 +146,7 @@ fn lwe() {
 fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
+    let result = "/roles/1/runtime/judge/result";
     check(
         [
             lwe_with("/name", json!("lwe structured recovery")),
@@ -167,6 +168,11 @@ fn checked_values() {
                 &format!("{agent}/egress/model/models"),
                 json!(["gpt-6-astra", "gpt-6-astra"]),
             ),
+            lwe_with(&format!("{result}/score"), json!("raw_score")),
+            lwe_with(&format!("{result}/score"), json!("/raw~2score")),
+            lwe_with(&format!("{result}/returns"), json!(["/metrics", ""])),
+            lwe_with(&format!("{result}/returns"), json!(["/metrics/"])),
+            lwe_with(&format!("{result}/returns"), json!(["/x/a~1b", "/a~1b"])),
             lwe_with(
                 "/roles/2/runtime/judge/slots/0/max_bytes",
                 json!(MAX_OP_PAYLOAD_BYTES + 1),
@@ -186,6 +192,11 @@ fn checked_values() {
             `MODE` is set more than once: set each name once
             no models: a model route allows at least one
             `gpt-6-astra` is listed more than once: list each model once
+            `raw_score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
+            `/raw~2score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
+            the empty pointer names the whole result, with no key: point to a field
+            `/metrics/` would return the empty key: point to a field with a name
+            `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             roles[final_judge].runtime.judge.slots[payload].max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
     );
 }
