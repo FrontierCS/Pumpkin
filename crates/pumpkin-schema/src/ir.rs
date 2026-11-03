@@ -241,7 +241,8 @@ pub struct JudgeGrant {
     /// The most calls the agent may make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calls: Option<NonZeroU64>,
-    /// The most judge command time the agent's calls may use in all.
+    /// The most judge command time the agent's calls may use in all. A command's time counts
+    /// against it once the command has ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_seconds: Option<NonZeroU64>,
     /// The timeout of each call, counted from the start of the judge command. A call also

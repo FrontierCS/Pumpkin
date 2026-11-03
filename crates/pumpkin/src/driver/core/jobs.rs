@@ -10,7 +10,8 @@
 //! The cumulative seconds left are what the grant allows less what ended commands used. A call
 //! is accepted only once the grant's earlier calls have all ended, and its timeout is at most
 //! the time left then, so the grant's calls stay within
-//! [`cumulative_seconds`](pumpkin_schema::ir::JudgeGrant::cumulative_seconds).
+//! [`cumulative_seconds`](pumpkin_schema::ir::JudgeGrant::cumulative_seconds) but for how late
+//! the runtime observes a call's end.
 //!
 //! The quota ledger is not kept apart: what each grant has used is counted from its jobs
 //! ([`Jobs::usage`]), so the two can't disagree.
@@ -125,8 +126,8 @@ pub(super) struct Usage {
     pub(super) calls: u64,
     /// The time the commands that have ended ran.
     pub(super) used: Duration,
-    /// Whether a call's job hasn't ended: it is queued, running, or ending.
-    pub(super) running: bool,
+    /// Whether one of the grant's calls hasn't ended.
+    pub(super) busy: bool,
 }
 
 impl State {
@@ -241,9 +242,9 @@ impl Jobs {
         for job in (self.0.iter()).filter(|job| job.grant == grant) {
             usage.calls += 1;
             match job.state {
-                State::Queued | State::Running { .. } => usage.running = true,
+                State::Queued | State::Running { .. } => usage.busy = true,
                 State::Ending { ran, .. } => {
-                    usage.running = true;
+                    usage.busy = true;
                     usage.used += ran.map_or(Duration::ZERO, Span::duration);
                 }
                 State::Ended { ran, .. } => {

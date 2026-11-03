@@ -182,7 +182,7 @@ impl Core<'_> {
         {
             return Err(format!("`{name}` has no calls left: it allows {calls}"));
         }
-        if usage.running {
+        if usage.busy {
             return Err(format!(
                 "`{name}` runs one call at a time, and already has one queued or running: call \
                  again once it has finished; this call is not charged"
