@@ -237,9 +237,9 @@ impl<'ir> Parser<'ir> {
             name: name.clone(),
             slot,
             calls: *calls,
-            cumulative: cumulative_seconds.map(|seconds| Duration::from_secs(seconds.get())),
+            cumulative_seconds: *cumulative_seconds,
             concurrency: *concurrency,
-            call_timeout: Duration::from_secs(call_timeout_seconds.get()),
+            call_timeout_seconds: *call_timeout_seconds,
         })
     }
 

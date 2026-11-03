@@ -430,14 +430,14 @@ impl<'w> Core<'w> {
     /// The longest a new call of `grant` may run: the smaller of the grant's call timeout and
     /// its cumulative time left.
     fn call_limit(&self, grant: JudgeGrantId) -> Duration {
-        let call_timeout = self.workflow.judge_grant(grant).call_timeout;
+        let call_timeout = self.workflow.judge_grant(grant).call_timeout();
         self.cumulative_left(grant)
             .map_or(call_timeout, |left| left.min(call_timeout))
     }
 
     /// The judge time `grant` has left: `None` without a cumulative limit.
     fn cumulative_left(&self, grant: JudgeGrantId) -> Option<Duration> {
-        let total = self.workflow.judge_grant(grant).cumulative?;
+        let total = self.workflow.judge_grant(grant).cumulative()?;
         Some(total.saturating_sub(self.jobs.usage(grant).used))
     }
 }
