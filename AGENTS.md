@@ -23,9 +23,10 @@
 - PREFER exhaustive `match` without wildcard arms, and destructuring structs in full when
   converting them
 - PREFER `#[expect(lint, reason = "...")]` over `#[allow(lint)]`
-- WRITE `unreachable!` for a path only a bug can reach, under
-  `#[expect(clippy::unreachable, reason = "…")]` saying why it can't happen; never handle such a
-  path. Handle, or return, only errors the world can cause
+- WRITE `unreachable!` only for a path that a bug alone can reach and that types can't rule
+  out, under `#[expect(clippy::unreachable, reason = "…")]` saying why it can't happen and why
+  no type excludes it; never handle such a path. Handle, or return, only errors the world can
+  cause
 - WRITE error messages as what is wrong, then what is expected
   (`the program is empty: name one`); passing an error up, add what was being done where the
   error doesn't say it, as `stdx::Context` does
