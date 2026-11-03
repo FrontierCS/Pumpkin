@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use super::{
     Agent, Judge, JudgeGrant, JudgeId, Main, RoleId, Sandbox, Score, SlotId, SoloThenJudge,
@@ -191,8 +192,8 @@ impl<'ir> Parser<'ir> {
             submit_grant: submit_grant?,
             main: SoloThenJudge {
                 score: score?,
-                deadline_seconds: *deadline_seconds,
-                finalize_grace_seconds: *finalize_grace_seconds,
+                deadline: Duration::from_secs(deadline_seconds.get()),
+                finalize_grace: Duration::from_secs(*finalize_grace_seconds),
             },
         })
     }
@@ -236,9 +237,9 @@ impl<'ir> Parser<'ir> {
             name: name.clone(),
             slot,
             calls: *calls,
-            cumulative_seconds: *cumulative_seconds,
+            cumulative: cumulative_seconds.map(|seconds| Duration::from_secs(seconds.get())),
             concurrency: *concurrency,
-            call_timeout_seconds: *call_timeout_seconds,
+            call_timeout: Duration::from_secs(call_timeout_seconds.get()),
         })
     }
 
@@ -295,7 +296,7 @@ impl<'ir> Parser<'ir> {
         let slot = self.judge_slot(&path, role, slot)?;
         shared.map(|()| Score {
             slot,
-            timeout_seconds: *timeout_seconds,
+            timeout: Duration::from_secs(timeout_seconds.get()),
         })
     }
 

@@ -133,9 +133,8 @@ pub enum WorkEnd {
     /// The pattern's deadline passed.
     Deadline,
     /// The agent finalized a submission, and was still running when the grace after it ran out
-    /// ([`SoloThenJudge::finalize_grace_seconds`]). An agent that exits within it ends the work
-    /// phase with [`AgentExited`](Self::AgentExited), and its submission is still the finalized
-    /// one.
+    /// ([`SoloThenJudge::finalize_grace`]). An agent that exits within it ends the work phase
+    /// with [`AgentExited`](Self::AgentExited), and its submission is still the finalized one.
     Finalized,
     /// The agent's command exited.
     AgentExited(ExitStatus),
@@ -189,11 +188,11 @@ pub enum Verdict {
 ///
 /// A runtime drives it: [`Core::start`] begins the run, at time 0, and returns the first
 /// actions; the runtime then feeds each [`Event`] it observes to [`Core::handle`], with the
-/// milliseconds since the run started, and performs the actions it returns, in order. Replies
-/// to ops are actions too ([`Action::Reply`]), and every op gets exactly one.
+/// time since the run started, and performs the actions it returns, in order. Replies to ops
+/// are actions too ([`Action::Reply`]), and every op gets exactly one.
 ///
 /// Time passes only as events say, so a runtime with nothing else to report sends
-/// [`Event::Tick`] when [`Core::tick_due_ms`] says. An event that doesn't apply to the run's
+/// [`Event::Tick`] when [`Core::tick_due`] says. An event that doesn't apply to the run's
 /// state, such as a second report on a job that has ended, changes nothing, and one observed
 /// before an earlier one, as a report from a job's thread can be, doesn't move the core's
 /// clock back. [`Event::AgentDestroyed`] is the exception: the runtime reports it only as
@@ -202,8 +201,8 @@ pub enum Verdict {
 pub struct Core<'w> {
     workflow: &'w Workflow,
     pattern: &'w SoloThenJudge,
-    /// The latest time an event was observed, in milliseconds since the run started.
-    now_ms: u64,
+    /// The latest time an event was observed, since the run started.
+    now: Duration,
     phase: Phase,
     jobs: jobs::Jobs,
 }
@@ -218,10 +217,10 @@ enum Phase {
         submission: Option<Submission>,
     },
     /// The agent finalized `submission`, which is locked as the selection, and the grace after
-    /// it ([`SoloThenJudge::finalize_grace_seconds`]) ends at `grace_end_ms`.
+    /// it ([`SoloThenJudge::finalize_grace`]) ends at `grace_end`.
     Finalized {
         submission: Submission,
-        grace_end_ms: u64,
+        grace_end: Duration,
     },
     /// The work phase has ended. The agent's jobs are being stopped, and its sandbox frozen,
     /// collected and destroyed.
@@ -248,23 +247,23 @@ impl<'w> Core<'w> {
         let core = Self {
             workflow,
             pattern,
-            now_ms: 0,
+            now: Duration::ZERO,
             phase: Phase::Work { submission: None },
             jobs: jobs::Jobs::default(),
         };
         (core, vec![Action::StartAgent])
     }
 
-    /// Takes in `event`, observed `at_ms` milliseconds after the run started, and returns the
-    /// actions it calls for, in the order to perform them.
-    pub fn handle(&mut self, at_ms: u64, event: Event) -> Vec<Action> {
-        self.now_ms = self.now_ms.max(at_ms);
+    /// Takes in `event`, observed `at` after the run started, and returns the actions it calls
+    /// for, in the order to perform them.
+    pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
+        self.now = self.now.max(at);
         let mut actions = Vec::new();
-        if self.now_ms >= self.deadline_ms() {
+        if self.now >= self.pattern.deadline {
             self.end_work(WorkEnd::Deadline, &mut actions);
         }
-        if let Phase::Finalized { grace_end_ms, .. } = self.phase
-            && self.now_ms >= grace_end_ms
+        if let Phase::Finalized { grace_end, .. } = self.phase
+            && self.now >= grace_end
         {
             self.end_work(WorkEnd::Finalized, &mut actions);
         }
@@ -297,54 +296,42 @@ impl<'w> Core<'w> {
                 }
             },
             Event::OpArrived { op, request } => self.op(op, request, &mut actions),
-            Event::JudgeStarted { job } => self.jobs.started(job, at_ms),
+            Event::JudgeStarted { job } => self.jobs.started(job, at),
             Event::JudgeExited { job, status: _ } => {
-                self.jobs.ended(job, at_ms, jobs::End::Exited);
+                self.jobs.ended(job, at, jobs::End::Exited);
             }
-            Event::JudgeTimedOut { job } => self.jobs.ended(job, at_ms, jobs::End::TimedOut),
+            Event::JudgeTimedOut { job } => self.jobs.ended(job, at, jobs::End::TimedOut),
             Event::JudgeCollected { job, result } => {
-                self.jobs
-                    .report(job, at_ms, jobs::Report::Collected(result));
+                self.jobs.report(job, at, jobs::Report::Collected(result));
             }
             Event::JudgeFailed { job, reason } => {
-                self.jobs.report(job, at_ms, jobs::Report::Failed(reason));
+                self.jobs.report(job, at, jobs::Report::Failed(reason));
             }
         }
         self.advance(&mut actions);
         actions
     }
 
-    /// When the core next acts without another event, in milliseconds since the run started:
-    /// at the deadline, or at the end of the grace after a finalize. The runtime sends
-    /// [`Event::Tick`] once that time has come. `None` once no time is due, after the work
-    /// phase.
-    pub fn tick_due_ms(&self) -> Option<u64> {
+    /// When the core next acts without another event, as a time since the run started: at the
+    /// deadline, or at the end of the grace after a finalize. The runtime sends [`Event::Tick`]
+    /// once that time has come. `None` once no time is due, after the work phase.
+    pub fn tick_due(&self) -> Option<Duration> {
         match self.phase {
-            Phase::Work { .. } => Some(self.deadline_ms()),
-            Phase::Finalized { grace_end_ms, .. } => Some(grace_end_ms.min(self.deadline_ms())),
+            Phase::Work { .. } => Some(self.pattern.deadline),
+            Phase::Finalized { grace_end, .. } => Some(grace_end.min(self.pattern.deadline)),
             Phase::Teardown { .. } | Phase::Final { .. } | Phase::Finished { .. } => None,
         }
-    }
-
-    /// The time the work phase ends at the latest, in milliseconds since the run started.
-    fn deadline_ms(&self) -> u64 {
-        self.pattern.deadline_seconds.get().saturating_mul(1000)
-    }
-
-    /// How long the agent may keep running after its finalize is accepted, in milliseconds.
-    fn finalize_grace_ms(&self) -> u64 {
-        self.pattern.finalize_grace_seconds.saturating_mul(1000)
     }
 
     /// Locks `submission`, finalized, as the selection, and starts the grace after it. A grace
     /// of 0 ends the work phase at once.
     fn finalize(&mut self, submission: Submission, actions: &mut Vec<Action>) {
-        let grace_ms = self.finalize_grace_ms();
+        let grace = self.pattern.finalize_grace;
         self.phase = Phase::Finalized {
             submission,
-            grace_end_ms: self.now_ms.saturating_add(grace_ms),
+            grace_end: self.now.saturating_add(grace),
         };
-        if grace_ms == 0 {
+        if grace.is_zero() {
             self.end_work(WorkEnd::Finalized, actions);
         }
     }
@@ -362,7 +349,7 @@ impl<'w> Core<'w> {
             agent_destroyed: false,
             submission,
         };
-        let stopped = self.jobs.stop_unfinished(self.now_ms);
+        let stopped = self.jobs.stop_unfinished(self.now);
         actions.extend(stopped.into_iter().map(|job| Action::StopJudge { job }));
         actions.push(Action::TearDownAgent);
     }
@@ -418,13 +405,12 @@ impl<'w> Core<'w> {
             return self.finish(Outcome { work_end, verdict }, actions);
         };
         // The final phase comes after the deadline, so the time left before it doesn't count.
-        let timeout_seconds = self.pattern.score.timeout_seconds.get();
         let job = self.jobs.add(JudgeCall::Score);
         actions.push(Action::StartJudge {
             job,
             call: JudgeCall::Score,
             payload: submission.payload.clone(),
-            timeout: Duration::from_secs(timeout_seconds),
+            timeout: self.pattern.score.timeout,
         });
         self.phase = Phase::Final {
             work_end,
@@ -440,19 +426,17 @@ impl<'w> Core<'w> {
         actions.push(Action::Finish { outcome });
     }
 
-    /// The longest a new call of `grant` may run, in milliseconds: the smaller of the grant's
-    /// call timeout and its cumulative time left.
-    fn call_limit_ms(&self, grant: JudgeGrantId) -> u64 {
-        let call_timeout = self.workflow.judge_grant(grant).call_timeout_seconds;
-        let call_ms = call_timeout.get().saturating_mul(1000);
-        self.cumulative_left_ms(grant)
-            .map_or(call_ms, |left_ms| left_ms.min(call_ms))
+    /// The longest a new call of `grant` may run: the smaller of the grant's call timeout and
+    /// its cumulative time left.
+    fn call_limit(&self, grant: JudgeGrantId) -> Duration {
+        let call_timeout = self.workflow.judge_grant(grant).call_timeout;
+        self.cumulative_left(grant)
+            .map_or(call_timeout, |left| left.min(call_timeout))
     }
 
-    /// The judge time `grant` has left, in milliseconds: `None` without a cumulative limit.
-    fn cumulative_left_ms(&self, grant: JudgeGrantId) -> Option<u64> {
-        let total = self.workflow.judge_grant(grant).cumulative_seconds?;
-        let used_ms = self.jobs.usage(grant).used_ms;
-        Some(total.get().saturating_mul(1000).saturating_sub(used_ms))
+    /// The judge time `grant` has left: `None` without a cumulative limit.
+    fn cumulative_left(&self, grant: JudgeGrantId) -> Option<Duration> {
+        let total = self.workflow.judge_grant(grant).cumulative?;
+        Some(total.saturating_sub(self.jobs.usage(grant).used))
     }
 }

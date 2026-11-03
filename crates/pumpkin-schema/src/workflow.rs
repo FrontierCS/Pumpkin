@@ -1,5 +1,5 @@
-//! A workflow parsed from its IR: references resolved to typed ids, and the rules that span
-//! its parts checked.
+//! A workflow parsed from its IR: references resolved to typed ids, counts of seconds turned
+//! into [`Duration`]s, and the rules that span its parts checked.
 //!
 //! A [`Workflow`] can only be made by [`Workflow::parse`], so code that acts on one need not
 //! check again what parsing established. Each kind of part has its own id type, so that, for
@@ -7,6 +7,7 @@
 //! valid for the workflow that issued them.
 
 use std::num::{NonZeroU32, NonZeroU64};
+use std::time::Duration;
 
 use crate::ir::{
     Command, Image, ModelRoute, Name, Resources, ResultSpec, Slot, User, WorkflowName,
@@ -167,12 +168,12 @@ pub struct JudgeGrant {
     /// See [`ir::JudgeGrant::calls`](crate::ir::JudgeGrant::calls).
     pub calls: Option<NonZeroU64>,
     /// See [`ir::JudgeGrant::cumulative_seconds`](crate::ir::JudgeGrant::cumulative_seconds).
-    pub cumulative_seconds: Option<NonZeroU64>,
+    pub cumulative: Option<Duration>,
     /// See [`ir::JudgeGrant::concurrency`](crate::ir::JudgeGrant::concurrency).
     pub concurrency: NonZeroU32,
     /// See
     /// [`ir::JudgeGrant::call_timeout_seconds`](crate::ir::JudgeGrant::call_timeout_seconds).
-    pub call_timeout_seconds: NonZeroU64,
+    pub call_timeout: Duration,
 }
 
 impl JudgeGrant {
@@ -199,10 +200,10 @@ pub enum Main {
 pub struct SoloThenJudge {
     pub score: Score,
     /// See [`ir::SoloThenJudge::deadline_seconds`](crate::ir::SoloThenJudge::deadline_seconds).
-    pub deadline_seconds: NonZeroU64,
+    pub deadline: Duration,
     /// See
     /// [`ir::SoloThenJudge::finalize_grace_seconds`](crate::ir::SoloThenJudge::finalize_grace_seconds).
-    pub finalize_grace_seconds: u64,
+    pub finalize_grace: Duration,
 }
 
 /// The parsed [`ir::Score`](crate::ir::Score): the slot of a judge no judge grant names, whose
@@ -211,5 +212,5 @@ pub struct SoloThenJudge {
 pub struct Score {
     pub slot: SlotId,
     /// See [`ir::Score::timeout_seconds`](crate::ir::Score::timeout_seconds).
-    pub timeout_seconds: NonZeroU64,
+    pub timeout: Duration,
 }

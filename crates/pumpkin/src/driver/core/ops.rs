@@ -42,7 +42,7 @@ enum Authorized<'c> {
     Judge {
         grant: JudgeGrantId,
         payload: PayloadRef,
-        timeout_ms: u64,
+        timeout: Duration,
     },
     Submit(Submission),
 }
@@ -76,7 +76,7 @@ impl Core<'_> {
             Authorized::Judge {
                 grant,
                 payload,
-                timeout_ms,
+                timeout,
             } => {
                 let job = self.jobs.add(JudgeCall::Grant(grant));
                 let remaining = self.remaining(grant);
@@ -85,7 +85,6 @@ impl Core<'_> {
                     remaining,
                 });
                 actions.push(Action::Reply { op, reply });
-                let timeout = Duration::from_millis(timeout_ms);
                 actions.push(Action::StartJudge {
                     job,
                     call: JudgeCall::Grant(grant),
@@ -94,13 +93,13 @@ impl Core<'_> {
                 });
             }
             Authorized::Submit(submission) => {
-                let (state, end_ms) = if submission.finalized {
-                    let grace_end_ms = self.now_ms.saturating_add(self.finalize_grace_ms());
-                    (SubmitState::Accepted, grace_end_ms.min(self.deadline_ms()))
+                let (state, end) = if submission.finalized {
+                    let grace_end = self.now.saturating_add(self.pattern.finalize_grace);
+                    (SubmitState::Accepted, grace_end.min(self.pattern.deadline))
                 } else {
-                    (SubmitState::Stored, self.deadline_ms())
+                    (SubmitState::Stored, self.pattern.deadline)
                 };
-                let remaining_seconds = end_ms.saturating_sub(self.now_ms) / 1000;
+                let remaining_seconds = end.saturating_sub(self.now).as_secs();
                 let reply = OpReply::Submit(SubmitReply {
                     state,
                     remaining_seconds,
@@ -211,20 +210,21 @@ impl Core<'_> {
                 usage.running
             ));
         }
-        if let Some(total) = grant.cumulative_seconds
-            && usage.used_ms >= total.get().saturating_mul(1000)
+        if let Some(total) = grant.cumulative
+            && usage.used >= total
         {
             return Err(format!(
-                "`{name}` has no judge time left: its calls have used the {total} s it allows"
+                "`{name}` has no judge time left: its calls have used the {} s it allows",
+                total.as_secs()
             ));
         }
         // Positive: the work phase ends at the deadline, and every limit is left above zero.
-        let run_left_ms = self.deadline_ms().saturating_sub(self.now_ms);
-        let timeout_ms = self.call_limit_ms(id).min(run_left_ms);
+        let run_left = self.pattern.deadline.saturating_sub(self.now);
+        let timeout = self.call_limit(id).min(run_left);
         Ok(Authorized::Judge {
             grant: id,
             payload,
-            timeout_ms,
+            timeout,
         })
     }
 
@@ -256,7 +256,7 @@ impl Core<'_> {
             max_bytes: self.submission_max_bytes(),
         });
         OpsReply {
-            remaining_seconds: self.deadline_ms().saturating_sub(self.now_ms) / 1000,
+            remaining_seconds: self.pattern.deadline.saturating_sub(self.now).as_secs(),
             resources: self.workflow.agent().sandbox.resources,
             grants: judges.chain([submit]).collect(),
         }
@@ -267,17 +267,17 @@ impl Core<'_> {
             name,
             slot,
             calls,
-            cumulative_seconds,
+            cumulative,
             concurrency,
-            call_timeout_seconds,
+            call_timeout,
         } = grant;
         op::JudgeGrant {
             name: name.clone(),
             max_bytes: self.workflow.slot(*slot).max_bytes,
             calls: *calls,
-            cumulative_seconds: *cumulative_seconds,
+            cumulative_seconds: cumulative.map(limit_seconds),
             concurrency: *concurrency,
-            call_timeout_seconds: *call_timeout_seconds,
+            call_timeout_seconds: limit_seconds(*call_timeout),
         }
     }
 
@@ -310,9 +310,22 @@ impl Core<'_> {
         let used = self.jobs.usage(grant).calls;
         Remaining {
             calls: calls.map(|calls| calls.get().saturating_sub(used)),
-            seconds: self.cumulative_left_ms(grant).map(|ms| ms / 1000),
+            seconds: self.cumulative_left(grant).as_ref().map(Duration::as_secs),
         }
     }
+}
+
+/// A judge grant's limit of time, in the seconds its IR gave it.
+fn limit_seconds(limit: Duration) -> NonZeroU64 {
+    #[expect(
+        clippy::unreachable,
+        reason = "the workflow's parser makes a grant's limits of time from non-zero counts of \
+                  seconds"
+    )]
+    let Some(seconds) = NonZeroU64::new(limit.as_secs()) else {
+        unreachable!("a judge grant's limit of time is {limit:?}, under a second")
+    };
+    seconds
 }
 
 /// Refuses a payload that is empty, or over `max_bytes`.
