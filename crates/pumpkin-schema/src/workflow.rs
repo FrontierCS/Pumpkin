@@ -8,9 +8,7 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
-use crate::ir::{
-    Asset, Command, Image, Mode, ModelRoute, Name, Resources, Slot, Trust, User, WorkflowName,
-};
+use crate::ir::{Command, Image, ModelRoute, Name, Resources, Slot, User, WorkflowName};
 
 mod parse;
 
@@ -53,14 +51,6 @@ impl Workflow {
         match role {
             RoleId::Agent => &self.agent.sandbox,
             RoleId::Judge(judge) => &self.judge(judge).sandbox,
-        }
-    }
-
-    /// The trust level of any role: the agent is untrusted.
-    pub fn trust(&self, role: RoleId) -> Trust {
-        match role {
-            RoleId::Agent => Trust::Untrusted,
-            RoleId::Judge(judge) => self.judge(judge).trust,
         }
     }
 
@@ -144,8 +134,6 @@ pub struct Sandbox {
     pub resources: Resources,
     /// Only the agent's may be set.
     pub model_route: Option<ModelRoute>,
-    /// Each named once.
-    pub assets: Vec<Asset>,
 }
 
 /// The agent role; see [`ir::Runtime::Agent`](crate::ir::Runtime::Agent).
@@ -162,8 +150,6 @@ pub struct Judge {
     pub sandbox: Sandbox,
     /// See [`ir::JudgeRuntime::command`](crate::ir::JudgeRuntime::command).
     pub command: Command,
-    pub mode: Mode,
-    pub trust: Trust,
     /// Each named once.
     pub slots: Vec<Slot>,
 }
@@ -212,8 +198,8 @@ pub struct SoloThenJudge {
     pub deadline_seconds: NonZeroU64,
 }
 
-/// The parsed [`ir::Score`](crate::ir::Score): a final-mode judge's slot, whose `max_bytes`
-/// caps every submission.
+/// The parsed [`ir::Score`](crate::ir::Score): the slot of a judge no judge grant names, whose
+/// `max_bytes` caps every submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Score {
     pub slot: SlotId,

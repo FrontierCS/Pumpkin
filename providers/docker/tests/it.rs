@@ -99,7 +99,6 @@ impl Fixture {
             }))
             .unwrap(),
             model_route: None,
-            assets: Vec::new(),
         };
         let start = Start {
             run,

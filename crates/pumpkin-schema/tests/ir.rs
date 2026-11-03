@@ -146,7 +146,6 @@ fn lwe() {
 fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
-    let asset = json!({ "name": "data", "path": "/data", "digest": "md5:abc", "mode": "any" });
     check(
         [
             lwe_with("/name", json!("lwe structured recovery")),
@@ -154,7 +153,6 @@ fn checked_values() {
             lwe_with(&format!("{agent}/name"), json!("bad\nname")),
             lwe_with(&format!("{agent}/image"), json!(format!("sha256:{HEX}"))),
             lwe_with(&format!("{agent}/image"), json!("ubuntu:24.04")),
-            lwe_with(&format!("{agent}/assets"), json!([asset])),
             lwe_with(&format!("{command}/cwd"), json!("workspace")),
             lwe_with(&format!("{command}/cwd"), json!("/workspace/")),
             lwe_with(&format!("{command}/argv"), json!([])),
@@ -180,7 +178,6 @@ fn checked_values() {
             `bad\nname` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             parsed
             `ubuntu:24.04` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`
-            `md5:abc` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits
             `workspace` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
             `/workspace/` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
             the command is empty: it needs a program
@@ -196,9 +193,6 @@ fn checked_values() {
 #[test]
 fn broken_references() {
     let mut ir = lwe_json();
-    let mut root = ir["roles"][1].clone();
-    root["name"] = json!("root");
-    ir["roles"].as_array_mut().unwrap().push(root);
     let payload = ir["roles"][2]["runtime"]["judge"]["slots"][0].clone();
     ir["roles"][2]["runtime"]["judge"]["slots"]
         .as_array_mut()
@@ -214,7 +208,6 @@ fn broken_references() {
         [ir],
         &expect![[r#"
             roles[final_judge].runtime.judge.slots[1].name: `payload` also names roles[final_judge].runtime.judge.slots[0]: give each a unique name
-            roles[root].name: `root` is reserved: use another name
             main.solo_then_judge.grants[2].name: `train` also names main.solo_then_judge.grants[0]: give each a unique name
             main.solo_then_judge.grants[0].judge.role: no role is named `ghost`: name one listed in `roles`
             main.solo_then_judge.grants[2].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
@@ -223,7 +216,7 @@ fn broken_references() {
 }
 
 /// A workflow has one agent, which alone has a model route and holds one submit grant, and the
-/// score judges with a final-mode judge.
+/// score judges with a judge no grant names, even a grant that fails to parse.
 #[test]
 fn broken_pattern() {
     let mut ir = lwe_json();
@@ -234,6 +227,7 @@ fn broken_pattern() {
     let pattern = &mut ir["main"]["solo_then_judge"];
     let submit = json!({ "submit": { "name": "resubmit" } });
     pattern["grants"].as_array_mut().unwrap().push(submit);
+    pattern["grants"][0]["judge"]["slot"] = json!("submission");
     pattern["score"]["role"] = json!("train_judge");
     let mut none = lwe_json();
     none["roles"].as_array_mut().unwrap().remove(0);
@@ -251,8 +245,9 @@ fn broken_pattern() {
         &expect![[r#"
             roles[final_judge].egress.model: `final_judge` is a judge, and only the agent has a model route: remove it
             roles[helper].runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
+            main.solo_then_judge.grants[train].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
             main.solo_then_judge.grants[resubmit].submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
-            main.solo_then_judge.score.role: `train_judge` is train-mode: name a final-mode judge
+            main.solo_then_judge.score.role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
             roles: no role is an agent: a workflow has exactly one
             main.solo_then_judge.grants: no submit grant: give the agent exactly one
             missing field `call_timeout_seconds`"#]],

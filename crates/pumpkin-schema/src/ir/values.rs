@@ -44,8 +44,8 @@ macro_rules! checked_string {
 }
 
 checked_string!(
-    /// The name of a role, slot, asset or grant: 1 to 64 characters from a-z, 0-9, `_` and
-    /// `-`, starting with a letter.
+    /// The name of a role, slot or grant: 1 to 64 characters from a-z, 0-9, `_` and `-`,
+    /// starting with a letter.
     Name,
     check_name
 );
@@ -62,12 +62,6 @@ checked_string!(
     /// `sha256:<hex>`.
     Image,
     check_image
-);
-
-checked_string!(
-    /// A content digest: `sha256:` and 64 lowercase hexadecimal digits.
-    Sha256Digest,
-    check_sha256_digest
 );
 
 checked_string!(

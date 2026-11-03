@@ -4,7 +4,7 @@ use super::{
     Agent, Judge, JudgeGrant, JudgeId, Main, RoleId, Sandbox, Score, SlotId, SoloThenJudge,
     SubmitGrant, Workflow,
 };
-use crate::ir::{self, Mode, Name};
+use crate::ir::{self, Name};
 use crate::sandbox::MAX_OP_PAYLOAD_BYTES;
 
 mod errors;
@@ -25,9 +25,6 @@ impl Workflow {
         Parser::default().workflow(ir)
     }
 }
-
-/// Role names that would read as other principals.
-const RESERVED_ROLE_NAMES: [&str; 2] = ["root", "operator"];
 
 /// Where a `solo_then_judge` pattern's errors are reported.
 const PATTERN: &str = "main.solo_then_judge";
@@ -90,25 +87,13 @@ impl<'ir> Parser<'ir> {
                 resources,
                 runtime,
                 egress: ir::Egress { model },
-                assets,
             } = role;
-            if RESERVED_ROLE_NAMES.contains(&name.as_str()) {
-                self.errors.report(
-                    format!("{path}.name"),
-                    format!("`{name}` is reserved: use another name"),
-                );
-            }
-            self.errors.unique(
-                &format!("{path}.assets"),
-                assets.iter().map(|asset| &asset.name),
-            );
             let sandbox = Sandbox {
                 name: name.clone(),
                 image: image.clone(),
                 user: *user,
                 resources: *resources,
                 model_route: model.clone(),
-                assets: assets.clone(),
             };
             let id = match runtime {
                 ir::Runtime::Agent(agent) => self.agent(path, sandbox, agent),
@@ -160,12 +145,7 @@ impl<'ir> Parser<'ir> {
     }
 
     fn judge(&mut self, path: &str, sandbox: Sandbox, judge: &ir::JudgeRuntime) -> RoleId {
-        let ir::JudgeRuntime {
-            command,
-            mode,
-            trust,
-            slots,
-        } = judge;
+        let ir::JudgeRuntime { command, slots } = judge;
         let labels = self.errors.unique(
             &format!("{path}.runtime.judge.slots"),
             slots.iter().map(|slot| &slot.name),
@@ -187,8 +167,6 @@ impl<'ir> Parser<'ir> {
         self.judges.push(Judge {
             sandbox,
             command: command.clone(),
-            mode: *mode,
-            trust: *trust,
             slots: slots.clone(),
         });
         RoleId::Judge(JudgeId(self.judges.len() - 1))
@@ -201,7 +179,7 @@ impl<'ir> Parser<'ir> {
             deadline_seconds,
         } = pattern;
         let (judge_grants, submit_grant) = self.grants(grants);
-        let score = self.score(score);
+        let score = self.score(score, grants);
         Ok(Pattern {
             judge_grants: judge_grants?,
             submit_grant: submit_grant?,
@@ -281,18 +259,30 @@ impl<'ir> Parser<'ir> {
         parsed
     }
 
-    /// The score: a slot of a final-mode judge.
-    fn score(&mut self, score: &ir::Score) -> Result<Score, Reported> {
+    /// The score: a slot of a judge that none of the agent's `grants` names, so that the judge
+    /// that scores the selection returns nothing to the agent.
+    fn score(&mut self, score: &ir::Score, grants: &[ir::Grant]) -> Result<Score, Reported> {
         let ir::Score { role, slot } = score;
         let path = format!("{PATTERN}.score");
-        let slot = self.judge_slot(&path, role, slot)?;
-        match self.judges[slot.judge.0].mode {
-            Mode::Final => Ok(Score { slot }),
-            Mode::Train => Err(self.errors.report(
+        // The grants are compared by the role they name in the IR, so that the rule holds even
+        // where a grant or the score's slot fails to resolve.
+        let role_is_judge = matches!(self.role_ids.get(role.as_str()), Some(RoleId::Judge(_)));
+        let grant = grants.iter().find_map(|grant| match grant {
+            ir::Grant::Judge(grant) => (grant.role == *role).then_some(grant),
+            ir::Grant::Submit(_) => None,
+        });
+        let shared = match grant {
+            Some(grant) if role_is_judge => Err(self.errors.report(
                 format!("{path}.role"),
-                format!("`{role}` is train-mode: name a final-mode judge"),
+                format!(
+                    "`{role}` is also the role of judge grant `{}`: name a judge no grant names",
+                    grant.name
+                ),
             )),
-        }
+            Some(_) | None => Ok(()),
+        };
+        let slot = self.judge_slot(&path, role, slot)?;
+        shared.map(|()| Score { slot })
     }
 
     /// Resolves a judge call's slot, `slot` of the judge `role`, with the call at `path`.
