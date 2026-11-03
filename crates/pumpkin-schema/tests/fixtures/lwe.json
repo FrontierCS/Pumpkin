@@ -40,9 +40,7 @@
               "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/train.json"
             ]
           },
-          "mode": "train",
-          "trust": "trusted",
-          "slots": [{ "name": "payload", "kind": "data", "max_bytes": 4194304 }]
+          "slots": [{ "name": "payload", "max_bytes": 4194304 }]
         }
       }
     },
@@ -64,9 +62,7 @@
               "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/eval.json"
             ]
           },
-          "mode": "final",
-          "trust": "trusted",
-          "slots": [{ "name": "payload", "kind": "data", "max_bytes": 4194304 }]
+          "slots": [{ "name": "payload", "max_bytes": 4194304 }]
         }
       }
     }

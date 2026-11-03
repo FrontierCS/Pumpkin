@@ -1,8 +1,7 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (one agent and its judges, with their [`Slot`]s and
-//! [`Mode`]s), and the pattern, [`Main`], which gives the agent its [`Grant`]s and judges what
-//! it submits.
+//! A workflow is data: [`Role`]s (one agent and its judges, with their [`Slot`]s), and the
+//! pattern, [`Main`], which gives the agent its [`Grant`]s and judges what it submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -20,9 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod values;
 
-pub use values::{
-    AbsolutePath, Argv, Env, EnvVar, Image, ModelName, Models, Name, Sha256Digest, WorkflowName,
-};
+pub use values::{AbsolutePath, Argv, Env, EnvVar, Image, ModelName, Models, Name, WorkflowName};
 
 /// A workflow.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,11 +59,6 @@ pub struct Role {
     /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// Data the role's image holds, declared for the per-mode rule. A task declares its assets
-    /// once it has data to keep from the agent, such as hidden evaluation data; none of the
-    /// tasks ported so far has any.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assets: Vec<Asset>,
 }
 
 /// A numeric user and group, neither of them root.
@@ -84,27 +76,6 @@ pub struct Resources {
     /// The CPU limit, in thousandths of a CPU.
     pub cpu_millis: NonZeroU64,
     pub memory_bytes: NonZeroU64,
-}
-
-/// Whether the workflow's author vouches for a role's own code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Trust {
-    /// The role's code acts as its author intends, though code it is given may not.
-    Trusted,
-    /// The role's code may act against the run. The agent is untrusted.
-    Untrusted,
-}
-
-/// The mode of a judge. The checker requires that only final-mode roles hold
-/// [`AssetMode::Final`] assets; parsing does not check it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    /// Judges work in progress; its results may reach the agent.
-    Train,
-    /// Judges the final submission.
-    Final,
 }
 
 /// What runs in a role's sandboxes.
@@ -129,9 +100,6 @@ pub struct AgentRuntime {
 pub struct JudgeRuntime {
     /// The command each judge call runs.
     pub command: Command,
-    pub mode: Mode,
-    /// Declared for every judge, so that no trust decision is implicit.
-    pub trust: Trust,
     /// Where inbound values land.
     pub slots: Vec<Slot>,
 }
@@ -155,21 +123,11 @@ pub struct Command {
 #[serde(deny_unknown_fields)]
 pub struct Slot {
     pub name: Name,
-    pub kind: SlotKind,
     /// The most bytes a payload into the slot may hold, at most
     /// [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), since every payload
     /// reaches its judge through an op. The [`Score`] slot's also caps every submission, so that
     /// whatever is selected fits it.
     pub max_bytes: NonZeroU64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlotKind {
-    /// Run by the receiver: whoever influenced the value controls the receiver.
-    Code,
-    /// Parsed, never executed: the value carries information but not control.
-    Data,
 }
 
 /// The routes out of a sandbox beyond its own session, all served by the gateway.
@@ -195,29 +153,6 @@ pub struct ModelRoute {
     pub models: Models,
     /// The cap on the role's model spending over a run, in millionths of a US dollar.
     pub budget_microusd: NonZeroU64,
-}
-
-/// Data a role's image holds.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Asset {
-    pub name: Name,
-    /// Where the asset is in the role's image.
-    pub path: AbsolutePath,
-    /// The digest of the asset's content.
-    pub digest: Sha256Digest,
-    pub mode: AssetMode,
-}
-
-/// Which roles may hold an asset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AssetMode {
-    /// Any role, whatever its mode: public datasets, model weights.
-    Any,
-    /// Final-mode roles only: hidden evaluation data, such as final workloads, seeds and
-    /// graded targets.
-    Final,
 }
 
 /// The pattern that drives a run.
@@ -299,7 +234,8 @@ pub struct SubmitGrant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Score {
-    /// The judge role, which is final-mode.
+    /// The judge role, which no [`JudgeGrant`] names, so that the agent never calls the judge
+    /// that scores it.
     pub role: Name,
     /// The judge's slot that receives the submission.
     pub slot: Name,

@@ -521,7 +521,6 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         user,
         resources,
         model_route: _,
-        assets: _,
     } = sandbox;
     let User { uid, gid } = *user;
     let Resources {
