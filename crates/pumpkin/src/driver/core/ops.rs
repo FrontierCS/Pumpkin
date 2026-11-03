@@ -189,7 +189,7 @@ impl Core<'_> {
                 usage.running
             ));
         }
-        if let Some(total) = grant.cumulative
+        if let Some(total) = grant.cumulative()
             && usage.used >= total
         {
             return Err(format!(
@@ -254,17 +254,17 @@ impl Core<'_> {
             name,
             slot,
             calls,
-            cumulative,
+            cumulative_seconds,
             concurrency,
-            call_timeout,
+            call_timeout_seconds,
         } = grant;
         op::JudgeGrant {
             name: name.clone(),
             max_bytes: self.workflow.slot(*slot).max_bytes,
             calls: *calls,
-            cumulative_seconds: cumulative.map(limit_seconds),
+            cumulative_seconds: *cumulative_seconds,
             concurrency: *concurrency,
-            call_timeout_seconds: limit_seconds(*call_timeout),
+            call_timeout_seconds: *call_timeout_seconds,
         }
     }
 
@@ -300,20 +300,6 @@ impl Core<'_> {
             seconds: self.cumulative_left(grant).as_ref().map(Duration::as_secs),
         }
     }
-}
-
-/// A judge grant's limit of time, in the seconds its IR gave it.
-fn limit_seconds(limit: Duration) -> NonZeroU64 {
-    #[expect(
-        clippy::unreachable,
-        reason = "the workflow's parser makes a grant's limits of time from non-zero counts of \
-                  seconds; no type excludes zero here, since the workflow keeps each limit once, \
-                  as the `Duration` the core's clock compares, and `Duration` has no non-zero form"
-    )]
-    let Some(seconds) = NonZeroU64::new(limit.as_secs()) else {
-        unreachable!("a judge grant's limit of time is {limit:?}, under a second")
-    };
-    seconds
 }
 
 /// Refuses a payload that is empty, or over `max_bytes`.

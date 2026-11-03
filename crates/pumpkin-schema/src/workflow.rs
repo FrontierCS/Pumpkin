@@ -168,17 +168,30 @@ pub struct JudgeGrant {
     /// See [`ir::JudgeGrant::calls`](crate::ir::JudgeGrant::calls).
     pub calls: Option<NonZeroU64>,
     /// See [`ir::JudgeGrant::cumulative_seconds`](crate::ir::JudgeGrant::cumulative_seconds).
-    pub cumulative: Option<Duration>,
+    pub cumulative_seconds: Option<NonZeroU64>,
     /// See [`ir::JudgeGrant::concurrency`](crate::ir::JudgeGrant::concurrency).
     pub concurrency: NonZeroU32,
     /// See
     /// [`ir::JudgeGrant::call_timeout_seconds`](crate::ir::JudgeGrant::call_timeout_seconds).
-    pub call_timeout: Duration,
+    pub call_timeout_seconds: NonZeroU64,
 }
 
 impl JudgeGrant {
     pub fn judge(&self) -> JudgeId {
         self.slot.judge
+    }
+
+    /// [`ir::JudgeGrant::cumulative_seconds`](crate::ir::JudgeGrant::cumulative_seconds), as a
+    /// [`Duration`].
+    pub fn cumulative(&self) -> Option<Duration> {
+        self.cumulative_seconds
+            .map(|seconds| Duration::from_secs(seconds.get()))
+    }
+
+    /// [`ir::JudgeGrant::call_timeout_seconds`](crate::ir::JudgeGrant::call_timeout_seconds), as
+    /// a [`Duration`].
+    pub fn call_timeout(&self) -> Duration {
+        Duration::from_secs(self.call_timeout_seconds.get())
     }
 }
 
