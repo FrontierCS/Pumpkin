@@ -10,8 +10,9 @@
 
 use expect_test::{Expect, expect};
 use pumpkin_schema::ir;
+use pumpkin_schema::sandbox::MAX_OP_PAYLOAD_BYTES;
 use pumpkin_schema::sandbox::op::OpReply;
-use pumpkin_schema::workflow::{Holder, Main, RoleId, Workflow};
+use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::{Value, json};
 
 const LWE: &str = include_str!("fixtures/lwe.json");
@@ -135,13 +136,9 @@ fn lwe() {
     );
     let workflow = Workflow::parse(&ir).unwrap();
     let Main::SoloThenJudge(pattern) = workflow.main();
-    assert_eq!(workflow.agent(pattern.agent).sandbox.name.as_str(), "agent");
-    assert_eq!(pattern.work_phase, workflow.initial_phase());
-    let submit = workflow.submit_grant(pattern.submit);
-    assert_eq!(submit.holder, RoleId::Agent(pattern.agent));
-    let score = workflow.judge_grant(pattern.score);
-    assert_eq!(score.holder, Holder::Root);
-    let judge = workflow.judge(score.judge());
+    assert_eq!(workflow.agent().sandbox.name.as_str(), "agent");
+    assert_eq!(workflow.submit_grant().name.as_str(), "submit");
+    let judge = workflow.judge(pattern.score.slot.judge());
     assert_eq!(judge.sandbox.name.as_str(), "final_judge");
 }
 
@@ -172,6 +169,10 @@ fn checked_values() {
                 &format!("{agent}/egress/model/models"),
                 json!(["gpt-6-astra", "gpt-6-astra"]),
             ),
+            lwe_with(
+                "/roles/2/runtime/judge/slots/0/max_bytes",
+                json!(MAX_OP_PAYLOAD_BYTES + 1),
+            ),
         ],
         &expect![[r#"
             `lwe structured recovery` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
@@ -187,7 +188,8 @@ fn checked_values() {
             `1ST` is not a valid environment variable name: use A-Z, a-z, 0-9 and `_`, not starting with a digit
             `MODE` is set more than once: set each name once
             no models: a model route allows at least one
-            `gpt-6-astra` is listed more than once: list each model once"#]],
+            `gpt-6-astra` is listed more than once: list each model once
+            roles[final_judge].runtime.judge.slots[payload].max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
     );
 }
 
@@ -202,73 +204,57 @@ fn broken_references() {
         .as_array_mut()
         .unwrap()
         .push(payload);
-    let train = ir["grants"][0].clone();
-    ir["grants"].as_array_mut().unwrap().push(train);
-    ir["grants"][0]["holder"] = json!({ "role": "ghost" });
-    ir["phases"][0]["live"] = json!(["agent", "agent", "train_judge", "ghost"]);
-    ir["phases"][0]["next"] = json!(["final", "later"]);
-    ir["phases"][1]["next"] = json!(["final"]);
-    ir["main"]["solo_then_judge"]["agent"] = json!("train_judge");
-    ir["main"]["solo_then_judge"]["score"] = json!("submit");
+    let pattern = &mut ir["main"]["solo_then_judge"];
+    let train = pattern["grants"][0].clone();
+    pattern["grants"].as_array_mut().unwrap().push(train);
+    pattern["grants"][0]["judge"]["role"] = json!("ghost");
+    pattern["grants"][2]["judge"]["slot"] = json!("submission");
+    pattern["score"]["role"] = json!("agent");
     check(
         [ir],
         &expect![[r#"
             roles[final_judge].runtime.judge.slots[1].name: `payload` also names roles[final_judge].runtime.judge.slots[0]: give each a unique name
             roles[root].name: `root` is reserved: use another name
-            phases[work].live: `agent` is already listed: list each once
-            phases[work].live: no role is named `ghost`: name one listed in `roles`
-            phases[work].next: no phase is named `later`: name one listed in `phases`
-            phases[final].next: the phase follows itself: it may not
-            grants[3].name: `train` also names grants[0]: give each a unique name
-            grants[0].holder: no role is named `ghost`: name one listed in `roles`
-            main.solo_then_judge.agent: `train_judge` is a judge: name an agent
-            main.solo_then_judge.score: `submit` is a submit grant: name a judge grant"#]],
+            main.solo_then_judge.grants[2].name: `train` also names main.solo_then_judge.grants[0]: give each a unique name
+            main.solo_then_judge.grants[0].judge.role: no role is named `ghost`: name one listed in `roles`
+            main.solo_then_judge.grants[2].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
+            main.solo_then_judge.score.role: `agent` is an agent: name a judge"#]],
     );
 }
 
-#[test]
-fn broken_grants() {
-    let mut ir = lwe_json();
-    ir["grants"][0]["phases"] = json!(["work", "final"]);
-    ir["grants"][0]["op"]["judge"]["slot"] = json!("submission");
-    ir["grants"][1]["holder"] = json!("root");
-    ir["grants"][2]["op"]["judge"]["role"] = json!("agent");
-    ir["grants"].as_array_mut().unwrap().push(json!({
-        "name": "idle",
-        "holder": { "role": "agent" },
-        "phases": [],
-        "op": { "submit": { "max_bytes": 1 } }
-    }));
-    check(
-        [ir],
-        &expect![[r#"
-            grants[train].holder: `agent` is not live in phase `final`: a grant applies only in phases where its roles are live
-            grants[train].op.judge.role: `train_judge` is not live in phase `final`: a grant applies only in phases where its roles are live
-            grants[train].op.judge.slot: `train_judge` has no slot named `submission`: name one of its slots
-            grants[submit].holder: the root holds a submit grant: only a role may
-            grants[score].op.judge.role: `agent` is an agent: name a judge
-            grants[idle].phases: no phases: a grant applies in at least one"#]],
-    );
-}
-
+/// A workflow has one agent, which alone has a model route and holds one submit grant, and the
+/// score judges with a final-mode judge.
 #[test]
 fn broken_pattern() {
     let mut ir = lwe_json();
-    // The final phase comes first and keeps the agent, the work phase leads nowhere, a
-    // train-mode judge scores, and submissions outgrow the score slot.
-    ir["phases"] = json!([
-        { "name": "final", "live": ["final_judge", "train_judge", "agent"] },
-        { "name": "work", "live": ["agent", "train_judge"] }
-    ]);
-    ir["grants"][2]["op"]["judge"]["role"] = json!("train_judge");
-    ir["grants"][1]["op"]["submit"]["max_bytes"] = json!(8_388_608);
+    let mut helper = ir["roles"][0].clone();
+    helper["name"] = json!("helper");
+    ir["roles"].as_array_mut().unwrap().push(helper);
+    ir["roles"][2]["egress"] = ir["roles"][0]["egress"].clone();
+    let pattern = &mut ir["main"]["solo_then_judge"];
+    let submit = json!({ "submit": { "name": "resubmit" } });
+    pattern["grants"].as_array_mut().unwrap().push(submit);
+    pattern["score"]["role"] = json!("train_judge");
+    let mut none = lwe_json();
+    none["roles"].as_array_mut().unwrap().remove(0);
+    none["main"]["solo_then_judge"]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    let mut untimed = lwe_json();
+    untimed["main"]["solo_then_judge"]["grants"][0]["judge"]
+        .as_object_mut()
+        .unwrap()
+        .remove("call_timeout_seconds");
     check(
-        [ir],
+        [ir, none, untimed],
         &expect![[r#"
-            main.solo_then_judge.work_phase: `work` is not the first phase: name the phase a run starts in
-            main.solo_then_judge.final_phase: the work phase `work` is not followed by `final`: list `final` in its `next`
-            main.solo_then_judge.agent: `agent` is live in the final phase `final`, so it would survive into judging: drop it from the phase's `live`
-            main.solo_then_judge.score: `score` judges with `train_judge`, which is train-mode: name a final-mode judge
-            main.solo_then_judge.submit: submissions of up to 8388608 bytes do not fit the score slot's 4194304 bytes: raise the slot's `max_bytes` or lower the submit grant's"#]],
+            roles[final_judge].egress.model: `final_judge` is a judge, and only the agent has a model route: remove it
+            roles[helper].runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
+            main.solo_then_judge.grants[resubmit].submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
+            main.solo_then_judge.score.role: `train_judge` is train-mode: name a final-mode judge
+            roles: no role is an agent: a workflow has exactly one
+            main.solo_then_judge.grants: no submit grant: give the agent exactly one
+            missing field `call_timeout_seconds`"#]],
     );
 }

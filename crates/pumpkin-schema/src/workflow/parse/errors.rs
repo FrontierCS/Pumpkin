@@ -4,7 +4,7 @@
 //! A part that fails to parse returns a [`Reported`], which only [`Errors::report`] makes, so a
 //! failed parse always has an error to return.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
@@ -13,8 +13,8 @@ use crate::ir::Name;
 /// A rule an IR breaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
-    /// Where in the IR, such as `grants[train].holder`. A part is named by its name, or by its
-    /// index where its name repeats, such as `grants[3].holder`.
+    /// Where in the IR, such as `main.solo_then_judge.grants[train].judge.role`. A part is
+    /// named by its name, or by its index where its name repeats, such as `roles[3].name`.
     pub path: String,
     pub message: String,
 }
@@ -112,26 +112,6 @@ impl Errors {
             labels.push(label);
         }
         labels
-    }
-
-    /// Resolves a list of references to a set, reporting repeated and unknown names.
-    pub(super) fn resolve_all<Id: Copy + Ord>(
-        &mut self,
-        path: &str,
-        names: &[Name],
-        ids: &HashMap<&str, Id>,
-        kind: &str,
-    ) -> BTreeSet<Id> {
-        let mut seen = HashSet::new();
-        let mut resolved = BTreeSet::new();
-        for name in names {
-            if !seen.insert(name) {
-                self.report(path, format!("`{name}` is already listed: list each once"));
-            } else if let Ok(id) = self.resolve(path, name, ids, kind) {
-                resolved.insert(id);
-            }
-        }
-        resolved
     }
 
     /// Resolves one reference, reporting an unknown name.

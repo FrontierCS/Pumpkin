@@ -84,8 +84,8 @@ pub enum Grant {
     Submit(SubmitGrant),
 }
 
-/// A grant that [`OpCall::Judge`] calls; see [`ir::JudgeOp`](crate::ir::JudgeOp) for its
-/// limits.
+/// A grant that [`OpCall::Judge`] calls; see [`ir::JudgeGrant`](crate::ir::JudgeGrant) for
+/// its limits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeGrant {
