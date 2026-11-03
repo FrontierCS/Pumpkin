@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod values;
 
-pub use values::{AbsolutePath, Argv, Env, EnvVar, Image, ModelName, Models, Name, WorkflowName};
+pub use values::{
+    AbsolutePath, Argv, Env, EnvVar, Image, JsonPointer, ModelName, Models, Name, Returns,
+    WorkflowName,
+};
 
 /// A workflow.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +105,23 @@ pub struct JudgeRuntime {
     pub command: Command,
     /// Where inbound values land.
     pub slots: Vec<Slot>,
+    /// What each call writes as its result.
+    pub result: ResultSpec,
+}
+
+/// What a judge call writes as its result: the JSON file `/pumpkin/out/result.json`, which its
+/// caller sees.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultSpec {
+    /// Points to the call's status in the result: the string `"passed"` or `"failed"`.
+    pub status: JsonPointer,
+    /// Points to the call's score in the result: a number, which a passed result must have and
+    /// a failed one must not have, `null` counting as no score.
+    pub score: JsonPointer,
+    /// The fields of the result that the caller's reply returns, besides the status. A field
+    /// the result lacks is left out.
+    pub returns: Returns,
 }
 
 /// A process to start in a sandbox, as the role's user.
@@ -179,8 +199,14 @@ pub struct SoloThenJudge {
     /// How long the work phase may last.
     ///
     /// The clock starts with the run, so starting the agent's sandbox counts against it.
-    /// Judging the selected submission comes after the deadline.
+    /// Judging the selected submission comes after the deadline, bounded instead by the
+    /// score's [`timeout_seconds`](Score::timeout_seconds).
     pub deadline_seconds: NonZeroU64,
+    /// How long the agent may keep running after its final submission is accepted, so that
+    /// its harness can finish its last turn. Its ops are refused meanwhile, and the work phase
+    /// ends when it exits, when this runs out, or at the deadline, whichever comes first. 0
+    /// ends the work phase at the final submission.
+    pub finalize_grace_seconds: u64,
 }
 
 /// Permission for the agent to use an op while it works.
@@ -239,4 +265,7 @@ pub struct Score {
     pub role: Name,
     /// The judge's slot that receives the submission.
     pub slot: Name,
+    /// The call's timeout, counted from the start of the judge command, so that judging the
+    /// selection always ends.
+    pub timeout_seconds: NonZeroU64,
 }

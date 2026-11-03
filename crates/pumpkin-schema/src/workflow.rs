@@ -8,7 +8,9 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
-use crate::ir::{Command, Image, ModelRoute, Name, Resources, Slot, User, WorkflowName};
+use crate::ir::{
+    Command, Image, ModelRoute, Name, Resources, ResultSpec, Slot, User, WorkflowName,
+};
 
 mod parse;
 
@@ -152,6 +154,8 @@ pub struct Judge {
     pub command: Command,
     /// Each named once.
     pub slots: Vec<Slot>,
+    /// See [`ir::JudgeRuntime::result`](crate::ir::JudgeRuntime::result).
+    pub result: ResultSpec,
 }
 
 /// A judge grant of the agent's.
@@ -196,6 +200,9 @@ pub struct SoloThenJudge {
     pub score: Score,
     /// See [`ir::SoloThenJudge::deadline_seconds`](crate::ir::SoloThenJudge::deadline_seconds).
     pub deadline_seconds: NonZeroU64,
+    /// See
+    /// [`ir::SoloThenJudge::finalize_grace_seconds`](crate::ir::SoloThenJudge::finalize_grace_seconds).
+    pub finalize_grace_seconds: u64,
 }
 
 /// The parsed [`ir::Score`](crate::ir::Score): the slot of a judge no judge grant names, whose
@@ -203,4 +210,6 @@ pub struct SoloThenJudge {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Score {
     pub slot: SlotId,
+    /// See [`ir::Score::timeout_seconds`](crate::ir::Score::timeout_seconds).
+    pub timeout_seconds: NonZeroU64,
 }
