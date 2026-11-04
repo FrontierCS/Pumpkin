@@ -7,12 +7,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
-use stdx::Context;
+use stdx::{Context, unpoisoned};
 
 use crate::commands::Commands;
 use crate::files::{self, Puts};
 use crate::ops::Ops;
-use crate::unpoisoned;
 
 /// Connects to the gateway at `socket` and serves the session until the gateway ends it. With
 /// `serve_ops`, it also serves ops, from before the first request.

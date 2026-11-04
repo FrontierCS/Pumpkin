@@ -22,10 +22,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
-use stdx::Context;
+use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
-use crate::{sys, unpoisoned};
+use crate::sys;
 
 /// The commands started in this sandbox.
 pub(crate) struct Commands {

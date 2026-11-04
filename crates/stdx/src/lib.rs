@@ -1,6 +1,7 @@
 //! Small extensions to the standard library that Pumpkin's crates share.
 
 use std::fmt::Display;
+use std::sync::LockResult;
 use std::{panic, process};
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
@@ -40,4 +41,26 @@ pub fn abort_on_panic() {
         report(info);
         process::abort();
     }));
+}
+
+/// The guard from locking a mutex, or from waiting on a condition variable with one, in a
+/// process where a panic ends it before it unwinds, as [`abort_on_panic`] and
+/// `panic = "abort"` make it.
+///
+/// # Panics
+///
+/// Panics if a thread panicked while holding the lock, which a process can see only where a
+/// panic unwinds, as in a test, which that panic has already failed.
+pub fn unpoisoned<T>(locked: LockResult<T>) -> T {
+    #[expect(
+        clippy::unreachable,
+        reason = "only a thread that panics while holding a lock poisons it, and a panic aborts \
+                  the process before it unwinds (`abort_on_panic`), so no thread is left to see \
+                  the lock. std's locks that can't be poisoned, in `sync::nonpoison`, are \
+                  unstable"
+    )]
+    let Ok(guard) = locked else {
+        unreachable!("a thread panicked while holding a lock")
+    };
+    guard
 }

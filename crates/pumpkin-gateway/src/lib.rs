@@ -27,10 +27,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{fmt, fs, mem};
+use std::{fmt, fs};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
@@ -643,16 +643,8 @@ fn route(
     ended: &OnceLock<String>,
     mut ops: Assembler,
 ) {
-    // Dropped before `ops`, a parameter, whose sender to the owner closes as `ops` drops: the
-    // owner, seeing it closed, asks why the session ended, which must be known by then.
-    let mut ending = Ending {
-        routes,
-        ended,
-        connection,
-        reason: "the session's reader thread panicked".to_owned(),
-    };
     let mut reader = BufReader::new(connection);
-    ending.reason = loop {
+    let reason = loop {
         let (message, body) = match frame::read::<FromSandbox>(&mut reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => break "the sandbox ended the session".to_owned(),
@@ -672,22 +664,9 @@ fn route(
             break reason;
         }
     };
-}
-
-/// Ends the session for `reason` as it drops. The reader thread holds one, so that the session
-/// ends however the thread leaves, unwinding from a panic included.
-struct Ending<'a> {
-    routes: &'a Mutex<Routes>,
-    ended: &'a OnceLock<String>,
-    connection: &'a UnixStream,
-    reason: String,
-}
-
-impl Drop for Ending<'_> {
-    fn drop(&mut self) {
-        let reason = mem::take(&mut self.reason);
-        end(self.routes, self.ended, self.connection, reason);
-    }
+    // Before `ops`, a parameter, drops, which closes its sender to the owner: the owner, seeing
+    // it closed, asks why the session ended, which must be known by then.
+    end(routes, ended, connection, reason);
 }
 
 /// Hands a reply to the request waiting on `stream`. A reply for no waiting request is
@@ -927,7 +906,7 @@ fn end(routes: &Mutex<Routes>, ended: &OnceLock<String>, connection: &UnixStream
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    stdx::unpoisoned(mutex.lock())
 }
 
 /// The error of a request on a session that has ended, for the reason in `ended`.
@@ -937,8 +916,8 @@ fn ended(ended: &OnceLock<String>) -> io::Error {
         reason = "every way to learn that the session ended follows the reason's recording: \
                   `end` records it before it closes the routes, which close otherwise only \
                   after a frame that ends their request or once nothing receives from them; \
-                  the ops' sender closes only after the reader thread's `Ending` has ended the \
-                  session, even as a panic unwinds it; and the rest call `end` or check the \
+                  the ops' sender closes only after the reader thread has ended the session; and \
+                  the rest call `end` or check the \
                   reason first. The reason sits in a `OnceLock` apart from the channels whose \
                   closing tells of the end, so no type ties the two"
     )]

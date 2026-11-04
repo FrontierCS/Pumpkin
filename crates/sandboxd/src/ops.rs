@@ -31,10 +31,10 @@ use std::time::Duration;
 use pumpkin_schema::sandbox::frame::{self, MAX_BODY_BYTES};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
 use pumpkin_schema::sandbox::{CONTROL_SOCKET, FromSandbox, MAX_OP_PAYLOAD_BYTES};
-use stdx::Context;
+use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
-use crate::{sys, unpoisoned};
+use crate::sys;
 
 /// The op in flight and the callers' turns, which the threads carrying ops and the session,
 /// which receives their replies, share.

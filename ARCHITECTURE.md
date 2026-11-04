@@ -25,7 +25,8 @@ Conventions are in [`AGENTS.md`](AGENTS.md). Names in backticks are for symbol s
 Each crate depends only on crates listed above it.
 
 **`crates/stdx`** (`stdx`). What the standard library lacks and several crates share: `Context`,
-which prefixes an error with what failed, and `abort_on_panic`.
+which prefixes an error with what failed, `abort_on_panic`, and `unpoisoned`, which takes a lock's
+guard where no panic can leave it poisoned.
 
 **`crates/pumpkin-schema`** (`pumpkin-schema`). Pumpkin's schemas, Rust types serialized as
 JSON, and the sandbox protocol's wire format ([crate doc](crates/pumpkin-schema/src/lib.rs)).

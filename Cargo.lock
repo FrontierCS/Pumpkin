@@ -80,6 +80,7 @@ dependencies = [
  "expect-test",
  "pumpkin-schema",
  "serde_json",
+ "stdx",
 ]
 
 [[package]]
