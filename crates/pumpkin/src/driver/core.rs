@@ -83,7 +83,7 @@ pub enum Event {
     JudgeTimedOut { job: JobId },
     /// A job's outputs have been collected and its sandbox destroyed. `result` is its
     /// `result.json` parsed per its judge's [`ResultSpec`](pumpkin_schema::ir::ResultSpec), or
-    /// why it could not be.
+    /// why the call has no valid result.
     JudgeCollected {
         job: JobId,
         result: Result<JudgeResult, String>,
@@ -276,7 +276,8 @@ impl<'w> Core<'w> {
             }
             Event::OpArrived { op, request } => self.op(op, request, &mut actions),
             Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
-            // The run's log keeps the status; whether a call passed is its result's to say.
+            // The run's log keeps the status; whether a call passed is for what its judge wrote
+            // to say.
             Event::JudgeExited { job, status: _ } => {
                 self.on_job(job, |state| state.ended(at, jobs::End::Exited));
             }
