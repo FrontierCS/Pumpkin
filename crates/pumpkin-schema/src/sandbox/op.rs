@@ -27,7 +27,7 @@
 //! whether the job passed or failed, and `failure` only if the job failed without one. The
 //! crate's tests pin an example of each form.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -94,7 +94,6 @@ pub struct JudgeGrant {
     pub max_bytes: NonZeroU64,
     pub calls: Option<NonZeroU64>,
     pub cumulative_seconds: Option<NonZeroU64>,
-    pub concurrency: NonZeroU32,
     pub call_timeout_seconds: NonZeroU64,
 }
 
@@ -132,7 +131,9 @@ pub struct Remaining {
 #[serde(deny_unknown_fields)]
 pub struct SubmitReply {
     pub state: SubmitState,
-    /// The time left before the deadline, in whole seconds rounded down.
+    /// The time left to work, in whole seconds rounded down: until the deadline, or, once a
+    /// final submission is accepted, until the end of the grace to wind down, if that comes
+    /// first.
     pub remaining_seconds: u64,
 }
 
@@ -178,7 +179,9 @@ pub enum Failed {
     NoResult { failure: Failure },
 }
 
-/// The fields of a judge's result that its caller sees, by name, each with the result's value.
+/// The fields of a judge's result that its caller sees, by name: those the judge declares
+/// ([`ResultSpec::returns`](crate::ir::ResultSpec::returns)) and the result holds, each with
+/// the result's value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Returned(Map<String, Value>);
@@ -203,7 +206,7 @@ pub struct Failure {
 pub enum FailureCode {
     /// The judge ran past its timeout.
     JudgeTimeout,
-    /// The judge failed, or was stopped, before giving a result.
+    /// The judge failed before giving a result.
     JudgeError,
     /// The judge wrote no valid result.
     InvalidResult,

@@ -15,6 +15,9 @@ Conventions are in [`AGENTS.md`](AGENTS.md). Names in backticks are for symbol s
   the session's owner, who takes each with `Session::next_op`.
 - The Docker provider starts a sandbox as a container that needs no root, with `sandboxd`
   mounted in and its session connected.
+- The driver's decision core, `Core`, decides what a run of a workflow does: it takes each
+  `Event` observed, such as an op from the agent, and returns the `Action`s to take, such as the
+  op's reply.
 - `xtask` runs contributors' tasks, among them the checks every change passes.
 
 ## Code map
@@ -27,10 +30,12 @@ which prefixes an error with what failed, and `abort_on_panic`.
 **`crates/pumpkin-schema`** (`pumpkin-schema`). Pumpkin's schemas, Rust types serialized as
 JSON, and the sandbox protocol's wire format ([crate doc](crates/pumpkin-schema/src/lib.rs)).
 
-- `ir`: the workflow IR, `ir::Workflow`. Its values check themselves as they deserialize
-  (`ir::values`: `Name`, `Image`, `AbsolutePath`, `Argv`, `Env`, ...).
+- `ir`: the workflow IR, `ir::Workflow`, with each judge's result contract (`ResultSpec`). Its
+  values check themselves as they deserialize (`ir::values`: `Name`, `Image`, `AbsolutePath`,
+  `Argv`, `Env`, `JsonPointer`, `Returns`, ...).
 - `workflow`: `Workflow::parse`, which resolves names to typed ids (`RoleId`, `JudgeId`, `SlotId`,
-  `JudgeGrantId`) and reports the rules the IR breaks (`ParseErrors`).
+  `JudgeGrantId`), gives every time as a `Duration`, and reports the rules the IR breaks
+  (`ParseErrors`).
 - `sandbox`: the sandbox protocol (`ToSandbox`, `FromSandbox`, `Launch`, `Entry`), and the
   in-sandbox contract (`pumpkin_dir()`, `pumpkin_subdirs()`, `SANDBOXCTL_PATH`, `CONTROL_SOCKET`).
 - `sandbox::frame` and `sandbox::tree`: what both ends of the protocol run, `frame::read`,
@@ -58,6 +63,15 @@ returns it as a `Container` once its `Session` is accepted. `Engine::destroy_all
 containers by their `RunTag`. Every call to the `docker` command line goes through one function,
 `docker`.
 
+**`crates/pumpkin`** (`pumpkin`). Pumpkin's host side: the driver's decision core,
+`driver::core` ([module doc](crates/pumpkin/src/driver/core.rs)). `Core::start` begins a run of a
+`Workflow`, and `Core::handle` takes each `Event` with the time since the run started; both
+return `Action`s, and `Core::tick_due` says when time alone next calls for some. Its `ops` module
+authorizes the agent's ops (`Request`) and fills in their replies, `jobs` meters the judge calls
+they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.json` per its
+`ResultSpec`. A run ends with `Action::Finish`, which carries its `Outcome` (`WorkEnd`,
+`Verdict`).
+
 **`xtask`**. Contributor tasks: `cargo xtask ci`, the checks every change passes, among them
 `docs::check`, the doc length caps; and `cargo xtask sandboxd`.
 
@@ -80,6 +94,8 @@ containers by their `RunTag`. Every call to the `docker` command line goes throu
   ([`ir`](crates/pumpkin-schema/src/ir.rs)).
 - Only `Workflow::parse` makes a `workflow::Workflow`, so code past it doesn't check again
   ([`workflow`](crates/pumpkin-schema/src/workflow.rs)).
+- A judge grant runs one call at a time, and names a judge no other grant names, so its judge
+  does too ([`ir::JudgeGrant`](crates/pumpkin-schema/src/ir.rs)).
 - Every provider presents the in-sandbox contract in each sandbox it starts
   ([`sandbox`](crates/pumpkin-schema/src/sandbox.rs)).
 - A passive sandbox makes no op: its session takes none without an `OpPayloadLimit`
@@ -119,6 +135,18 @@ containers by their `RunTag`. Every call to the `docker` command line goes throu
 - `docker` reaches only the engine of the context named, whatever the environment
   ([`pumpkin-docker`](providers/docker/src/lib.rs): its envelope, and `docker`).
 
+### `pumpkin`
+
+- The decision core does no I/O and reads no clock, so the same events give the same actions
+  ([`core`](crates/pumpkin/src/driver/core.rs)).
+- The core authorizes every op the agent makes ([`ops`](crates/pumpkin/src/driver/core/ops.rs)),
+  and answers exactly once each op it is given ([`Core`](crates/pumpkin/src/driver/core.rs)).
+- What a judge grant has used is counted from its jobs, so no separate ledger can disagree with
+  them ([`jobs`](crates/pumpkin/src/driver/core/jobs.rs)).
+- The agent learns of a judge call only its state and the fields its judge declares
+  ([`ResultSpec`](crates/pumpkin-schema/src/ir.rs),
+  [`Failure`](crates/pumpkin/src/driver/core/jobs.rs)).
+
 ## Where new code goes
 
 - **A Pumpkin schema** (an IR field, a protocol message, an op's call or reply): in
@@ -133,10 +161,13 @@ containers by their `RunTag`. Every call to the `docker` command line goes throu
   replies; a `Session` method in the gateway; its handling in `sandboxd`'s `session`, by the
   module that serves it (`files`, `commands`).
 - **An op:** its call and reply in `sandbox::op`, with a row in its table; its command in
-  `sandboxctl`'s grammar (`ctl`); its `Op` in the gateway.
+  `sandboxctl`'s grammar (`ctl`); its `Op` in the gateway; its `Request` in the decision core.
 - **A path or limit every sandbox relies on, whatever its provider:** `pumpkin_schema::sandbox`,
   beside `pumpkin_dir()`.
 - **A system call `std` lacks, for `sandboxd`:** `sys`.
+- **A decision of a run** (when its work phase ends, whether an op is allowed, what its reply
+  says): `driver::core`, an op's rule in `ops` and judge calls' metering in `jobs`. What the core
+  must know comes in as an `Event`, and what must be done goes out as an `Action`.
 - **A provider:** `providers/<name>/`, crate `pumpkin-<name>`, which the workspace's
   `providers/*` glob takes in. Its platform's calls and its sandboxes' confinement stay in its
   crate, as `docker` and `create_args` stay in `pumpkin-docker`.

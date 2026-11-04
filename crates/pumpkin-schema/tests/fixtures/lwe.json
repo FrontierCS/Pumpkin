@@ -40,7 +40,12 @@
               "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/train.json"
             ]
           },
-          "slots": [{ "name": "payload", "max_bytes": 4194304 }]
+          "slots": [{ "name": "payload", "max_bytes": 4194304 }],
+          "result": {
+            "status": "/status",
+            "score": "/raw_score",
+            "returns": ["/raw_score", "/metrics", "/failure"]
+          }
         }
       }
     },
@@ -62,7 +67,12 @@
               "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/eval.json"
             ]
           },
-          "slots": [{ "name": "payload", "max_bytes": 4194304 }]
+          "slots": [{ "name": "payload", "max_bytes": 4194304 }],
+          "result": {
+            "status": "/status",
+            "score": "/raw_score",
+            "returns": ["/raw_score", "/metrics", "/failure"]
+          }
         }
       }
     }
@@ -77,14 +87,14 @@
             "slot": "payload",
             "calls": 100,
             "cumulative_seconds": 12000,
-            "concurrency": 1,
             "call_timeout_seconds": 12000
           }
         },
         { "submit": { "name": "submit" } }
       ],
-      "score": { "role": "final_judge", "slot": "payload" },
-      "deadline_seconds": 18000
+      "score": { "role": "final_judge", "slot": "payload", "timeout_seconds": 120 },
+      "deadline_seconds": 18000,
+      "finalize_grace_seconds": 60
     }
   }
 }

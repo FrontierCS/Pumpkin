@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use super::{
     Agent, Judge, JudgeGrant, JudgeId, Main, RoleId, Sandbox, Score, SlotId, SoloThenJudge,
@@ -145,7 +146,11 @@ impl<'ir> Parser<'ir> {
     }
 
     fn judge(&mut self, path: &str, sandbox: Sandbox, judge: &ir::JudgeRuntime) -> RoleId {
-        let ir::JudgeRuntime { command, slots } = judge;
+        let ir::JudgeRuntime {
+            command,
+            slots,
+            result,
+        } = judge;
         let labels = self.errors.unique(
             &format!("{path}.runtime.judge.slots"),
             slots.iter().map(|slot| &slot.name),
@@ -168,6 +173,7 @@ impl<'ir> Parser<'ir> {
             sandbox,
             command: command.clone(),
             slots: slots.clone(),
+            result: result.clone(),
         });
         RoleId::Judge(JudgeId(self.judges.len() - 1))
     }
@@ -177,6 +183,7 @@ impl<'ir> Parser<'ir> {
             grants,
             score,
             deadline_seconds,
+            finalize_grace_seconds,
         } = pattern;
         let (judge_grants, submit_grant) = self.grants(grants);
         let score = self.score(score, grants);
@@ -185,7 +192,8 @@ impl<'ir> Parser<'ir> {
             submit_grant: submit_grant?,
             main: SoloThenJudge {
                 score: score?,
-                deadline_seconds: *deadline_seconds,
+                deadline: Duration::from_secs(deadline_seconds.get()),
+                finalize_grace: Duration::from_secs(*finalize_grace_seconds),
             },
         })
     }
@@ -204,9 +212,11 @@ impl<'ir> Parser<'ir> {
             .unique(&collection, grants.iter().map(ir::Grant::name));
         let mut judge_grants = Vec::new();
         let mut submit_grants = Vec::new();
-        for (grant, path) in grants.iter().zip(labels) {
+        for (index, (grant, path)) in grants.iter().zip(labels).enumerate() {
             match grant {
-                ir::Grant::Judge(grant) => judge_grants.push(self.judge_grant(&path, grant)),
+                ir::Grant::Judge(grant) => {
+                    judge_grants.push(self.judge_grant(&path, grant, &grants[..index]));
+                }
                 ir::Grant::Submit(ir::SubmitGrant { name }) => submit_grants.push((path, name)),
             }
         }
@@ -214,23 +224,39 @@ impl<'ir> Parser<'ir> {
         (judge_grants, self.submit_grant(&collection, &submit_grants))
     }
 
-    fn judge_grant(&mut self, path: &str, grant: &ir::JudgeGrant) -> Result<JudgeGrant, Reported> {
+    /// A judge grant, at `path`, whose judge none of the `earlier` grants names.
+    fn judge_grant(
+        &mut self,
+        path: &str,
+        grant: &ir::JudgeGrant,
+        earlier: &[ir::Grant],
+    ) -> Result<JudgeGrant, Reported> {
         let ir::JudgeGrant {
             name,
             role,
             slot,
             calls,
             cumulative_seconds,
-            concurrency,
             call_timeout_seconds,
         } = grant;
-        let slot = self.judge_slot(&format!("{path}.judge"), role, slot)?;
-        Ok(JudgeGrant {
+        let path = format!("{path}.judge");
+        let shared = match self.judge_grant_naming(role, earlier) {
+            Some(first) => Err(self.errors.report(
+                format!("{path}.role"),
+                format!(
+                    "`{role}` is named by judge grants `{}` and `{name}`: name each judge from \
+                     one grant",
+                    first.name
+                ),
+            )),
+            None => Ok(()),
+        };
+        let slot = self.judge_slot(&path, role, slot)?;
+        shared.map(|()| JudgeGrant {
             name: name.clone(),
             slot,
             calls: *calls,
             cumulative_seconds: *cumulative_seconds,
-            concurrency: *concurrency,
             call_timeout_seconds: *call_timeout_seconds,
         })
     }
@@ -262,27 +288,44 @@ impl<'ir> Parser<'ir> {
     /// The score: a slot of a judge that none of the agent's `grants` names, so that the judge
     /// that scores the selection returns nothing to the agent.
     fn score(&mut self, score: &ir::Score, grants: &[ir::Grant]) -> Result<Score, Reported> {
-        let ir::Score { role, slot } = score;
+        let ir::Score {
+            role,
+            slot,
+            timeout_seconds,
+        } = score;
         let path = format!("{PATTERN}.score");
-        // The grants are compared by the role they name in the IR, so that the rule holds even
-        // where a grant or the score's slot fails to resolve.
-        let role_is_judge = matches!(self.role_ids.get(role.as_str()), Some(RoleId::Judge(_)));
-        let grant = grants.iter().find_map(|grant| match grant {
-            ir::Grant::Judge(grant) => (grant.role == *role).then_some(grant),
-            ir::Grant::Submit(_) => None,
-        });
-        let shared = match grant {
-            Some(grant) if role_is_judge => Err(self.errors.report(
+        let shared = match self.judge_grant_naming(role, grants) {
+            Some(grant) => Err(self.errors.report(
                 format!("{path}.role"),
                 format!(
                     "`{role}` is also the role of judge grant `{}`: name a judge no grant names",
                     grant.name
                 ),
             )),
-            Some(_) | None => Ok(()),
+            None => Ok(()),
         };
         let slot = self.judge_slot(&path, role, slot)?;
-        shared.map(|()| Score { slot })
+        shared.map(|()| Score {
+            slot,
+            timeout: Duration::from_secs(timeout_seconds.get()),
+        })
+    }
+
+    /// The first of `grants` that is a judge grant naming `role`, if `role` is a judge.
+    fn judge_grant_naming<'g>(
+        &self,
+        role: &Name,
+        grants: &'g [ir::Grant],
+    ) -> Option<&'g ir::JudgeGrant> {
+        // The grants are compared by the role they name in the IR, so that a rule about the
+        // judges they name holds even where a grant's slot or the score's fails to resolve.
+        if !matches!(self.role_ids.get(role.as_str()), Some(RoleId::Judge(_))) {
+            return None;
+        }
+        grants.iter().find_map(|grant| match grant {
+            ir::Grant::Judge(grant) => (grant.role == *role).then_some(grant),
+            ir::Grant::Submit(_) => None,
+        })
     }
 
     /// Resolves a judge call's slot, `slot` of the judge `role`, with the call at `path`.

@@ -65,6 +65,12 @@ checked_string!(
 );
 
 checked_string!(
+    /// A content digest: `sha256:` and 64 lowercase hexadecimal digits.
+    Sha256Digest,
+    check_sha256_digest
+);
+
+checked_string!(
     /// An absolute path without empty, `.` or `..` components.
     AbsolutePath,
     check_absolute_path
@@ -82,6 +88,29 @@ checked_string!(
     ModelName,
     check_model_name
 );
+
+checked_string!(
+    /// A JSON pointer (RFC 6901): empty for the whole document, or `/`-prefixed reference
+    /// tokens, in which `~0` stands for `~` and `~1` for `/`. Every `~` starts one of those
+    /// escapes.
+    JsonPointer,
+    check_json_pointer
+);
+
+impl JsonPointer {
+    /// The value the pointer names in `document`, if there is one. A token names an object's
+    /// member, or an array's element by its index in decimal without leading zeros.
+    pub fn resolve<'v>(&self, document: &'v serde_json::Value) -> Option<&'v serde_json::Value> {
+        // serde_json resolves RFC 6901 pointers, and the check above has refused any other.
+        document.pointer(self.as_str())
+    }
+
+    /// The last reference token, unescaped: `None` for the whole document.
+    fn last_token(&self) -> Option<String> {
+        let (_, token) = self.0.rsplit_once('/')?;
+        Some(token.replace("~1", "/").replace("~0", "~"))
+    }
+}
 
 fn check_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
@@ -180,6 +209,22 @@ fn check_relative_path(path: &str) -> Result<(), String> {
             "`{}` is not a normalized relative path: use `/`-separated components, none of them \
              empty, `.` or `..`, and no NUL byte",
             path.escape_debug()
+        ))
+    }
+}
+
+fn check_json_pointer(pointer: &str) -> Result<(), String> {
+    let escaped = pointer
+        .split('~')
+        .skip(1)
+        .all(|after| after.starts_with(['0', '1']));
+    if (pointer.is_empty() || pointer.starts_with('/')) && escaped {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` \
+             for `/`, or nothing for the whole document",
+            pointer.escape_debug()
         ))
     }
 }
@@ -360,5 +405,54 @@ impl TryFrom<Vec<ModelName>> for Models {
 impl From<Models> for Vec<ModelName> {
     fn from(models: Models) -> Self {
         models.0
+    }
+}
+
+/// The fields of a judge's result that its caller's reply returns.
+///
+/// Each is a JSON pointer into the result, keyed in the reply's
+/// [`Returned`](crate::sandbox::op::Returned) by its last reference token. So every pointer
+/// names a field below the whole result, and no two share a key. Nor is any key empty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<JsonPointer>", into = "Vec<JsonPointer>")]
+pub struct Returns(Vec<(String, JsonPointer)>);
+
+impl Returns {
+    /// Each field's key, with the pointer to its value, in the IR's order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &JsonPointer)> {
+        self.0.iter().map(|(key, pointer)| (key.as_str(), pointer))
+    }
+}
+
+impl TryFrom<Vec<JsonPointer>> for Returns {
+    type Error = String;
+
+    fn try_from(pointers: Vec<JsonPointer>) -> Result<Self, Self::Error> {
+        let mut fields: Vec<(String, JsonPointer)> = Vec::with_capacity(pointers.len());
+        for pointer in pointers {
+            let Some(key) = pointer.last_token() else {
+                let message = "the empty pointer names the whole result, with no key: point to \
+                               a field";
+                return Err(message.to_owned());
+            };
+            if key.is_empty() {
+                return Err(format!(
+                    "`{pointer}` would return the empty key: point to a field with a name"
+                ));
+            }
+            if let Some((_, earlier)) = fields.iter().find(|(seen, _)| *seen == key) {
+                return Err(format!(
+                    "`{earlier}` and `{pointer}` would both return `{key}`: return each key once"
+                ));
+            }
+            fields.push((key, pointer));
+        }
+        Ok(Self(fields))
+    }
+}
+
+impl From<Returns> for Vec<JsonPointer> {
+    fn from(returns: Returns) -> Self {
+        returns.0.into_iter().map(|(_, pointer)| pointer).collect()
     }
 }

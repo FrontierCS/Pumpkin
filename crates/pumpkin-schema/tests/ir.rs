@@ -82,7 +82,7 @@ fn op_replies() {
     check(
         [
             Reply(
-                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"concurrency":1,"call_timeout_seconds":600},{"kind":"submit","name":"submit","max_bytes":4194304}]}"#,
+                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":600},{"kind":"submit","name":"submit","max_bytes":4194304}]}"#,
             ),
             Reply(r#"{"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}"#),
             Reply(
@@ -113,7 +113,7 @@ fn op_replies() {
             ),
         ],
         &expect![[r#"
-            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Judge(JudgeGrant { name: Name("train"), max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), concurrency: 1, call_timeout_seconds: 600 }), Submit(SubmitGrant { name: Name("submit"), max_bytes: 4194304 })] })
+            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Judge(JudgeGrant { name: Name("train"), max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), call_timeout_seconds: 600 }), Submit(SubmitGrant { name: Name("submit"), max_bytes: 4194304 })] })
             Judge(JudgeReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
@@ -149,6 +149,7 @@ fn lwe() {
 fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
+    let result = "/roles/1/runtime/judge/result";
     check(
         [
             lwe_with("/name", json!("lwe structured recovery")),
@@ -170,6 +171,11 @@ fn checked_values() {
                 &format!("{agent}/egress/model/models"),
                 json!(["gpt-6-astra", "gpt-6-astra"]),
             ),
+            lwe_with(&format!("{result}/score"), json!("raw_score")),
+            lwe_with(&format!("{result}/score"), json!("/raw~2score")),
+            lwe_with(&format!("{result}/returns"), json!(["/metrics", ""])),
+            lwe_with(&format!("{result}/returns"), json!(["/metrics/"])),
+            lwe_with(&format!("{result}/returns"), json!(["/x/a~1b", "/a~1b"])),
             lwe_with(
                 "/roles/2/runtime/judge/slots/0/max_bytes",
                 json!(MAX_OP_PAYLOAD_BYTES + 1),
@@ -189,6 +195,11 @@ fn checked_values() {
             `MODE` is set more than once: set each name once
             no models: a model route allows at least one
             `gpt-6-astra` is listed more than once: list each model once
+            `raw_score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
+            `/raw~2score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
+            the empty pointer names the whole result, with no key: point to a field
+            `/metrics/` would return the empty key: point to a field with a name
+            `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             roles[final_judge].runtime.judge.slots[payload].max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
     );
 }
@@ -218,8 +229,9 @@ fn broken_references() {
     );
 }
 
-/// A workflow has one agent, which alone has a model route and holds one submit grant, and the
-/// score judges with a judge no grant names, even a grant that fails to parse.
+/// A workflow has one agent, which alone has a model route and holds one submit grant, a judge
+/// grant names a judge no other grant names, and the score judges with a judge no grant names,
+/// even a grant that fails to parse.
 #[test]
 fn broken_pattern() {
     let mut ir = lwe_json();
@@ -229,7 +241,12 @@ fn broken_pattern() {
     ir["roles"][2]["egress"] = ir["roles"][0]["egress"].clone();
     let pattern = &mut ir["main"]["solo_then_judge"];
     let submit = json!({ "submit": { "name": "resubmit" } });
-    pattern["grants"].as_array_mut().unwrap().push(submit);
+    let mut retrain = pattern["grants"][0].clone();
+    retrain["judge"]["name"] = json!("retrain");
+    pattern["grants"]
+        .as_array_mut()
+        .unwrap()
+        .extend([submit, retrain]);
     pattern["grants"][0]["judge"]["slot"] = json!("submission");
     pattern["score"]["role"] = json!("train_judge");
     let mut none = lwe_json();
@@ -249,6 +266,7 @@ fn broken_pattern() {
             roles[final_judge].egress.model: `final_judge` is a judge, and only the agent has a model route: remove it
             roles[helper].runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             main.solo_then_judge.grants[train].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
+            main.solo_then_judge.grants[retrain].judge.role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
             main.solo_then_judge.grants[resubmit].submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
             main.solo_then_judge.score.role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
             roles: no role is an agent: a workflow has exactly one
