@@ -24,11 +24,11 @@
 //! only if the gateway accepts it with an [`OpPayloadLimit`].
 //!
 //! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
-//! sandboxes it starts: the driver and a task's commands rely on them in any sandbox. It holds
-//! at most [`PUMPKIN_BYTES`], or less where a provider backs it with the role's memory. A
-//! sandbox whose role makes ops also has `sandboxctl` at [`SANDBOXCTL_PATH`], and its
-//! `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox is passive: nothing in it
-//! can make an op, and its session takes none.
+//! sandboxes it starts: the session's owner and a role's commands rely on them in any sandbox.
+//! It holds at most [`PUMPKIN_BYTES`], or less where a provider backs it with the role's
+//! memory. A sandbox whose role makes ops also has `sandboxctl` at [`SANDBOXCTL_PATH`], and its
+//! `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox is passive: nothing in it can
+//! make an op, and its session takes none.
 
 use serde::{Deserialize, Serialize};
 
@@ -73,21 +73,21 @@ impl TryFrom<u64> for OpPayloadLimit {
 /// The directory that holds Pumpkin's files in every sandbox, `/pumpkin`, and belongs to the
 /// role's user.
 ///
-/// The driver puts a role's inputs there and collects its results from there; a task's
-/// commands read and write them at the paths below it.
+/// The session's owner puts a role's inputs there and collects its results from there; a
+/// role's commands read and write them at the paths below it.
 pub fn pumpkin_dir() -> AbsolutePath {
     valid("/pumpkin")
 }
 
 /// The directories below [`pumpkin_dir()`], there before a role's first command starts: `in`
-/// holds what the driver puts in, `out` what it collects, `home` the commands' home, and `log`
-/// their output.
+/// holds what the session's owner puts in, `out` what it collects, `home` the commands' home,
+/// and `log` their output.
 pub fn pumpkin_subdirs() -> [RelativePath; 4] {
     ["in", "out", "home", "log"].map(valid)
 }
 
-/// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the driver collects from below
-/// it fits in this many.
+/// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the session's owner collects
+/// from below it fits in this many.
 ///
 /// A provider may back it with the role's memory, as the Docker provider does, so that its
 /// files and the role's processes share the role's memory limit: a role can keep there at most
