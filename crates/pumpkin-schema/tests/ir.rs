@@ -2,6 +2,9 @@
 //! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
 //! policy. Its image digests, the agent's command and the judges' environment are placeholders.
 //! Also the JSON of ops' replies, which `sandboxctl` prints.
+//!
+//! The workflow stays whole, as the IR's golden fixture: `lwe` compares a round trip of all of
+//! it, and every other IR case is a change to it (`lwe_json`, `lwe_with`).
 
 #![expect(
     clippy::unwrap_used,

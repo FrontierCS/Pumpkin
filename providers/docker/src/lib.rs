@@ -11,9 +11,10 @@
 //! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
 //!   container's log, which holds at most 1 MiB;
 //! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, holding the
-//!   [directories](pumpkin_subdirs) the driver puts there over the session. It holds at most
-//!   [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's memory limit,
-//!   so a role can keep there no more than that limit, less what its processes use;
+//!   [directories](pumpkin_subdirs) that [`Engine::start`] puts there over the session. It
+//!   holds at most [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's
+//!   memory limit, so a role can keep there no more than that limit, less what its processes
+//!   use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
 //!   `VOLUME` its image declares, which is removed with the container. Neither has a size
@@ -34,7 +35,7 @@
 //! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
 //! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them.
 //! Each container is labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds
-//! a run's containers, and only those, even when the driver that started them is gone, and
+//! a run's containers, and only those, even when the process that started them is gone, and
 //! with its role's name, so that `docker ps` shows which is which. The provider runs on a
 //! rootful engine or a rootless one, and its report says which ([`Security::rootless`]).
 
@@ -214,7 +215,7 @@ pub struct Start<'a> {
     /// A static `sandboxd` binary, which the role's user can execute.
     pub sandboxd: &'a Path,
     /// A directory for the session's socket, which only this container sees. Its parent must
-    /// be private to the driver's user, since the socket accepts the first connection, whoever
+    /// be private to the caller's user, since the socket accepts the first connection, whoever
     /// makes it. The container enters at the directory's mount itself, so the role's user needs
     /// to traverse only the directory, not its parent. Unix socket paths are short, so keep it
     /// short too.
@@ -365,8 +366,8 @@ impl Engine {
             format!(
                 "the session's socket can't be made at {}: {error}: expected a directory that \
                  exists, which this user can write to, by a path short enough for a Unix \
-                 socket, and nothing at `{SOCKET_NAME}`, where a driver that was killed leaves \
-                 its socket",
+                 socket, and nothing at `{SOCKET_NAME}`, where a process that was killed \
+                 leaves its socket",
                 socket.display()
             )
         })?;

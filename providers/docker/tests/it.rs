@@ -583,7 +583,7 @@ fn failed_start() {
             let not_executable = fixture.dir.join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
             let missing = fixture.dir.join("absent");
-            // Something at the socket's path, as a driver that was killed leaves its socket.
+            // Something at the socket's path, as a process that was killed leaves its socket.
             fs::create_dir(fixture.dir.join("stale")).unwrap();
             fs::write(fixture.dir.join("stale/s"), "").unwrap();
             let comma = fixture.dir.join("sandboxd,readonly=false");
@@ -608,7 +608,7 @@ fn failed_start() {
         },
         &expect![[r#"
             missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
-            stale: the session's socket can't be made at <dir>/stale/s: Address already in use (os error 98): expected a directory that exists, which this user can write to, by a path short enough for a Unix socket, and nothing at `s`, where a driver that was killed leaves its socket
+            stale: the session's socket can't be made at <dir>/stale/s: Address already in use (os error 98): expected a directory that exists, which this user can write to, by a path short enough for a Unix socket, and nothing at `s`, where a process that was killed leaves its socket
             comma: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
             unexecutable: `docker start …: fix what Docker reports
             unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports

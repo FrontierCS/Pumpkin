@@ -9,7 +9,7 @@
 //!
 //! Deserialization checks each value on its own, so a deserialized IR holds only well-formed
 //! names, images, paths and limits. [`crate::workflow::Workflow::parse`] checks how the parts
-//! fit together.
+//! fit together, and the limits a protocol bounds.
 //!
 //! The crate's tests parse a complete workflow, the LWE task's, in `tests/fixtures/lwe.json`.
 

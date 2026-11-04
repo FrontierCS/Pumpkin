@@ -5,6 +5,8 @@
 - PREFER running the narrowest relevant test while iterating
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend
   existing helpers instead of creating parallel ones
+- ALWAYS put new code where `ARCHITECTURE.md` places it, and update `ARCHITECTURE.md` in the
+  same pull request when anything it states changes or new code falls outside it
 - PREFER the smallest change that fits the existing design
 - TREAT a new dependency, crate or `pub` item as an architectural change, and say why in the
   pull request
