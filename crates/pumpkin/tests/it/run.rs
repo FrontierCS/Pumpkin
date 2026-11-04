@@ -143,7 +143,7 @@ fn mini() {
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap();
     lines.extend(shape(&log));
     let started: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
-    let started = started["event"]["unix_ns"].as_u64().unwrap();
+    let started = nanos(&started["event"]["unix_ns"]).unwrap();
     lines.push(format!(
         "the run started during execute: {}",
         during.contains(&started)
@@ -180,13 +180,13 @@ fn mini() {
         op_arrived {"request":{"kind":"ops"}} -> reply {"reply":{"grants":[{"call_timeout_seconds":60,"calls":2,"cumulative_seconds":null,"kind":"judge","max_bytes":1024,"name":"train"},{"kind":"submit","max_bytes":1024,"name":"submit"}],"kind":"ops","resources":{"cpu_millis":500,"memory_bytes":268435456}}}
         op_arrived {"request":{"grant":"nothing","kind":"judge","payload":"7 bytes"}} -> reply {"reply":{"kind":"refused","message":"you hold no grant named `nothing`: call one that `ops` lists"}}
         op_refused {"message":"the payload is 1025 bytes, more than the limit of 1024: send at most 1024","request":{"grant":"train","kind":"judge","payload":{"over":1024,"size":1025}}}
-        op_arrived {"request":{"grant":"train","kind":"judge","payload":"6 bytes"}} -> reply {"reply":{"job":1,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":1,"payload":"6 bytes","timeout_ns":60000000000}
+        op_arrived {"request":{"grant":"train","kind":"judge","payload":"6 bytes"}} -> reply {"reply":{"job":1,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":1,"payload":"6 bytes","timeout_ns":"60000000000"}
         judge_started {"job":1}
         judge_exited {"job":1,"status":{"code":0}}
         judge_collected {"job":1,"result":{"passed":true,"returned":{"bytes":6},"score":6}}
         op_arrived {"request":{"job":1,"kind":"status"}} -> reply {"reply":{"job":1,"kind":"status","remaining":{"calls":1,"seconds":null},"returned":{"bytes":6},"state":"passed"}}
         op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
-        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ns":18446744073709551615}
+        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ns":"18446744073709551615"}
         note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
         judge_started {"job":2}
         judge_exited {"job":2,"status":{"code":0}}
@@ -299,7 +299,7 @@ fn shape(log: &str) -> Vec<String> {
     for (seq, line) in log.lines().enumerate() {
         let record: Value = serde_json::from_str(line).unwrap();
         assert_eq!(record["seq"], json!(seq), "{record}");
-        assert!(record["at_ns"].is_u64(), "{record}");
+        assert!(nanos(&record["at_ns"]).is_some(), "{record}");
         if let Some(note) = record.get("note") {
             lines.push(format!("note: {note}"));
             continue;
@@ -343,6 +343,11 @@ fn event(event: &Value) -> String {
 fn unix_ns() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     u64::try_from(since.as_nanos()).unwrap()
+}
+
+/// A time or duration of the log's, a decimal string of nanoseconds, as a number.
+fn nanos(value: &Value) -> Option<u64> {
+    value.as_str()?.parse().ok()
 }
 
 /// An action, without its op's number or the seconds left, and the run's finish by its score

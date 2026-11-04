@@ -3,9 +3,9 @@
 //! `log.jsonl` holds one JSON record per line, each written and synced before what it records
 //! is acted on. A record is one of:
 //!
-//! - an event: `{"seq": n, "at_ns": t, "event": e, "actions": [a, ...]}`, which the runtime
+//! - an event: `{"seq": n, "at_ns": "t", "event": e, "actions": [a, ...]}`, which the runtime
 //!   observed `t` nanoseconds after the run started, with the actions the core decided on. The
-//!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": u}`, at `u`
+//!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u"}`, at `u`
 //!   nanoseconds after the Unix epoch by the driving machine's clock, with the core's first
 //!   actions. Like it, an op the gateway refused itself, since its payload was over the agent's
 //!   limit, is no event of the core's, which neither decides on it nor learns of it, so it has
@@ -13,17 +13,17 @@
 //!   request's payload is `{"size": s, "over": n}`, its size and the limit it was over, in
 //!   bytes, without a digest, since the gateway kept none of its bytes, and the message is the
 //!   refusal the gateway sent, unless the agent's session had ended;
-//! - a note: `{"seq": n, "at_ns": t, "note": s}`, something the runtime observed that the core
-//!   doesn't decide on, such as what it collected of the agent's sandbox, outputs it couldn't
-//!   collect, or why the run failed.
+//! - a note: `{"seq": n, "at_ns": "t", "note": s}`, something the runtime observed that the
+//!   core doesn't decide on, such as what it collected of the agent's sandbox, outputs it
+//!   couldn't collect, or why the run failed.
 //!
 //! `seq` counts records from 0. An event's `at_ns` is when it was observed, so a judge call's
 //! report may follow a later one. Each event and action is an object whose `kind` is its name
 //! in snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants
 //! appear by their names in the workflow, jobs and ops by their numbers, payloads by size and
-//! digest, and times and durations in nanoseconds, the core's resolution, where `u64::MAX`
-//! (about 584 years) stands for anything longer. A judge call's `start_judge` names the agent's
-//! grant it was made under, or `null` for the pattern's score. A reply is the
+//! digest, and times and durations in nanoseconds, the core's resolution, as decimal strings,
+//! where `u64::MAX` (about 584 years) stands for anything longer. A judge call's `start_judge`
+//! names the agent's grant it was made under, or `null` for the pattern's score. A reply is the
 //! [`OpReply`](pumpkin_schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
@@ -139,10 +139,14 @@ impl Log {
     }
 }
 
-/// `duration` in nanoseconds, as the log gives times and durations: `u64::MAX` if it is
-/// longer, over about 584 years.
-fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+/// `duration` in nanoseconds, as the log gives times and durations.
+fn nanos(duration: Duration) -> String {
+    // A decimal string, as proto3 JSON, OTLP and I-JSON (RFC 7493) write integers past 2^53: a
+    // reader that reads JSON numbers as doubles, as JavaScript's `JSON.parse` does, rounds
+    // those, and a time since the Unix epoch in nanoseconds is past 2^53.
+    u64::try_from(duration.as_nanos())
+        .unwrap_or(u64::MAX)
+        .to_string()
 }
 
 /// The JSON form of an event.
