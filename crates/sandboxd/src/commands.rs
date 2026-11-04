@@ -163,17 +163,9 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         .process_group(0)
         .spawn()
         .context(format_args!("`{program}` didn't start in {cwd}"))?;
-    // The reaper waits for it, so its handle is dropped without waiting.
-    let id = child.id();
-    #[expect(
-        clippy::unreachable,
-        reason = "the standard library casts the child's pid_t, a positive i32, to the u32 it \
-                  returns"
-    )]
-    let Ok(pid) = i32::try_from(id) else {
-        unreachable!("the child's process ID {id} overflows an i32")
-    };
-    Ok(pid)
+    // The reaper waits for it, so its handle is dropped without waiting. The standard library
+    // casts the child's pid_t to the u32 it returns, which `cast_signed` undoes.
+    Ok(child.id().cast_signed())
 }
 
 /// Reaps children forever, reporting the exits of started commands. With no children, it
