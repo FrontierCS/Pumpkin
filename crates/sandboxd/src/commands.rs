@@ -142,19 +142,13 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         stdout,
         stderr,
     } = launch;
-    #[expect(
-        clippy::unreachable,
-        reason = "an Argv holds a program: its only constructor refuses an empty one"
-    )]
-    let Some((program, args)) = argv.as_slice().split_first() else {
-        unreachable!("the command's Argv is empty")
-    };
+    let program = argv.program();
     let mut output = OpenOptions::new();
     output.write(true).create(true).truncate(true);
     let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
     let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
     let child = Command::new(program)
-        .args(args)
+        .args(argv.args())
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
         .current_dir(cwd.as_str())
         .stdin(Stdio::null())
