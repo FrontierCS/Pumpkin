@@ -5,7 +5,7 @@ use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use pumpkin_docker::{Container, Engine, RunTag, Start};
 use pumpkin_gateway::Session;
@@ -17,6 +17,8 @@ use pumpkin_schema::sandbox::{
 };
 use pumpkin_schema::workflow::Sandbox;
 use stdx::Context;
+
+use super::record;
 
 /// The most entries a collected tree may hold.
 const ENTRIES: u64 = 100_000;
@@ -157,15 +159,13 @@ pub(super) struct Clock {
 
 impl Clock {
     pub(super) fn start() -> Self {
-        let unix = SystemTime::now().duration_since(UNIX_EPOCH);
         Self {
             start: Instant::now(),
-            unix: unix.unwrap_or(Duration::ZERO),
+            unix: record::since_epoch(SystemTime::now()),
         }
     }
 
-    /// When the run started, as the time since the Unix epoch, by this machine's clock: zero if
-    /// that is set before 1970.
+    /// When the run started, as the time since the Unix epoch ([`record::since_epoch`]).
     pub(super) fn unix(self) -> Duration {
         self.unix
     }
