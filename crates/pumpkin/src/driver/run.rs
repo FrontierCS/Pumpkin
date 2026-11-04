@@ -505,7 +505,7 @@ impl Runtime<'_, '_> {
         for stop in self.stops.values() {
             stop.store(true, Ordering::Relaxed);
         }
-        // Dropping the agent's container ends its session and removes it.
+        // Dropping the agent's container removes it, then ends its session.
         self.agent = None;
     }
 }

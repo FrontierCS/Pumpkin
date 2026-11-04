@@ -112,8 +112,10 @@ pub struct JudgeRuntime {
 /// What a judge call writes: its result and its evidence.
 ///
 /// The result is the JSON file at [`result_file()`](crate::sandbox::result_file), of which its
-/// caller sees the status and the fields [`returns`](Self::returns) names. The evidence is the
-/// files in [`evidence_dir()`](crate::sandbox::evidence_dir), which go to the operator alone.
+/// caller sees the status and the fields [`returns`](Self::returns) names. Once the judge's
+/// command exits, the result alone says how the call went, whatever the exit status. The
+/// evidence is the files in [`evidence_dir()`](crate::sandbox::evidence_dir), which go to the
+/// operator alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSpec {
