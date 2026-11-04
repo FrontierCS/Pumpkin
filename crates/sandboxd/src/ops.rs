@@ -115,7 +115,7 @@ impl Ops {
         thread::Builder::new()
             .name("ops".to_owned())
             .spawn(move || ops.accept(&listener, &sender))
-            .map_err(|error| error.to_string())?;
+            .context("the thread that accepts callers didn't start")?;
         Ok(())
     }
 
@@ -165,9 +165,9 @@ impl Ops {
         let answer = match frame::read::<OpCall>(&mut connection) {
             Ok(Some((call, path))) => self.call(call, &path, &connection, sender),
             Ok(None) => return,
-            Err(error) => Err(Unanswered::Failed(format!(
-                "the request is not an op: {error}"
-            ))),
+            Err(error) => Err(error)
+                .context("the request is not an op")
+                .map_err(Unanswered::Failed),
         };
         let answer = match answer {
             Ok(reply) => Ok(reply),

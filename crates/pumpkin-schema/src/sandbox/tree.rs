@@ -36,8 +36,8 @@ pub struct Writer {
     limits: Limits,
     bytes: u64,
     entries: u64,
-    /// The file being written and the bytes still due for it.
-    file: Option<(File, u64)>,
+    /// The file being written, its path, and the bytes still due for it.
+    file: Option<(File, RelativePath, u64)>,
 }
 
 impl Writer {
@@ -83,7 +83,7 @@ impl Writer {
                 let target = self.root.join(path.as_str());
                 let file = File::create_new(&target).map_err(|error| at(path, &error))?;
                 if *size > 0 {
-                    self.file = Some((file, *size));
+                    self.file = Some((file, path.clone(), *size));
                 }
                 Ok(())
             }
@@ -102,7 +102,7 @@ impl Writer {
                 "file data is empty: send at least one byte in each frame",
             ));
         }
-        let Some((file, due)) = &mut self.file else {
+        let Some((file, path, due)) = &mut self.file else {
             return Err(invalid(
                 "file data arrived outside a file: send it after a file entry",
             ));
@@ -113,7 +113,7 @@ impl Writer {
                 "file data runs past the file's size: send exactly the size given",
             ));
         }
-        file.write_all(bytes)?;
+        file.write_all(bytes).map_err(|error| at(path, &error))?;
         *due -= len;
         if *due == 0 {
             self.file = None;
@@ -133,7 +133,7 @@ impl Writer {
     fn check_file_complete(&self) -> io::Result<()> {
         match &self.file {
             None => Ok(()),
-            Some((_, due)) => Err(invalid(format!(
+            Some((_, _, due)) => Err(invalid(format!(
                 "a file ended {due} bytes short: send all of its bytes before the next part"
             ))),
         }

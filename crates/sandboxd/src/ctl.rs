@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use pumpkin_schema::sandbox::{CONTROL_SOCKET, frame};
+use stdx::Context;
 
 use crate::print_line;
 
@@ -178,19 +179,15 @@ fn exit_code(reply: &OpReply) -> u8 {
 
 fn run(flags: flags::Sandboxctl) -> Result<OpReply, String> {
     let (call, body) = parse(flags)?;
-    let unreached =
-        |error: io::Error| format!("sandboxd at {CONTROL_SOCKET} can't be reached: {error}");
-    let mut connection = UnixStream::connect(CONTROL_SOCKET).map_err(|error| {
-        format!(
-            "{}: run sandboxctl in a sandbox that serves ops",
-            unreached(error)
-        )
-    })?;
-    frame::write(&mut connection, &call, &body).map_err(unreached)?;
+    let unreached = format_args!("sandboxd at {CONTROL_SOCKET} can't be reached");
+    let mut connection = UnixStream::connect(CONTROL_SOCKET)
+        .context(unreached)
+        .map_err(|error| format!("{error}: run sandboxctl in a sandbox that serves ops"))?;
+    frame::write(&mut connection, &call, &body).context(unreached)?;
     match frame::read::<Result<OpReply, String>>(&mut connection) {
         Ok(Some((answer, _))) => answer,
         Ok(None) => Err(UNANSWERED.to_owned()),
-        Err(error) => Err(format!("sandboxd's answer can't be read: {error}")),
+        Err(error) => Err(error).context("sandboxd's answer can't be read"),
     }
 }
 

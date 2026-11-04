@@ -30,7 +30,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{fs, mem};
+use std::{fmt, fs, mem};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
@@ -93,9 +93,13 @@ impl Listener {
     ///
     /// # Errors
     ///
-    /// Fails if nothing connects in time or accepting fails.
+    /// Fails with [`io::ErrorKind::TimedOut`] if nothing connects in time, or if accepting the
+    /// connection or setting up its session fails.
     pub fn accept(self, timeout: Duration, ops: Option<OpPayloadLimit>) -> io::Result<Session> {
-        self.listener.set_nonblocking(true)?;
+        let path = self.path.display();
+        self.listener
+            .set_nonblocking(true)
+            .map_err(|error| context(format_args!("{path} can't be made non-blocking"), &error))?;
         let deadline = Instant::now() + timeout;
         let stream = loop {
             match self.listener.accept() {
@@ -104,18 +108,20 @@ impl Listener {
                     if Instant::now() >= deadline {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
-                            format!(
-                                "no sandbox connected to {} within {timeout:?}",
-                                self.path.display()
-                            ),
+                            format!("no sandbox connected to {path} within {timeout:?}"),
                         ));
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let what = format_args!("a connection to {path} can't be accepted");
+                    return Err(context(what, &error));
+                }
             }
         };
-        stream.set_nonblocking(false)?;
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| context("the sandbox's connection can't be made blocking", &error))?;
         Session::new(stream, ops)
     }
 }
@@ -280,7 +286,9 @@ impl Process {
 impl Session {
     fn new(stream: UnixStream, limit: Option<OpPayloadLimit>) -> io::Result<Self> {
         // A socket option, so it holds for every handle on the connection.
-        stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+        stream
+            .set_write_timeout(Some(REPLY_TIMEOUT))
+            .map_err(|error| context("the connection's write timeout can't be set", &error))?;
         let routes = Arc::new(Mutex::new(Routes {
             open: HashMap::new(),
             op: None,
@@ -289,7 +297,9 @@ impl Session {
         // From the reader thread to the owner. Every arrival is the op in flight, so the queue
         // never holds more than one.
         let (arrivals, ops) = mpsc::sync_channel(1);
-        let reader = stream.try_clone()?;
+        let reader = stream
+            .try_clone()
+            .map_err(|error| context("the connection can't be cloned for its reader", &error))?;
         let (reader_routes, reader_ended) = (Arc::clone(&routes), Arc::clone(&ended));
         let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let assembler = Assembler {
@@ -301,7 +311,8 @@ impl Session {
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         thread::Builder::new()
             .name("session".to_owned())
-            .spawn(move || route(&reader, &reader_routes, &reader_ended, assembler))?;
+            .spawn(move || route(&reader, &reader_routes, &reader_ended, assembler))
+            .map_err(|error| context("the session's reader thread didn't start", &error))?;
         Ok(Self {
             id,
             connection: stream,
@@ -370,7 +381,8 @@ impl Session {
     /// protocol or passes a limit, or if the session ends.
     pub fn collect(&mut self, dir: &AbsolutePath, into: &Path, limits: Limits) -> io::Result<()> {
         let (stream, replies) = self.open(Queue::Tree)?;
-        let collected = fs::create_dir(into).and_then(|()| {
+        let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
+        let collected = created.and_then(|()| {
             let tree = tree::Writer::new(into.to_owned(), limits);
             self.send(
                 &ToSandbox::Collect {
@@ -944,6 +956,11 @@ fn unexpected(message: &FromSandbox) -> io::Error {
         io::ErrorKind::InvalidData,
         broke(&format!("it sent {message:?} out of turn")),
     )
+}
+
+/// `error`, prefixed with what failed, as `<what>: <error>`, keeping its kind.
+fn context(what: impl fmt::Display, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{what}: {error}"))
 }
 
 /// Why a session ends when the sandbox does `what`.

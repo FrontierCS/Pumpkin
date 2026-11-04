@@ -27,7 +27,7 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
-/// The rules an IR breaks, in the order of the parts that break them; see
+/// The rules an IR breaks, in the order the parse finds them; see
 /// [`Workflow::parse`](crate::workflow::Workflow::parse) for which rules. Never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseErrors(Vec<ParseError>);
@@ -81,9 +81,8 @@ impl Errors {
         }
     }
 
-    /// Labels the parts of a collection for their error paths, and reports each name that
-    /// repeats an earlier one. A part is labeled by its name, or by its index where its name
-    /// repeats, so that each label names one part.
+    /// Labels the parts of a collection for their error paths, as [`ParseError::path`] names
+    /// them, and reports each name that repeats an earlier one.
     pub(super) fn unique<'n>(
         &mut self,
         collection: &str,
