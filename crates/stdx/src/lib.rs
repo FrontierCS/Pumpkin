@@ -56,8 +56,8 @@ pub fn unpoisoned<T>(locked: LockResult<T>) -> T {
         clippy::unreachable,
         reason = "only a thread that panics while holding a lock poisons it, and a panic aborts \
                   the process before it unwinds (`abort_on_panic`), so no thread is left to see \
-                  the lock. std's locks that can't be poisoned, in `sync::nonpoison`, are \
-                  unstable"
+                  the lock; a lock that can't be poisoned would take a dependency, as std's \
+                  (`sync::nonpoison`) is unstable"
     )]
     let Ok(guard) = locked else {
         unreachable!("a thread panicked while holding a lock")

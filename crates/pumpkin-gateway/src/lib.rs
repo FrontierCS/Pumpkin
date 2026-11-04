@@ -420,10 +420,8 @@ impl Session {
                     #[expect(
                         clippy::unreachable,
                         reason = "the refusal's message, which `Assembler::pass_on` writes, names \
-                                  only the payload's size and the limit, so its frame's message \
-                                  is under 200 bytes, far under `frame::MAX_MESSAGE_BYTES`, \
-                                  64 KiB. `frame::write` learns a message's length only as it \
-                                  serializes it, so no type bounds it"
+                                  only the payload's size and the limit, so its frame's message is \
+                                  under 200 bytes, far under `frame::MAX_MESSAGE_BYTES`, 64 KiB"
                     )]
                     Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                         unreachable!("the refusal of op {} is too long: {error}", refused.number)
@@ -456,9 +454,8 @@ impl Session {
         #[expect(
             clippy::unreachable,
             reason = "the owner answers each op on the session that handed it out, as this \
-                      method's contract requires. Types would tie an op to its session only by a \
-                      lifetime brand on all of `Session`'s API, or by a handle in each op to the \
-                      connection, which the session's one owner alone writes to"
+                      method's contract requires; a lifetime brand tying each op to its session \
+                      would reshape all of `Session`'s `pub` API"
         )]
         if session != self.id {
             unreachable!("op {number} was answered on a session other than the one it arrived on")
@@ -821,10 +818,9 @@ impl Assembler {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
             #[expect(
                 clippy::unreachable,
-                reason = "the queue holds one arrival, and holds none now: an op leaves the \
-                          flight only once the owner has taken its arrival, to answer it or as \
-                          `next_op` refuses it, and the sandbox may open the next op only after \
-                          that. That is an order of two threads' steps, which no type expresses"
+                reason = "the queue holds one arrival, and holds none now: an op leaves the flight \
+                          only once the owner has taken its arrival, to answer it or as `next_op` \
+                          refuses it, and the sandbox may open the next op only after that"
             )]
             Err(TrySendError::Full(_)) => {
                 unreachable!("op {number} arrived while the queue held another op's arrival")
@@ -866,10 +862,9 @@ fn payload(
     }
     #[expect(
         clippy::unreachable,
-        reason = "the size is at most the limit, which is at most `MAX_OP_PAYLOAD_BYTES`, \
-                  64 MiB (an `OpPayloadLimit` holds no more), which fits the usize of every \
-                  Linux target, of 32 bits or more. std converts to usize without failing only \
-                  from u16 and narrower"
+        reason = "the size is at most the limit, which is at most `MAX_OP_PAYLOAD_BYTES`, 64 MiB \
+                  (an `OpPayloadLimit` holds no more), which fits the usize of every Linux target, \
+                  of 32 bits or more"
     )]
     let Ok(capacity) = usize::try_from(size) else {
         unreachable!("a payload of {size} bytes overflows a usize")
@@ -913,13 +908,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn ended(ended: &OnceLock<String>) -> io::Error {
     #[expect(
         clippy::unreachable,
-        reason = "every way to learn that the session ended follows the reason's recording: \
-                  `end` records it before it closes the routes, which close otherwise only \
-                  after a frame that ends their request or once nothing receives from them; \
-                  the ops' sender closes only after the reader thread has ended the session; and \
-                  the rest call `end` or check the \
-                  reason first. The reason sits in a `OnceLock` apart from the channels whose \
-                  closing tells of the end, so no type ties the two"
+        reason = "every way to learn that the session ended follows the reason's recording: `end` \
+                  records it before it closes the routes, which close otherwise only after a frame \
+                  that ends their request or once nothing receives from them; the ops' sender \
+                  closes only after the reader thread has ended the session; and the rest call \
+                  `end` or check the reason first; sending the reason as each channel's last \
+                  message would need room in queues that may be full"
     )]
     let Some(reason) = ended.get() else {
         unreachable!("the session ended without a reason")

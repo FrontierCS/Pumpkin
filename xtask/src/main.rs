@@ -155,8 +155,7 @@ fn root() -> &'static Path {
     #[expect(
         clippy::unreachable,
         reason = "`Path::parent` finds none only for a root or an empty path, and xtask's \
-                  directory is the workspace's `xtask/`, below its root. `env!` gives a `&str`, \
-                  whose type doesn't say that it has a parent"
+                  directory is the workspace's `xtask/`, below its root"
     )]
     let Some(root) = xtask.parent() else {
         unreachable!("xtask's directory {} has no parent", xtask.display())

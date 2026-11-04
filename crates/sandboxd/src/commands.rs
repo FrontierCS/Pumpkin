@@ -182,8 +182,7 @@ fn reaper(shared: &Shared) {
             clippy::unreachable,
             reason = "the reaper found children under the lock, and nothing else reaps them: \
                       starting a command reaps only a child that failed to start, before it lets \
-                      go of the lock. Which children exist is the kernel's state, which no type \
-                      holds"
+                      go of the lock"
         )]
         let Some(pid) = sys::wait_for_child() else {
             unreachable!("the children found under the lock are gone, reaped by another")
@@ -214,10 +213,8 @@ fn exit_status(status: std::process::ExitStatus) -> ExitStatus {
     }
     #[expect(
         clippy::unreachable,
-        reason = "waitpid reports an exit, a death by signal, a stop or a continuation; the \
-                  reaper skips stops before decoding, and asks for no continuations. The status \
-                  is the kernel's int, which `ExitStatus` decodes on demand, so no type narrows \
-                  it to the first two"
+        reason = "waitpid reports an exit, a death by signal, a stop or a continuation; the reaper \
+                  skips stops before decoding, and asks for no continuations"
     )]
     let Some(signal) = status.signal() else {
         unreachable!(

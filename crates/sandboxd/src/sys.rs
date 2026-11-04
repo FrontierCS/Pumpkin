@@ -42,9 +42,8 @@ pub(crate) fn wait_for_child() -> Option<i32> {
             Some(libc::EINTR) => {}
             #[expect(
                 clippy::unreachable,
-                reason = "waitid fails otherwise only for invalid options or a nonblocking \
-                          pidfd, and these options are valid and name no pidfd. Its error is an \
-                          errno, an int, which no type narrows to what these arguments allow"
+                reason = "waitid fails otherwise only for invalid options or a nonblocking pidfd, \
+                          and these options are valid and name no pidfd"
             )]
             _ => unreachable!("waitid(P_ALL, WEXITED | WNOWAIT) failed: {error}"),
         }
@@ -67,8 +66,7 @@ pub(crate) fn has_children() -> bool {
             clippy::unreachable,
             reason = "waitid fails otherwise only for invalid options, a nonblocking pidfd, or a \
                       signal while it blocks, and these options are valid, name no pidfd, and \
-                      don't block. Its error is an errno, an int, which no type narrows to what \
-                      these arguments allow"
+                      don't block"
         )]
         _ => unreachable!("waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT) failed: {error}"),
     }
@@ -91,9 +89,7 @@ pub(crate) fn reap(pid: i32) -> Option<i32> {
                     clippy::unreachable,
                     reason = "given a child's process ID and WNOHANG, waitpid returns that ID or \
                               0, or fails with ECHILD: EINTR needs a wait that blocks, EINVAL \
-                              invalid options, and ESRCH a pid of INT_MIN. It returns an int and \
-                              sets errno, neither of which a type narrows to what these \
-                              arguments allow"
+                              invalid options, and ESRCH a pid of INT_MIN"
                 )]
                 _ => unreachable!("waitpid({pid}, WNOHANG) returned {returned}: {error}"),
             }

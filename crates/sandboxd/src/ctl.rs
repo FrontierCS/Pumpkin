@@ -149,10 +149,8 @@ pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
             #[expect(
                 clippy::unreachable,
                 reason = "serde_json fails only on a `Serialize` impl that fails or on a map key \
-                          that isn't a string, and an `OpReply` has neither: its impls are \
-                          derived or `Value`'s, and its maps have string keys. \
-                          `Serialize::serialize` returns a `Result` for every type, so no type \
-                          says that it can't fail"
+                          that isn't a string, and an `OpReply` has neither: its impls are derived \
+                          or `Value`'s, and its maps have string keys"
             )]
             let Ok(json) = serde_json::to_string(&reply) else {
                 unreachable!("{reply:?} can't be written as JSON")
