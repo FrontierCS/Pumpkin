@@ -45,8 +45,8 @@ pub struct PayloadRef {
     pub digest: Sha256Digest,
 }
 
-/// What an op asks, as its caller sent it: the gateway's `Op`, with the payload named by its
-/// digest.
+/// What an op asks, as its caller sent it: the gateway's [`Op`](pumpkin_gateway::Op), with the
+/// payload named by its digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// See [`OpCall::Ops`](pumpkin_schema::sandbox::op::OpCall::Ops).

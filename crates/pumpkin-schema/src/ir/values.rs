@@ -182,6 +182,20 @@ fn check_sha256_digest(digest: &str) -> Result<(), String> {
     }
 }
 
+impl From<[u8; 32]> for Sha256Digest {
+    /// The digest of SHA-256's 32 bytes, `bytes`: `sha256:` and each byte as two lowercase
+    /// hexadecimal digits.
+    fn from(bytes: [u8; 32]) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut digest = String::from("sha256:");
+        for byte in bytes {
+            digest.push(char::from(HEX[usize::from(byte >> 4)]));
+            digest.push(char::from(HEX[usize::from(byte & 0xf)]));
+        }
+        Self(digest)
+    }
+}
+
 /// Whether `path` is one or more `/`-separated components, none of them empty, `.` or `..`.
 fn has_normal_components(path: &str) -> bool {
     path.split('/')

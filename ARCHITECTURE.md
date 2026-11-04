@@ -18,6 +18,9 @@ Conventions are in [`AGENTS.md`](AGENTS.md). Names in backticks are for symbol s
 - The driver's decision core, `Core`, decides what a run of a workflow does: it takes each
   `Event` observed, such as an op from the agent, and returns the `Action`s to take, such as the
   op's reply.
+- The driver's runtime, `Run`, runs a workflow on the Docker provider as the core decides, and
+  keeps the run's record, whose run log holds every event the core took and the actions it
+  returned.
 - `xtask` runs contributors' tasks, among them the checks every change passes.
 
 ## Code map
@@ -69,14 +72,23 @@ returns it as a `Container` once its `Session` is accepted. `Engine::destroy_all
 containers by their `RunTag`. Every call to the `docker` command line goes through one function,
 `docker`.
 
-**`crates/pumpkin`** (`pumpkin`). Pumpkin's host side: the driver's decision core,
-`driver::core` ([module doc](crates/pumpkin/src/driver/core.rs)). `Core::start` begins a run of a
+**`crates/pumpkin`** (`pumpkin`). Pumpkin's host side: the driver, which runs a workflow. The
+driver's decision core is `driver::core` ([module doc](crates/pumpkin/src/driver/core.rs)).
+`Core::start` begins a run of a
 `Workflow`, and `Core::handle` takes each `Event` with the time since the run started; both
 return `Action`s, and `Core::tick_due` says when time alone next calls for some. Its `ops` module
 authorizes the agent's ops (`Request`) and fills in their replies, `jobs` meters the judge calls
 they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.json` per its
 `ResultSpec`. A run ends with `Action::Finish`, which carries its `Outcome` (`WorkEnd`,
 `Verdict`).
+
+The driver's runtime is `driver::run` ([module doc](crates/pumpkin/src/driver/run.rs)).
+`Run::prepare` parses a workflow's IR and begins its record, and `Run::execute` drives the run
+to its `Outcome`, unless it fails. One loop, `Runtime::drive`, turns the agent's ops and its end
+(`agent`, `Agent::watch`), the reports of judge calls (`judge`, a thread per call) and ticks
+into `Event`s, appends each with the actions the core returns to the run log (`log`, `Log`), and
+performs them in sandboxes that `Sandboxes` starts (`sandbox`). `record` lays out the run's
+record, and stores the payloads of the calls the core accepts by digest (`Payloads`).
 
 **`xtask`**. Contributor tasks: `cargo xtask ci`, the checks every change passes, among them
 `docs::check`, the doc length caps; and `cargo xtask sandboxd`.
@@ -152,6 +164,23 @@ they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.jso
 - The agent learns of a judge call only its state and the fields its judge declares
   ([`ResultSpec`](crates/pumpkin-schema/src/ir.rs),
   [`Failure`](crates/pumpkin/src/driver/core/jobs.rs)).
+- One loop drives a run and owns its state; each judge call runs on a thread of its own, which
+  reports to the loop ([`run`](crates/pumpkin/src/driver/run.rs)).
+- The run log holds every event the core takes, with the actions it returns, each written and
+  synced before they are performed, and every op the agent's session hands out, those the
+  gateway refuses itself included ([`log`](crates/pumpkin/src/driver/run/log.rs)).
+- A call's payload is stored only once the core accepts the call, so a refused one leaves only
+  its size and digest in the log ([`Runtime::reply`](crates/pumpkin/src/driver/run.rs)).
+- Of a judge's `out`, the record keeps only its `result_file()`, up to `RESULT_MAX_BYTES`, and
+  its `evidence_dir()`, up to the judge's `evidence_max_bytes`
+  ([`judge`](crates/pumpkin/src/driver/run/judge.rs)).
+- A run leaves no container behind: a judge call's end is reported once its sandbox is
+  destroyed, a sandbox that can't be destroyed fails the run, and a run, however it ends,
+  removes every container that carries its `RunTag` once its judge calls' threads have ended
+  ([`judge`](crates/pumpkin/src/driver/run/judge.rs),
+  [`Run::execute`](crates/pumpkin/src/driver/run.rs)). Whatever ends the process at once, such
+  as a signal or a panic, leaves the run's containers, for `Engine::destroy_all` to remove by
+  its `RunTag`, and its socket directory `pumpkin-<id>`.
 
 ## Where new code goes
 
@@ -174,6 +203,12 @@ they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.jso
 - **A decision of a run** (when its work phase ends, whether an op is allowed, what its reply
   says): `driver::core`, an op's rule in `ops` and judge calls' metering in `jobs`. What the core
   must know comes in as an `Event`, and what must be done goes out as an `Action`.
+- **What a run does in a sandbox** (starting it, putting files in, collecting what it wrote,
+  destroying it): `driver::run`, the agent's sandbox in `agent`, a judge call's in `judge`, and
+  what both share in `sandbox`; the loop performs each `Action` in `Runtime::perform`.
+- **A file of a run's record, or a record of its run log:** `record`, whose module doc lists the
+  record's files, and `log`, whose module doc lists the log's records and which gives each
+  `Event` and `Action` its JSON form.
 - **A provider:** `providers/<name>/`, crate `pumpkin-<name>`, which the workspace's
   `providers/*` glob takes in. Its platform's calls and its sandboxes' confinement stay in its
   crate, as `docker` and `create_args` stay in `pumpkin-docker`.

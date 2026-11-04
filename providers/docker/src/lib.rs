@@ -53,7 +53,7 @@ use pumpkin_schema::sandbox::{
     OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir, pumpkin_subdirs,
 };
 use pumpkin_schema::workflow::Sandbox;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use stdx::Context;
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
@@ -90,7 +90,7 @@ const ROLE_LABEL: &str = "pumpkin.role";
 /// Any name but the empty one, which `docker` would take for no name, and so reach the engine
 /// of the command line's current context. A name no context has is refused by
 /// [`Engine::connect`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -116,13 +116,13 @@ impl TryFrom<String> for ContextName {
 
 /// The Docker engine a context reaches, which every container of the provider's runs in, and
 /// its report.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Engine {
     report: Report,
 }
 
 /// The engine, as `docker` describes it before anything starts.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Report {
     /// The context `docker` reaches the engine through.
     pub context: ContextName,
@@ -141,7 +141,7 @@ pub struct Report {
 }
 
 /// What the engine's security options say.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Security {
     /// Whether the engine runs as an ordinary user rather than as root.
     // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
@@ -191,7 +191,7 @@ struct ClientInfoJson {
 
 /// The value of the label that finds a run's containers: every container of the run carries
 /// it, and [`Engine::destroy_all`] removes the containers that do.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RunTag(String);
 
 impl RunTag {
