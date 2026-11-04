@@ -2,7 +2,7 @@
 //!
 //! `mini` runs a small workflow on Docker, with the Docker tests' `busybox` image: its agent
 //! calls a judge grant through `sandboxctl`, polls each job's status until it has ended, and
-//! submits with finalize, which stops the one call still running; its judges write a
+//! submits with finalize and exits, which stops the one call still running; its judges write a
 //! `result.json` and evidence, in one call more than its limit. Like the Docker tests, it is
 //! ignored, and fails without `PUMPKIN_SANDBOXD`. The refusals need no Docker.
 
@@ -34,8 +34,8 @@ const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json"
 /// calls `train` with a payload over its slot's `max_bytes`, which the gateway refuses; calls
 /// `train`, polling each job until it has ended, with a payload, then with one whose judge
 /// writes too much evidence; calls `train` with one whose judge doesn't end, polling the job
-/// until it runs; and finalizes the first payload, which ends the work phase, and so stops the
-/// running job.
+/// until it runs; and finalizes the first payload and exits, which ends the work phase, and so
+/// stops the running job.
 const AGENT: &str = r#"
 set -o errexit -o nounset
 ctl=/.pumpkin/bin/sandboxctl
