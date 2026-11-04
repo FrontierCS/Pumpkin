@@ -2,9 +2,9 @@
 //!
 //! `mini` runs a small workflow on Docker, with the Docker tests' `busybox` image: its agent
 //! calls a judge grant through `sandboxctl`, polls each job's status until it has ended, and
-//! submits with finalize; its judges write a `result.json` and evidence, in one call more than
-//! its limit. Like the Docker tests, it is ignored, and fails without `PUMPKIN_SANDBOXD`. The
-//! refusals need no Docker.
+//! submits with finalize, which stops the one call still running; its judges write a
+//! `result.json` and evidence, in one call more than its limit. Like the Docker tests, it is
+//! ignored, and fails without `PUMPKIN_SANDBOXD`. The refusals need no Docker.
 
 #![expect(
     clippy::unwrap_used,
@@ -32,33 +32,40 @@ const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json"
 
 /// The agent: calls a judge grant it doesn't hold, whose payload is refused and not kept;
 /// calls `train` with a payload over its slot's `max_bytes`, which the gateway refuses; calls
-/// `train`, polling each job until it has finished, with a payload, then with one whose judge
-/// writes too much evidence; and finalizes the first payload.
+/// `train`, polling each job until it has ended, with a payload, then with one whose judge
+/// writes too much evidence; calls `train` with one whose judge doesn't end, polling the job
+/// until it runs; and finalizes the first payload, which ends the work phase, and so stops the
+/// running job.
 const AGENT: &str = r#"
 set -o errexit -o nounset
 ctl=/.pumpkin/bin/sandboxctl
 printf ledger > payload
 printf evidence > evidence
+printf slow > slow
 printf refused > refused
 head -c 1025 /dev/zero > oversized
-judged() {
+# Calls `train` with the payload in file $1, and polls the job while its state is one of $2.
+call() {
     job=$($ctl judge train "$1" | sed 's/.*"job":\([0-9]*\).*/\1/')
-    while $ctl status "$job" | grep -qE '"state":"(queued|running)"'; do sleep 1; done
+    while $ctl status "$job" | grep -qE "\"state\":\"($2)\""; do sleep 1; done
 }
 $ctl ops | sed 's/"remaining_seconds":[0-9]*/"remaining_seconds":<s>/'
 $ctl judge nothing refused || true
 $ctl judge train oversized || true
-judged payload
-judged evidence
+call payload 'queued|running'
+call evidence 'queued|running'
+call slow queued
 $ctl submit submit payload --finalize > /dev/null
 "#;
 
 /// A judge: scores a payload by its size, and keeps evidence, over its limit for the payload
-/// `evidence`.
+/// `evidence`. For `slow`, it does so only after its call's timeout, so that a stop that
+/// doesn't take effect shows as the call timing out.
 const JUDGE: &str = r#"
-if [ "$(cat /pumpkin/in/payload/raw)" = evidence ]; then
-    head -c 1024 /dev/zero > /pumpkin/out/evidence/padding
-fi
+case $(cat /pumpkin/in/payload/raw) in
+evidence) head -c 1024 /dev/zero > /pumpkin/out/evidence/padding ;;
+slow) sleep 300 ;;
+esac
 bytes=$(wc -c < /pumpkin/in/payload/raw)
 printf '{"status": "passed", "score": %s, "bytes": %s, "secret": "for the operator"}\n' \
     $bytes $bytes > /pumpkin/out/result.json
@@ -171,7 +178,7 @@ fn mini() {
         outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"bytes":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:fe14010b4fe83303852f0467c919ef9a7ca089b91e96e3aad7d426dd87079297","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         the record:
         agent/log/command.stderr: 
-        agent/log/command.stdout: {"kind":"ops","remaining_seconds":<s>,"resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"judge","name":"train","max_bytes":1024,"calls":2,"cumulative_seconds":null,"call_timeout_seconds":60},{"kind":"submit","name":"submit","max_bytes":1024}]}; {"kind":"refused","message":"you hold no grant named `nothing`: call one that `ops` lists"}; {"kind":"refused","message":"the payload is 1025 bytes, more than the limit of 1024: send at most 1024"}
+        agent/log/command.stdout: {"kind":"ops","remaining_seconds":<s>,"resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"judge","name":"train","max_bytes":1024,"calls":3,"cumulative_seconds":null,"call_timeout_seconds":60},{"kind":"submit","name":"submit","max_bytes":1024}]}; {"kind":"refused","message":"you hold no grant named `nothing`: call one that `ops` lists"}; {"kind":"refused","message":"the payload is 1025 bytes, more than the limit of 1024: send at most 1024"}
         agent/out/
         engine.json
         ir.json
@@ -183,35 +190,42 @@ fn mini() {
         jobs/2/log/command.stdout: judged 8 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
         jobs/2/out/result.json: {"status": "passed", "score": 8, "bytes": 8, "secret": "for the operator"}
         jobs/3/log/command.stderr: 
-        jobs/3/log/command.stdout: judged 6 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
-        jobs/3/out/evidence/evidence.txt: kept
-        jobs/3/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
+        jobs/3/log/command.stdout: 
+        jobs/3/out/evidence/
+        jobs/4/log/command.stderr: 
+        jobs/4/log/command.stdout: judged 6 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
+        jobs/4/out/evidence/evidence.txt: kept
+        jobs/4/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
         log.jsonl
         outcome.json
+        payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6: slow
         payloads/ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e: evidence
         payloads/fe14010b4fe83303852f0467c919ef9a7ca089b91e96e3aad7d426dd87079297: ledger
         the log, without the polls before the job ended:
         run_started {"unix_ns":"<unix_ns>"} -> start_agent
         agent_started
-        op_arrived {"request":{"kind":"ops"}} -> reply {"reply":{"grants":[{"call_timeout_seconds":60,"calls":2,"cumulative_seconds":null,"kind":"judge","max_bytes":1024,"name":"train"},{"kind":"submit","max_bytes":1024,"name":"submit"}],"kind":"ops","resources":{"cpu_millis":500,"memory_bytes":268435456}}}
+        op_arrived {"request":{"kind":"ops"}} -> reply {"reply":{"grants":[{"call_timeout_seconds":60,"calls":3,"cumulative_seconds":null,"kind":"judge","max_bytes":1024,"name":"train"},{"kind":"submit","max_bytes":1024,"name":"submit"}],"kind":"ops","resources":{"cpu_millis":500,"memory_bytes":268435456}}}
         op_arrived {"request":{"grant":"nothing","kind":"judge","payload":"7 bytes"}} -> reply {"reply":{"kind":"refused","message":"you hold no grant named `nothing`: call one that `ops` lists"}}
         op_refused {"message":"the payload is 1025 bytes, more than the limit of 1024: send at most 1024","request":{"grant":"train","kind":"judge","payload":{"over":1024,"size":1025}}}
-        op_arrived {"request":{"grant":"train","kind":"judge","payload":"6 bytes"}} -> reply {"reply":{"job":1,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":1,"payload":"6 bytes","timeout_ns":"60000000000"}
+        op_arrived {"request":{"grant":"train","kind":"judge","payload":"6 bytes"}} -> reply {"reply":{"job":1,"kind":"judge","remaining":{"calls":2,"seconds":null}}}; start_judge {"grant":"train","job":1,"payload":"6 bytes","timeout_ns":"60000000000"}
         judge_started {"job":1}
         judge_exited {"job":1,"status":{"code":0}}
         judge_collected {"job":1,"result":{"passed":true,"returned":{"bytes":6},"score":6}}
-        op_arrived {"request":{"job":1,"kind":"status"}} -> reply {"reply":{"job":1,"kind":"status","remaining":{"calls":1,"seconds":null},"returned":{"bytes":6},"state":"passed"}}
-        op_arrived {"request":{"grant":"train","kind":"judge","payload":"8 bytes"}} -> reply {"reply":{"job":2,"kind":"judge","remaining":{"calls":0,"seconds":null}}}; start_judge {"grant":"train","job":2,"payload":"8 bytes","timeout_ns":"60000000000"}
+        op_arrived {"request":{"job":1,"kind":"status"}} -> reply {"reply":{"job":1,"kind":"status","remaining":{"calls":2,"seconds":null},"returned":{"bytes":6},"state":"passed"}}
+        op_arrived {"request":{"grant":"train","kind":"judge","payload":"8 bytes"}} -> reply {"reply":{"job":2,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":2,"payload":"8 bytes","timeout_ns":"60000000000"}
         judge_started {"job":2}
         judge_exited {"job":2,"status":{"code":0}}
         judge_collected {"invalid":"the evidence holds 1029 bytes, over the judge's `evidence_max_bytes` of 1024: write at most 1024","job":2}
-        op_arrived {"request":{"job":2,"kind":"status"}} -> reply {"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":2,"kind":"status","remaining":{"calls":0,"seconds":null},"state":"failed"}}
-        op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
-        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":3,"payload":"6 bytes","timeout_ns":"18446744073709551615"}
-        note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
+        op_arrived {"request":{"job":2,"kind":"status"}} -> reply {"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":2,"kind":"status","remaining":{"calls":1,"seconds":null},"state":"failed"}}
+        op_arrived {"request":{"grant":"train","kind":"judge","payload":"4 bytes"}} -> reply {"reply":{"job":3,"kind":"judge","remaining":{"calls":0,"seconds":null}}}; start_judge {"grant":"train","job":3,"payload":"4 bytes","timeout_ns":"60000000000"}
         judge_started {"job":3}
-        judge_exited {"job":3,"status":{"code":0}}
-        judge_collected {"job":3,"result":{"passed":true,"returned":{"bytes":6},"score":6}} -> finish with score 6
+        op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
+        agent_exited {"status":{"code":0}} -> stop_judge {"job":3}; tear_down_agent
+        note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
+        judge_failed {"job":3,"reason":"the call was stopped"} -> start_judge {"grant":null,"job":4,"payload":"6 bytes","timeout_ns":"18446744073709551615"}
+        judge_started {"job":4}
+        judge_exited {"job":4,"status":{"code":0}}
+        judge_collected {"job":4,"result":{"passed":true,"returned":{"bytes":6},"score":6}} -> finish with score 6
         the run started during execute: true
         left over: 0 containers, sockets removed"#]].assert_eq(&lines.join("\n"));
 }
@@ -265,7 +279,7 @@ fn mini_ir(image: &ir::Image, agent: &str, judge: &str) -> Value {
         "main": { "solo_then_judge": {
             "grants": [
                 { "judge": {
-                    "name": "train", "role": "train_judge", "slot": "payload", "calls": 2,
+                    "name": "train", "role": "train_judge", "slot": "payload", "calls": 3,
                     "call_timeout_seconds": 60
                 } },
                 { "submit": { "name": "submit" } },
