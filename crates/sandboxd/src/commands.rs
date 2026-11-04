@@ -31,6 +31,9 @@ use crate::{print_line, sys};
 /// The context of a failed [`sys::has_children`], which the reaper and freezing both call.
 const HAS_CHILDREN_FAILED: &str = "finding whether sandboxd has children failed";
 
+/// The context of a failed [`kill_everything`], which freezing and a failed reaper both call.
+const KILL_FAILED: &str = "the sandbox's processes couldn't be killed";
+
 /// The commands started in this sandbox.
 pub(crate) struct Commands {
     // Shared with the reaper thread, which reaps children while the session starts commands
@@ -66,9 +69,8 @@ impl Shared {
 }
 
 impl Commands {
-    /// Starts the thread that reaps children and reports exits through `sender`. Should a wait
-    /// for a child fail, the thread kills the commands and ends `sandboxd`, which can't report
-    /// their exits without it.
+    /// Starts the thread that reaps children and reports exits through `sender`. If a wait for
+    /// a child fails, the thread kills the commands and ends `sandboxd`.
     pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
         let state = State {
             running: HashMap::new(),
@@ -85,8 +87,11 @@ impl Commands {
                 let Err(error) = reaper(&shared);
                 // With no reaper, no exit would be reported, so `sandboxd` stops as the end of
                 // the session stops it, and the gateway sees the connection close.
-                let _ = kill_everything(&shared.lock());
                 print_line(io::stderr(), format_args!("sandboxd: {error}"));
+                let killed = kill_everything(&shared.lock());
+                if let Err(error) = killed.context(KILL_FAILED) {
+                    print_line(io::stderr(), format_args!("sandboxd: {error}"));
+                }
                 process::exit(1);
             }
         })?;
@@ -114,7 +119,7 @@ impl Commands {
     pub(crate) fn freeze(&self) -> Result<(), String> {
         let mut state = self.shared.lock();
         state.frozen = true;
-        kill_everything(&state).context("the sandbox's processes couldn't be killed")?;
+        kill_everything(&state).context(KILL_FAILED)?;
         // Wake the reaper: orphans of processes sandboxd didn't start (a `docker exec`)
         // become its children with no start to announce them.
         self.shared.changed.notify_all();
@@ -182,7 +187,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 /// ask only for exits. A stopped child is still running, so the reaper reports nothing for it,
 /// and [`sys::reap`] consumes the report of its stop, so that it doesn't come back. `sandboxd`
 /// never resumes the child, which stays stopped until freezing or the end of the session kills
-/// it. Returns only if a wait fails.
+/// it.
 fn reaper(shared: &Shared) -> Result<Infallible, String> {
     loop {
         let mut state = shared.lock();

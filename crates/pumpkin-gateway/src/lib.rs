@@ -20,7 +20,7 @@
 //! but bounds what ops cost the host, and ends a session whose sandbox breaks the ops' rules.
 
 use std::collections::HashMap;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -675,6 +675,13 @@ struct AbortOnUnwind;
 
 impl Drop for AbortOnUnwind {
     fn drop(&mut self) {
+        // Straight to the standard error, which `cargo test` doesn't capture, unlike the panic's
+        // message from this thread.
+        let _ = writeln!(
+            io::stderr(),
+            "the gateway's reader thread panicked, so the process aborts: under `cargo test`, \
+             rerun with --nocapture to see the panic"
+        );
         process::abort();
     }
 }

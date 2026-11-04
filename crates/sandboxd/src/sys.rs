@@ -3,9 +3,8 @@
 //! making the process non-dumpable, opening only a regular file, at a path the role's code can
 //! write, and finding whether a connection's other end has closed it, without reading from it.
 //!
-//! A call's errno is the world's, and returned, but for one that means an argument the call is
-//! never given, which is `unreachable!`, as `EINVAL` for a wait call's options. `kill`, `killpg`
-//! and `prctl` return even that, since a security module's hook may give them any.
+//! Every errno a call returns is the world's, and returned: the kernel's security policy, a
+//! security module's or a seccomp filter's, may fail any call with any errno.
 
 #![expect(
     unsafe_code,
@@ -22,7 +21,8 @@ use std::path::Path;
 use stdx::Context;
 
 /// Waits until a child has exited, or a child that made this process its tracer has stopped,
-/// without reaping it, and returns its process ID: `None` if there are no children.
+/// without reaping it, and returns its process ID: `None` if there are no children. Fails with
+/// waitid's errno.
 pub(crate) fn wait_for_child() -> io::Result<Option<i32>> {
     loop {
         // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
@@ -38,17 +38,13 @@ pub(crate) fn wait_for_child() -> io::Result<Option<i32>> {
         match error.raw_os_error() {
             Some(libc::ECHILD) => return Ok(None),
             Some(libc::EINTR) => {}
-            #[expect(
-                clippy::unreachable,
-                reason = "waitid fails with EINVAL only for invalid options, and these are valid"
-            )]
-            Some(libc::EINVAL) => unreachable!("waitid(P_ALL, WEXITED | WNOWAIT) failed: {error}"),
             _ => return Err(error),
         }
     }
 }
 
 /// Whether this process has any children: running, stopped, or exited and not yet reaped.
+/// Fails with waitid's errno.
 pub(crate) fn has_children() -> io::Result<bool> {
     // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -60,13 +56,6 @@ pub(crate) fn has_children() -> io::Result<bool> {
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ECHILD) => Ok(false),
-        #[expect(
-            clippy::unreachable,
-            reason = "waitid fails with EINVAL only for invalid options, and these are valid"
-        )]
-        Some(libc::EINVAL) => {
-            unreachable!("waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT) failed: {error}")
-        }
         _ => Err(error),
     }
 }
@@ -74,6 +63,7 @@ pub(crate) fn has_children() -> io::Result<bool> {
 /// Reaps child `pid` if it has exited and returns its raw status: `None` if it hasn't exited
 /// yet, or was already reaped. For a child that made this process its tracer, it also returns
 /// the status of a stop, and consumes the report of it, so that no wait returns it again.
+/// Fails with waitpid's errno.
 pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
     let mut status = 0;
     // SAFETY: waitpid writes only to `status`, which outlives the call.
@@ -84,14 +74,6 @@ pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
             let error = io::Error::last_os_error();
             match error.raw_os_error() {
                 Some(libc::ECHILD) => Ok(None),
-                #[expect(
-                    clippy::unreachable,
-                    reason = "waitpid fails with EINVAL only for invalid options, and WNOHANG is \
-                              valid, and with ESRCH only for a pid of INT_MIN, which no child has"
-                )]
-                Some(libc::EINVAL | libc::ESRCH) => {
-                    unreachable!("waitpid({pid}, WNOHANG) failed: {error}")
-                }
                 _ => Err(error),
             }
         }
