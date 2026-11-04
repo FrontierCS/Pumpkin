@@ -91,8 +91,7 @@ impl Ops {
         let socket = Path::new(CONTROL_SOCKET);
         #[expect(
             clippy::unreachable,
-            reason = "`CONTROL_SOCKET`, `/pumpkin/sandboxctl/socket`, is an absolute path to a \
-                      file in a directory"
+            reason = "`CONTROL_SOCKET` is an absolute path to a file in a directory"
         )]
         let Some(dir) = socket.parent() else {
             unreachable!("the control socket {CONTROL_SOCKET} has no directory")
