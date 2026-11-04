@@ -52,14 +52,14 @@ pub fn read<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<(T
 }
 
 fn encode_len(len: usize, max: usize, what: &str) -> io::Result<[u8; 4]> {
-    if len > max {
-        return Err(io::Error::new(
+    // A length that doesn't fit a u32 is over both caps, of at most 1 MiB.
+    match u32::try_from(len) {
+        Ok(encoded) if len <= max => Ok(encoded.to_be_bytes()),
+        Ok(_) | Err(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("the {what} is {len} bytes: a frame's {what} holds at most {max}"),
-        ));
+        )),
     }
-    let len = u32::try_from(len).map_err(io::Error::other)?;
-    Ok(len.to_be_bytes())
 }
 
 /// Reads a length, or `None` if the connection ended before its first byte and `may_end`.
@@ -80,13 +80,14 @@ fn read_len(
             Err(error) => return Err(error),
         }
     }
-    let len = usize::try_from(u32::from_be_bytes(bytes)).map_err(io::Error::other)?;
-    if len > max {
-        return Err(invalid_data(format!(
+    let len = u32::from_be_bytes(bytes);
+    // A length that doesn't fit a usize is over the cap, a usize.
+    match usize::try_from(len) {
+        Ok(len) if len <= max => Ok(Some(len)),
+        Ok(_) | Err(_) => Err(invalid_data(format!(
             "a frame's {what} is {len} bytes: it holds at most {max}"
-        )));
+        ))),
     }
-    Ok(Some(len))
 }
 
 fn read_bytes(reader: &mut impl Read, len: usize) -> io::Result<Vec<u8>> {

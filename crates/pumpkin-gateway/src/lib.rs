@@ -513,7 +513,7 @@ impl Session {
                     self.send(&ToSandbox::Entry { stream, entry }, &[])?;
                 }
                 Put::File(path, bytes) => {
-                    let size = u64::try_from(bytes.len()).map_err(io::Error::other)?;
+                    let size = bytes.len() as u64;
                     let entry = Entry::File {
                         path: path.clone(),
                         size,
