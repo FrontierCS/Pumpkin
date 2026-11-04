@@ -49,19 +49,17 @@ pub struct PayloadRef {
 /// digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    /// Asks for the caller's limits: the time left to work, its resources and the grants it
-    /// holds.
+    /// See [`OpCall::Ops`](pumpkin_schema::sandbox::op::OpCall::Ops).
     Ops,
-    /// Calls the judge grant named `grant` with `payload`.
+    /// See [`OpCall::Judge`](pumpkin_schema::sandbox::op::OpCall::Judge).
     Judge { grant: Name, payload: PayloadRef },
-    /// Submits `payload` to the submit grant named `grant`. `finalize` marks it as the final
-    /// submission.
+    /// See [`OpCall::Submit`](pumpkin_schema::sandbox::op::OpCall::Submit).
     Submit {
         grant: Name,
         finalize: bool,
         payload: PayloadRef,
     },
-    /// Asks how job `job` is doing.
+    /// See [`OpCall::Status`](pumpkin_schema::sandbox::op::OpCall::Status).
     Status { job: u64 },
 }
 
@@ -98,7 +96,8 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the agent's sandbox and its command.
+    /// Starts the agent's sandbox and its command, whose end the runtime reports as
+    /// [`Event::AgentExited`] or [`Event::AgentFailed`].
     StartAgent,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
@@ -119,7 +118,8 @@ pub enum Action {
     /// Freezes the agent's sandbox, collects its outputs and destroys it, before the runtime
     /// performs the next action: the core takes the agent as gone once it asks.
     TearDownAgent,
-    /// Ends the run with its outcome. The core takes no further action.
+    /// Ends the run with its outcome. After it, the core only refuses the ops that still
+    /// arrive.
     Finish { outcome: Outcome },
 }
 

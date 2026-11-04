@@ -34,7 +34,7 @@ JSON, and the sandbox protocol's wire format ([crate doc](crates/pumpkin-schema/
   values check themselves as they deserialize (`ir::values`: `Name`, `Image`, `AbsolutePath`,
   `Argv`, `Env`, `JsonPointer`, `Returns`, ...).
 - `workflow`: `Workflow::parse`, which resolves names to typed ids (`RoleId`, `JudgeId`, `SlotId`,
-  `JudgeGrantId`), turns counts of seconds into `Duration`s, and reports the rules the IR breaks
+  `JudgeGrantId`), gives every time as a `Duration`, and reports the rules the IR breaks
   (`ParseErrors`).
 - `sandbox`: the sandbox protocol (`ToSandbox`, `FromSandbox`, `Launch`, `Entry`), and the
   in-sandbox contract (`pumpkin_dir()`, `pumpkin_subdirs()`, `SANDBOXCTL_PATH`, `CONTROL_SOCKET`).
@@ -140,7 +140,7 @@ they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.jso
 - The decision core does no I/O and reads no clock, so the same events give the same actions
   ([`core`](crates/pumpkin/src/driver/core.rs)).
 - The core authorizes every op the agent makes ([`ops`](crates/pumpkin/src/driver/core/ops.rs)),
-  and answers each exactly once ([`Core`](crates/pumpkin/src/driver/core.rs)).
+  and answers exactly once each op it is given ([`Core`](crates/pumpkin/src/driver/core.rs)).
 - What a judge grant has used is counted from its jobs, so no separate ledger can disagree with
   them ([`jobs`](crates/pumpkin/src/driver/core/jobs.rs)).
 - The agent learns of a judge call only its state and the fields its judge declares
@@ -161,7 +161,7 @@ they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.jso
   replies; a `Session` method in the gateway; its handling in `sandboxd`'s `session`, by the
   module that serves it (`files`, `commands`).
 - **An op:** its call and reply in `sandbox::op`, with a row in its table; its command in
-  `sandboxctl`'s grammar (`ctl`); its `Op` in the gateway.
+  `sandboxctl`'s grammar (`ctl`); its `Op` in the gateway; its `Request` in the decision core.
 - **A path or limit every sandbox relies on, whatever its provider:** `pumpkin_schema::sandbox`,
   beside `pumpkin_dir()`.
 - **A system call `std` lacks, for `sandboxd`:** `sys`.

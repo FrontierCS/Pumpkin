@@ -109,7 +109,8 @@ pub struct JudgeRuntime {
     pub result: ResultSpec,
 }
 
-/// What a judge call writes as its result: the JSON file `/pumpkin/out/result.json`, of which
+/// What a judge call writes as its result: the JSON file `result.json` in `out` below
+/// [`pumpkin_dir()`](crate::sandbox::pumpkin_dir), of which
 /// its caller sees the status and the fields [`returns`](Self::returns) names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,10 +203,9 @@ pub struct SoloThenJudge {
     /// Judging the selected submission comes after the deadline, bounded instead by the
     /// score's [`timeout_seconds`](Score::timeout_seconds).
     pub deadline_seconds: NonZeroU64,
-    /// How long the agent may keep running after its final submission is accepted, so that
-    /// its harness can finish its last turn. Its ops are refused meanwhile, and the work phase
-    /// ends when it exits, when this runs out, or at the deadline, whichever comes first. 0
-    /// ends the work phase at the final submission.
+    /// How long the agent may keep running after its final submission is accepted. Its ops are
+    /// refused meanwhile, and the work phase ends when it exits, when this runs out, or at the
+    /// deadline, whichever comes first. 0 ends the work phase at the final submission.
     pub finalize_grace_seconds: u64,
 }
 
@@ -268,7 +268,6 @@ pub struct Score {
     pub role: Name,
     /// The judge's slot that receives the submission.
     pub slot: Name,
-    /// The call's timeout, counted from the start of the judge command, so that judging the
-    /// selection always ends.
+    /// The call's timeout, counted from the start of the judge command.
     pub timeout_seconds: NonZeroU64,
 }

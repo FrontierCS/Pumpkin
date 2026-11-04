@@ -1,5 +1,5 @@
-//! A workflow parsed from its IR: references resolved to typed ids, counts of seconds turned
-//! into [`Duration`]s, and the rules that span its parts checked.
+//! A workflow parsed from its IR: references resolved to typed ids, every time given as a
+//! [`Duration`], and the rules that span its parts checked.
 //!
 //! A [`Workflow`] can only be made by [`Workflow::parse`], so code that acts on one need not
 //! check again what parsing established. Each kind of part has its own id type, so that, for
