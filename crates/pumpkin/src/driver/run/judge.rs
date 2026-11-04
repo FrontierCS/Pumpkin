@@ -99,7 +99,7 @@ fn judge(call: &Call<'_>, container: &mut Container) -> Event {
         Ok(started) => started,
         Err(reason) => return failed(reason),
     };
-    let ended = match wait(call, &mut process, started + call.timeout) {
+    let ended = match wait(call, &mut process, started.checked_add(call.timeout)) {
         Ok(ended) => ended,
         Err(error) => return failed(format!("the judge's session ended: {error}")),
     };
@@ -141,19 +141,19 @@ fn start(call: &Call<'_>, session: &mut Session) -> Result<(Process, Instant), S
 }
 
 /// Waits for the command to exit, up to `deadline`, or until a stop. Reports its exit or its
-/// timeout.
-fn wait(call: &Call<'_>, process: &mut Process, deadline: Instant) -> io::Result<Ended> {
+/// timeout. A `deadline` of `None`, past what the clock can hold, is never reached.
+fn wait(call: &Call<'_>, process: &mut Process, deadline: Option<Instant>) -> io::Result<Ended> {
     let job = call.job;
     loop {
-        let now = Instant::now();
-        if now >= deadline {
+        let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        if left.is_some_and(|left| left.is_zero()) {
             call.event(Event::JudgeTimedOut { job });
             return Ok(Ended::TimedOut);
         }
         if call.stopped() {
             return Ok(Ended::Stopped);
         }
-        if let Some(status) = process.wait((deadline - now).min(POLL))? {
+        if let Some(status) = process.wait(left.map_or(POLL, |left| left.min(POLL)))? {
             call.event(Event::JudgeExited { job, status });
             return Ok(Ended::Exited);
         }

@@ -186,7 +186,7 @@ fn mini() {
         judge_collected {"job":1,"result":{"passed":true,"returned":{"bytes":6},"score":6}}
         op_arrived {"request":{"job":1,"kind":"status"}} -> reply {"reply":{"job":1,"kind":"status","remaining":{"calls":1,"seconds":null},"returned":{"bytes":6},"state":"passed"}}
         op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
-        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ns":60000000000}
+        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ns":18446744073709551615}
         note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
         judge_started {"job":2}
         judge_exited {"job":2,"status":{"code":0}}
@@ -206,7 +206,8 @@ fn sockets(id: &str) -> PathBuf {
 }
 
 /// The mini workflow's IR, with `image` for every role, and `agent` and `judge` as the scripts
-/// of the agent's and the judges' commands.
+/// of the agent's and the judges' commands. The score's timeout is the longest the IR can
+/// state, past what the clock can reach and what the run log's nanoseconds can count.
 fn mini_ir(image: &ir::Image, agent: &str, judge: &str) -> Value {
     let role = |name: &str, runtime: Value| {
         json!({
@@ -248,7 +249,7 @@ fn mini_ir(image: &ir::Image, agent: &str, judge: &str) -> Value {
                 } },
                 { "submit": { "name": "submit" } },
             ],
-            "score": { "role": "final_judge", "slot": "payload", "timeout_seconds": 60 },
+            "score": { "role": "final_judge", "slot": "payload", "timeout_seconds": u64::MAX },
             "deadline_seconds": 300,
             "finalize_grace_seconds": 60
         } }
