@@ -114,7 +114,9 @@ fn valid<T: TryFrom<String, Error = String>>(path: &str) -> T {
         #[expect(
             clippy::unreachable,
             reason = "each of this module's paths is normalized: `/pumpkin` is absolute, and \
-                      each of its directories one plain component"
+                      each of its directories one plain component. `AbsolutePath` and \
+                      `RelativePath` hold a `String`, which no `const` can build, so each path \
+                      is checked as it is made"
         )]
         Err(error) => unreachable!("{error}"),
     }

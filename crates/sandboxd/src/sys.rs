@@ -37,7 +37,8 @@ pub(crate) fn wait_for_child() -> Option<i32> {
             #[expect(
                 clippy::unreachable,
                 reason = "waitid fails otherwise only for invalid options or a nonblocking \
-                          pidfd, and these options are valid and name no pidfd"
+                          pidfd, and these options are valid and name no pidfd. Its error is an \
+                          errno, an int, which no type narrows to what these arguments allow"
             )]
             _ => unreachable!("waitid(P_ALL, WEXITED | WNOWAIT) failed: {error}"),
         }
@@ -60,7 +61,8 @@ pub(crate) fn has_children() -> bool {
             clippy::unreachable,
             reason = "waitid fails otherwise only for invalid options, a nonblocking pidfd, or a \
                       signal while it blocks, and these options are valid, name no pidfd, and \
-                      don't block"
+                      don't block. Its error is an errno, an int, which no type narrows to what \
+                      these arguments allow"
         )]
         _ => unreachable!("waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT) failed: {error}"),
     }
@@ -83,7 +85,9 @@ pub(crate) fn reap(pid: i32) -> Option<i32> {
                     clippy::unreachable,
                     reason = "given a child's process ID and WNOHANG, waitpid returns that ID or \
                               0, or fails with ECHILD: EINTR needs a wait that blocks, EINVAL \
-                              invalid options, and ESRCH a pid of INT_MIN"
+                              invalid options, and ESRCH a pid of INT_MIN. It returns an int and \
+                              sets errno, neither of which a type narrows to what these \
+                              arguments allow"
                 )]
                 _ => unreachable!("waitpid({pid}, WNOHANG) returned {returned}: {error}"),
             }
@@ -108,7 +112,8 @@ pub(crate) fn kill_all_others() {
         #[expect(
             clippy::unreachable,
             reason = "Linux's kill(-1) skips each process it may not signal, and returns success, \
-                      or ESRCH when it found nothing to signal: never EPERM"
+                      or ESRCH when it found nothing to signal: never EPERM. Its error is an \
+                      errno, an int, which no type narrows to what this call allows"
         )]
         Err(error) => unreachable!("kill(-1, SIGKILL) failed: {error}"),
     }
@@ -136,7 +141,8 @@ pub(crate) fn make_non_dumpable() {
         #[expect(
             clippy::unreachable,
             reason = "PR_SET_DUMPABLE fails only for a value other than SUID_DUMP_DISABLE (0) or \
-                      SUID_DUMP_USER (1), and this passes 0"
+                      SUID_DUMP_USER (1), and this passes 0. Its error is an errno, an int, which \
+                      no type narrows to what this call allows"
         )]
         _ => unreachable!(
             "prctl(PR_SET_DUMPABLE, 0) failed: {}",
@@ -200,8 +206,9 @@ fn killed(result: libc::c_int) -> io::Result<()> {
         Some(libc::EPERM) => Err(error),
         #[expect(
             clippy::unreachable,
-            reason = "kill and killpg fail otherwise only with EINVAL, for an invalid signal, and \
-                      both send SIGKILL"
+            reason = "kill(2) and killpg(3) list one other failure, EINVAL, for an invalid signal, \
+                      and both send SIGKILL. Their error is an errno, an int, which no type \
+                      narrows to what these calls allow"
         )]
         _ => unreachable!("sending SIGKILL failed: {error}"),
     }

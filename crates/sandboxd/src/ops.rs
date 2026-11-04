@@ -91,7 +91,8 @@ impl Ops {
         let socket = Path::new(CONTROL_SOCKET);
         #[expect(
             clippy::unreachable,
-            reason = "`CONTROL_SOCKET` is an absolute path to a file in a directory"
+            reason = "`CONTROL_SOCKET` is an absolute path to a file in a directory. It is a \
+                      `&str`, whose type doesn't say that it has a parent"
         )]
         let Some(dir) = socket.parent() else {
             unreachable!("the control socket {CONTROL_SOCKET} has no directory")
@@ -154,7 +155,8 @@ impl Ops {
             #[expect(
                 clippy::unreachable,
                 reason = "each op's channel holds one reply, and only the call that takes the op \
-                          out of flight, under the lock, sends one"
+                          out of flight, under the lock, sends one. std's one-shot channel, \
+                          whose `send` takes its sender by value, is unstable (`sync::oneshot`)"
             )]
             Err(TrySendError::Full(_)) => unreachable!("op {op} was answered twice"),
         }
@@ -214,7 +216,8 @@ impl Ops {
             reason = "the op's sender stays in the flight until `Ops::reply` takes it, and sends \
                       the reply before dropping it, or a later turn's `open` replaces it, which \
                       can't happen while this caller holds its turn; when the session ends, \
-                      `sandboxd` exits with the sender still there"
+                      `sandboxd` exits with the sender still there. Rust has no linear types, so \
+                      no type makes the sender's holder send before dropping it"
         )]
         let Ok(reply) = reply.recv() else {
             unreachable!("op {op} lost where its reply goes without a reply")
@@ -286,7 +289,8 @@ fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
     #[expect(
         clippy::unreachable,
         reason = "the capacity is at most `MAX_OP_PAYLOAD_BYTES` and a byte, 64 MiB and one, \
-                  which fits the usize of every Linux target, of 32 bits or more"
+                  which fits the usize of every Linux target, of 32 bits or more. std converts to \
+                  usize without failing only from u16 and narrower"
     )]
     let Ok(capacity) = usize::try_from(expected) else {
         unreachable!("a capacity of {expected} bytes overflows a usize")

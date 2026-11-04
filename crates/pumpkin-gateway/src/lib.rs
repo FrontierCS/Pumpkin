@@ -419,10 +419,11 @@ impl Session {
                 match self.answer(refused.number, OpReply::Refused { message }) {
                     #[expect(
                         clippy::unreachable,
-                        reason = "the refusal's message is the one `Assembler::pass_on` writes, \
-                                  which names only the payload's size and the limit, two u64s, \
-                                  so its frame's message is a few hundred bytes, far under \
-                                  `frame::MAX_MESSAGE_BYTES`, 64 KiB"
+                        reason = "the refusal's message, which `Assembler::pass_on` writes, names \
+                                  only the payload's size and the limit, so its frame's message \
+                                  is under 200 bytes, far under `frame::MAX_MESSAGE_BYTES`, \
+                                  64 KiB. `frame::write` learns a message's length only as it \
+                                  serializes it, so no type bounds it"
                     )]
                     Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                         unreachable!("the refusal of op {} is too long: {error}", refused.number)
@@ -455,8 +456,9 @@ impl Session {
         #[expect(
             clippy::unreachable,
             reason = "the owner answers each op on the session that handed it out, as this \
-                      method's contract requires: on another, the op's number would name an op \
-                      that sandbox may not have made"
+                      method's contract requires. Types would tie an op to its session only by a \
+                      lifetime brand on all of `Session`'s API, or by a handle in each op to the \
+                      connection, which the session's one owner alone writes to"
         )]
         if session != self.id {
             unreachable!("op {number} was answered on a session other than the one it arrived on")
@@ -848,9 +850,9 @@ impl Assembler {
             #[expect(
                 clippy::unreachable,
                 reason = "the queue holds one arrival, and holds none now: an op leaves the \
-                          flight only once the owner has taken its arrival from the queue, as \
-                          it answers an op it took, or `next_op` refuses one it took, and the \
-                          sandbox may open the next op only once the one before has left"
+                          flight only once the owner has taken its arrival, to answer it or as \
+                          `next_op` refuses it, and the sandbox may open the next op only after \
+                          that. That is an order of two threads' steps, which no type expresses"
             )]
             Err(TrySendError::Full(_)) => {
                 unreachable!("op {number} arrived while the queue held another op's arrival")
@@ -894,7 +896,8 @@ fn payload(
         clippy::unreachable,
         reason = "the size is at most the limit, which is at most `MAX_OP_PAYLOAD_BYTES`, \
                   64 MiB (an `OpPayloadLimit` holds no more), which fits the usize of every \
-                  Linux target, of 32 bits or more"
+                  Linux target, of 32 bits or more. std converts to usize without failing only \
+                  from u16 and narrower"
     )]
     let Ok(capacity) = usize::try_from(size) else {
         unreachable!("a payload of {size} bytes overflows a usize")
@@ -943,7 +946,8 @@ fn ended(ended: &OnceLock<String>) -> io::Error {
                   after a frame that ends their request or once nothing receives from them; \
                   the ops' sender closes only after the reader thread's `Ending` has ended the \
                   session, even as a panic unwinds it; and the rest call `end` or check the \
-                  reason first"
+                  reason first. The reason sits in a `OnceLock` apart from the channels whose \
+                  closing tells of the end, so no type ties the two"
     )]
     let Some(reason) = ended.get() else {
         unreachable!("the session ended without a reason")
