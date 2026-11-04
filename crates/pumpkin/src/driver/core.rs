@@ -68,8 +68,6 @@ pub enum Request {
 /// What the runtime observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The agent's command has started in its sandbox.
-    AgentStarted,
     /// The agent's command has exited.
     AgentExited { status: ExitStatus },
     /// The agent's sandbox failed: it could not start, or its session ended.
@@ -80,7 +78,7 @@ pub enum Event {
     /// A job's command has started.
     JudgeStarted { job: JobId },
     /// A job's command has exited by itself.
-    JudgeExited { job: JobId, status: ExitStatus },
+    JudgeExited { job: JobId },
     /// A job's command reached its timeout, and the runtime stopped it.
     JudgeTimedOut { job: JobId },
     /// A job's outputs have been collected and its sandbox destroyed. `result` is its
@@ -100,7 +98,7 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the agent's sandbox and its command, then reports [`Event::AgentStarted`].
+    /// Starts the agent's sandbox and its command.
     StartAgent,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
@@ -264,9 +262,8 @@ impl<'w> Core<'w> {
             self.end_work(WorkEnd::Finalized, &mut actions);
         }
         match event {
-            // Nothing waits for these: whether the agent's command has started changes no
-            // decision, and a tick only moves the clock.
-            Event::AgentStarted | Event::Tick => {}
+            // A tick only moves the clock, on which the checks above have acted.
+            Event::Tick => {}
             Event::AgentExited { status } => {
                 self.end_work(WorkEnd::AgentExited(status), &mut actions);
             }
@@ -275,7 +272,7 @@ impl<'w> Core<'w> {
             }
             Event::OpArrived { op, request } => self.op(op, request, &mut actions),
             Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
-            Event::JudgeExited { job, status: _ } => {
+            Event::JudgeExited { job } => {
                 self.on_job(job, |state| state.ended(at, jobs::End::Exited));
             }
             Event::JudgeTimedOut { job } => {

@@ -5,10 +5,10 @@
 //! A script has one event per line: the time in milliseconds since the run started, then one
 //! of these:
 //!
-//! - `agent_started`, `agent_exited <code>`, `agent_failed <reason>`;
+//! - `agent_exited <code>`, `agent_failed <reason>`;
 //! - `ops`, `judge <grant> <bytes>`, `submit <grant> <bytes> [final]` and `status <job>`,
 //!   each an op from the agent, whose payload is named by the op's number;
-//! - `judge_started <job>`, `judge_exited <job> <code>`, `judge_timed_out <job>`,
+//! - `judge_started <job>`, `judge_exited <job>`, `judge_timed_out <job>`,
 //!   `collected <job> <result.json>`, `judge_failed <job> <reason>`;
 //! - `tick`.
 
@@ -82,7 +82,6 @@ impl Run<'_> {
         let job = || JobId(words[1].parse().unwrap());
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
         match words[0] {
-            "agent_started" => Event::AgentStarted,
             "agent_exited" => Event::AgentExited {
                 status: code(words[1]),
             },
@@ -107,10 +106,7 @@ impl Run<'_> {
                 job: words[1].parse().unwrap(),
             }),
             "judge_started" => Event::JudgeStarted { job: job() },
-            "judge_exited" => Event::JudgeExited {
-                job: job(),
-                status: code(words[2]),
-            },
+            "judge_exited" => Event::JudgeExited { job: job() },
             "judge_timed_out" => Event::JudgeTimedOut { job: job() },
             "collected" => {
                 let slot = self.workflow.call_slot(self.jobs[&job()]);
@@ -259,27 +255,25 @@ fn lwe() {
     check(
         |_| {},
         r#"
-        0 agent_started
         1000 ops
         2000 judge train 10240
         2100 status 1
         2500 judge_started 1
         3000 status 1
-        9500 judge_exited 1 0
+        9500 judge_exited 1
         9600 collected 1 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}, "summary": "for the operator"}
         10000 status 1
         11000 submit submit 10240
         12000 submit submit 10240 final
         12100 agent_exited 0
         13500 judge_started 2
-        20000 judge_exited 2 0
+        20000 judge_exited 2
         20100 collected 2 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}}
         "#,
         &expect![[r#"
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             1000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             2000 judge train 10240
@@ -290,7 +284,7 @@ fn lwe() {
             2500 judge_started 1
             3000 status 1
               reply to op 4: {"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}
-            9500 judge_exited 1 0
+            9500 judge_exited 1
             9600 collected 1 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}, "summary": "for the operator"}
             10000 status 1
               reply to op 5: {"kind":"status","job":1,"state":"passed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11993}}
@@ -304,7 +298,7 @@ fn lwe() {
               start job 2 of score on op 7's payload of 10240 bytes, with a timeout of 120s
               (no tick due)
             13500 judge_started 2
-            20000 judge_exited 2 0
+            20000 judge_exited 2
             20100 collected 2 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}}
               finish: score 0; work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, passed, returning {"metrics":{"solved":0},"raw_score":0}
         "#]],
@@ -322,7 +316,6 @@ fn quotas() {
             train["call_timeout_seconds"] = json!(6);
         },
         r#"
-        0 agent_started
         1000 judge train 4194305
         1000 judge nothing 10
         1000 submit train 10
@@ -330,7 +323,7 @@ fn quotas() {
         1000 submit submit 4194305
         1000 judge train 10
         2000 judge_started 1
-        6000 judge_exited 1 1
+        6000 judge_exited 1
         6100 collected 1 {"status": "failed", "raw_score": null, "failure": {"code": "wrong_answer"}, "summary": "for the operator"}
         6200 status 1
         7000 judge train 10
@@ -345,7 +338,6 @@ fn quotas() {
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             1000 judge train 4194305
               refuse op 1: the payload is 4194305 bytes, over `train`'s limit of 4194304: send a smaller one
             1000 judge nothing 10
@@ -360,7 +352,7 @@ fn quotas() {
               reply to op 6: {"kind":"judge","job":1,"remaining":{"calls":99,"seconds":10}}
               start job 1 of train on op 6's payload of 10 bytes, with a timeout of 6s
             2000 judge_started 1
-            6000 judge_exited 1 1
+            6000 judge_exited 1
             6100 collected 1 {"status": "failed", "raw_score": null, "failure": {"code": "wrong_answer"}, "summary": "for the operator"}
             6200 status 1
               reply to op 7: {"kind":"status","job":1,"state":"failed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"remaining":{"calls":99,"seconds":6}}
@@ -388,12 +380,11 @@ fn one_call_at_a_time() {
     check(
         |ir| ir["main"]["solo_then_judge"]["grants"][0]["judge"]["calls"] = json!(2),
         r#"
-        0 agent_started
         1000 judge train 10
         1100 judge train 10
         1200 status 1
         2000 judge_started 1
-        3000 judge_exited 1 0
+        3000 judge_exited 1
         3100 judge train 10
         3200 collected 1 {"status": "passed"}
         3300 status 1
@@ -406,7 +397,6 @@ fn one_call_at_a_time() {
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":12000}}
               start job 1 of train on op 1's payload of 10 bytes, with a timeout of 12000s
@@ -415,7 +405,7 @@ fn one_call_at_a_time() {
             1200 status 1
               reply to op 3: {"kind":"status","job":1,"state":"queued","remaining":{"calls":1,"seconds":12000}}
             2000 judge_started 1
-            3000 judge_exited 1 0
+            3000 judge_exited 1
             3100 judge train 10
               refuse op 4: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             3200 collected 1 {"status": "passed"}
@@ -441,7 +431,6 @@ fn deadline() {
     check(
         |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
         r#"
-        0 agent_started
         50000 submit submit 10
         55000 judge train 10
         55500 judge_started 1
@@ -458,7 +447,6 @@ fn deadline() {
             start
               start the agent
               (tick due at 60000)
-            0 agent_started
             50000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":10}
             55000 judge train 10
@@ -491,27 +479,25 @@ fn agent_ends() {
     check(
         |_| {},
         r#"
-        0 agent_started
         1000 judge train 10
         1500 judge_started 1
-        3000 judge_exited 1 0
+        3000 judge_exited 1
         3100 submit submit 10
         3200 agent_exited 0
         3400 collected 1 {"status": "passed", "raw_score": 1}
         3500 judge_started 2
-        5000 judge_exited 2 0
+        5000 judge_exited 2
         5100 collected 2 {"status": "failed", "raw_score": 7.5, "failure": "too slow"}
         "#,
         &expect![[r#"
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}
               start job 1 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 judge_started 1
-            3000 judge_exited 1 0
+            3000 judge_exited 1
             3100 submit submit 10
               reply to op 2: {"kind":"submit","state":"stored","remaining_seconds":17996}
             3200 agent_exited 0
@@ -520,7 +506,7 @@ fn agent_ends() {
             3400 collected 1 {"status": "passed", "raw_score": 1}
               start job 2 of score on op 2's payload of 10 bytes, with a timeout of 120s
             3500 judge_started 2
-            5000 judge_exited 2 0
+            5000 judge_exited 2
             5100 collected 2 {"status": "failed", "raw_score": 7.5, "failure": "too slow"}
               finish: no score; work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, got no result, InvalidResult("the result failed, yet has a score at `/raw_score`: leave it out, or write null")
         "#]],
@@ -550,7 +536,6 @@ fn finalize_lock() {
     check(
         |_| {},
         r"
-        0 agent_started
         1000 judge train 10
         1500 judge_started 1
         2000 submit submit 10 final
@@ -565,7 +550,6 @@ fn finalize_lock() {
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}
               start job 1 of train on op 1's payload of 10 bytes, with a timeout of 12000s
@@ -591,7 +575,6 @@ fn finalize_lock() {
     check(
         |ir| ir["main"]["solo_then_judge"]["finalize_grace_seconds"] = json!(0),
         r"
-        0 agent_started
         2000 submit submit 10 final
         2100 ops
         ",
@@ -599,7 +582,6 @@ fn finalize_lock() {
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             2000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":0}
               tear down the agent
@@ -618,14 +600,12 @@ fn finalize_near_deadline() {
     check(
         |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(30),
         r"
-        0 agent_started
         10000 submit submit 10 final
         ",
         &expect![[r#"
             start
               start the agent
               (tick due at 30000)
-            0 agent_started
             10000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":20}
         "#]],
@@ -638,7 +618,6 @@ fn unknown_jobs() {
     check(
         |_| {},
         r"
-        0 agent_started
         1000 judge train 10
         1400 status 2
         1500 status 0
@@ -647,7 +626,6 @@ fn unknown_jobs() {
             start
               start the agent
               (tick due at 18000000)
-            0 agent_started
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}
               start job 1 of train on op 1's payload of 10 bytes, with a timeout of 12000s
