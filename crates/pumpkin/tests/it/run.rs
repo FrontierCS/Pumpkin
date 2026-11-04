@@ -58,11 +58,12 @@ call slow queued
 $ctl submit submit payload --finalize > /dev/null
 "#;
 
-/// A judge: scores a payload by its size, and keeps evidence, a byte over its limit for the
-/// payload `evidence`. For `slow`, it does so only after its call's timeout, so that a stop that
-/// doesn't take effect shows as the call timing out.
+/// A judge: scores a payload by its size, and keeps evidence, exactly at its limit for the
+/// payload `ledger` and a byte over it for `evidence`. For `slow`, it does so only after its
+/// call's timeout, so that a stop that doesn't take effect shows as the call timing out.
 const JUDGE: &str = r#"
 case $(cat /pumpkin/in/payload/raw) in
+ledger) printf '%1019s' '' > /pumpkin/out/evidence/padding ;;
 evidence) head -c 1020 /dev/zero > /pumpkin/out/evidence/padding ;;
 slow) sleep 300 ;;
 esac
@@ -185,6 +186,7 @@ fn mini() {
         jobs/1/log/command.stderr: 
         jobs/1/log/command.stdout: judged 6 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
         jobs/1/out/evidence/evidence.txt: kept
+        jobs/1/out/evidence/padding: 
         jobs/1/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
         jobs/2/log/command.stderr: 
         jobs/2/log/command.stdout: judged 8 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
@@ -195,6 +197,7 @@ fn mini() {
         jobs/4/log/command.stderr: 
         jobs/4/log/command.stdout: judged 6 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
         jobs/4/out/evidence/evidence.txt: kept
+        jobs/4/out/evidence/padding: 
         jobs/4/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
         log.jsonl
         outcome.json
