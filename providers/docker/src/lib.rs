@@ -41,8 +41,10 @@
 
 use std::env;
 use std::ffi::OsStr;
+use std::fmt;
+use std::io;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
@@ -296,11 +298,14 @@ impl Engine {
         })?;
         let endpoint = String::from_utf8_lossy(&inspected.stdout).trim().to_owned();
         let info = docker(&context, ["info", "--format", "{{json .}}"]).map_err(|error| {
-            let todo = if error.contains("permission denied") {
-                "let this user reach the engine's socket: by the `docker` group, which is \
-                 root-equivalent, or by running rootless Docker and naming its context"
-            } else {
-                "start the engine, or name a context whose engine runs"
+            let todo = match &error {
+                Failure::Exited { stderr, .. } if stderr.contains("permission denied") => {
+                    "let this user reach the engine's socket: by the `docker` group, which is \
+                     root-equivalent, or by running rootless Docker and naming its context"
+                }
+                Failure::Unrun(_) | Failure::Exited { .. } => {
+                    "start the engine, or name a context whose engine runs"
+                }
             };
             format!("the Docker engine isn't reachable through context `{name}`: {error}: {todo}")
         })?;
@@ -356,9 +361,9 @@ impl Engine {
     /// Fails, naming the path, if the session's socket can't be made in the socket directory,
     /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
     /// container; if its `sandboxd` doesn't connect within 30 s, which a `sandboxd` that exits
-    /// at once still costs; or if the directories can't be put. Whatever container `docker`
-    /// created is removed before the error returns, which quotes the end of the container's
-    /// logs, and says if removing it failed.
+    /// at once still costs, or its session can't be set up; or if the directories can't be
+    /// put. Whatever container `docker` created is removed before the error returns, which
+    /// quotes the end of the container's logs, and says if removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
         let socket = start.socket_dir.join(SOCKET_NAME);
@@ -491,10 +496,14 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
 /// payload limit, if any, and puts the directories a role expects.
 fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
     let mut session = listener.accept(CONNECT_TIMEOUT, ops).map_err(|error| {
-        format!(
-            "the `sandboxd` of container {id} didn't connect: {error}: expected it to connect \
-             as it starts"
-        )
+        if error.kind() == io::ErrorKind::TimedOut {
+            format!(
+                "the `sandboxd` of container {id} didn't connect: {error}: expected it to \
+                 connect as it starts"
+            )
+        } else {
+            format!("the session of container {id} can't be set up: {error}")
+        }
     })?;
     let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
     let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
@@ -604,15 +613,16 @@ fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
 /// first if it runs. A container already gone is removed.
 fn remove(context: &ContextName, id: &str) -> Result<(), String> {
     match docker(context, ["rm", "--force", "--volumes", id]) {
+        Ok(_) => Ok(()),
         // Docker 29 exits 0 here, but no minimum version is pinned, and older engines fail.
-        Err(error) if error.contains("No such container") => Ok(()),
-        other => other.map(|_| ()),
+        Err(Failure::Exited { stderr, .. }) if stderr.contains("No such container") => Ok(()),
+        Err(error) => Err(error.to_string()),
     }
 }
 
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
 /// its standard error, which `docker logs` writes to its own two streams.
-fn log_tail(context: &ContextName, id: &str) -> Result<String, String> {
+fn log_tail(context: &ContextName, id: &str) -> Result<String, Failure> {
     let logs = ["logs", "--tail", "20", id];
     let Output {
         status: _,
@@ -624,8 +634,8 @@ fn log_tail(context: &ContextName, id: &str) -> Result<String, String> {
 
 /// `error`, from a `docker` command that failed for a reason the provider doesn't foresee, and
 /// what to do about it: Docker's error says what is wrong.
-fn fix_reported(error: String) -> String {
-    error + ": fix what Docker reports"
+fn fix_reported(error: impl fmt::Display) -> String {
+    format!("{error}: fix what Docker reports")
 }
 
 /// Runs `docker` against `context` alone with `args`, and returns its output. If the command
@@ -639,7 +649,7 @@ fn fix_reported(error: String) -> String {
 /// command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`, among
 /// others, would set the endpoint and TLS of `default`. A context reached over `ssh://` would
 /// need `SSH_AUTH_SOCK` too, which isn't passed.
-fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, String>
+fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -656,25 +666,51 @@ where
         .args(&args)
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| {
-            format!("`docker` didn't run: {error}: install Docker's command line on `PATH`")
-        })?;
+        .map_err(Failure::Unrun)?;
     if output.status.success() {
         Ok(output)
     } else {
-        // The command, such as `container ls`, and its argument, as in `start <id>`, but none of
-        // its options, which can be long.
-        let mut shown = String::new();
+        // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`,
+        // but none of its options, which can be long.
+        let mut command = "docker".to_owned();
         let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
         for word in words.take(2).take_while(|word| !word.starts_with('-')) {
-            shown.push(' ');
-            shown.push_str(&word);
+            command.push(' ');
+            command.push_str(&word);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "`docker{shown}` failed with {}: {}",
-            output.status,
-            stderr.trim()
-        ))
+        Err(Failure::Exited {
+            command,
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+/// Why a [`docker`] command failed, displayed as [`docker`] describes its error.
+enum Failure {
+    /// `docker` didn't run.
+    Unrun(io::Error),
+    /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what
+    /// Docker reported.
+    Exited {
+        command: String,
+        status: ExitStatus,
+        stderr: String,
+    },
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unrun(error) => write!(
+                f,
+                "`docker` didn't run: {error}: install Docker's command line on `PATH`"
+            ),
+            Self::Exited {
+                command,
+                status,
+                stderr,
+            } => write!(f, "`{command}` failed with {status}: {}", stderr.trim()),
+        }
     }
 }

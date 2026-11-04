@@ -18,9 +18,9 @@ impl Workflow {
     ///
     /// # Errors
     ///
-    /// Returns the rules the IR breaks, each with its path in the IR, such as a name that
-    /// resolves to nothing or a second agent. A rule about parts that fail to resolve is not
-    /// checked, so fixing those errors may reveal others.
+    /// Returns the rules the IR breaks, each with its [path](ParseError::path) in the IR, such
+    /// as a name that resolves to nothing or a second agent. A rule about parts that fail to
+    /// resolve is not checked, so fixing those errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }

@@ -195,7 +195,8 @@ fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
     let build = build.args(["--message-format", "json-render-diagnostics"]);
     // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {
-        let message: serde_json::Value = serde_json::from_str(line)?;
+        let message: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("cargo printed `{line}`, which isn't JSON: {error}"))?;
         if message["reason"] == "compiler-artifact"
             && message["target"]["name"] == "sandboxd"
             && let Some(path) = message["executable"].as_str()
