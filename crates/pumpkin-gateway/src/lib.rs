@@ -792,14 +792,7 @@ impl Assembler {
                 "it sent data for op {number}, which is not open"
             )));
         };
-        #[expect(
-            clippy::unreachable,
-            reason = "a frame's body holds at most `frame::MAX_BODY_BYTES`, 1 MiB, which fits a \
-                      u64"
-        )]
-        let Ok(len) = u64::try_from(bytes.len()) else {
-            unreachable!("a body of {} bytes overflows a u64", bytes.len())
-        };
+        let len = bytes.len() as u64;
         let Some(due) = assembly.due.checked_sub(len) else {
             return Err(broke(&format!(
                 "it sent {len} bytes of op {number}'s payload, past its size: {} were left",

@@ -299,15 +299,7 @@ fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
     file.take(MAX_OP_PAYLOAD_BYTES + 1)
         .read_to_end(&mut payload)
         .context(path.display())?;
-    #[expect(
-        clippy::unreachable,
-        reason = "the payload is read through `take(MAX_OP_PAYLOAD_BYTES + 1)`, so it holds at \
-                  most 64 MiB and a byte, which fits a u64"
-    )]
-    let Ok(len) = u64::try_from(payload.len()) else {
-        unreachable!("a payload of {} bytes overflows a u64", payload.len())
-    };
-    if len > MAX_OP_PAYLOAD_BYTES {
+    if payload.len() as u64 > MAX_OP_PAYLOAD_BYTES {
         return Err(too_long());
     }
     Ok(payload)
@@ -315,14 +307,7 @@ fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
 
 /// Sends op `op`: its call with its payload's size, then the payload's bytes.
 fn send(sender: &Sender, op: u32, call: OpCall, payload: &[u8]) -> io::Result<()> {
-    #[expect(
-        clippy::unreachable,
-        reason = "a payload holds at most `MAX_OP_PAYLOAD_BYTES`, 64 MiB, as `read_payload` \
-                  checks, which fits a u64"
-    )]
-    let Ok(size) = u64::try_from(payload.len()) else {
-        unreachable!("a payload of {} bytes overflows a u64", payload.len())
-    };
+    let size = payload.len() as u64;
     sender.send(&FromSandbox::Op { op, call, size }, &[])?;
     for chunk in payload.chunks(MAX_BODY_BYTES) {
         sender.send(&FromSandbox::OpData { op }, chunk)?;
