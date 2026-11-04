@@ -13,9 +13,9 @@
 //! - `jobs/<n>/out` and `jobs/<n>/log`: judge call `n`'s result, evidence and logs;
 //! - `agent/out` and `agent/log`: the agent's outputs and logs, collected when the work phase
 //!   ends;
-//! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields, in the
-//!   run log's JSON form of an outcome (`log::outcome_json`); or `{"state": "refused" |
-//!   "failed", "reason": r}`.
+//! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields, in
+//!   the run log's JSON form of an outcome (`log::outcome_json`); or
+//!   `{"state": "refused" | "failed", "reason": r}`.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

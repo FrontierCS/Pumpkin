@@ -2,12 +2,12 @@
 //! [core](super::core) decides, and keeps the run's record.
 //!
 //! [`Run::prepare`] parses a workflow and begins its record, and [`Run::execute`] runs it to
-//! its outcome. One thread drives the run. In a loop, it takes the agent's ops from its session,
-//! the reports of judge calls, and a tick when the core wants one ([`Core::tick_due`]); it turns
-//! each into an [`Event`], appends that to the run log with the actions the core returns, and
-//! then performs them. Each judge call runs on a thread of its own, in a fresh sandbox (the
-//! `judge` module); the record's files and the run log's records are laid out in the `record`
-//! and `log` modules.
+//! its outcome. One thread drives the run. In a loop, it takes the agent's ops from its
+//! session, the reports of judge calls, and a tick when the core wants one
+//! ([`Core::tick_due`]); it turns each into an [`Event`], appends that to the run log with the
+//! actions the core returns, and then performs them. Each judge call runs on a thread of its
+//! own, in a fresh sandbox (the `judge` module); the record's files and the run log's records
+//! are laid out in the `record` and `log` modules.
 //!
 //! What a role's code finds in its sandbox is the in-sandbox contract, which
 //! [`pumpkin_schema::sandbox`] gives.

@@ -74,13 +74,12 @@ containers by their `RunTag`. Every call to the `docker` command line goes throu
 
 **`crates/pumpkin`** (`pumpkin`). Pumpkin's host side: the driver, which runs a workflow. The
 driver's decision core is `driver::core` ([module doc](crates/pumpkin/src/driver/core.rs)).
-`Core::start` begins a run of a
-`Workflow`, and `Core::handle` takes each `Event` with the time since the run started; both
-return `Action`s, and `Core::tick_due` says when time alone next calls for some. Its `ops` module
-authorizes the agent's ops (`Request`) and fills in their replies, `jobs` meters the judge calls
-they start (`Jobs::usage`), and `JudgeResult::parse` reads a judge's `result.json` per its
-`ResultSpec`. A run ends with `Action::Finish`, which carries its `Outcome` (`WorkEnd`,
-`Verdict`).
+`Core::start` begins a run of a `Workflow`, and `Core::handle` takes each `Event` with the time
+since the run started; both return `Action`s, and `Core::tick_due` says when time alone next
+calls for some. Its `ops` module authorizes the agent's ops (`Request`) and fills in their
+replies, `jobs` meters the judge calls they start (`Jobs::usage`), and `JudgeResult::parse`
+reads a judge's `result.json` per its `ResultSpec`. A run ends with `Action::Finish`, which
+carries its `Outcome` (`WorkEnd`, `Verdict`).
 
 The driver's runtime is `driver::run` ([module doc](crates/pumpkin/src/driver/run.rs)).
 `Run::prepare` parses a workflow's IR and begins its record, and `Run::execute` drives the run
