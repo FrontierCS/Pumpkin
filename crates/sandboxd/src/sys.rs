@@ -2,6 +2,9 @@
 //! for any child or finding whether there is one, killing a process group or every process,
 //! making the process non-dumpable, opening only a regular file, at a path the role's code can
 //! write, and finding whether a connection's other end has closed it, without reading from it.
+//!
+//! Every errno a call returns is the world's, and returned: the kernel's security policy, a
+//! security module's or a seccomp filter's, may fail any call with any errno.
 
 #![expect(
     unsafe_code,
@@ -18,8 +21,9 @@ use std::path::Path;
 use stdx::Context;
 
 /// Waits until a child has exited, or a child that made this process its tracer has stopped,
-/// without reaping it, and returns its process ID: `None` if there are no children.
-pub(crate) fn wait_for_child() -> Option<i32> {
+/// without reaping it, and returns its process ID: `None` if there are no children. Fails with
+/// waitid's errno.
+pub(crate) fn wait_for_child() -> io::Result<Option<i32>> {
     loop {
         // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -28,66 +32,56 @@ pub(crate) fn wait_for_child() -> Option<i32> {
         if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
             // SAFETY: waitid filled `info` for a child that exited or stopped, so it holds a
             // process ID.
-            return Some(unsafe { info.si_pid() });
+            return Ok(Some(unsafe { info.si_pid() }));
         }
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
-            Some(libc::ECHILD) => return None,
+            Some(libc::ECHILD) => return Ok(None),
             Some(libc::EINTR) => {}
-            #[expect(
-                clippy::unreachable,
-                reason = "waitid fails otherwise only for invalid options or a nonblocking \
-                          pidfd, and these options are valid and name no pidfd"
-            )]
-            _ => unreachable!("waitid(P_ALL, WEXITED | WNOWAIT) failed: {error}"),
+            _ => return Err(error),
         }
     }
 }
 
 /// Whether this process has any children: running, stopped, or exited and not yet reaped.
-pub(crate) fn has_children() -> bool {
+/// Fails with waitid's errno.
+pub(crate) fn has_children() -> io::Result<bool> {
     // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
     // SAFETY: waitid writes only to `info`, which outlives the call.
     if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
-        return true;
+        return Ok(true);
     }
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
-        Some(libc::ECHILD) => false,
-        #[expect(
-            clippy::unreachable,
-            reason = "waitid fails otherwise only for invalid options, a nonblocking pidfd, or a \
-                      signal while it blocks, and these options are valid, name no pidfd, and \
-                      don't block"
-        )]
-        _ => unreachable!("waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT) failed: {error}"),
+        Some(libc::ECHILD) => Ok(false),
+        _ => Err(error),
     }
 }
 
 /// Reaps child `pid` if it has exited and returns its raw status: `None` if it hasn't exited
 /// yet, or was already reaped. For a child that made this process its tracer, it also returns
 /// the status of a stop, and consumes the report of it, so that no wait returns it again.
-pub(crate) fn reap(pid: i32) -> Option<i32> {
+/// Fails with waitpid's errno.
+pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
     let mut status = 0;
     // SAFETY: waitpid writes only to `status`, which outlives the call.
     match unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) } {
-        reaped if reaped == pid => Some(status),
-        0 => None,
-        returned => {
+        reaped if reaped == pid => Ok(Some(status)),
+        0 => Ok(None),
+        -1 => {
             let error = io::Error::last_os_error();
             match error.raw_os_error() {
-                Some(libc::ECHILD) => None,
-                #[expect(
-                    clippy::unreachable,
-                    reason = "given a child's process ID and WNOHANG, waitpid returns that ID or \
-                              0, or fails with ECHILD: EINTR needs a wait that blocks, EINVAL \
-                              invalid options, and ESRCH a pid of INT_MIN"
-                )]
-                _ => unreachable!("waitpid({pid}, WNOHANG) returned {returned}: {error}"),
+                Some(libc::ECHILD) => Ok(None),
+                _ => Err(error),
             }
         }
+        #[expect(
+            clippy::unreachable,
+            reason = "given a child's process ID, waitpid returns that ID, 0 or -1"
+        )]
+        returned => unreachable!("waitpid({pid}, WNOHANG) returned {returned}"),
     }
 }
 
@@ -100,18 +94,11 @@ pub(crate) fn kill_group(group: i32) -> io::Result<()> {
 
 /// Kills every process this one may signal, and skips the others. As the first process of its
 /// namespace, that is every other process in it: the kernel never sends a signal for `-1` to
-/// the sender itself or to PID 1.
-pub(crate) fn kill_all_others() {
+/// the sender itself or to PID 1. Where something other than the user's rights keeps it from
+/// killing a process, such as a security module's policy, it may fail, or skip that one too.
+pub(crate) fn kill_all_others() -> io::Result<()> {
     // SAFETY: kill takes only integers and touches no memory of this process.
-    match killed(unsafe { libc::kill(-1, libc::SIGKILL) }) {
-        Ok(()) => {}
-        #[expect(
-            clippy::unreachable,
-            reason = "Linux's kill(-1) skips each process it may not signal, and returns success, \
-                      or ESRCH when it found nothing to signal: never EPERM"
-        )]
-        Err(error) => unreachable!("kill(-1, SIGKILL) failed: {error}"),
-    }
+    killed(unsafe { libc::kill(-1, libc::SIGKILL) })
 }
 
 /// Whether this is the first process of its PID namespace, as `sandboxd` is in a sandbox.
@@ -126,22 +113,15 @@ pub(crate) fn is_first_process() -> bool {
 /// first process, whose standard output and error are the container's log, kept on the host:
 /// a command that could open them could write there, outside the session.
 ///
-/// The commands it starts don't inherit the flag, since `execve` resets it.
-pub(crate) fn make_non_dumpable() {
+/// The commands it starts don't inherit the flag, since `execve` resets it. Fails if the
+/// kernel refuses, as a security module's policy may.
+pub(crate) fn make_non_dumpable() -> io::Result<()> {
     let off: libc::c_ulong = 0;
     // SAFETY: `PR_SET_DUMPABLE` takes integer arguments only, each passed as the
     // `unsigned long` the kernel reads.
     match unsafe { libc::prctl(libc::PR_SET_DUMPABLE, off, off, off, off) } {
-        0 => {}
-        #[expect(
-            clippy::unreachable,
-            reason = "PR_SET_DUMPABLE fails only for a value other than SUID_DUMP_DISABLE (0) or \
-                      SUID_DUMP_USER (1), and this passes 0"
-        )]
-        _ => unreachable!(
-            "prctl(PR_SET_DUMPABLE, 0) failed: {}",
-            io::Error::last_os_error()
-        ),
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
     }
 }
 
@@ -188,8 +168,9 @@ pub(crate) fn peer_closed(connection: &UnixStream) -> bool {
 }
 
 /// The outcome of a `kill` or `killpg` that sent `SIGKILL` and returned `result`: finding no
-/// process left to kill is no failure, and lacking the permission to kill is the only one,
-/// which only [`kill_group`] can report.
+/// process left to kill is no failure, and any other errno is the world's, as when the user may
+/// not kill a process (`EPERM`, which `kill(-1)` never reports), or a security module's policy
+/// forbids it.
 fn killed(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         return Ok(());
@@ -197,12 +178,6 @@ fn killed(result: libc::c_int) -> io::Result<()> {
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
-        Some(libc::EPERM) => Err(error),
-        #[expect(
-            clippy::unreachable,
-            reason = "kill and killpg fail otherwise only with EINVAL, for an invalid signal, and \
-                      both send SIGKILL"
-        )]
-        _ => unreachable!("sending SIGKILL failed: {error}"),
+        _ => Err(error),
     }
 }

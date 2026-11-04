@@ -20,17 +20,17 @@
 //! but bounds what ops cost the host, and ends a session whose sandbox breaks the ops' rules.
 
 use std::collections::HashMap;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{fmt, fs, mem};
+use std::{fmt, fs, mem, process};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
@@ -419,10 +419,9 @@ impl Session {
                 match self.answer(refused.number, OpReply::Refused { message }) {
                     #[expect(
                         clippy::unreachable,
-                        reason = "the refusal's message is the one `Assembler::pass_on` writes, \
-                                  which names only the payload's size and the limit, two u64s, \
-                                  so its frame's message is a few hundred bytes, far under \
-                                  `frame::MAX_MESSAGE_BYTES`, 64 KiB"
+                        reason = "the refusal's message, which `Assembler::pass_on` writes, names \
+                                  only the payload's size and the limit, so its frame's message is \
+                                  under 200 bytes, far under `frame::MAX_MESSAGE_BYTES`, 64 KiB"
                     )]
                     Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                         unreachable!("the refusal of op {} is too long: {error}", refused.number)
@@ -455,8 +454,8 @@ impl Session {
         #[expect(
             clippy::unreachable,
             reason = "the owner answers each op on the session that handed it out, as this \
-                      method's contract requires: on another, the op's number would name an op \
-                      that sandbox may not have made"
+                      method's contract requires; a lifetime brand tying each op to its session \
+                      would reshape all of `Session`'s `pub` API"
         )]
         if session != self.id {
             unreachable!("op {number} was answered on a session other than the one it arrived on")
@@ -511,7 +510,7 @@ impl Session {
                     self.send(&ToSandbox::Entry { stream, entry }, &[])?;
                 }
                 Put::File(path, bytes) => {
-                    let size = u64::try_from(bytes.len()).map_err(io::Error::other)?;
+                    let size = bytes.len() as u64;
                     let entry = Entry::File {
                         path: path.clone(),
                         size,
@@ -641,16 +640,11 @@ fn route(
     ended: &OnceLock<String>,
     mut ops: Assembler,
 ) {
-    // Dropped before `ops`, a parameter, whose sender to the owner closes as `ops` drops: the
-    // owner, seeing it closed, asks why the session ended, which must be known by then.
-    let mut ending = Ending {
-        routes,
-        ended,
-        connection,
-        reason: "the session's reader thread panicked".to_owned(),
-    };
+    // A panic here would skip `end`, leaving the session open with its owner waiting on it, so
+    // it aborts the process instead, in every build, tests included.
+    let unwinding = AbortOnUnwind;
     let mut reader = BufReader::new(connection);
-    ending.reason = loop {
+    let reason = loop {
         let (message, body) = match frame::read::<FromSandbox>(&mut reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => break "the sandbox ended the session".to_owned(),
@@ -670,21 +664,25 @@ fn route(
             break reason;
         }
     };
+    // Before `ops`, a parameter, drops, which closes its sender to the owner: the owner, seeing
+    // it closed, asks why the session ended, which must be known by then.
+    end(routes, ended, connection, reason);
+    mem::forget(unwinding);
 }
 
-/// Ends the session for `reason` as it drops. The reader thread holds one, so that the session
-/// ends however the thread leaves, unwinding from a panic included.
-struct Ending<'a> {
-    routes: &'a Mutex<Routes>,
-    ended: &'a OnceLock<String>,
-    connection: &'a UnixStream,
-    reason: String,
-}
+/// Aborts the process as it drops, which only a panic unwinding past it lets happen.
+struct AbortOnUnwind;
 
-impl Drop for Ending<'_> {
+impl Drop for AbortOnUnwind {
     fn drop(&mut self) {
-        let reason = mem::take(&mut self.reason);
-        end(self.routes, self.ended, self.connection, reason);
+        // Straight to the standard error, which `cargo test` doesn't capture, unlike the panic's
+        // message from this thread.
+        let _ = writeln!(
+            io::stderr(),
+            "the gateway's reader thread panicked, so the process aborts: under `cargo test`, \
+             rerun with --nocapture to see the panic"
+        );
+        process::abort();
     }
 }
 
@@ -790,14 +788,7 @@ impl Assembler {
                 "it sent data for op {number}, which is not open"
             )));
         };
-        #[expect(
-            clippy::unreachable,
-            reason = "a frame's body holds at most `frame::MAX_BODY_BYTES`, 1 MiB, which fits a \
-                      u64"
-        )]
-        let Ok(len) = u64::try_from(bytes.len()) else {
-            unreachable!("a body of {} bytes overflows a u64", bytes.len())
-        };
+        let len = bytes.len() as u64;
         let Some(due) = assembly.due.checked_sub(len) else {
             return Err(broke(&format!(
                 "it sent {len} bytes of op {number}'s payload, past its size: {} were left",
@@ -847,10 +838,9 @@ impl Assembler {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
             #[expect(
                 clippy::unreachable,
-                reason = "the queue holds one arrival, and holds none now: an op leaves the \
-                          flight only once the owner has taken its arrival from the queue, as \
-                          it answers an op it took, or `next_op` refuses one it took, and the \
-                          sandbox may open the next op only once the one before has left"
+                reason = "the queue holds one arrival, and holds none now: an op leaves the flight \
+                          only once the owner has taken its arrival, to answer it or as `next_op` \
+                          refuses it, and the sandbox may open the next op only after that"
             )]
             Err(TrySendError::Full(_)) => {
                 unreachable!("op {number} arrived while the queue held another op's arrival")
@@ -892,9 +882,9 @@ fn payload(
     }
     #[expect(
         clippy::unreachable,
-        reason = "the size is at most the limit, which is at most `MAX_OP_PAYLOAD_BYTES`, \
-                  64 MiB (an `OpPayloadLimit` holds no more), which fits the usize of every \
-                  Linux target, of 32 bits or more"
+        reason = "the size is at most the limit, which is at most `MAX_OP_PAYLOAD_BYTES`, 64 MiB \
+                  (an `OpPayloadLimit` holds no more), which fits the usize of every Linux target, \
+                  of 32 bits or more"
     )]
     let Ok(capacity) = usize::try_from(size) else {
         unreachable!("a payload of {size} bytes overflows a usize")
@@ -931,19 +921,20 @@ fn end(routes: &Mutex<Routes>, ended: &OnceLock<String>, connection: &UnixStream
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    stdx::unpoisoned(mutex.lock())
 }
 
 /// The error of a request on a session that has ended, for the reason in `ended`.
 fn ended(ended: &OnceLock<String>) -> io::Error {
     #[expect(
         clippy::unreachable,
-        reason = "every way to learn that the session ended follows the reason's recording: \
-                  `end` records it before it closes the routes, which close otherwise only \
-                  after a frame that ends their request or once nothing receives from them; \
-                  the ops' sender closes only after the reader thread's `Ending` has ended the \
-                  session, even as a panic unwinds it; and the rest call `end` or check the \
-                  reason first"
+        reason = "every way to learn that the session ended follows the reason's recording: `end` \
+                  records it before it closes the routes, which close otherwise only after a frame \
+                  that ends their request or once nothing receives from them; the ops' sender \
+                  closes only after the reader thread has ended the session, which a panic there \
+                  can't skip, as it aborts the process; and the rest call `end` or check the \
+                  reason first; sending the reason as each channel's last message would need \
+                  room in queues that may be full"
     )]
     let Some(reason) = ended.get() else {
         unreachable!("the session ended without a reason")

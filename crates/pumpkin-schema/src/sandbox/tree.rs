@@ -107,7 +107,7 @@ impl Writer {
                 "file data arrived outside a file: send it after a file entry",
             ));
         };
-        let len = u64::try_from(bytes.len()).map_err(io::Error::other)?;
+        let len = bytes.len() as u64;
         if len > *due {
             return Err(invalid(
                 "file data runs past the file's size: send exactly the size given",

@@ -25,7 +25,6 @@ use std::fmt::Display;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::LockResult;
 
 mod commands;
 mod ctl;
@@ -100,7 +99,10 @@ fn main() -> ExitCode {
     if Path::new(&name).file_name() == Some("sandboxctl".as_ref()) {
         return ctl::main(args);
     }
-    sys::make_non_dumpable();
+    if let Err(error) = sys::make_non_dumpable() {
+        eprintln!("sandboxd: making the process non-dumpable failed: {error}");
+        return ExitCode::FAILURE;
+    }
     let flags::Sandboxd { gateway, ops } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {
@@ -128,18 +130,4 @@ fn main() -> ExitCode {
 /// reports even when nobody reads their output.
 fn print_line(mut stream: impl Write, line: impl Display) {
     let _ = writeln!(stream, "{line}");
-}
-
-/// The guard from locking a mutex, or from waiting on a condition variable with one.
-fn unpoisoned<T>(locked: LockResult<T>) -> T {
-    #[expect(
-        clippy::unreachable,
-        reason = "only a thread that panics while holding a lock poisons it, and a panic aborts \
-                  the process before it unwinds (`stdx::abort_on_panic`), so no thread is left \
-                  to see the lock"
-    )]
-    let Ok(guard) = locked else {
-        unreachable!("a thread panicked while holding a lock")
-    };
-    guard
 }

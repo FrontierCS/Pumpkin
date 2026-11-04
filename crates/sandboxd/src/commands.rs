@@ -13,19 +13,26 @@
 //! while there are children already.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{self, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
-use stdx::Context;
+use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
-use crate::{sys, unpoisoned};
+use crate::{print_line, sys};
+
+/// The context of a failed [`sys::has_children`], which the reaper and freezing both call.
+const HAS_CHILDREN_FAILED: &str = "finding whether sandboxd has children failed";
+
+/// The context of a failed [`kill_everything`], which freezing and a failed reaper both call.
+const KILL_FAILED: &str = "the sandbox's processes couldn't be killed";
 
 /// The commands started in this sandbox.
 pub(crate) struct Commands {
@@ -62,7 +69,8 @@ impl Shared {
 }
 
 impl Commands {
-    /// Starts the thread that reaps children and reports exits through `sender`.
+    /// Starts the thread that reaps children and reports exits through `sender`. If a wait for
+    /// a child fails, the thread kills the commands and ends `sandboxd`.
     pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
         let state = State {
             running: HashMap::new(),
@@ -75,7 +83,17 @@ impl Commands {
         });
         thread::Builder::new().name("reaper".to_owned()).spawn({
             let shared = Arc::clone(&shared);
-            move || reaper(&shared)
+            move || {
+                let Err(error) = reaper(&shared);
+                // With no reaper, no exit would be reported, so `sandboxd` stops as the end of
+                // the session stops it, and the gateway sees the connection close.
+                print_line(io::stderr(), format_args!("sandboxd: {error}"));
+                let killed = kill_everything(&shared.lock());
+                if let Err(error) = killed.context(KILL_FAILED) {
+                    print_line(io::stderr(), format_args!("sandboxd: {error}"));
+                }
+                process::exit(1);
+            }
         })?;
         Ok(Self { shared })
     }
@@ -101,13 +119,13 @@ impl Commands {
     pub(crate) fn freeze(&self) -> Result<(), String> {
         let mut state = self.shared.lock();
         state.frozen = true;
-        kill_everything(&state).context("the sandbox's processes couldn't be killed")?;
+        kill_everything(&state).context(KILL_FAILED)?;
         // Wake the reaper: orphans of processes sandboxd didn't start (a `docker exec`)
         // become its children with no start to announce them.
         self.shared.changed.notify_all();
         // A running command is a child until the reaper reaps it, which it reports before
         // letting go of the lock, so once no children are left, every exit has been reported.
-        while sys::has_children() {
+        while sys::has_children().context(HAS_CHILDREN_FAILED)? {
             state = self.shared.wait(state);
         }
         Ok(())
@@ -126,8 +144,7 @@ impl Commands {
 /// can't be killed leaves no other alive, and the first failure is returned.
 fn kill_everything(state: &State) -> io::Result<()> {
     if sys::is_first_process() {
-        sys::kill_all_others();
-        return Ok(());
+        return sys::kill_all_others();
     }
     let killed = state.running.keys().map(|&group| sys::kill_group(group));
     killed.fold(Ok(()), Result::and)
@@ -142,19 +159,13 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         stdout,
         stderr,
     } = launch;
-    #[expect(
-        clippy::unreachable,
-        reason = "an Argv holds a program: its only constructor refuses an empty one"
-    )]
-    let Some((program, args)) = argv.as_slice().split_first() else {
-        unreachable!("the command's Argv is empty")
-    };
+    let program = argv.program();
     let mut output = OpenOptions::new();
     output.write(true).create(true).truncate(true);
     let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
     let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
     let child = Command::new(program)
-        .args(args)
+        .args(argv.args())
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
         .current_dir(cwd.as_str())
         .stdin(Stdio::null())
@@ -163,17 +174,9 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         .process_group(0)
         .spawn()
         .context(format_args!("`{program}` didn't start in {cwd}"))?;
-    // The reaper waits for it, so its handle is dropped without waiting.
-    let id = child.id();
-    #[expect(
-        clippy::unreachable,
-        reason = "the standard library casts the child's pid_t, a positive i32, to the u32 it \
-                  returns"
-    )]
-    let Ok(pid) = i32::try_from(id) else {
-        unreachable!("the child's process ID {id} overflows an i32")
-    };
-    Ok(pid)
+    // The reaper waits for it, so its handle is dropped without waiting. The standard library
+    // casts the child's pid_t to the u32 it returns, which `cast_signed` undoes.
+    Ok(child.id().cast_signed())
 }
 
 /// Reaps children forever, reporting the exits of started commands. With no children, it
@@ -185,10 +188,10 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 /// and [`sys::reap`] consumes the report of its stop, so that it doesn't come back. `sandboxd`
 /// never resumes the child, which stays stopped until freezing or the end of the session kills
 /// it.
-fn reaper(shared: &Shared) {
+fn reaper(shared: &Shared) -> Result<Infallible, String> {
     loop {
         let mut state = shared.lock();
-        while !sys::has_children() {
+        while !sys::has_children().context(HAS_CHILDREN_FAILED)? {
             state = shared.wait(state);
         }
         // Commands may start while the reaper waits for a child.
@@ -199,11 +202,11 @@ fn reaper(shared: &Shared) {
                       starting a command reaps only a child that failed to start, before it lets \
                       go of the lock"
         )]
-        let Some(pid) = sys::wait_for_child() else {
+        let Some(pid) = sys::wait_for_child().context("waiting for a child to exit failed")? else {
             unreachable!("the children found under the lock are gone, reaped by another")
         };
         let mut state = shared.lock();
-        let Some(raw) = sys::reap(pid) else {
+        let Some(raw) = sys::reap(pid).context(format_args!("reaping child {pid} failed"))? else {
             continue;
         };
         let status = std::process::ExitStatus::from_raw(raw);
@@ -228,8 +231,8 @@ fn exit_status(status: std::process::ExitStatus) -> ExitStatus {
     }
     #[expect(
         clippy::unreachable,
-        reason = "waitpid reports an exit, a death by signal, a stop or a continuation; the \
-                  reaper skips stops before decoding, and asks for no continuations"
+        reason = "waitpid reports an exit, a death by signal, a stop or a continuation; the reaper \
+                  skips stops before decoding, and asks for no continuations"
     )]
     let Some(signal) = status.signal() else {
         unreachable!(

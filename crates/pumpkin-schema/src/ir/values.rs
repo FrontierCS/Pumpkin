@@ -2,7 +2,7 @@
 //! is well formed.
 
 use std::collections::HashSet;
-use std::fmt;
+use std::{fmt, iter};
 
 use serde::{Deserialize, Serialize};
 
@@ -243,38 +243,51 @@ fn check_model_name(name: &str) -> Result<(), String> {
 /// A command's program and arguments. The program is not empty, and nothing holds a NUL byte.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<String>", into = "Vec<String>")]
-pub struct Argv(Vec<String>);
+pub struct Argv {
+    program: String,
+    args: Vec<String>,
+}
 
 impl Argv {
-    pub fn as_slice(&self) -> &[String] {
-        &self.0
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
     }
 }
 
 impl TryFrom<Vec<String>> for Argv {
     type Error = String;
 
-    fn try_from(argv: Vec<String>) -> Result<Self, Self::Error> {
-        match argv.first() {
+    fn try_from(command: Vec<String>) -> Result<Self, Self::Error> {
+        let mut command = command.into_iter();
+        let program = match command.next() {
             None => return Err("the command is empty: it needs a program".to_owned()),
             Some(program) if program.is_empty() => {
                 return Err("the program is empty: name one".to_owned());
             }
-            Some(_) => {}
-        }
-        if let Some(arg) = argv.iter().find(|arg| arg.contains('\0')) {
+            Some(program) => program,
+        };
+        let args: Vec<String> = command.collect();
+        if let Some(arg) = iter::once(&program)
+            .chain(&args)
+            .find(|arg| arg.contains('\0'))
+        {
             return Err(format!(
                 "`{}` holds a NUL byte: no argument may",
                 arg.escape_debug()
             ));
         }
-        Ok(Self(argv))
+        Ok(Self { program, args })
     }
 }
 
 impl From<Argv> for Vec<String> {
     fn from(argv: Argv) -> Self {
-        argv.0
+        let Argv { program, args } = argv;
+        iter::once(program).chain(args).collect()
     }
 }
 
