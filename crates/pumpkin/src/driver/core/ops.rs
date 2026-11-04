@@ -120,10 +120,10 @@ impl Core<'_> {
         };
         match work_end {
             WorkEnd::Finalized => {
-                Err("a final submission was accepted: no more ops are taken".to_owned())
+                Err("a final submission was accepted: make no more ops".to_owned())
             }
             WorkEnd::Deadline | WorkEnd::AgentExited(_) | WorkEnd::AgentFailed(_) => {
-                Err("the work phase has ended: no more ops are taken".to_owned())
+                Err("the work phase has ended: make no more ops".to_owned())
             }
         }
     }
@@ -180,7 +180,9 @@ impl Core<'_> {
         if let Some(calls) = grant.calls
             && usage.calls >= calls.get()
         {
-            return Err(format!("`{name}` has no calls left: it allows {calls}"));
+            return Err(format!(
+                "`{name}` has no calls left of the {calls} it allows: make no more calls to it"
+            ));
         }
         if usage.busy {
             return Err(format!(
@@ -192,7 +194,7 @@ impl Core<'_> {
             && usage.used >= total
         {
             return Err(format!(
-                "`{name}` has no judge time left: its calls have used the {} s it allows",
+                "`{name}` has no judge time left of the {} s it allows: make no more calls to it",
                 total.as_secs()
             ));
         }

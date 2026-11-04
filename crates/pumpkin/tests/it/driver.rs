@@ -373,7 +373,7 @@ fn quotas() {
             14000 status 2
               reply to op 9: {"kind":"status","job":2,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":98,"seconds":0}}
             14100 judge train 10
-              refuse op 10: `train` has no judge time left: its calls have used the 10 s it allows
+              refuse op 10: `train` has no judge time left of the 10 s it allows: make no more calls to it
             14200 submit submit 0
               refuse op 11: the payload is empty: send `submit` at least one byte
         "#]],
@@ -426,7 +426,7 @@ fn one_call_at_a_time() {
               start job 2 of train on op 6's payload of 10 bytes, with a timeout of 11999s
             4000 judge_failed 2 the judge's sandbox did not connect
             4100 judge train 10
-              refuse op 7: `train` has no calls left: it allows 2
+              refuse op 7: `train` has no calls left of the 2 it allows: make no more calls to it
             4200 status 2
               reply to op 8: {"kind":"status","job":2,"state":"failed","failure":{"code":"judge_error","message":"the judge failed before giving a result"},"remaining":{"calls":0,"seconds":11999}}
         "#]],
@@ -471,7 +471,7 @@ fn deadline() {
               tear down the agent
               (no tick due)
             60100 status 1
-              refuse op 3: the work phase has ended: no more ops are taken
+              refuse op 3: the work phase has ended: make no more ops
             60200 agent_exited 137
             60400 judge_failed 1 stopped
               start job 2 of score on op 1's payload of 10 bytes, with a timeout of 120s
@@ -574,11 +574,11 @@ fn finalize_lock() {
               reply to op 2: {"kind":"submit","state":"accepted","remaining_seconds":60}
               (tick due at 62000)
             2100 ops
-              refuse op 3: a final submission was accepted: no more ops are taken
+              refuse op 3: a final submission was accepted: make no more ops
             2200 status 1
-              refuse op 4: a final submission was accepted: no more ops are taken
+              refuse op 4: a final submission was accepted: make no more ops
             2300 submit submit 10
-              refuse op 5: a final submission was accepted: no more ops are taken
+              refuse op 5: a final submission was accepted: make no more ops
             61999 tick
             62000 tick
               stop job 1
@@ -606,7 +606,7 @@ fn finalize_lock() {
               start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
               (no tick due)
             2100 ops
-              refuse op 2: a final submission was accepted: no more ops are taken
+              refuse op 2: a final submission was accepted: make no more ops
         "#]],
     );
 }
