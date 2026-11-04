@@ -3,27 +3,27 @@
 //! `log.jsonl` holds one JSON record per line, each written and synced before what it records
 //! is acted on. A record is one of:
 //!
-//! - an event: `{"seq": n, "at_ms": t, "event": e, "actions": [a, ...]}`, which the runtime
-//!   observed `t` milliseconds after the run started, with the actions the core decided on. The
-//!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ms": u}`, at `u`
-//!   milliseconds after the Unix epoch by the driving machine's clock, with the core's first
+//! - an event: `{"seq": n, "at_ns": t, "event": e, "actions": [a, ...]}`, which the runtime
+//!   observed `t` nanoseconds after the run started, with the actions the core decided on. The
+//!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": u}`, at `u`
+//!   nanoseconds after the Unix epoch by the driving machine's clock, with the core's first
 //!   actions. Like it, an op the gateway refused itself, since its payload was over the agent's
 //!   limit, is no event of the core's, which neither decides on it nor learns of it, so it has
 //!   no actions: `{"kind": "op_refused", "request": r, "message": m}`, where the
 //!   request's payload is `{"size": s, "over": n}`, its size and the limit it was over, in
 //!   bytes, without a digest, since the gateway kept none of its bytes, and the message is the
 //!   refusal the gateway sent, unless the agent's session had ended;
-//! - a note: `{"seq": n, "at_ms": t, "note": s}`, something the runtime observed that the core
+//! - a note: `{"seq": n, "at_ns": t, "note": s}`, something the runtime observed that the core
 //!   doesn't decide on, such as what it collected of the agent's sandbox, outputs it couldn't
 //!   collect, or why the run failed.
 //!
-//! `seq` counts records from 0. An event's `at_ms` is when it was observed, so a judge call's
+//! `seq` counts records from 0. An event's `at_ns` is when it was observed, so a judge call's
 //! report may follow a later one. Each event and action is an object whose `kind` is its name
 //! in snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Roles
 //! and grants appear by their names in the workflow, jobs and ops by their numbers, payloads by
-//! size and digest, and durations in milliseconds. A judge call's `start_judge` names the
-//! agent's grant it was made under, or `null` for the pattern's score. A reply is the
-//! [`OpReply`](pumpkin_schema::sandbox::op::OpReply) sent.
+//! size and digest, and times and durations in whole nanoseconds, as the core takes and returns
+//! them. A judge call's `start_judge` names the agent's grant it was made under, or `null` for
+//! the pattern's score. A reply is the [`OpReply`](pumpkin_schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -70,7 +70,7 @@ impl Log {
         unix: Duration,
         actions: &[Action],
     ) -> Result<(), String> {
-        let event = json!({ "kind": "run_started", "unix_ms": millis(unix) });
+        let event = json!({ "kind": "run_started", "unix_ns": nanos(unix) });
         self.record(workflow, Duration::ZERO, event, actions)
     }
 
@@ -115,14 +115,14 @@ impl Log {
             .iter()
             .map(|action| action_json(workflow, action))
             .collect();
-        let mut record = json!({ "actions": actions, "at_ms": millis(at) });
+        let mut record = json!({ "actions": actions, "at_ns": nanos(at) });
         record["event"] = event;
         self.append(record)
     }
 
     /// Appends a note.
     pub(super) fn note(&mut self, at: Duration, note: &str) -> Result<(), String> {
-        self.append(json!({ "note": note, "at_ms": millis(at) }))
+        self.append(json!({ "note": note, "at_ns": nanos(at) }))
     }
 
     fn append(&mut self, mut record: Value) -> Result<(), String> {
@@ -138,10 +138,10 @@ impl Log {
     }
 }
 
-/// `duration` in whole milliseconds, rounded down, as the log gives times and durations:
-/// `u64::MAX` if it is longer.
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+/// `duration` in nanoseconds, as the log gives times and durations: `u64::MAX` if it is
+/// longer, over about 584 years.
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// The JSON form of an event.
@@ -215,7 +215,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
                 JudgeCall::Score => None,
             },
             "payload": payload_json(payload),
-            "timeout_ms": millis(*timeout),
+            "timeout_ns": nanos(*timeout),
         }),
         Action::StopJudge { job } => json!({ "kind": "stop_judge", "job": job.0 }),
         Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),

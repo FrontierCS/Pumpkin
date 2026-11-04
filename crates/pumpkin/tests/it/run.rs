@@ -131,9 +131,9 @@ fn mini() {
     let run = Run::prepare(&ir, &runs.dir).unwrap();
     let (tag, record, sockets) = (tag(run.id()), run.dir().to_owned(), sockets(run.id()));
     runs.tag = Some(tag.clone());
-    let before = unix_ms();
+    let before = unix_ns();
     let outcome = run.execute(engine(), &sandboxd).unwrap();
-    let during = before..=unix_ms();
+    let during = before..=unix_ns();
     let mut lines = vec![format!("score: {:?}", outcome.score())];
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     lines.push(format!("outcome.json: {}", compact(&outcome)));
@@ -143,7 +143,7 @@ fn mini() {
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap();
     lines.extend(shape(&log));
     let started: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
-    let started = started["event"]["unix_ms"].as_u64().unwrap();
+    let started = started["event"]["unix_ns"].as_u64().unwrap();
     lines.push(format!(
         "the run started during execute: {}",
         during.contains(&started)
@@ -175,18 +175,18 @@ fn mini() {
         outcome.json
         payloads/fe14010b4fe83303852f0467c919ef9a7ca089b91e96e3aad7d426dd87079297: ledger
         the log, without the polls before the job ended:
-        run_started {"unix_ms":"<unix_ms>"} -> start_agent
+        run_started {"unix_ns":"<unix_ns>"} -> start_agent
         agent_started
         op_arrived {"request":{"kind":"ops"}} -> reply {"reply":{"grants":[{"call_timeout_seconds":60,"calls":2,"cumulative_seconds":null,"kind":"judge","max_bytes":1024,"name":"train"},{"kind":"submit","max_bytes":1024,"name":"submit"}],"kind":"ops","resources":{"cpu_millis":500,"memory_bytes":268435456}}}
         op_arrived {"request":{"grant":"nothing","kind":"judge","payload":"7 bytes"}} -> reply {"reply":{"kind":"refused","message":"you hold no grant named `nothing`: call one that `ops` lists"}}
         op_refused {"message":"the payload is 1025 bytes, more than the limit of 1024: send at most 1024","request":{"grant":"train","kind":"judge","payload":{"over":1024,"size":1025}}}
-        op_arrived {"request":{"grant":"train","kind":"judge","payload":"6 bytes"}} -> reply {"reply":{"job":1,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":1,"payload":"6 bytes","timeout_ms":60000}
+        op_arrived {"request":{"grant":"train","kind":"judge","payload":"6 bytes"}} -> reply {"reply":{"job":1,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":1,"payload":"6 bytes","timeout_ns":60000000000}
         judge_started {"job":1}
         judge_exited {"job":1,"status":{"code":0}}
         judge_collected {"job":1,"result":{"passed":true,"returned":{"bytes":6},"score":6}}
         op_arrived {"request":{"job":1,"kind":"status"}} -> reply {"reply":{"job":1,"kind":"status","remaining":{"calls":1,"seconds":null},"returned":{"bytes":6},"state":"passed"}}
         op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
-        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ms":60000}
+        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ns":60000000000}
         note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
         judge_started {"job":2}
         judge_exited {"job":2,"status":{"code":0}}
@@ -298,7 +298,7 @@ fn shape(log: &str) -> Vec<String> {
     for (seq, line) in log.lines().enumerate() {
         let record: Value = serde_json::from_str(line).unwrap();
         assert_eq!(record["seq"], json!(seq), "{record}");
-        assert!(record["at_ms"].is_u64(), "{record}");
+        assert!(record["at_ns"].is_u64(), "{record}");
         if let Some(note) = record.get("note") {
             lines.push(format!("note: {note}"));
             continue;
@@ -332,16 +332,16 @@ fn event(event: &Value) -> String {
     if let Some(request) = event.get_mut("request") {
         shorten_payload(request);
     }
-    if let Some(unix_ms) = event.get_mut("unix_ms") {
-        *unix_ms = json!("<unix_ms>");
+    if let Some(unix_ns) = event.get_mut("unix_ns") {
+        *unix_ns = json!("<unix_ns>");
     }
     fields(&mut event)
 }
 
-/// Milliseconds since the Unix epoch.
-fn unix_ms() -> u64 {
+/// Nanoseconds since the Unix epoch.
+fn unix_ns() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    u64::try_from(since.as_millis()).unwrap()
+    u64::try_from(since.as_nanos()).unwrap()
 }
 
 /// An action, without its op's number or the seconds left, and the run's finish by its score
