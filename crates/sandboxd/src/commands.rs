@@ -13,11 +13,12 @@
 //! while there are children already.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{self, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
@@ -25,7 +26,10 @@ use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
 use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
-use crate::sys;
+use crate::{print_line, sys};
+
+/// The context of a failed [`sys::has_children`], which the reaper and freezing both call.
+const HAS_CHILDREN_FAILED: &str = "finding whether sandboxd has children failed";
 
 /// The commands started in this sandbox.
 pub(crate) struct Commands {
@@ -62,7 +66,9 @@ impl Shared {
 }
 
 impl Commands {
-    /// Starts the thread that reaps children and reports exits through `sender`.
+    /// Starts the thread that reaps children and reports exits through `sender`. Should a wait
+    /// for a child fail, the thread kills the commands and ends `sandboxd`, which can't report
+    /// their exits without it.
     pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
         let state = State {
             running: HashMap::new(),
@@ -75,7 +81,14 @@ impl Commands {
         });
         thread::Builder::new().name("reaper".to_owned()).spawn({
             let shared = Arc::clone(&shared);
-            move || reaper(&shared)
+            move || {
+                let Err(error) = reaper(&shared);
+                // With no reaper, no exit would be reported, so `sandboxd` stops as the end of
+                // the session stops it, and the gateway sees the connection close.
+                let _ = kill_everything(&shared.lock());
+                print_line(io::stderr(), format_args!("sandboxd: {error}"));
+                process::exit(1);
+            }
         })?;
         Ok(Self { shared })
     }
@@ -107,7 +120,7 @@ impl Commands {
         self.shared.changed.notify_all();
         // A running command is a child until the reaper reaps it, which it reports before
         // letting go of the lock, so once no children are left, every exit has been reported.
-        while sys::has_children() {
+        while sys::has_children().context(HAS_CHILDREN_FAILED)? {
             state = self.shared.wait(state);
         }
         Ok(())
@@ -169,11 +182,11 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
 /// ask only for exits. A stopped child is still running, so the reaper reports nothing for it,
 /// and [`sys::reap`] consumes the report of its stop, so that it doesn't come back. `sandboxd`
 /// never resumes the child, which stays stopped until freezing or the end of the session kills
-/// it.
-fn reaper(shared: &Shared) {
+/// it. Returns only if a wait fails.
+fn reaper(shared: &Shared) -> Result<Infallible, String> {
     loop {
         let mut state = shared.lock();
-        while !sys::has_children() {
+        while !sys::has_children().context(HAS_CHILDREN_FAILED)? {
             state = shared.wait(state);
         }
         // Commands may start while the reaper waits for a child.
@@ -184,11 +197,11 @@ fn reaper(shared: &Shared) {
                       starting a command reaps only a child that failed to start, before it lets \
                       go of the lock"
         )]
-        let Some(pid) = sys::wait_for_child() else {
+        let Some(pid) = sys::wait_for_child().context("waiting for a child to exit failed")? else {
             unreachable!("the children found under the lock are gone, reaped by another")
         };
         let mut state = shared.lock();
-        let Some(raw) = sys::reap(pid) else {
+        let Some(raw) = sys::reap(pid).context(format_args!("reaping child {pid} failed"))? else {
             continue;
         };
         let status = std::process::ExitStatus::from_raw(raw);
