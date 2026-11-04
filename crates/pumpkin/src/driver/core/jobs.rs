@@ -37,8 +37,7 @@ pub enum Failure {
 
 impl Failure {
     /// The failure as a status reply gives it. Its message holds no detail from the judge or
-    /// the runtime, which the run's log keeps, so a caller learns of a call only what its
-    /// judge's declared fields say.
+    /// the runtime, so a caller learns of a call only what its judge's declared fields say.
     pub(super) fn reply(&self) -> op::Failure {
         let (code, message) = match self {
             Self::Timeout => (FailureCode::JudgeTimeout, "the judge ran past its timeout"),

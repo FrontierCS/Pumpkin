@@ -109,8 +109,8 @@ pub struct JudgeRuntime {
     pub result: ResultSpec,
 }
 
-/// What a judge call writes as its result: the JSON file `/pumpkin/out/result.json`, which its
-/// caller sees.
+/// What a judge call writes as its result: the JSON file `/pumpkin/out/result.json`, of which
+/// its caller sees the status and the fields [`returns`](Self::returns) names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSpec {

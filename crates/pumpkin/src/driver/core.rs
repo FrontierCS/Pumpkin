@@ -37,8 +37,8 @@ pub struct JobId(pub u64);
 
 /// A payload the runtime holds, named by its digest.
 ///
-/// The core decides on its size and passes the reference on, never the bytes; the runtime
-/// stores the bytes only once the core accepts the call that carries them.
+/// The core decides on its size and passes the reference on, never the bytes, so the bytes
+/// need be stored only once the core accepts the call that carries them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayloadRef {
     pub size: u64,
@@ -118,9 +118,8 @@ pub enum Action {
     },
     /// Stops a job wherever it is, and destroys its sandbox. Its last report follows as usual.
     StopJudge { job: JobId },
-    /// Freezes the agent's sandbox, collects its outputs, its trajectory among them, and
-    /// destroys it, before the runtime performs the next action: the core takes the agent as
-    /// gone once it asks.
+    /// Freezes the agent's sandbox, collects its outputs and destroys it, before the runtime
+    /// performs the next action: the core takes the agent as gone once it asks.
     TearDownAgent,
     /// Ends the run with its outcome. The core takes no further action.
     Finish { outcome: Outcome },
@@ -192,9 +191,8 @@ pub enum Verdict {
 ///
 /// Time passes only as events say, so a runtime with nothing else to report sends
 /// [`Event::Tick`] when [`Core::tick_due`] says. An event that doesn't apply to the run's
-/// state, such as a second report on a job that has ended, changes nothing, and one observed
-/// before an earlier one, as a report from a job's thread can be, doesn't move the core's
-/// clock back.
+/// state, such as a second report on a job that has ended, changes nothing, and one whose
+/// time is before an earlier event's doesn't move the core's clock back.
 #[derive(Debug)]
 pub struct Core<'w> {
     workflow: &'w Workflow,
@@ -266,7 +264,8 @@ impl<'w> Core<'w> {
             self.end_work(WorkEnd::Finalized, &mut actions);
         }
         match event {
-            // Recorded for the run's log; nothing waits for it.
+            // Nothing waits for these: whether the agent's command has started changes no
+            // decision, and a tick only moves the clock.
             Event::AgentStarted | Event::Tick => {}
             Event::AgentExited { status } => {
                 self.end_work(WorkEnd::AgentExited(status), &mut actions);
