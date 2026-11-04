@@ -31,6 +31,7 @@ impl JudgeResult {
             status,
             score,
             returns,
+            evidence_max_bytes: _,
         } = spec;
         let document: Value = serde_json::from_slice(json).context("result.json is not JSON")?;
         let passed = match status.resolve(&document).and_then(Value::as_str) {

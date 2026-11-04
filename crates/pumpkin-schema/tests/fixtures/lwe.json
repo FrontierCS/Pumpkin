@@ -44,7 +44,8 @@
           "result": {
             "status": "/status",
             "score": "/raw_score",
-            "returns": ["/raw_score", "/metrics", "/failure"]
+            "returns": ["/raw_score", "/metrics", "/failure"],
+            "evidence_max_bytes": 1048576
           }
         }
       }
@@ -71,7 +72,8 @@
           "result": {
             "status": "/status",
             "score": "/raw_score",
-            "returns": ["/raw_score", "/metrics", "/failure"]
+            "returns": ["/raw_score", "/metrics", "/failure"],
+            "evidence_max_bytes": 1048576
           }
         }
       }

@@ -188,6 +188,16 @@ fn has_normal_components(path: &str) -> bool {
         .all(|component| !matches!(component, "" | "." | ".."))
 }
 
+impl AbsolutePath {
+    /// `path` below this one.
+    #[must_use]
+    pub fn join(&self, path: &RelativePath) -> Self {
+        // Both are normalized, so `path`'s components follow this path's, a `/` between them;
+        // only `/` itself ends with one.
+        Self(format!("{}/{}", self.0.trim_end_matches('/'), path.0))
+    }
+}
+
 fn check_absolute_path(path: &str) -> Result<(), String> {
     let normalized = path == "/" || path.strip_prefix('/').is_some_and(has_normal_components);
     if normalized && !path.contains('\0') {
@@ -356,6 +366,14 @@ impl From<EnvVar> for String {
 pub struct Env(Vec<EnvVar>);
 
 impl Env {
+    /// This environment, with `default` before its entries unless one of them sets its name.
+    #[must_use]
+    pub(crate) fn with_default(&self, default: EnvVar) -> Self {
+        let set = self.0.iter().any(|entry| entry.name == default.name);
+        let default = (!set).then_some(default);
+        Self(default.into_iter().chain(self.0.iter().cloned()).collect())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

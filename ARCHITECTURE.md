@@ -38,7 +38,12 @@ JSON, and the sandbox protocol's wire format ([crate doc](crates/pumpkin-schema/
   `JudgeGrantId`), gives every time as a `Duration`, and reports the rules the IR breaks
   (`ParseErrors`).
 - `sandbox`: the sandbox protocol (`ToSandbox`, `FromSandbox`, `Launch`, `Entry`), and the
-  in-sandbox contract (`pumpkin_dir()`, `pumpkin_subdirs()`, `SANDBOXCTL_PATH`, `CONTROL_SOCKET`).
+  in-sandbox contract (`pumpkin_dir()`, `pumpkin_subdirs()`, `SANDBOXCTL_PATH`, `CONTROL_SOCKET`),
+  with the paths and limits a role's commands and its session's owner share: a judge call's
+  payload (`slot_payload()`), its result (`result_file()`, `RESULT_MAX_BYTES`) and evidence
+  (`evidence_dir()`), and each command's environment, with its `HOME` (`command_env()`), and its
+  output (`command_stdout()`, `command_stderr()`), relative to `pumpkin_dir()`, which
+  `AbsolutePath::join` joins them to.
 - `sandbox::frame` and `sandbox::tree`: what both ends of the protocol run, `frame::read`,
   `frame::write` and `tree::Writer`.
 - `sandbox::op`: ops' calls (`OpCall`) and replies (`OpReply`), whose JSON `sandboxctl` prints.

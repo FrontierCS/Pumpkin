@@ -109,9 +109,11 @@ pub struct JudgeRuntime {
     pub result: ResultSpec,
 }
 
-/// What a judge call writes as its result: the JSON file `result.json` in `out` below
-/// [`pumpkin_dir()`](crate::sandbox::pumpkin_dir), of which
-/// its caller sees the status and the fields [`returns`](Self::returns) names.
+/// What a judge call writes: its result and its evidence.
+///
+/// The result is the JSON file at [`result_file()`](crate::sandbox::result_file), of which its
+/// caller sees the status and the fields [`returns`](Self::returns) names. The evidence is the
+/// files in [`evidence_dir()`](crate::sandbox::evidence_dir), which go to the operator alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSpec {
@@ -123,6 +125,8 @@ pub struct ResultSpec {
     /// The fields of the result that the caller's reply returns, besides the status. A field
     /// the result lacks is left out.
     pub returns: Returns,
+    /// The most bytes of evidence kept from each call, in all.
+    pub evidence_max_bytes: u64,
 }
 
 /// A process to start in a sandbox, as the role's user.
