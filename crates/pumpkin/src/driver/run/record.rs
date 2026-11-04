@@ -38,7 +38,7 @@ pub(super) fn create(runs: &Path) -> Result<(String, PathBuf), String> {
     File::open("/dev/urandom")
         .and_then(|mut urandom| urandom.read_exact(&mut random))
         .context("reading /dev/urandom for the run's id failed")?;
-    let seconds = since_epoch(SystemTime::now()).as_secs();
+    let seconds = since_epoch().as_secs();
     let id = format!("{}-{:08x}", utc_stamp(seconds), u32::from_be_bytes(random));
     let dir = runs.join(&id);
     fs::create_dir(&dir).context(dir.display())?;
@@ -46,10 +46,12 @@ pub(super) fn create(runs: &Path) -> Result<(String, PathBuf), String> {
     Ok((id, dir))
 }
 
-/// The time since the Unix epoch of `time`, by this machine's clock: zero if the clock is set
-/// before 1970.
-pub(super) fn since_epoch(time: SystemTime) -> Duration {
-    time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO)
+/// The time since the Unix epoch now, by this machine's clock: zero if the clock is set before
+/// 1970.
+pub(super) fn since_epoch() -> Duration {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
 }
 
 /// `seconds` since the Unix epoch as `YYYYMMDD-hhmmss`, in UTC.

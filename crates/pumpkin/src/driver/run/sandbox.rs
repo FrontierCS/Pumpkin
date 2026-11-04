@@ -5,7 +5,7 @@ use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use pumpkin_docker::{Container, Engine, RunTag, Start};
 use pumpkin_gateway::Session;
@@ -161,7 +161,7 @@ impl Clock {
     pub(super) fn start() -> Self {
         Self {
             start: Instant::now(),
-            unix: record::since_epoch(SystemTime::now()),
+            unix: record::since_epoch(),
         }
     }
 
