@@ -31,7 +31,8 @@ pub enum Failure {
     Timeout,
     /// It failed before giving a result, for the runtime's reason.
     Error(String),
-    /// Its `result.json` was missing or invalid, for this reason.
+    /// Its `result.json` was missing or invalid, or its evidence over its limit, for this
+    /// reason.
     InvalidResult(String),
 }
 

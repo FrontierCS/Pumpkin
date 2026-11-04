@@ -125,7 +125,8 @@ pub struct ResultSpec {
     /// The fields of the result that the caller's reply returns, besides the status. A field
     /// the result lacks is left out.
     pub returns: Returns,
-    /// The most bytes of evidence kept from each call, in all.
+    /// The most bytes of evidence a call may write, in all: a call whose evidence holds more
+    /// has no valid result, and none of its evidence is kept.
     pub evidence_max_bytes: u64,
 }
 

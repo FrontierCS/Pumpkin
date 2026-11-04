@@ -1,9 +1,10 @@
 //! Running a workflow through the library's entry point, [`Run`].
 //!
 //! `mini` runs a small workflow on Docker, with the Docker tests' `busybox` image: its agent
-//! calls a judge grant through `sandboxctl`, polls the job's status until it has passed, and
-//! submits with finalize; its judges write a `result.json` and evidence. Like the Docker tests,
-//! it is ignored, and fails without `PUMPKIN_SANDBOXD`. The refusals need no Docker.
+//! calls a judge grant through `sandboxctl`, polls each job's status until it has ended, and
+//! submits with finalize; its judges write a `result.json` and evidence, in one call more than
+//! its limit. Like the Docker tests, it is ignored, and fails without `PUMPKIN_SANDBOXD`. The
+//! refusals need no Docker.
 
 #![expect(
     clippy::unwrap_used,
@@ -31,23 +32,33 @@ const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json"
 
 /// The agent: calls a judge grant it doesn't hold, whose payload is refused and not kept;
 /// calls `train` with a payload over its slot's `max_bytes`, which the gateway refuses; calls
-/// `train`, polls the job until it has finished, and finalizes the same payload.
+/// `train`, polling each job until it has finished, with a payload, then with one whose judge
+/// writes too much evidence; and finalizes the first payload.
 const AGENT: &str = r#"
 set -o errexit -o nounset
 ctl=/.pumpkin/bin/sandboxctl
 printf ledger > payload
+printf evidence > evidence
 printf refused > refused
 head -c 1025 /dev/zero > oversized
+judged() {
+    job=$($ctl judge train "$1" | sed 's/.*"job":\([0-9]*\).*/\1/')
+    while $ctl status "$job" | grep -qE '"state":"(queued|running)"'; do sleep 1; done
+}
 $ctl ops | sed 's/"remaining_seconds":[0-9]*/"remaining_seconds":<s>/'
 $ctl judge nothing refused || true
 $ctl judge train oversized || true
-job=$($ctl judge train payload | sed 's/.*"job":\([0-9]*\).*/\1/')
-while $ctl status "$job" | grep -qE '"state":"(queued|running)"'; do sleep 1; done
+judged payload
+judged evidence
 $ctl submit submit payload --finalize > /dev/null
 "#;
 
-/// A judge: scores a payload by its size, and keeps evidence.
+/// A judge: scores a payload by its size, and keeps evidence, over its limit for the payload
+/// `evidence`.
 const JUDGE: &str = r#"
+if [ "$(cat /pumpkin/in/payload/raw)" = evidence ]; then
+    head -c 1024 /dev/zero > /pumpkin/out/evidence/padding
+fi
 bytes=$(wc -c < /pumpkin/in/payload/raw)
 printf '{"status": "passed", "score": %s, "bytes": %s, "secret": "for the operator"}\n' \
     $bytes $bytes > /pumpkin/out/result.json
@@ -124,6 +135,7 @@ fn refusals() {
 /// outcome, its record and its log, and by what it leaves behind: nothing.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn mini() {
     let sandboxd = sandboxd();
     let mut runs = Runs::new("mini");
@@ -168,11 +180,15 @@ fn mini() {
         jobs/1/out/evidence/evidence.txt: kept
         jobs/1/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
         jobs/2/log/command.stderr: 
-        jobs/2/log/command.stdout: judged 6 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
-        jobs/2/out/evidence/evidence.txt: kept
-        jobs/2/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
+        jobs/2/log/command.stdout: judged 8 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
+        jobs/2/out/result.json: {"status": "passed", "score": 8, "bytes": 8, "secret": "for the operator"}
+        jobs/3/log/command.stderr: 
+        jobs/3/log/command.stdout: judged 6 bytes as 4242, with HOME=/pumpkin/home, in /pumpkin/home
+        jobs/3/out/evidence/evidence.txt: kept
+        jobs/3/out/result.json: {"status": "passed", "score": 6, "bytes": 6, "secret": "for the operator"}
         log.jsonl
         outcome.json
+        payloads/ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e: evidence
         payloads/fe14010b4fe83303852f0467c919ef9a7ca089b91e96e3aad7d426dd87079297: ledger
         the log, without the polls before the job ended:
         run_started {"unix_ns":"<unix_ns>"} -> start_agent
@@ -185,12 +201,17 @@ fn mini() {
         judge_exited {"job":1,"status":{"code":0}}
         judge_collected {"job":1,"result":{"passed":true,"returned":{"bytes":6},"score":6}}
         op_arrived {"request":{"job":1,"kind":"status"}} -> reply {"reply":{"job":1,"kind":"status","remaining":{"calls":1,"seconds":null},"returned":{"bytes":6},"state":"passed"}}
-        op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
-        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":2,"payload":"6 bytes","timeout_ns":"18446744073709551615"}
-        note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
+        op_arrived {"request":{"grant":"train","kind":"judge","payload":"8 bytes"}} -> reply {"reply":{"job":2,"kind":"judge","remaining":{"calls":0,"seconds":null}}}; start_judge {"grant":"train","job":2,"payload":"8 bytes","timeout_ns":"60000000000"}
         judge_started {"job":2}
         judge_exited {"job":2,"status":{"code":0}}
-        judge_collected {"job":2,"result":{"passed":true,"returned":{"bytes":6},"score":6}} -> finish with score 6
+        judge_collected {"invalid":"the evidence holds 1029 bytes, over the judge's `evidence_max_bytes` of 1024: write at most 1024","job":2}
+        op_arrived {"request":{"job":2,"kind":"status"}} -> reply {"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":2,"kind":"status","remaining":{"calls":0,"seconds":null},"state":"failed"}}
+        op_arrived {"request":{"finalize":true,"grant":"submit","kind":"submit","payload":"6 bytes"}} -> reply {"reply":{"kind":"submit","state":"accepted"}}
+        agent_exited {"status":{"code":0}} -> tear_down_agent; start_judge {"grant":null,"job":3,"payload":"6 bytes","timeout_ns":"18446744073709551615"}
+        note: "collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 465 bytes"
+        judge_started {"job":3}
+        judge_exited {"job":3,"status":{"code":0}}
+        judge_collected {"job":3,"result":{"passed":true,"returned":{"bytes":6},"score":6}} -> finish with score 6
         the run started during execute: true
         left over: 0 containers, sockets removed"#]].assert_eq(&lines.join("\n"));
 }

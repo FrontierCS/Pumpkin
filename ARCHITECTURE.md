@@ -171,7 +171,8 @@ record, and stores the payloads of the calls the core accepts by digest (`Payloa
 - A call's payload is stored only once the core accepts the call, so a refused one leaves only
   its size and digest in the log ([`Runtime::reply`](crates/pumpkin/src/driver/run.rs)).
 - Of a judge's `out`, the record keeps only its `result_file()`, up to `RESULT_MAX_BYTES`, and
-  its `evidence_dir()`, up to the judge's `evidence_max_bytes`
+  its `evidence_dir()`, up to the judge's `evidence_max_bytes`; a call over either limit has no
+  result, so every result the record keeps has its evidence
   ([`judge`](crates/pumpkin/src/driver/run/judge.rs)).
 - A run leaves no container behind: a judge call's end is reported once its sandbox is
   destroyed, a sandbox that can't be destroyed fails the run, and a run, however it ends,

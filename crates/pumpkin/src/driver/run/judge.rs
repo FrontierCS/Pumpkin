@@ -171,8 +171,16 @@ fn outputs(call: &Call<'_>, session: &mut Session) -> Result<JudgeResult, String
             "removing what the record doesn't keep of job {job}'s outputs failed: {error}"
         ));
     }
+    let evidence = check_evidence(
+        &call.dir.join(evidence_dir().as_str()),
+        call.judge.result.evidence_max_bytes,
+    );
     collected.context("the judge's outputs are incomplete")?;
-    JudgeResult::parse(&call.judge.result, &result?)
+    let result = result?;
+    // A score is audited by its evidence, so a result whose evidence the record can't keep
+    // stands no more than a result over its own limit does.
+    evidence?;
+    JudgeResult::parse(&call.judge.result, &result)
 }
 
 /// Reads the collected result, at `path`, or removes it if it is too large.
@@ -198,11 +206,30 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).context(path.display())
 }
 
+/// Checks that the collected evidence, at `path`, holds at most `max` bytes, or removes it if
+/// it holds more. Evidence the judge removed holds none.
+fn check_evidence(path: &Path, max: u64) -> Result<(), String> {
+    let bytes = match record::tree_size(path) {
+        Ok(size) => size.bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context(path.display()),
+    };
+    if bytes <= max {
+        return Ok(());
+    }
+    let too_large = format!(
+        "the evidence holds {bytes} bytes, over the judge's `evidence_max_bytes` of {max}: write \
+         at most {max}"
+    );
+    Err(match fs::remove_dir_all(path) {
+        Ok(()) => too_large,
+        Err(error) => format!("{too_large}; removing it from the record failed: {error}"),
+    })
+}
+
 /// Removes from the collected [`out_dir()`] what the record doesn't keep: anything but the
-/// [`result_file()`] and the [`evidence_dir()`], and the evidence if it holds more than the
-/// judge's `evidence_max_bytes`.
+/// [`result_file()`] and the [`evidence_dir()`].
 fn prune_outputs(call: &Call<'_>) -> io::Result<()> {
-    let max = call.judge.result.evidence_max_bytes;
     let (result, evidence) = (result_file(), evidence_dir());
     let kept = |path: &RelativePath| call.dir.join(path.as_str());
     let entries = match fs::read_dir(call.dir.join(out_dir().as_str())) {
@@ -214,26 +241,15 @@ fn prune_outputs(call: &Call<'_>) -> io::Result<()> {
         let entry = entry?;
         let path = entry.path();
         let is_dir = entry.file_type()?.is_dir();
-        if !is_dir && path == kept(&result) {
+        if (!is_dir && path == kept(&result)) || (is_dir && path == kept(&evidence)) {
             continue;
         }
-        if is_dir && path == kept(&evidence) {
-            let bytes = record::tree_size(&path)?.bytes;
-            if bytes <= max {
-                continue;
-            }
-            call.note(format!(
-                "job {}'s evidence holds {bytes} bytes, over its limit of {max}: it is not kept",
-                call.job.0
-            ));
-        } else {
-            call.note(format!(
-                "job {} wrote {}, which is neither its {result} file nor its {evidence} \
-                 directory: it is not kept",
-                call.job.0,
-                path.display()
-            ));
-        }
+        call.note(format!(
+            "job {} wrote {}, which is neither its {result} file nor its {evidence} directory: \
+             it is not kept",
+            call.job.0,
+            path.display()
+        ));
         if is_dir {
             fs::remove_dir_all(&path)?;
         } else {
