@@ -77,10 +77,8 @@ pub(crate) fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
-        // A provenance attestation records each build's own ID and times, so a build with one
-        // gets an ID of its own; and as a build moves the tag to its ID, the containerd image
-        // store keeps no image by the ID the tag had, which another test process, running at
-        // once, may be using.
+        // Without provenance, for the reason `image()` in the Docker provider's tests gives
+        // (`providers/docker/tests/it.rs`).
         let mut build = docker()
             .args(["build", "--quiet", "--provenance=false"])
             .args(["--tag=pumpkin-tests:workspace", "-"])
