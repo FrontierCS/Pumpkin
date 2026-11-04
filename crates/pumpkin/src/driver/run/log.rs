@@ -21,9 +21,10 @@
 //! report may follow a later one. Each event and action is an object whose `kind` is its name
 //! in snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants
 //! appear by their names in the workflow, jobs and ops by their numbers, payloads by size and
-//! digest, and times and durations in whole nanoseconds, as the core takes and returns them. A
-//! judge call's `start_judge` names the agent's grant it was made under, or `null` for the
-//! pattern's score. A reply is the [`OpReply`](pumpkin_schema::sandbox::op::OpReply) sent.
+//! digest, and times and durations in nanoseconds, the core's resolution, where `u64::MAX`
+//! (about 584 years) stands for anything longer. A judge call's `start_judge` names the agent's
+//! grant it was made under, or `null` for the pattern's score. A reply is the
+//! [`OpReply`](pumpkin_schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
