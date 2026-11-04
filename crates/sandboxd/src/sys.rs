@@ -2,6 +2,12 @@
 //! for any child or finding whether there is one, killing a process group or every process,
 //! making the process non-dumpable, opening only a regular file, at a path the role's code can
 //! write, and finding whether a connection's other end has closed it, without reading from it.
+//!
+//! Any errno a call returns is the world's, and returned, wherever something outside `sandboxd`
+//! can cause it: a security module's hook, which `kill`, `killpg` and `prctl` run, may return
+//! any. The wait calls run no such hook, and fail otherwise only for arguments they never get,
+//! so those failures are `unreachable!`, as long as no seccomp filter denies the calls, as
+//! Docker's default profile doesn't.
 
 #![expect(
     unsafe_code,
@@ -123,23 +129,15 @@ pub(crate) fn is_first_process() -> bool {
 /// first process, whose standard output and error are the container's log, kept on the host:
 /// a command that could open them could write there, outside the session.
 ///
-/// The commands it starts don't inherit the flag, since `execve` resets it.
-pub(crate) fn make_non_dumpable() {
+/// The commands it starts don't inherit the flag, since `execve` resets it. Fails if the
+/// kernel refuses, as a security module's policy may.
+pub(crate) fn make_non_dumpable() -> io::Result<()> {
     let off: libc::c_ulong = 0;
     // SAFETY: `PR_SET_DUMPABLE` takes integer arguments only, each passed as the
     // `unsigned long` the kernel reads.
     match unsafe { libc::prctl(libc::PR_SET_DUMPABLE, off, off, off, off) } {
-        0 => {}
-        #[expect(
-            clippy::unreachable,
-            reason = "PR_SET_DUMPABLE fails only for a value other than SUID_DUMP_DISABLE (0) or \
-                      SUID_DUMP_USER (1), and this passes 0. Its error is an errno, an int, which \
-                      no type narrows to what this call allows"
-        )]
-        _ => unreachable!(
-            "prctl(PR_SET_DUMPABLE, 0) failed: {}",
-            io::Error::last_os_error()
-        ),
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
     }
 }
 
@@ -186,9 +184,9 @@ pub(crate) fn peer_closed(connection: &UnixStream) -> bool {
 }
 
 /// The outcome of a `kill` or `killpg` that sent `SIGKILL` and returned `result`: finding no
-/// process left to kill is no failure, and any other is the world's, as when the user may not
-/// kill a process (`EPERM`, which `kill(-1)` never reports), or a security module's policy
-/// forbids it (`EACCES`).
+/// process left to kill is no failure, and any other errno is the world's, as when the user may
+/// not kill a process (`EPERM`, which `kill(-1)` never reports), or a security module's policy
+/// forbids it.
 fn killed(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         return Ok(());
@@ -196,15 +194,6 @@ fn killed(result: libc::c_int) -> io::Result<()> {
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
-        #[expect(
-            clippy::unreachable,
-            reason = "kill and killpg fail with EINVAL only for an invalid signal, and both send \
-                      SIGKILL. Their error is an errno, an int, which no type narrows to what \
-                      these calls allow"
-        )]
-        Some(libc::EINVAL) => unreachable!("sending SIGKILL failed: {error}"),
-        // A security module may fail a kill with an error of its own, and the kernel's audit
-        // with ENOMEM, besides the EPERM and EACCES the doc names.
         _ => Err(error),
     }
 }

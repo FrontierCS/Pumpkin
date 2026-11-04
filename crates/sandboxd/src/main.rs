@@ -100,7 +100,10 @@ fn main() -> ExitCode {
     if Path::new(&name).file_name() == Some("sandboxctl".as_ref()) {
         return ctl::main(args);
     }
-    sys::make_non_dumpable();
+    if let Err(error) = sys::make_non_dumpable() {
+        eprintln!("sandboxd: making the process non-dumpable failed: {error}");
+        return ExitCode::FAILURE;
+    }
     let flags::Sandboxd { gateway, ops } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {
