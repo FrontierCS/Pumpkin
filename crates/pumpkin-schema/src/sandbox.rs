@@ -132,8 +132,8 @@ pub fn result_file() -> RelativePath {
 pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
 /// `out/evidence`, there before a judge's command starts, which holds the files of evidence
-/// that only the operator sees, up to its [`ResultSpec`](crate::ir::ResultSpec)'s
-/// `evidence_max_bytes`, past which the call has no valid result.
+/// that only the operator sees, within its
+/// [`evidence_max_bytes`](crate::ir::ResultSpec::evidence_max_bytes).
 pub fn evidence_dir() -> RelativePath {
     valid("out/evidence")
 }
