@@ -58,12 +58,12 @@ call slow queued
 $ctl submit submit payload --finalize > /dev/null
 "#;
 
-/// A judge: scores a payload by its size, and keeps evidence, over its limit for the payload
-/// `evidence`. For `slow`, it does so only after its call's timeout, so that a stop that
+/// A judge: scores a payload by its size, and keeps evidence, a byte over its limit for the
+/// payload `evidence`. For `slow`, it does so only after its call's timeout, so that a stop that
 /// doesn't take effect shows as the call timing out.
 const JUDGE: &str = r#"
 case $(cat /pumpkin/in/payload/raw) in
-evidence) head -c 1024 /dev/zero > /pumpkin/out/evidence/padding ;;
+evidence) head -c 1020 /dev/zero > /pumpkin/out/evidence/padding ;;
 slow) sleep 300 ;;
 esac
 bytes=$(wc -c < /pumpkin/in/payload/raw)
@@ -215,7 +215,7 @@ fn mini() {
         op_arrived {"request":{"grant":"train","kind":"judge","payload":"8 bytes"}} -> reply {"reply":{"job":2,"kind":"judge","remaining":{"calls":1,"seconds":null}}}; start_judge {"grant":"train","job":2,"payload":"8 bytes","timeout_ns":"60000000000"}
         judge_started {"job":2}
         judge_exited {"job":2,"status":{"code":0}}
-        judge_collected {"invalid":"the evidence holds 1029 bytes, over the judge's `evidence_max_bytes` of 1024: write at most 1024","job":2}
+        judge_collected {"invalid":"the evidence holds 1025 bytes, over the judge's `evidence_max_bytes` of 1024: write at most 1024","job":2}
         op_arrived {"request":{"job":2,"kind":"status"}} -> reply {"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":2,"kind":"status","remaining":{"calls":1,"seconds":null},"state":"failed"}}
         op_arrived {"request":{"grant":"train","kind":"judge","payload":"4 bytes"}} -> reply {"reply":{"job":3,"kind":"judge","remaining":{"calls":0,"seconds":null}}}; start_judge {"grant":"train","job":3,"payload":"4 bytes","timeout_ns":"60000000000"}
         judge_started {"job":3}
