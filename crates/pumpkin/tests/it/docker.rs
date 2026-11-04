@@ -70,14 +70,20 @@ pub(crate) fn containers(run: &RunTag) -> Vec<String> {
 
 /// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
 /// a world-writable `/workspace`, which a role's user needs, since the writable layer is the
-/// workspace. Built once, from the pinned image, and tagged, so that each build replaces the
-/// last instead of leaving it behind untagged.
+/// workspace. Built once, from the pinned image, and tagged, so that no build leaves an image
+/// behind untagged; a build from the cache gives the same ID as the last, so test processes
+/// that run at once share the image.
 pub(crate) fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
+        // A provenance attestation records each build's own ID and times, so a build with one
+        // gets an ID of its own; and as a build moves the tag to its ID, the containerd image
+        // store keeps no image by the ID the tag had, which another test process, running at
+        // once, may be using.
         let mut build = docker()
-            .args(["build", "--quiet", "--tag=pumpkin-tests:workspace", "-"])
+            .args(["build", "--quiet", "--provenance=false"])
+            .args(["--tag=pumpkin-tests:workspace", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
