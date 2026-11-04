@@ -30,7 +30,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{fmt, fs};
+use std::{fmt, fs, mem, process};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
@@ -640,6 +640,9 @@ fn route(
     ended: &OnceLock<String>,
     mut ops: Assembler,
 ) {
+    // A panic here would skip `end`, leaving the session open with its owner waiting on it, so
+    // it aborts the process instead, in every build, tests included.
+    let unwinding = AbortOnUnwind;
     let mut reader = BufReader::new(connection);
     let reason = loop {
         let (message, body) = match frame::read::<FromSandbox>(&mut reader) {
@@ -664,6 +667,16 @@ fn route(
     // Before `ops`, a parameter, drops, which closes its sender to the owner: the owner, seeing
     // it closed, asks why the session ended, which must be known by then.
     end(routes, ended, connection, reason);
+    mem::forget(unwinding);
+}
+
+/// Aborts the process as it drops, which only a panic unwinding past it lets happen.
+struct AbortOnUnwind;
+
+impl Drop for AbortOnUnwind {
+    fn drop(&mut self) {
+        process::abort();
+    }
 }
 
 /// Hands a reply to the request waiting on `stream`. A reply for no waiting request is
@@ -911,9 +924,10 @@ fn ended(ended: &OnceLock<String>) -> io::Error {
         reason = "every way to learn that the session ended follows the reason's recording: `end` \
                   records it before it closes the routes, which close otherwise only after a frame \
                   that ends their request or once nothing receives from them; the ops' sender \
-                  closes only after the reader thread has ended the session; and the rest call \
-                  `end` or check the reason first; sending the reason as each channel's last \
-                  message would need room in queues that may be full"
+                  closes only after the reader thread has ended the session, which a panic there \
+                  can't skip, as it aborts the process; and the rest call `end` or check the \
+                  reason first; sending the reason as each channel's last message would need \
+                  room in queues that may be full"
     )]
     let Some(reason) = ended.get() else {
         unreachable!("the session ended without a reason")
