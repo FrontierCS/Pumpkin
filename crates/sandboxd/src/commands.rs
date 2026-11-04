@@ -126,8 +126,7 @@ impl Commands {
 /// can't be killed leaves no other alive, and the first failure is returned.
 fn kill_everything(state: &State) -> io::Result<()> {
     if sys::is_first_process() {
-        sys::kill_all_others();
-        return Ok(());
+        return sys::kill_all_others();
     }
     let killed = state.running.keys().map(|&group| sys::kill_group(group));
     killed.fold(Ok(()), Result::and)

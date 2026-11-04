@@ -104,19 +104,11 @@ pub(crate) fn kill_group(group: i32) -> io::Result<()> {
 
 /// Kills every process this one may signal, and skips the others. As the first process of its
 /// namespace, that is every other process in it: the kernel never sends a signal for `-1` to
-/// the sender itself or to PID 1.
-pub(crate) fn kill_all_others() {
+/// the sender itself or to PID 1. Where something other than the user's rights keeps it from
+/// killing a process, such as a security module's policy, it may fail, or skip that one too.
+pub(crate) fn kill_all_others() -> io::Result<()> {
     // SAFETY: kill takes only integers and touches no memory of this process.
-    match killed(unsafe { libc::kill(-1, libc::SIGKILL) }) {
-        Ok(()) => {}
-        #[expect(
-            clippy::unreachable,
-            reason = "Linux's kill(-1) skips each process it may not signal, and returns success, \
-                      or ESRCH when it found nothing to signal: never EPERM. Its error is an \
-                      errno, an int, which no type narrows to what this call allows"
-        )]
-        Err(error) => unreachable!("kill(-1, SIGKILL) failed: {error}"),
-    }
+    killed(unsafe { libc::kill(-1, libc::SIGKILL) })
 }
 
 /// Whether this is the first process of its PID namespace, as `sandboxd` is in a sandbox.
@@ -194,8 +186,9 @@ pub(crate) fn peer_closed(connection: &UnixStream) -> bool {
 }
 
 /// The outcome of a `kill` or `killpg` that sent `SIGKILL` and returned `result`: finding no
-/// process left to kill is no failure, and lacking the permission to kill is the only one,
-/// which only [`kill_group`] can report.
+/// process left to kill is no failure, and any other is the world's, as when the user may not
+/// kill a process (`EPERM`, which `kill(-1)` never reports), or a security module's policy
+/// forbids it (`EACCES`).
 fn killed(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         return Ok(());
@@ -203,13 +196,15 @@ fn killed(result: libc::c_int) -> io::Result<()> {
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
-        Some(libc::EPERM) => Err(error),
         #[expect(
             clippy::unreachable,
-            reason = "kill(2) and killpg(3) list one other failure, EINVAL, for an invalid signal, \
-                      and both send SIGKILL. Their error is an errno, an int, which no type \
-                      narrows to what these calls allow"
+            reason = "kill and killpg fail with EINVAL only for an invalid signal, and both send \
+                      SIGKILL. Their error is an errno, an int, which no type narrows to what \
+                      these calls allow"
         )]
-        _ => unreachable!("sending SIGKILL failed: {error}"),
+        Some(libc::EINVAL) => unreachable!("sending SIGKILL failed: {error}"),
+        // A security module may fail a kill with an error of its own, and the kernel's audit
+        // with ENOMEM, besides the EPERM and EACCES the doc names.
+        _ => Err(error),
     }
 }
