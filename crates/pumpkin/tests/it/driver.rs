@@ -106,7 +106,11 @@ impl Run<'_> {
                 job: words[1].parse().unwrap(),
             }),
             "judge_started" => Event::JudgeStarted { job: job() },
-            "judge_exited" => Event::JudgeExited { job: job() },
+            // The core reads no judge's exit status, so the scripts give none.
+            "judge_exited" => Event::JudgeExited {
+                job: job(),
+                status: ExitStatus::Code(0),
+            },
             "judge_timed_out" => Event::JudgeTimedOut { job: job() },
             "collected" => {
                 let slot = self.workflow.call_slot(self.jobs[&job()]);
