@@ -151,10 +151,17 @@ impl Cargo {
 
 /// The workspace's root, which holds `xtask/`.
 fn root() -> &'static Path {
-    #[expect(clippy::expect_used, reason = "the workspace's root holds xtask/")]
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask/ has a parent directory")
+    let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
+    #[expect(
+        clippy::unreachable,
+        reason = "`Path::parent` finds none only for a root or an empty path, and xtask's \
+                  directory is the workspace's `xtask/`, below its root. `env!` gives a `&str`, \
+                  whose type doesn't say that it has a parent"
+    )]
+    let Some(root) = xtask.parent() else {
+        unreachable!("xtask's directory {} has no parent", xtask.display())
+    };
+    root
 }
 
 /// Runs the checks every change must pass, in order, and stops at the first that fails. With
