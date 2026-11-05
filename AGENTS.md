@@ -28,6 +28,10 @@
   `unreachable!` under `#[expect(clippy::unreachable, reason = "…")]` saying why only a bug can
   reach it; never handle such a path. Handle, or return, every error the world can cause, the
   kernel's and its security policy's included
+- NEVER catch a panic outside tests: a panic is a bug, and it ends the whole process, since what
+  it leaves behind can't be trusted; a binary that runs threads installs `stdx::abort_on_panic`
+- WRITE `unsafe` only to make a system call `std` lacks, each use acknowledging the
+  `unsafe_code` lint with a reason
 - WRITE error messages as what is wrong, then what is expected
   (`the program is empty: name one`); passing an error up, add what was being done where the
   error doesn't say it, as `stdx::Context` does

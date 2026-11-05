@@ -37,17 +37,11 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
   not check again what parsing established.
 - **Architecture Invariant:** the IR holds no defaults: an absent field means what its doc says,
   such as no limit; whatever writes the IR picks the defaults.
-- **Architecture Invariant:** no grant names the judge that scores, so the agent never calls it.
-- **Architecture Invariant:** a tree holds only directories and regular files, below the directory
-  it is written to: no link, device or `..` crosses a session.
 
 **`crates/pumpkin-gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
 `Session`, whose one owner moves trees, runs commands (`Process`) and answers ops (`Arrival`).
-- **Architecture Invariant:** the socket, not a secret, tells which sandbox is talking: each has
-  its own `Listener`, which takes one connection.
 - **Architecture Invariant:** everything a session receives is untrusted: a protocol break ends
   the session, and a sandbox costs the host only bounded memory and bounded waits.
-- **Architecture Invariant:** a passive sandbox, whose role makes no ops, can make none.
 - **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes
   have the same sessions: of Pumpkin's crates, it depends only on `pumpkin-schema` and `stdx`.
 
@@ -65,8 +59,6 @@ starts `Container`s and removes a run's by their `RunTag`. A provider is `provid
 crate `pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
 - **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
   the paths `sandbox` names, so a role's commands and the session's owner find them anywhere.
-- **Architecture Invariant:** each container carries its run's `RunTag`, so a run's containers are
-  found and removed after the process that started them is gone.
 - **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
   `docker` against the named context alone, so the operator's choice of engine holds. Tests run
   `docker` directly only to observe containers or build images.
@@ -91,12 +83,4 @@ with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check
 
 ## Cross-cutting concerns
 
-**Errors.** What the world can cause is returned or handled (`AGENTS.md`). **Architecture
-Invariant:** a panic is a bug, and outside tests it ends the whole process: no code outside tests
-catches one, since what a panic leaves behind can't be trusted. Each binary that runs threads
-installs `stdx`'s hook.
-
-**Unsafe.** **Architecture Invariant:** `unsafe` is only for a system call `std` lacks, each use
-acknowledging the workspace's `unsafe_code` lint with a reason, as `ci` requires.
-
-**Concurrency.** `AGENTS.md`'s rule on concurrency primitives and single ownership holds throughout.
+Errors, panics, `unsafe` and concurrency follow the rules in [`AGENTS.md`](AGENTS.md).
