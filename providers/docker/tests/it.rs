@@ -28,7 +28,7 @@ use pumpkin_docker::{ContextName, Engine, Report, Security};
 use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, RefusedOp, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::provider::{
-    Create, Created, Dial, Listed, Role, RunTag, SOCKET_NAME, SandboxId,
+    Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,
 };
 use pumpkin_schema::sandbox::op::{
     Failed, Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
@@ -89,10 +89,10 @@ impl Fixture {
             .unwrap()
     }
 
-    /// Starts a sandbox for role `role` as the runtime does: created through the provider, its
-    /// session accepted by `by` where the sandbox dials, taking ops within `ops` if it gives a
-    /// limit, and set up. A sandbox whose session fails is deleted, and the error quotes its
-    /// console.
+    /// Starts a sandbox for role `role` as the runtime does: through the provider, which
+    /// publishes `image` and `sandboxd`, then creates it, its session accepted by `by` where the
+    /// sandbox dials, taking ops within `ops` if it gives a limit, and set up. A sandbox whose
+    /// session fails is deleted, and the error quotes its console.
     fn try_start(
         &self,
         run: &RunTag,
@@ -114,11 +114,14 @@ impl Fixture {
             }))
             .unwrap(),
         };
+        let path = sandboxd.to_owned();
+        let published = engine().publish(&[Local::Role { image }, Local::Sandboxd { path }])?;
+        let [image, sandboxd] = <[Published; 2]>::try_from(published).unwrap();
         let create = Create {
             run: run.clone(),
             role,
             image,
-            sandboxd: sandboxd.to_owned(),
+            sandboxd,
             ops: ops.is_some(),
             dial: Dial::Socket { dir },
         };
@@ -677,7 +680,7 @@ fn volume(sandbox: &Started) -> String {
 
 /// A `sandboxd` that doesn't exist is named, and one whose path has a comma, which `--mount`
 /// would read as the start of another option, is refused; a container that Docker creates but
-/// can't start is removed; an image the engine doesn't have isn't pulled; and a
+/// can't start is removed; an image the engine doesn't have is refused, not pulled; and a
 /// sandbox whose `sandboxd` exits without dialing is deleted once its start's deadline passes,
 /// its console quoted.
 #[test]
@@ -718,20 +721,23 @@ fn failed_start() {
             lines
         },
         &expect![[r#"
-            missing: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
-            comma: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
+            missing: publishing `sandboxd` failed: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
+            comma: publishing `sandboxd` failed: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
             unexecutable: `docker start …: fix what Docker reports
-            unpulled: `docker create` failed with exit status: 1: Error response from daemon: No such image: busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: fix what Docker reports
+            unpulled: the engine of context `<context>` has no image busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: build or load it there first, as the provider pulls none
             stand-in: no sandbox connected to <dir>/stand-in/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a stand-in, which exits without dialing
             left: []"#]],
     );
 }
 
-/// `message`, with the fixture's directory as `<dir>`, and `…` for what varies between runs or
-/// hosts in a failed `docker start`: the container's ID, and what Docker reports, which comes
-/// from the container runtime, and varies with the runtime and its version.
+/// `message`, with the fixture's directory as `<dir>`, the tests' context as `<context>`, and
+/// `…` for what varies between runs or hosts in a failed `docker start`: the container's ID, and
+/// what Docker reports, which comes from the container runtime, and varies with the runtime and
+/// its version.
 fn redact(fixture: &Fixture, message: &str) -> String {
-    let message = message.replace(&fixture.dir.display().to_string(), "<dir>");
+    let context = format!("context `{}`", engine().report().context.as_str());
+    let message = (message.replace(&fixture.dir.display().to_string(), "<dir>"))
+        .replace(&context, "context `<context>`");
     let (from, to) = ("`docker start ", ": fix what Docker reports");
     if let Some((before, rest)) = message.split_once(from)
         && let Some((_, after)) = rest.split_once(to)
