@@ -6,11 +6,11 @@
 //! removed, so no second connection can follow. The socket, not a secret, tells which sandbox
 //! is talking.
 //!
-//! Everything a session receives is untrusted, since the sandbox may run an agent's code. A
-//! message that fails to parse or comes out of turn, more replies than a waiting request takes,
-//! silence for [`REPLY_TIMEOUT`] while a request waits, or a write the sandbox doesn't read
-//! within it ends the session, which stops the sandbox. A collected tree is written into a
-//! new directory of its own, within [`Limits`].
+//! A sandbox, however buggy, can't harm the host through its session. A message that fails to
+//! parse or comes out of turn, more replies than a waiting request takes, silence for
+//! [`REPLY_TIMEOUT`] while a request waits, or a write the sandbox doesn't read within it ends
+//! the session, which stops the sandbox. A collected tree is written into a new directory of
+//! its own, within [`Limits`].
 //!
 //! # Ops
 //!
@@ -43,9 +43,9 @@ use pumpkin_schema::sandbox::{
 /// How long a session waits on the sandbox: for its next frame, and for it to read a write.
 ///
 /// `sandboxd` answers every request promptly, reads what it is sent, and sends a tree's frames
-/// one after another, so a sandbox that stalls this long is stuck or hostile. The limit holds
-/// for each frame and each write, not for a whole request: a tree's transfer is bounded only
-/// by its [`Limits`] times this.
+/// one after another, so a sandbox that stalls this long is stuck. The limit holds for each
+/// frame and each write, not for a whole request: a tree's transfer is bounded only by its
+/// [`Limits`] times this.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How many frames of a tree may wait for the request writing it. While that many wait, the

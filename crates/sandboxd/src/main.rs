@@ -16,9 +16,10 @@
 //! only the process groups of the commands still running.
 //!
 //! It runs as the role's user from the start and needs no privileges: everything it does,
-//! the role's own code could do too. That is why its reports are untrusted wherever the role
-//! runs untrusted code. It does make itself non-dumpable first, so that the role's code can't
-//! reach it through `/proc` ([`sys::make_non_dumpable`] says why).
+//! the role's own code could do too, so it is no boundary within its sandbox, and where the
+//! role runs the agent's code, that code can shape what it reports. It does make itself
+//! non-dumpable first, so that the role's code can't reach it through `/proc`
+//! ([`sys::make_non_dumpable`] says why).
 
 use std::ffi::OsString;
 use std::fmt::Display;

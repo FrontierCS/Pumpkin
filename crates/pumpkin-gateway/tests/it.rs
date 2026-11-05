@@ -1,6 +1,6 @@
 //! The gateway's end of a session, against a fake sandbox that answers the gateway's first
 //! request with frames of its choosing, ops among them, waiting where it chooses for an op's
-//! reply, and then ends the session: a sandbox running an agent's code can send anything.
+//! reply, and then ends the session: it sends what a buggy `sandboxd` might.
 
 #![expect(
     clippy::unwrap_used,
@@ -353,7 +353,7 @@ fn reply(kind: &str, stream: u32) -> (Value, Vec<u8>) {
 }
 
 #[test]
-fn untrusted_answers() {
+fn sandbox_answers() {
     check(
         "answers",
         None,
@@ -411,7 +411,7 @@ fn untrusted_answers() {
 /// Ops the sandbox makes, which the gateway passes on whole, refuses, or ends the session for,
 /// in a session that takes ops whose payloads hold at most 4 bytes, and in one that takes none.
 #[test]
-fn untrusted_ops() {
+fn sandbox_ops() {
     check(
         "ops",
         Some(OpPayloadLimit::try_from(4).unwrap()),

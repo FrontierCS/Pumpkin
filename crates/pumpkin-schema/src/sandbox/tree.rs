@@ -1,10 +1,10 @@
 //! Writing a tree that arrives over a session into a directory.
 //!
 //! Both ends use it: `sandboxd` for what the gateway puts, the gateway for what it collects,
-//! which a sandbox running untrusted code produced. Parsing has already confined every path
-//! to the directory, so the writer checks how the parts fit: each entry's parent exists, file
-//! sizes match their data, and the tree stays within its [`Limits`]. Since no entry creates a
-//! missing parent, each creates at most one directory or file.
+//! which may come from a buggy sandbox. Parsing has already confined every path to the
+//! directory, so the writer checks how the parts fit: each entry's parent exists, file sizes
+//! match their data, and the tree stays within its [`Limits`]. Since no entry creates a missing
+//! parent, each creates at most one directory or file.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -22,7 +22,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// No limit, for trees from a trusted sender.
+    /// No limit, for trees from the host, which decides what it sends.
     pub const NONE: Self = Self {
         bytes: u64::MAX,
         entries: u64::MAX,

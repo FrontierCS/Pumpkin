@@ -85,7 +85,7 @@ pub struct Resources {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Runtime {
-    /// An agent harness. Agents are untrusted, and whatever reaches them is code.
+    /// An agent harness.
     Agent(AgentRuntime),
     /// A judge, whose command runs once per call in a fresh instance.
     Judge(JudgeRuntime),

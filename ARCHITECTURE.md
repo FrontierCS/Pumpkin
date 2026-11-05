@@ -5,14 +5,17 @@ changing the code are in [`AGENTS.md`](AGENTS.md). Names in backticks are for sy
 
 ## Bird's-eye view
 
-Pumpkin runs workflows, in which an untrusted agent works and judges score what it submits. A
+Pumpkin runs workflows, in which an agent works and judges score what it submits. A
 workflow is data, JSON in Pumpkin's IR: one agent, its judges, and a pattern that grants the agent
 judge calls and a submission, and ends the run with a verdict. Each instance of a role is a
 sandbox, a judge's afresh for each call, whose first process, `sandboxd`, dials the host and serves
 one session: the host puts and collects files, starts commands and freezes the sandbox, and code
 in the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
 driver's decision core decides what a run does, and a provider, such as Docker's, makes sandboxes.
-The session is the boundary that matters most: anything past it may be the agent's.
+The session is the boundary that matters most: a sandbox may be buggy, and the agent is
+opportunistic and goal-directed, using whatever it can reach to finish its task or raise its
+score. So each guard either limits what the agent's code can reach, or keeps a buggy sandbox from
+harming the host or the run.
 
 ## Entry points
 
@@ -40,8 +43,8 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 
 **`crates/pumpkin-gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
 `Session`, whose one owner moves trees, runs commands (`Process`) and answers ops (`Arrival`).
-- **Architecture Invariant:** everything a session receives is untrusted: a protocol break ends
-  the session, and a sandbox costs the host only bounded memory and bounded waits.
+- **Architecture Invariant:** a sandbox can't harm the host through its session: anything out of
+  protocol ends the session, and a session costs the host only bounded memory and bounded waits.
 - **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes
   have the same sessions: of Pumpkin's crates, it depends only on `pumpkin-schema` and `stdx`.
 
@@ -50,8 +53,8 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 `sandboxctl`, and `sys` holds the system calls `std` lacks.
 - **Architecture Invariant:** the protocol's two ends share no Pumpkin crate but `pumpkin-schema`
   and `stdx`, so the protocol is all they agree on: `sandboxd` uses the gateway only in tests.
-- **Architecture Invariant:** it has only its role's privileges, so its reports are untrusted
-  wherever the role runs untrusted code.
+- **Architecture Invariant:** it has only its role's privileges, so it is no boundary within its
+  sandbox: where the role runs the agent's code, that code can shape what `sandboxd` reports.
 
 **`providers/docker`.** `pumpkin-docker`, a sandbox as a container that needs no root to start:
 `Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`),

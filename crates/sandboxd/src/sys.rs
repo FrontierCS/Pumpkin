@@ -126,7 +126,7 @@ pub(crate) fn make_non_dumpable() -> io::Result<()> {
 }
 
 /// Opens the regular file at `path` with `options`, and fails for anything else there.
-/// `sandboxd` runs as the same user as the role's code, which can plant anything at the paths
+/// `sandboxd` runs as the same user as the role's code, which can put anything at the paths
 /// `sandboxd` opens, so this adds to `options`:
 ///
 /// - `O_NOFOLLOW`, so that a symbolic link there fails the open instead of leading elsewhere,

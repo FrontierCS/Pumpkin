@@ -298,7 +298,7 @@ fn refusals() {
             missing.argv = Argv::try_from(vec!["/nonexistent/program".to_owned()]).unwrap();
             let started = sandbox.session.start(missing).map(|_| ());
             lines.push(format!("missing program: {}", show_error(sandbox, started)));
-            // The role's code can plant anything at a command's output paths, such as a link to
+            // The role's code can put anything at a command's output paths, such as a link to
             // `sandboxd`'s own standard error, or a FIFO that nothing reads.
             let link = sandbox.sh("echo leaked", &[]);
             std::os::unix::fs::symlink("/proc/self/fd/2", link.stdout.as_str()).unwrap();
