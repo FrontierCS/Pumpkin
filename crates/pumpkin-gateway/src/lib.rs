@@ -42,7 +42,7 @@ use pumpkin_schema::sandbox::op::{OpCall, OpReply};
 use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
-    ToSandbox, frame,
+    ToSandbox, frame, pumpkin_dir, pumpkin_subdirs,
 };
 use stdx::Deadline;
 
@@ -313,6 +313,31 @@ impl Session {
             ended,
             next_stream: 1,
             ops,
+        })
+    }
+
+    /// Puts [`pumpkin_subdirs()`] under [`pumpkin_dir()`], which every sandbox needs before its
+    /// first command, by `by` ([deadlines](crate#deadlines)).
+    ///
+    /// # Errors
+    ///
+    /// Fails if `sandboxd` can't put the directories, if `by` passes first, or if the session
+    /// ends.
+    pub fn set_up(&mut self, by: Deadline) -> Result<(), String> {
+        let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
+        let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
+        self.put(&root, &puts, by).map_err(|error| {
+            let failed =
+                format!("the directories under `{root}` can't be put in the sandbox: {error}");
+            // A deadline's error says what is expected.
+            if error.kind() == io::ErrorKind::TimedOut {
+                failed
+            } else {
+                format!(
+                    "{failed}: expected its `sandboxd` to put them, as the role's user, who owns \
+                     `{root}`"
+                )
+            }
         })
     }
 

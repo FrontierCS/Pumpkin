@@ -11,10 +11,10 @@
 //! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
 //!   container's log, which holds at most 1 MiB;
 //! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, holding the
-//!   [directories](pumpkin_subdirs) that [`Engine::start`] puts there over the session. It
-//!   holds at most [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's
-//!   memory limit, so a role can keep there no more than that limit, less what its processes
-//!   use;
+//!   [directories](pumpkin_schema::sandbox::pumpkin_subdirs) that [`Engine::start`] puts
+//!   there over the session. It holds at most [`PUMPKIN_BYTES`], and its files are in memory,
+//!   counted against the role's memory limit, so a role can keep there no more than that
+//!   limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
 //!   `VOLUME` its image declares, which is removed with the container. Neither has a size
@@ -46,12 +46,10 @@ use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
 use std::time::Duration;
 
-use pumpkin_gateway::{Listener, Put, Session};
+use pumpkin_gateway::{Listener, Session};
 use pumpkin_schema::ir::{Resources, User};
 use pumpkin_schema::provider::RunTag;
-use pumpkin_schema::sandbox::{
-    OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir, pumpkin_subdirs,
-};
+use pumpkin_schema::sandbox::{OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
 use pumpkin_schema::workflow::Sandbox;
 use serde::Deserialize;
 use stdx::process::Environment;
@@ -338,8 +336,7 @@ impl Engine {
     }
 
     /// Starts a container for the role, connects its session, which takes ops within
-    /// [`Start::ops`]'s limit, if it gives one, and puts [`pumpkin_subdirs()`] under
-    /// [`pumpkin_dir()`].
+    /// [`Start::ops`]'s limit, if it gives one, and sets it up ([`Session::set_up`]).
     ///
     /// # Errors
     ///
@@ -479,7 +476,7 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
 }
 
 /// Accepts the session of container `id`'s `sandboxd`, which takes ops within `ops`, the
-/// payload limit, if any, and puts the directories a role expects.
+/// payload limit, if any, and sets it up ([`Session::set_up`]).
 fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
     let by = Deadline::after(CONNECT_TIMEOUT);
     let mut session = listener.accept(by, ops).map_err(|error| {
@@ -492,22 +489,7 @@ fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<
             format!("the session of container {id} can't be set up: {error}")
         }
     })?;
-    let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
-    let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
-    session.put(&root, &puts, by).map_err(|error| {
-        if error.kind() == io::ErrorKind::TimedOut {
-            format!(
-                "the `sandboxd` of container {id} didn't put the directories under `{root}` \
-                 within {CONNECT_TIMEOUT:?} of starting: {error}: expected it to put them as it \
-                 starts"
-            )
-        } else {
-            format!(
-                "the directories under `{root}` can't be put in container {id}: {error}: \
-                 expected its `sandboxd` to put them, as the role's user, who owns `{root}`"
-            )
-        }
-    })?;
+    session.set_up(by).context(format_args!("container {id}"))?;
     Ok(session)
 }
 
