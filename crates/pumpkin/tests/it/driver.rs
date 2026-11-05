@@ -306,7 +306,7 @@ fn lwe() {
             12100 agent_exited 0
               tear down the agent
               start job 1 of score on op 7's payload of 10240 bytes, with a timeout of 120s
-              (tick due at 18210000)
+              (tick due at 18200000)
             13500 judge_started 1
             20000 judge_exited 1
             20100 collected 1 {"status": "passed", "raw_score": 0, "metrics": {"solved": 0}}
@@ -468,7 +468,7 @@ fn deadline() {
             60000 tick
               stop job 0
               tear down the agent
-              (tick due at 270000)
+              (tick due at 260000)
             60100 status 0
               refuse op 3: the work phase has ended: make no more ops
             60200 agent_exited 137
@@ -514,7 +514,7 @@ fn agent_ends() {
               reply to op 2: {"kind":"submit","state":"stored","remaining_seconds":17996}
             3200 agent_exited 0
               tear down the agent
-              (tick due at 18210000)
+              (tick due at 18200000)
             3400 collected 0 {"status": "passed", "raw_score": 1}
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
             3500 judge_started 1
@@ -543,7 +543,7 @@ fn agent_ends() {
 
 /// A run still going at its hard end is abandoned while the agent works, or in the grace after
 /// a finalize: an op that comes then is refused, after the run is abandoned, and the reports on
-/// its jobs change nothing. With a deadline of 60 s, the hard end ([`lasts`]) is 270 s in.
+/// its jobs change nothing. With a deadline of 60 s, the hard end ([`lasts`]) is 260 s in.
 #[test]
 fn hard_end() {
     let deadline = |ir: &mut Value| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60);
@@ -552,8 +552,8 @@ fn hard_end() {
         r"
         1000 judge train 10
         1500 judge_started 0
-        270000 ops
-        270100 judge_exited 0
+        260000 ops
+        260100 judge_exited 0
         ",
         &expect![[r#"
             start
@@ -563,18 +563,18 @@ fn hard_end() {
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
               start job 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
             1500 judge_started 0
-            270000 ops
+            260000 ops
               abandon the run at its hard end
               refuse op 2: the run has passed its hard end: make no more ops
               (no tick due)
-            270100 judge_exited 0
+            260100 judge_exited 0
         "#]],
     );
     check(
         deadline,
         r"
         1000 submit submit 10 final
-        270000 tick
+        260000 tick
         ",
         &expect![[r#"
             start
@@ -582,7 +582,7 @@ fn hard_end() {
               (tick due at 60000)
             1000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":59}
-            270000 tick
+            260000 tick
               abandon the run at its hard end
               (no tick due)
         "#]],
@@ -591,7 +591,7 @@ fn hard_end() {
 
 /// After the work phase, the hard end is due: a run is abandoned at it in its teardown, and
 /// under the final judge, whose result gives no outcome once it comes at the hard end, here
-/// with a grace of 30 s, which brings the hard end to 240 s.
+/// with a grace of 30 s, which brings the hard end to 230 s.
 #[test]
 fn hard_end_after_work() {
     check(
@@ -600,8 +600,8 @@ fn hard_end_after_work() {
         1000 judge train 10
         1500 judge_started 0
         60000 tick
-        269999 tick
-        270000 tick
+        259999 tick
+        260000 tick
         ",
         &expect![[r#"
             start
@@ -614,9 +614,9 @@ fn hard_end_after_work() {
             60000 tick
               stop job 0
               tear down the agent
-              (tick due at 270000)
-            269999 tick
-            270000 tick
+              (tick due at 260000)
+            259999 tick
+            260000 tick
               abandon the run at its hard end
               (no tick due)
         "#]],
@@ -632,8 +632,8 @@ fn hard_end_after_work() {
         2000 agent_exited 0
         2500 judge_started 0
         122500 judge_timed_out 0
-        239999 tick
-        240000 collected 0 {"status": "passed", "raw_score": 7}
+        229999 tick
+        230000 collected 0 {"status": "passed", "raw_score": 7}
         "#,
         &expect![[r#"
             start
@@ -644,18 +644,20 @@ fn hard_end_after_work() {
             2000 agent_exited 0
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 240000)
+              (tick due at 230000)
             2500 judge_started 0
             122500 judge_timed_out 0
-            239999 tick
-            240000 collected 0 {"status": "passed", "raw_score": 7}
+            229999 tick
+            230000 collected 0 {"status": "passed", "raw_score": 7}
               abandon the run at its hard end
               (no tick due)
         "#]],
     );
 }
 
-/// A run that has finished has no hard end. One whose times sum past the largest `Duration`
+/// A run that has finished has no hard end. One whose deadline is shorter than its startup has
+/// the startup in the deadline's place, since the agent's start may outrun the deadline: with a
+/// deadline of 5 s, the hard end is 210 s in. One whose times sum past the largest `Duration`
 /// has the largest as its hard end.
 #[test]
 fn hard_end_bounds() {
@@ -663,7 +665,7 @@ fn hard_end_bounds() {
         |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
         r"
         1000 agent_exited 0
-        270000 tick
+        260000 tick
         ",
         &expect![[r#"
             start
@@ -673,7 +675,31 @@ fn hard_end_bounds() {
               tear down the agent
               finish: no score; work ended at the agent's exit, Code(0); no submission
               (no tick due)
-            270000 tick
+            260000 tick
+        "#]],
+    );
+    check(
+        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(5),
+        r"
+        1000 submit submit 10
+        5000 tick
+        209999 tick
+        210000 tick
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 5000)
+            1000 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":4}
+            5000 tick
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 210000)
+            209999 tick
+            210000 tick
+              abandon the run at its hard end
+              (no tick due)
         "#]],
     );
     check(
@@ -766,7 +792,7 @@ fn finalize_lock() {
             62000 tick
               stop job 0
               tear down the agent
-              (tick due at 18210000)
+              (tick due at 18200000)
             62200 judge_failed 0 stopped
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
@@ -785,7 +811,7 @@ fn finalize_lock() {
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":0}
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 18150000)
+              (tick due at 18140000)
             2100 ops
               refuse op 2: a final submission was accepted: make no more ops
         "#]],
