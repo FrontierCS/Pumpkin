@@ -6,7 +6,7 @@
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend
   existing helpers instead of creating parallel ones
 - ALWAYS put new code where `ARCHITECTURE.md` places it, and update `ARCHITECTURE.md` in the
-  same pull request when anything it states changes or new code falls outside it
+  same pull request only when a crate or module boundary, or an invariant it states, changes
 - PREFER the smallest change that fits the existing design
 - TREAT a new dependency, crate or `pub` item as an architectural change, and say why in the
   pull request
@@ -28,6 +28,10 @@
   `unreachable!` under `#[expect(clippy::unreachable, reason = "…")]` saying why only a bug can
   reach it; never handle such a path. Handle, or return, every error the world can cause, the
   kernel's and its security policy's included
+- NEVER catch a panic outside tests: a panic is a bug, and it ends the whole process, since what
+  it leaves behind can't be trusted; a binary that runs threads installs `stdx::abort_on_panic`
+- WRITE `unsafe` only to make a system call `std` lacks, each use acknowledging the
+  `unsafe_code` lint with a reason
 - WRITE error messages as what is wrong, then what is expected
   (`the program is empty: name one`); passing an error up, add what was being done where the
   error doesn't say it, as `stdx::Context` does
@@ -40,7 +44,8 @@
 - SET `test = false` on each library and binary target: tests live in the integration test
   binary, and `cargo test` would build each target again for an empty unit-test harness
 - WRITE rustdoc beside the code, and each rule or invariant once, at its home (the type, the
-  constructor, or the protocol's module doc); every other doc links to it
+  constructor, or the protocol's module doc); every other doc links to it, or names it for
+  symbol search, as `ARCHITECTURE.md` does
 - WRITE rustdoc for a public item as its contract (what it does, its errors and panics), not
   how it works
 - WRITE a module doc that says what the module is for and links to where its rules live; it

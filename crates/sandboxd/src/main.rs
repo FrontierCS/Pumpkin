@@ -40,6 +40,11 @@ mod flags {
         unreachable_pub,
         reason = "xflags declares the types it generates `pub`"
     )]
+    #![expect(
+        clippy::allow_attributes,
+        clippy::allow_attributes_without_reason,
+        reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
+    )]
 
     use std::path::PathBuf;
 
