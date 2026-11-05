@@ -58,7 +58,7 @@ use stdx::Context;
 use stdx::process::Environment;
 
 /// The most seconds a sandbox's start takes, as [`Capabilities::startup_seconds`] declares it.
-const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(30).unwrap();
+const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
 /// host's disk, outside the container's other limits, so it is capped whatever writes there,
