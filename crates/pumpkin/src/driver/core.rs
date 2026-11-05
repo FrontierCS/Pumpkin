@@ -6,7 +6,8 @@
 //! The core implements [`SoloThenJudge`]. Its [`Action`]s ask the runtime to start the agent,
 //! answer ops, run judge calls, collect outputs and destroy sandboxes, and [`Event`]s report
 //! what the runtime observed. [`WorkEnd`] names why the work phase ended, and
-//! [`Action::Finish`] carries the run's [`Outcome`].
+//! [`Action::Finish`] carries the run's [`Outcome`], or [`Action::Abandon`] ends it without
+//! one.
 //!
 //! The rules by which the core authorizes ops and fills in their replies are in its `ops`
 //! module, and how it meters judge calls in its `jobs` module.
@@ -124,6 +125,10 @@ pub enum Action {
     /// Ends the run with its outcome. After it, the core only refuses the ops that still
     /// arrive.
     Finish { outcome: Outcome },
+    /// Ends the run without an outcome, since it was still going at its hard end ([`lasts`]),
+    /// and stops whatever of it still runs. After it, the core only refuses the ops that still
+    /// arrive.
+    Abandon,
 }
 
 /// Why the work phase ended.
@@ -183,6 +188,26 @@ pub enum Verdict {
     },
 }
 
+/// How long a run of `workflow` may last from its start: its hard end, which [`Core::start`]
+/// sets, after the deadline.
+///
+/// It is the pattern's deadline, its finalize grace and its score's timeout, and three times
+/// `startup`, how long the run's provider may take to start a sandbox, from when the runtime
+/// asks for one to when its session is ready.
+pub fn lasts(workflow: &Workflow, startup: Duration) -> Duration {
+    let Main::SoloThenJudge(pattern) = workflow.main();
+    // The deadline bounds the work phase, and the score's timeout the final judge's command. Of
+    // the startups, one is the final judge's sandbox's, and one the agent's, whose start counts
+    // against the deadline yet may outrun a short one. The grace, which the deadline cuts
+    // short, and the third startup are slack for ending the work phase and collecting what it
+    // left, which nothing else bounds: a margin chosen, not derived.
+    pattern
+        .deadline
+        .saturating_add(pattern.finalize_grace)
+        .saturating_add(pattern.score.timeout)
+        .saturating_add(startup.saturating_mul(3))
+}
+
 /// A run's decision core.
 ///
 /// A runtime drives it: [`Core::start`] begins the run, at time 0, and returns the first
@@ -200,6 +225,8 @@ pub struct Core<'w> {
     pattern: &'w SoloThenJudge,
     /// The latest time an event was observed, since the run started.
     now: Duration,
+    /// The run's hard end, since it started.
+    hard_end: Duration,
     phase: Phase,
     jobs: jobs::Jobs,
 }
@@ -234,17 +261,21 @@ enum Phase {
     },
     /// The run has finished.
     Finished { work_end: WorkEnd },
+    /// The run has been abandoned.
+    Abandoned,
 }
 
 impl<'w> Core<'w> {
-    /// Starts a run of `workflow`: its work phase begins at time 0. Returns the core and its
-    /// first actions.
-    pub fn start(workflow: &'w Workflow) -> (Self, Vec<Action>) {
+    /// Starts a run of `workflow`, whose provider may take `startup` to start a sandbox: its
+    /// work phase begins at time 0, and its hard end is [`lasts`] after. Returns the core and
+    /// its first actions.
+    pub fn start(workflow: &'w Workflow, startup: Duration) -> (Self, Vec<Action>) {
         let Main::SoloThenJudge(pattern) = workflow.main();
         let core = Self {
             workflow,
             pattern,
             now: Duration::ZERO,
+            hard_end: lasts(workflow, startup),
             phase: Phase::Work { submission: None },
             jobs: jobs::Jobs::default(),
         };
@@ -256,6 +287,9 @@ impl<'w> Core<'w> {
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
         let mut actions = Vec::new();
+        if self.now >= self.hard_end {
+            self.abandon(&mut actions);
+        }
         if self.now >= self.pattern.deadline {
             self.end_work(WorkEnd::Deadline, &mut actions);
         }
@@ -297,14 +331,30 @@ impl<'w> Core<'w> {
     }
 
     /// When the core next acts without another event, as a time since the run started: at the
-    /// deadline, or at the end of the grace after a finalize. The runtime sends [`Event::Tick`]
-    /// once that time has come. `None` once no time is due, after the work phase.
+    /// deadline, or at the end of the grace after a finalize, while the agent works; then at
+    /// the hard end. The runtime sends [`Event::Tick`] once that time has come. `None` once the
+    /// run has ended.
     pub fn tick_due(&self) -> Option<Duration> {
         match self.phase {
+            // These phases end by the deadline, which comes before the hard end.
             Phase::Work { .. } => Some(self.pattern.deadline),
             Phase::Finalized { grace_end, .. } => Some(grace_end.min(self.pattern.deadline)),
-            Phase::Teardown { .. } | Phase::Final { .. } | Phase::Finished { .. } => None,
+            Phase::Teardown { .. } | Phase::Final { .. } => Some(self.hard_end),
+            Phase::Finished { .. } | Phase::Abandoned => None,
         }
+    }
+
+    /// Abandons the run, still going at its hard end, unless it has ended.
+    fn abandon(&mut self, actions: &mut Vec<Action>) {
+        match self.phase {
+            Phase::Work { .. }
+            | Phase::Finalized { .. }
+            | Phase::Teardown { .. }
+            | Phase::Final { .. } => {}
+            Phase::Finished { .. } | Phase::Abandoned => return,
+        }
+        self.phase = Phase::Abandoned;
+        actions.push(Action::Abandon);
     }
 
     /// Locks `submission`, finalized, as the selection, and starts the grace after it. A grace
@@ -326,7 +376,10 @@ impl<'w> Core<'w> {
         let submission = match &mut self.phase {
             Phase::Work { submission } => submission.take(),
             Phase::Finalized { submission, .. } => Some(submission.clone()),
-            Phase::Teardown { .. } | Phase::Final { .. } | Phase::Finished { .. } => return,
+            Phase::Teardown { .. }
+            | Phase::Final { .. }
+            | Phase::Finished { .. }
+            | Phase::Abandoned => return,
         };
         self.phase = Phase::Teardown {
             work_end,
@@ -371,7 +424,8 @@ impl<'w> Core<'w> {
             Phase::Work { .. }
             | Phase::Finalized { .. }
             | Phase::Teardown { .. }
-            | Phase::Finished { .. } => {}
+            | Phase::Finished { .. }
+            | Phase::Abandoned => {}
         }
     }
 
@@ -414,7 +468,8 @@ impl<'w> Core<'w> {
             | Phase::Finalized { .. }
             | Phase::Teardown { .. }
             | Phase::Final { .. }
-            | Phase::Finished { .. } => self.jobs.state_mut(job),
+            | Phase::Finished { .. }
+            | Phase::Abandoned => self.jobs.state_mut(job),
         };
         if let Some(state) = state {
             apply(state);

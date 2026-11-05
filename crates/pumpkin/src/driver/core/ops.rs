@@ -117,6 +117,9 @@ impl Core<'_> {
             Phase::Teardown { work_end, .. }
             | Phase::Final { work_end, .. }
             | Phase::Finished { work_end } => work_end,
+            Phase::Abandoned => {
+                return Err("the run has passed its hard end: make no more ops".to_owned());
+            }
         };
         match work_end {
             WorkEnd::Finalized => {
