@@ -96,8 +96,9 @@ impl JudgeResult {
 
     /// The state of the job that gave this result, as a status reply gives it.
     pub(super) fn job_state(&self) -> JobState {
-        let returned = self.returned.clone();
-        match self.status {
+        let Self { status, returned } = self;
+        let returned = returned.clone();
+        match status {
             Status::Passed { .. } => JobState::Passed { returned },
             Status::Failed => JobState::Failed(Failed::Judged { returned }),
         }

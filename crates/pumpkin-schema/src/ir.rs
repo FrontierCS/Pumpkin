@@ -112,6 +112,9 @@ pub struct JudgeRuntime {
 /// What a judge call writes as its result: the JSON file `result.json` in `out` below
 /// [`pumpkin_dir()`](crate::sandbox::pumpkin_dir), of which
 /// its caller sees the status and the fields [`returns`](Self::returns) names.
+///
+/// Once the judge's command exits, the result alone says how the call went, whatever the exit
+/// status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSpec {

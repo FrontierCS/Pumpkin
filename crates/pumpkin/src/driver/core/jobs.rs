@@ -57,9 +57,9 @@ impl Failure {
     }
 }
 
-/// The agent's jobs, numbered from 1 in the order they were added. The score's job takes the
-/// number after theirs, and the final phase holds it, so a number the agent asks about never
-/// names it.
+/// The agent's jobs, each numbered by its index, in the order they were added. The score's job
+/// takes the number after theirs, and the final phase holds it, so a number the agent asks about
+/// never names it.
 #[derive(Debug, Default)]
 pub(super) struct Jobs(Vec<Job>);
 
@@ -185,26 +185,25 @@ impl State {
 impl Jobs {
     /// Adds a job, queued, made under `grant`.
     pub(super) fn add(&mut self, grant: JudgeGrantId) -> JobId {
+        let job = JobId(self.0.len() as u64);
         self.0.push(Job {
             grant,
             state: State::Queued,
         });
-        JobId(self.0.len() as u64)
+        job
     }
 
     /// The number the score's job takes: the one after the agent's jobs'.
     pub(super) fn score_job(&self) -> JobId {
-        JobId(self.0.len() as u64 + 1)
+        JobId(self.0.len() as u64)
     }
 
     pub(super) fn get(&self, job: JobId) -> Option<&Job> {
-        let index = usize::try_from(job.0.checked_sub(1)?).ok()?;
-        self.0.get(index)
+        self.0.get(usize::try_from(job.0).ok()?)
     }
 
     pub(super) fn state_mut(&mut self, job: JobId) -> Option<&mut State> {
-        let index = usize::try_from(job.0.checked_sub(1)?).ok()?;
-        Some(&mut self.0.get_mut(index)?.state)
+        Some(&mut self.0.get_mut(usize::try_from(job.0).ok()?)?.state)
     }
 
     /// Stops every job that is queued or running at `now`, and returns them. A job whose
@@ -224,7 +223,7 @@ impl Jobs {
                 ran,
                 end: End::Stopped,
             };
-            stopped.push(JobId(index as u64 + 1));
+            stopped.push(JobId(index as u64));
         }
         stopped
     }

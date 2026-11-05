@@ -30,7 +30,7 @@ pub use result::JudgeResult;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpId(pub u64);
 
-/// A judge call's job. The core numbers jobs from 1, in the order it starts them, and callers
+/// A judge call's job. The core numbers jobs from 0, in the order it starts them, and callers
 /// ask about their jobs by these numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobId(pub u64);
@@ -66,9 +66,11 @@ pub enum Request {
 /// What the runtime observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    /// The agent's command has started in its sandbox.
+    AgentStarted,
     /// The agent's command has exited.
     AgentExited { status: ExitStatus },
-    /// The agent's sandbox failed: it could not start, or its session ended.
+    /// The agent's sandbox or its command could not start, or its session ended.
     AgentFailed { reason: String },
     /// The agent's sandbox made an op. The core answers it with an [`Action::Reply`] naming
     /// `op`.
@@ -76,8 +78,8 @@ pub enum Event {
     /// A job's command has started.
     JudgeStarted { job: JobId },
     /// A job's command has exited by itself.
-    JudgeExited { job: JobId },
-    /// A job's command reached its timeout, and the runtime stopped it.
+    JudgeExited { job: JobId, status: ExitStatus },
+    /// A job's command reached its timeout, and the runtime stops it.
     JudgeTimedOut { job: JobId },
     /// A job's outputs have been collected and its sandbox destroyed. `result` is its
     /// `result.json` parsed per its judge's [`ResultSpec`](pumpkin_schema::ir::ResultSpec), or
@@ -96,8 +98,9 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the agent's sandbox and its command, whose end the runtime reports as
-    /// [`Event::AgentExited`] or [`Event::AgentFailed`].
+    /// Starts the agent's sandbox and its command. The runtime reports [`Event::AgentStarted`]
+    /// once both have started, then the command's end as [`Event::AgentExited`] or
+    /// [`Event::AgentFailed`]; or [`Event::AgentFailed`] alone, if either didn't start.
     StartAgent,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
@@ -134,7 +137,7 @@ pub enum WorkEnd {
     Finalized,
     /// The agent's command exited.
     AgentExited(ExitStatus),
-    /// The agent's sandbox failed, for this reason.
+    /// The agent's sandbox or its command failed, for this reason.
     AgentFailed(String),
 }
 
@@ -262,8 +265,9 @@ impl<'w> Core<'w> {
             self.end_work(WorkEnd::Finalized, &mut actions);
         }
         match event {
-            // A tick only moves the clock, on which the checks above have acted.
-            Event::Tick => {}
+            // The agent's start is for the run log alone, and a tick only moves the clock, on
+            // which the checks above have acted.
+            Event::AgentStarted | Event::Tick => {}
             Event::AgentExited { status } => {
                 self.end_work(WorkEnd::AgentExited(status), &mut actions);
             }
@@ -272,7 +276,8 @@ impl<'w> Core<'w> {
             }
             Event::OpArrived { op, request } => self.op(op, request, &mut actions),
             Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
-            Event::JudgeExited { job } => {
+            // The run log keeps the status; whether a call passed is its result's to say.
+            Event::JudgeExited { job, status: _ } => {
                 self.on_job(job, |state| state.ended(at, jobs::End::Exited));
             }
             Event::JudgeTimedOut { job } => {
