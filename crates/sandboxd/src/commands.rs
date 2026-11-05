@@ -12,7 +12,7 @@
 //! an orphan the kernel hands a sandbox's first process descends from a child, so it arrives
 //! while there are children already.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
@@ -53,7 +53,7 @@ struct Shared {
 struct State {
     /// The started commands still running, by process ID, each with the stream that started
     /// it. Each leads a process group of its own.
-    running: HashMap<i32, u32>,
+    running: BTreeMap<i32, u32>,
     frozen: bool,
 }
 
@@ -73,7 +73,7 @@ impl Commands {
     /// a child fails, the thread kills the commands and ends `sandboxd`.
     pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
         let state = State {
-            running: HashMap::new(),
+            running: BTreeMap::new(),
             frozen: false,
         };
         let shared = Arc::new(Shared {

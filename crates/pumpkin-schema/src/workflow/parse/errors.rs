@@ -4,7 +4,7 @@
 //! A part that fails to parse returns a [`Reported`], which only [`Errors::report`] makes, so a
 //! failed parse always has an error to return.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -90,7 +90,7 @@ impl Errors {
     ) -> Vec<String> {
         let names: Vec<&Name> = names.into_iter().collect();
         // The index of each name's first use, and how many parts use it.
-        let mut uses: HashMap<&Name, (usize, usize)> = HashMap::new();
+        let mut uses: BTreeMap<&Name, (usize, usize)> = BTreeMap::new();
         for (index, name) in names.iter().enumerate() {
             uses.entry(name).or_insert((index, 0)).1 += 1;
         }
@@ -118,7 +118,7 @@ impl Errors {
         &mut self,
         path: &str,
         name: &Name,
-        ids: &HashMap<&str, Id>,
+        ids: &BTreeMap<&str, Id>,
         kind: &str,
     ) -> Result<Id, Reported> {
         ids.get(name.as_str()).copied().ok_or_else(|| {

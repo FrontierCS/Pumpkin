@@ -6,7 +6,7 @@
 //! that can't be sent, such as one holding a link, fails before its first entry. Files are
 //! expected not to change while they are sent, as after the sandbox is frozen.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -25,7 +25,7 @@ use crate::sys;
 #[derive(Default)]
 pub(crate) struct Puts {
     /// The tree being put on each stream: `None` once it has failed, until its end arrives.
-    trees: HashMap<u32, Option<tree::Writer>>,
+    trees: BTreeMap<u32, Option<tree::Writer>>,
 }
 
 impl Puts {
