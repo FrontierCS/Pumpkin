@@ -33,9 +33,9 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 **`crates/pumpkin-schema`.** The formats Pumpkin's programs share, never copied into a consumer:
 `ir`, the workflow IR; `workflow`, a workflow parsed; `sandbox`, the sandbox protocol, its `frame`s,
 `tree`s, ops (`sandbox::op`) and the in-sandbox contract: the paths, limits and environment a
-role's commands and its session's owner share. Another program's format, such as `docker info`'s,
-stays with the code that reads it. **API Boundary:** the IR, the in-sandbox contract,
-`sandboxctl`'s JSON.
+role's commands and its session's owner share; `provider`, the values a run and its providers
+exchange. Another program's format, such as `docker info`'s, stays with the code that reads it.
+**API Boundary:** the IR, the in-sandbox contract, `sandboxctl`'s JSON.
 - **Architecture Invariant:** outside its tests, it depends on `serde` and `serde_json` alone,
   because `sandboxd`, a small static binary, depends on it.
 - **Architecture Invariant:** only parsing makes a `workflow::Workflow`, so code past parsing need

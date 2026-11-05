@@ -24,9 +24,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{Container, ContextName, Engine, Report, RunTag, Security, Start};
+use pumpkin_docker::{Container, ContextName, Engine, Report, Security, Start};
 use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, RefusedOp, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
+use pumpkin_schema::provider::RunTag;
 use pumpkin_schema::sandbox::op::{
     Failed, Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
     StatusReply, SubmitReply, SubmitState,
@@ -66,7 +67,8 @@ impl Fixture {
                  which builds sandboxd and sets it"
             );
         };
-        let tag = |suffix: &str| RunTag::from(format!("pk-{}-{name}{suffix}", std::process::id()));
+        let tag = |suffix: &str| format!("pk-{}-{name}{suffix}", std::process::id());
+        let tag = |suffix: &str| RunTag::try_from(tag(suffix)).unwrap();
         // Socket paths are short: a directory in the system's temporary one, private to this
         // user, as the parent of every socket directory must be.
         let dir = std::env::temp_dir().join(format!("pk-{}-{name}", std::process::id()));
