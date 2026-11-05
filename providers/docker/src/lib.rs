@@ -1,27 +1,25 @@
 //! The Docker provider: a sandbox for a role as a container that needs no root to start.
 //!
-//! [`Engine::start`] runs the `docker` command line, as an ordinary user, against the engine of
-//! the operator's [context](#the-envelope), and returns a [`Container`] whose [`Session`] is
-//! connected to the `sandboxd` inside. The container has:
+//! [`Engine`] runs `docker` as an ordinary user against the engine of the operator's
+//! [context](#the-envelope), and makes each sandbox a container that has:
 //!
-//! - no network but loopback; the session's socket, in a host directory mounted read-only,
-//!   is the only way out;
+//! - no network but loopback; the dial's socket, in a host directory mounted read-only, is the
+//!   only way out;
 //! - the role's user from its first process, no capabilities, and `no-new-privileges`;
 //! - CPU, memory (swap included) and process limits, and a core file size limit of 0;
-//! - `sandboxd`, mounted read-only, as its first process, whose output alone is the
-//!   container's log, which holds at most 1 MiB;
-//! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, holding the
-//!   [directories](pumpkin_schema::sandbox::pumpkin_subdirs) that [`Engine::start`] puts
-//!   there over the session. It holds at most [`PUMPKIN_BYTES`], and its files are in memory,
-//!   counted against the role's memory limit, so a role can keep there no more than that
-//!   limit, less what its processes use;
+//! - `sandboxd`, mounted read-only, as its first process, dialing the [`Dial`] its create
+//!   gives, and whose output alone is the container's log, which holds at most 1 MiB;
+//! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, for the session's owner to
+//!   put [directories](pumpkin_schema::sandbox::pumpkin_subdirs) in. It holds at most
+//!   [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's memory limit,
+//!   so a role can keep there no more than that limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
 //!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
 //!   `VOLUME` its image declares, which is removed with the container. Neither has a size
 //!   limit, so a role can fill the disk the Docker daemon stores containers on. Docker's
 //!   `/dev/shm` and `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so
 //!   what they hold counts against the memory limit;
-//! - for a role that makes ops ([`Start::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
+//! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
 //!   read-only, and `sandboxd` serving ops; any other sandbox is
 //!   [passive](pumpkin_schema::sandbox).
 //!
@@ -33,31 +31,33 @@
 //! picks up none of its own, and nothing in its environment overrides the one named
 //! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
 //! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
-//! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them.
-//! Each container is labelled with its run's [`RunTag`], so that [`Engine::destroy_all`] finds
-//! a run's containers, and only those, even when the process that started them is gone, and
-//! with its role's name, so that `docker ps` shows which is which. The provider runs on a
-//! rootful engine or a rootless one, and its report says which ([`Security::rootless`]).
+//! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them; it
+//! pulls no image, so a role's must be in the engine already. Each container is
+//! labelled with its run's [`RunTag`], so that [`Engine::list`] finds a run's containers, and
+//! only those, even when the process that started them is gone, and with its role's name, so
+//! that `docker ps` shows which is which. The provider runs on a rootful engine or a rootless
+//! one, and its report says which ([`Security::rootless`]).
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
-use std::time::Duration;
 
-use pumpkin_gateway::{Listener, Session};
 use pumpkin_schema::ir::{Resources, User};
-use pumpkin_schema::provider::RunTag;
-use pumpkin_schema::sandbox::{OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
-use pumpkin_schema::workflow::Sandbox;
-use serde::Deserialize;
+use pumpkin_schema::provider::{
+    Capabilities, Console, Create, Created, Dial, Listed, Ready, Role, RunTag, SOCKET_NAME,
+    SandboxId,
+};
+use pumpkin_schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
+use serde::{Deserialize, Serialize};
+use stdx::Context;
 use stdx::process::Environment;
-use stdx::{Context, Deadline};
 
-/// How long a new container has to connect its `sandboxd` to the session's socket and put the
-/// directories a role expects.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most seconds a sandbox's start takes, as [`Capabilities::startup_seconds`] declares it.
+const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(30).unwrap();
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
 /// host's disk, outside the container's other limits, so it is capped whatever writes there,
@@ -75,9 +75,6 @@ const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
 /// Where the session's socket directory is mounted in the container.
 const GATEWAY_DIR: &str = "/.pumpkin/gateway";
 
-/// The socket's name in its directory.
-const SOCKET_NAME: &str = "s";
-
 /// The label that carries a container's run tag.
 const RUN_LABEL: &str = "pumpkin.run";
 
@@ -90,7 +87,7 @@ const ROLE_LABEL: &str = "pumpkin.role";
 /// Any name but the empty one, which `docker` would take for no name, and so reach the engine
 /// of the command line's current context. A name no context has is refused by
 /// [`Engine::connect`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -119,10 +116,12 @@ impl TryFrom<String> for ContextName {
 #[derive(Debug)]
 pub struct Engine {
     report: Report,
+    /// What [`Engine::ready`] gives: the report as JSON, and the capabilities.
+    ready: Ready,
 }
 
 /// The engine, as `docker` describes it before anything starts.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Report {
     /// The context `docker` reaches the engine through.
     pub context: ContextName,
@@ -141,7 +140,7 @@ pub struct Report {
 }
 
 /// What the engine's security options say.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Security {
     /// Whether the engine runs as an ordinary user rather than as root.
     // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
@@ -187,77 +186,6 @@ struct InfoJson {
 #[serde(rename_all = "PascalCase")]
 struct ClientInfoJson {
     version: String,
-}
-
-/// What [`Engine::start`] needs to start a container.
-#[derive(Debug)]
-pub struct Start<'a> {
-    /// The run the container belongs to.
-    pub run: &'a RunTag,
-    /// The role's name, image, user and resources. The image must be in the engine already: the
-    /// provider never pulls one.
-    pub sandbox: &'a Sandbox,
-    /// A static `sandboxd` binary, which the role's user can execute.
-    pub sandboxd: &'a Path,
-    /// A directory for the session's socket, which only this container sees. Its parent must
-    /// be private to the caller's user, since the socket accepts the first connection, whoever
-    /// makes it. The container enters at the directory's mount itself, so the role's user needs
-    /// to traverse only the directory, not its parent. Unix socket paths are short, so keep it
-    /// short too.
-    pub socket_dir: &'a Path,
-    /// For a role whose commands make ops through `sandboxctl`, as an agent's do, the most
-    /// bytes an op's payload may hold, which [`Engine::start`] accepts the session with
-    /// ([`Listener::accept`]). `None` for a [passive](pumpkin_schema::sandbox) sandbox.
-    pub ops: Option<OpPayloadLimit>,
-}
-
-/// A sandbox's container and the session with the `sandboxd` inside.
-///
-/// Dropping it, or calling [`destroy`](Self::destroy), removes the container and ends the
-/// session.
-#[derive(Debug)]
-pub struct Container {
-    context: ContextName,
-    id: String,
-    session: Session,
-    removed: bool,
-}
-
-impl Container {
-    /// The container's ID.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The session with the container's `sandboxd`, which the container's owner drives.
-    pub fn session(&mut self) -> &mut Session {
-        &mut self.session
-    }
-
-    /// Removes the container and ends the session, reporting a failure to remove the
-    /// container.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `docker` can't remove the container.
-    pub fn destroy(mut self) -> Result<(), String> {
-        self.teardown().map_err(fix_reported)
-    }
-
-    /// Removes the container, once. The session ends as the container drops it.
-    fn teardown(&mut self) -> Result<(), String> {
-        if std::mem::replace(&mut self.removed, true) {
-            return Ok(());
-        }
-        remove(&self.context, &self.id)
-    }
-}
-
-impl Drop for Container {
-    fn drop(&mut self) {
-        // Best effort: `destroy` is the way to learn that removing failed.
-        let _ = self.teardown();
-    }
 }
 
 impl Engine {
@@ -317,17 +245,17 @@ impl Engine {
                 ("PidsLimit", pids_limit),
             ],
         )?;
-        Ok(Self {
-            report: Report {
-                context,
-                endpoint,
-                client_version: client_info.version,
-                engine_version: server_version,
-                security: Security::parse(&security_options.unwrap_or_default()),
-                kernel: kernel_version,
-                os: operating_system,
-            },
-        })
+        let report = Report {
+            context,
+            endpoint,
+            client_version: client_info.version,
+            engine_version: server_version,
+            security: Security::parse(&security_options.unwrap_or_default()),
+            kernel: kernel_version,
+            os: operating_system,
+        };
+        let ready = ready(&report);
+        Ok(Self { report, ready })
     }
 
     /// The engine, as it was when [`connect`](Self::connect) reached it.
@@ -335,89 +263,107 @@ impl Engine {
         &self.report
     }
 
-    /// Starts a container for the role, connects its session, which takes ops within
-    /// [`Start::ops`]'s limit, if it gives one, and sets it up ([`Session::set_up`]).
-    ///
-    /// # Errors
-    ///
-    /// Fails, naming the path, if the session's socket can't be made in the socket directory,
-    /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
-    /// container; if its `sandboxd` doesn't connect and take the directories within 30 s in
-    /// all, which a `sandboxd` that exits at once still costs, or its session can't be set up;
-    /// or if the directories can't be put. Whatever container `docker` created is removed
-    /// before the error returns, which quotes the end of the container's logs, and says if
-    /// removing it failed.
-    pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
-        let context = &self.report.context;
-        let socket = start.socket_dir.join(SOCKET_NAME);
-        let listener = Listener::bind(socket.clone()).map_err(|error| {
-            format!(
-                "the session's socket can't be made at {}: {error}: expected a directory that \
-                 exists, which this user can write to, by a path short enough for a Unix \
-                 socket, and nothing at `{SOCKET_NAME}`, where a process that was killed \
-                 leaves its socket",
-                socket.display()
-            )
-        })?;
-        // Creating and starting apart gives the container's ID before anything can fail with
-        // a container left behind, so a failure removes this container by its ID.
-        let created = docker(context, &create_args(start)?).map_err(fix_reported)?;
-        let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
-        let started = docker(context, ["start", &id]).map_err(fix_reported);
-        match started.and_then(|_| connect(listener, &id, start.ops)) {
-            Ok(session) => Ok(Container {
-                context: context.clone(),
-                id,
-                session,
-                removed: false,
-            }),
-            Err(error) => {
-                let mut parts = vec![error];
-                match log_tail(context, &id).context("the container's logs couldn't be read") {
-                    Ok(logs) if logs.trim().is_empty() => {}
-                    Ok(logs) => parts.push(format!("the container's logs end: {}", logs.trim())),
-                    Err(error) => parts.push(error),
-                }
-                let left = format_args!("container {id} is left behind, as removing it failed");
-                if let Err(removal) = remove(context, &id).context(left) {
-                    parts.push(removal);
-                }
-                Err(parts.join("; "))
-            }
-        }
+    /// What the engine declares once reached: its report, as JSON, and what a run may rely on of
+    /// its sandboxes.
+    pub fn ready(&self) -> &Ready {
+        &self.ready
     }
 
-    /// Removes every container of the run, and returns their IDs. Containers of other runs
-    /// stay.
+    /// Creates the container `create` describes and starts its `sandboxd`.
     ///
     /// # Errors
     ///
-    /// Fails if `docker` can't list them, or can't remove one; the others are removed
-    /// regardless.
-    pub fn destroy_all(&self, run: &RunTag) -> Result<Vec<String>, String> {
+    /// Fails if `docker` can't create or start the container. A container it created, it
+    /// removes, or its error says that removing it failed.
+    pub fn create(&self, create: &Create) -> Result<Created, String> {
         let context = &self.report.context;
-        // The IDs of the run's containers, running or not.
-        let filter = format!("label={RUN_LABEL}={}", run.as_str());
-        let ls = [
-            "container",
-            "ls",
-            "--all",
-            "--quiet",
-            "--no-trunc",
-            "--filter",
-            &filter,
-        ];
-        let listed = docker(context, ls).map_err(fix_reported)?;
-        let ids = String::from_utf8_lossy(&listed.stdout);
-        let ids: Vec<String> = ids.lines().map(str::to_owned).collect();
-        let failures: Vec<String> = (ids.iter())
-            .filter_map(|id| remove(context, id).err())
+        // Creating and starting apart gives the container's ID before anything can fail with
+        // a container left behind, so a failure removes this container by its ID.
+        let created = docker(context, &create_args(create)?).map_err(fix_reported)?;
+        let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
+        if let Err(error) = docker(context, ["start", &id]) {
+            let mut message = fix_reported(error);
+            let left = format_args!("container {id} is left behind, as removing it failed");
+            if let Err(removal) = remove(context, &id).context(left) {
+                message = format!("{message}; {removal}");
+            }
+            return Err(message);
+        }
+        Ok(Created {
+            id: SandboxId::from(id),
+        })
+    }
+
+    /// Removes each of `ids` that is a container of `run`, running or not, and returns the rest:
+    /// a container of another run, or none, stays as it is.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker` can't list the run's containers, or can't remove one, which leaves the
+    /// others removed.
+    pub fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
+        let context = &self.report.context;
+        let ours: BTreeSet<String> = of_run(context, run)?.into_iter().collect();
+        let (known, unknown): (Vec<&SandboxId>, Vec<&SandboxId>) =
+            ids.iter().partition(|id| ours.contains(id.as_str()));
+        let failures: Vec<String> = (known.iter())
+            .filter_map(|id| remove(context, id.as_str()).err())
             .collect();
         if failures.is_empty() {
-            Ok(ids)
+            Ok(unknown.into_iter().cloned().collect())
         } else {
             Err(fix_reported(failures.join("; ")))
         }
+    }
+
+    /// The containers of `run`, running or not.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker` can't list them.
+    pub fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+        let ids = of_run(&self.report.context, run)?;
+        let listed = ids.into_iter().map(|id| Listed {
+            id: SandboxId::from(id),
+        });
+        Ok(listed.collect())
+    }
+
+    /// The end of the log of container `id` of `run` ([`Console`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails if `id` is no container of `run`, as for another run's, or if `docker` can't read
+    /// its log.
+    pub fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
+        let context = &self.report.context;
+        let id = id.as_str();
+        if !of_run(context, run)?.iter().any(|ours| ours == id) {
+            return Err(format!(
+                "container {id} is no sandbox of run {}: name one that the run's list finds",
+                run.as_str()
+            ));
+        }
+        let text = log_tail(context, id).map_err(fix_reported)?;
+        Ok(Console { text })
+    }
+}
+
+/// What [`Engine::ready`] gives of an engine that `report` describes.
+fn ready(report: &Report) -> Ready {
+    #[expect(
+        clippy::unreachable,
+        reason = "a `Report` holds only strings, bools and `Option<String>`s, through derived \
+                  impls, none of which serde_json fails to write"
+    )]
+    let Ok(json) = serde_json::to_value(report) else {
+        unreachable!("{report:?} can't be written as JSON")
+    };
+    Ready {
+        report: json,
+        capabilities: Capabilities {
+            startup_seconds: STARTUP_SECONDS,
+        },
     }
 }
 
@@ -475,40 +421,22 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
     ))
 }
 
-/// Accepts the session of container `id`'s `sandboxd`, which takes ops within `ops`, the
-/// payload limit, if any, and sets it up ([`Session::set_up`]).
-fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
-    let by = Deadline::after(CONNECT_TIMEOUT);
-    let mut session = listener.accept(by, ops).map_err(|error| {
-        if error.kind() == io::ErrorKind::TimedOut {
-            format!(
-                "the `sandboxd` of container {id} didn't connect within {CONNECT_TIMEOUT:?}: \
-                 {error}: expected it to connect as it starts"
-            )
-        } else {
-            format!("the session of container {id} can't be set up: {error}")
-        }
-    })?;
-    session.set_up(by).context(format_args!("container {id}"))?;
-    Ok(session)
-}
-
 /// The arguments of `docker create` for the container.
-fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
-    let &Start {
+fn create_args(create: &Create) -> Result<Vec<String>, String> {
+    let Create {
         run,
-        sandbox,
-        sandboxd,
-        socket_dir,
-        ops,
-    } = start;
-    let Sandbox {
-        name,
+        role,
         image,
+        sandboxd,
+        ops,
+        dial,
+    } = create;
+    let Dial::Socket { dir } = dial;
+    let Role {
+        name,
         user,
         resources,
-        model_route: _,
-    } = sandbox;
+    } = role;
     let User { uid, gid } = *user;
     let Resources {
         cpu_millis,
@@ -550,9 +478,9 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         ),
         "--tmpfs=/tmp:ro".to_owned(),
         bind_mount(sandboxd, SANDBOXD_PATH)?,
-        bind_mount(socket_dir, GATEWAY_DIR)?,
+        bind_mount(dir, GATEWAY_DIR)?,
     ];
-    if ops.is_some() {
+    if *ops {
         args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
     }
     args.extend([
@@ -561,7 +489,7 @@ fn create_args(start: &Start<'_>) -> Result<Vec<String>, String> {
         image.to_string(),
         format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
     ]);
-    if ops.is_some() {
+    if *ops {
         args.push("--ops".to_owned());
     }
     Ok(args)
@@ -595,6 +523,31 @@ fn remove(context: &ContextName, id: &str) -> Result<(), String> {
         Err(Failure::Exited { stderr, .. }) if stderr.contains("No such container") => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// The IDs of run `run`'s containers, running or not: those whose run label holds its tag.
+fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<String>, String> {
+    let filter = format!("label={RUN_LABEL}={}", run.as_str());
+    let format = format!("{{{{.ID}}}} {{{{.Label \"{RUN_LABEL}\"}}}}");
+    let ls = [
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--filter",
+        &filter,
+        "--format",
+        &format,
+    ];
+    let listed = docker(context, ls).map_err(fix_reported)?;
+    // Each row's label is compared here too, so that neither a bug in the filter nor how
+    // `docker` reads it reaches another run's container, whatever deletes what this finds.
+    let rows = String::from_utf8_lossy(&listed.stdout);
+    let ids = rows.lines().filter_map(|row| {
+        let (id, label) = row.split_once(' ')?;
+        (label == run.as_str()).then(|| id.to_owned())
+    });
+    Ok(ids.collect())
 }
 
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of

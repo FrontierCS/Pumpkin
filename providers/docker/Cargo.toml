@@ -9,13 +9,13 @@ publish.workspace = true
 test = false
 
 [dependencies]
-pumpkin-gateway = { path = "../../crates/pumpkin-gateway" }
 pumpkin-schema = { path = "../../crates/pumpkin-schema" }
 stdx = { path = "../../crates/stdx" }
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+pumpkin-gateway = { path = "../../crates/pumpkin-gateway" }
 expect-test.workspace = true
 
 [lints]

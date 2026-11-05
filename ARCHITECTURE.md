@@ -59,9 +59,13 @@ exchange. Another program's format, such as `docker info`'s, stays with the code
   sandbox: where the role runs the agent's code, that code can shape what `sandboxd` reports.
 
 **`providers/docker`.** `pumpkin-docker`, a sandbox as a container that needs no root to start:
-`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`),
-starts `Container`s and removes a run's by their `RunTag`. A provider is `providers/<name>`,
-crate `pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
+`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), and
+makes each sandbox a container. A provider is `providers/<name>`, crate `pumpkin-<name>`, which
+holds its platform's calls and its sandboxes' confinement.
+- **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
+  its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
+  bounds only its own platform calls, so no provider depends on `pumpkin-gateway` outside its
+  tests.
 - **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
   `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands and the
   session's owner find them anywhere.
