@@ -74,7 +74,8 @@ crate `pumpkin-<name>`, which holds its platform's calls and its sandboxes' conf
 **`crates/pumpkin`.** The host side: the driver. Its decision core, `driver::core`, takes each
 `Event` a runtime observes and returns the `Action`s the runtime is to perform, until one ends the
 run, with its `Outcome`, or abandons it at its hard end; its `ops` rules on ops, `jobs` meters
-judge calls, and `result` reads a call's `result.json` (`JudgeResult`).
+judge calls, and `result` reads a call's `result.json` (`JudgeResult`). The runtime, `driver::run`,
+prepares each `Run` and keeps its record, whose files `record` lays out.
 - **Architecture Invariant:** the decision core does no I/O, reads no clock and uses no randomly
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
   decides when time ends the work phase or the run, the hard end included.

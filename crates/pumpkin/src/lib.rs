@@ -1,3 +1,3 @@
-//! Pumpkin's host side: the [`driver`]'s decision core.
+//! Pumpkin's host side: the [`driver`].
 
 pub mod driver;
