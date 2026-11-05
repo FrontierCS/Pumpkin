@@ -43,6 +43,7 @@ use stdx::process::Environment;
 use stdx::{Context, Deadline};
 
 /// A small public image, pinned by digest.
+// Repeated in `crates/pumpkin/tests/it/docker.rs`: change both.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
@@ -86,14 +87,14 @@ impl Fixture {
 
     /// Starts a passive sandbox for role `role`, which runs as 4242:4243.
     fn start(&self, run: &RunTag, role: &str) -> Started {
-        self.try_start(run, role, &self.sandboxd, image(), None, startup())
+        self.try_start(run, role, &self.sandboxd, image(), None)
             .unwrap()
     }
 
-    /// Starts a sandbox for role `role` as the runtime does: through the provider, which
-    /// publishes `image` and `sandboxd`, then creates it, its session accepted by `by` where the
-    /// sandbox dials, taking ops within `ops` if it gives a limit, and set up. A sandbox whose
-    /// session fails is deleted, and the error quotes its console.
+    /// Starts a sandbox for role `role` as the runtime does: creates what
+    /// [`publish`](Self::publish) gives, and accepts its session where it dials, set up by the
+    /// startup the provider declares, taking ops within `ops` if it gives a limit. A sandbox
+    /// whose session fails is deleted, and the error quotes its console.
     fn try_start(
         &self,
         run: &RunTag,
@@ -101,8 +102,41 @@ impl Fixture {
         sandboxd: &Path,
         image: Image,
         ops: Option<OpPayloadLimit>,
-        by: Deadline,
     ) -> Result<Started, String> {
+        let (create, listener) = self.publish(run, role, sandboxd, image, ops.is_some())?;
+        let by = startup();
+        let Created { id } = provider().create(&create)?;
+        let accepted = listener.accept(by, ops).map_err(|error| error.to_string());
+        let set_up = accepted.and_then(|mut session| {
+            session
+                .set_up(by)
+                .context(format_args!("sandbox {}", id.as_str()))?;
+            Ok(session)
+        });
+        match set_up {
+            Ok(session) => Ok(Started { id, session }),
+            Err(error) => {
+                let console = provider().console(run, &id).unwrap();
+                assert_eq!(provider().delete(run, &[id]).unwrap(), []);
+                Err(format!(
+                    "{error}; its console ends: {}",
+                    console.text.trim()
+                ))
+            }
+        }
+    }
+
+    /// Publishes `image` and `sandboxd` through the provider, and returns the create of a
+    /// sandbox of run `run` for role `role`, which runs them as 4242:4243, and the listener
+    /// where it dials.
+    fn publish(
+        &self,
+        run: &RunTag,
+        role: &str,
+        sandboxd: &Path,
+        image: Image,
+        ops: bool,
+    ) -> Result<(Create, Listener), String> {
         let dir = self.dir.join(role);
         fs::create_dir_all(&dir).unwrap();
         let listener = Listener::bind(dir.join(SOCKET_NAME)).unwrap();
@@ -123,28 +157,10 @@ impl Fixture {
             role,
             image,
             sandboxd,
-            ops: ops.is_some(),
+            ops,
             dial: Dial::Socket { dir },
         };
-        let Created { id } = provider().create(&create)?;
-        let accepted = listener.accept(by, ops).map_err(|error| error.to_string());
-        let set_up = accepted.and_then(|mut session| {
-            session
-                .set_up(by)
-                .context(format_args!("sandbox {}", id.as_str()))?;
-            Ok(session)
-        });
-        match set_up {
-            Ok(session) => Ok(Started { id, session }),
-            Err(error) => {
-                let console = provider().console(run, &id).unwrap();
-                assert_eq!(provider().delete(run, &[id]).unwrap(), []);
-                Err(format!(
-                    "{error}; its console ends: {}",
-                    console.text.trim()
-                ))
-            }
-        }
+        Ok((create, listener))
     }
 }
 
@@ -221,6 +237,7 @@ fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
+// Repeated in `crates/pumpkin/tests/it/docker.rs`: change both.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
@@ -273,20 +290,22 @@ fn show_logs(run: &RunTag) -> Result<(), String> {
 /// The ID of the image the tests share, which the IR accepts as a pinned image: `busybox` with
 /// a world-writable `/workspace`, which a role's user needs, since the writable layer is the
 /// workspace, and a world-writable `VOLUME` at `/volume`, for which Docker makes each container
-/// an anonymous volume. Built once, from the pinned image, and tagged, so that each build
-/// replaces the last instead of leaving it behind untagged.
+/// an anonymous volume. Built once, from the pinned image, and tagged, so that no build leaves
+/// an image behind untagged; a build from the cache gives the same ID as the last, so test
+/// processes that run at once share the image.
+// Built alike in `crates/pumpkin/tests/it/docker.rs`: change both.
 fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile =
             format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace /volume\nVOLUME /volume\n");
+        // A provenance attestation records each build's own ID and times, so a build with one
+        // gets an ID of its own; and as a build moves the tag to its ID, the containerd image
+        // store keeps no image by the ID the tag had, which another test process, running at
+        // once, may be using.
         let mut build = docker()
-            .args([
-                "build",
-                "--quiet",
-                "--tag=pumpkin-docker-tests:workspace",
-                "-",
-            ])
+            .args(["build", "--quiet", "--provenance=false"])
+            .args(["--tag=pumpkin-docker-tests:workspace", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -597,79 +616,31 @@ fn report() {
     );
 }
 
-/// A run's list finds the run's sandboxes alone; deleting a run's sandboxes removes their
-/// containers, with their anonymous volumes, and deleting what its list finds cleans it up; a
-/// run's delete keeps, and returns, the ids of no sandbox of the run, such as another run's, or
-/// one deleted already, and its console refuses another run's.
+/// Deleting what a run's list finds removes its containers' anonymous volumes, and no other
+/// run's.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn cleanup() {
+fn volumes() {
     check(
-        "cleanup",
+        "volumes",
         |fixture| {
-            let (run, other_run) = (&fixture.run, &fixture.other_run);
-            let started = ["first", "second", "third", "other"].map(|role| {
-                let run = if role == "other" { other_run } else { run };
-                (role, fixture.start(run, role))
-            });
+            let started = [("first", &fixture.run), ("other", &fixture.other_run)];
+            let started = started.map(|(role, run)| (role, fixture.start(run, role)));
             let volumes = started.each_ref().map(|(_, sandbox)| volume(sandbox));
-            // Each id as the role of the sandbox it names, if one does, sorted.
-            let named = |ids: Vec<SandboxId>| {
-                let role = |id: SandboxId| match started.iter().find(|(_, s)| s.id == id) {
-                    Some((role, _)) => (*role).to_owned(),
-                    None => id.as_str().to_owned(),
-                };
-                let mut named: Vec<String> = ids.into_iter().map(role).collect();
-                named.sort();
-                named
-            };
-            let listed = |run| ids(provider().list(run).unwrap());
-            let deleted = |run, ids: &[SandboxId]| named(provider().delete(run, ids).unwrap());
-            let left = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#).unwrap();
-            let (first, other) = (started[0].1.id.clone(), started[3].1.id.clone());
-            let again = [first.clone(), SandboxId::from("pumpkin-none".to_owned())];
-            let mut lines = vec![
-                format!("listed: {:?}", named(listed(run))),
-                format!("the other run's listed: {:?}", named(listed(other_run))),
-                format!("deleting first: unknown {:?}", deleted(run, &[first])),
-                format!(
-                    "deleting other as this run's: kept {:?}",
-                    deleted(run, std::slice::from_ref(&other))
-                ),
-                (provider().console(run, &other).unwrap_err())
-                    .replace(other.as_str(), "<other>")
-                    .replace(run.as_str(), "<run>"),
-                format!("listed then: {:?}", named(listed(run))),
-                format!(
-                    "deleting what is listed: unknown {:?}",
-                    deleted(run, &listed(run))
-                ),
-                format!("left: {:?}", left(run)),
-                format!(
-                    "deleting first again, and an id no sandbox has: unknown {:?}",
-                    deleted(run, &again)
-                ),
-                format!("the other run's left: {:?}", left(other_run)),
-            ];
+            let listed = ids(provider().list(&fixture.run).unwrap());
+            let unknown = provider().delete(&fixture.run, &listed).unwrap();
             let listed = docker().args(["volume", "ls", "--quiet"]).output().unwrap();
             let listed = String::from_utf8(listed.stdout).unwrap();
             let kept = (started.iter().zip(&volumes))
                 .filter(|&(_, volume)| listed.lines().any(|listed| listed == volume))
                 .map(|((role, _), _)| role);
-            lines.push(format!("volumes left: {:?}", kept.collect::<Vec<_>>()));
-            lines
+            vec![
+                format!("deleting what is listed: unknown {unknown:?}"),
+                format!("volumes left: {:?}", kept.collect::<Vec<_>>()),
+            ]
         },
         &expect![[r#"
-            listed: ["first", "second", "third"]
-            the other run's listed: ["other"]
-            deleting first: unknown []
-            deleting other as this run's: kept ["other"]
-            container <other> is no sandbox of run <run>: name one that the run's list finds
-            listed then: ["second", "third"]
             deleting what is listed: unknown []
-            left: []
-            deleting first again, and an id no sandbox has: unknown ["first", "pumpkin-none"]
-            the other run's left: ["other"]
             volumes left: ["other"]"#]],
     );
 }
@@ -687,9 +658,7 @@ fn volume(sandbox: &Started) -> String {
 
 /// A `sandboxd` that doesn't exist is named, and one whose path has a comma, which `--mount`
 /// would read as the start of another option, is refused; a container that Docker creates but
-/// can't start is removed; an image the engine doesn't have is refused, not pulled; and a
-/// sandbox whose `sandboxd` exits without dialing is deleted once its start's deadline passes,
-/// its console quoted.
+/// can't start is removed; and an image the engine doesn't have is refused, not pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -701,26 +670,16 @@ fn failed_start() {
             let missing = fixture.dir.join("absent");
             let comma = fixture.dir.join("sandboxd,readonly=false");
             fs::write(&comma, "").unwrap();
-            // A `sandboxd` that fails as it starts, saying why.
-            let stand_in = fixture.dir.join("stand-in-sandboxd");
-            let script =
-                "#!/bin/sh\necho 'sandboxd: a stand-in, which exits without dialing' >&2\n";
-            fs::write(&stand_in, script).unwrap();
-            fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
             let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
             let attempts = [
                 ("missing", missing.as_path(), image()),
                 ("comma", comma.as_path(), image()),
                 ("unexecutable", not_executable.as_path(), image()),
                 ("unpulled", fixture.sandboxd.as_path(), unpulled),
-                ("stand-in", stand_in.as_path(), image()),
             ];
             let mut lines = Vec::new();
             for (role, sandboxd, image) in attempts {
-                // None of them dials, however long its start waits, so a deadline shorter than
-                // the provider's startup ends each the same, sooner.
-                let by = Deadline::after(Duration::from_secs(5));
-                let failed = fixture.try_start(&fixture.run, role, sandboxd, image, None, by);
+                let failed = fixture.try_start(&fixture.run, role, sandboxd, image, None);
                 lines.push(format!("{role}: {}", redact(fixture, &failed.unwrap_err())));
             }
             let left = containers(&fixture.run, "{{.ID}}").unwrap();
@@ -732,7 +691,6 @@ fn failed_start() {
             comma: publishing `sandboxd` failed: <dir>/sandboxd,readonly=false can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8 without commas
             unexecutable: `docker start …: fix what Docker reports
             unpulled: the engine of context `<context>` has no image busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000: build or load it there first, as the provider pulls none
-            stand-in: no sandbox connected to <dir>/stand-in/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a stand-in, which exits without dialing
             left: []"#]],
     );
 }
@@ -754,6 +712,35 @@ fn redact(fixture: &Fixture, message: &str) -> String {
     message
 }
 
+/// Once a sandbox's container has stopped, its console holds what its `sandboxd` printed: here a
+/// stand-in's, which exits without dialing.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn console() {
+    check(
+        "console",
+        |fixture| {
+            // A `sandboxd` that fails as it starts, saying why.
+            let stand_in = fixture.dir.join("stand-in-sandboxd");
+            let script =
+                "#!/bin/sh\necho 'sandboxd: a stand-in, which exits without dialing' >&2\n";
+            fs::write(&stand_in, script).unwrap();
+            fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+            let published = fixture.publish(&fixture.run, "stand-in", &stand_in, image(), false);
+            let (create, _) = published.unwrap();
+            let Created { id } = provider().create(&create).unwrap();
+            // Docker finishes writing a container's log before it marks the container stopped,
+            // which `docker wait` waits for, so the console then holds all the stand-in printed.
+            let waited = docker().args(["wait", id.as_str()]).output().unwrap();
+            assert!(waited.status.success(), "{waited:?}");
+            let console = provider().console(&fixture.run, &id).unwrap();
+            vec![format!("console: {}", console.text.trim())]
+        },
+        &expect![[r#"
+            console: sandboxd: a stand-in, which exits without dialing"#]],
+    );
+}
+
 /// A shell function, `ctl`, that runs `sandboxctl` with its arguments, and shows how it exited
 /// and what it printed.
 const CTL: &str = r#"
@@ -772,7 +759,7 @@ fn ops() {
             let payload = payload();
             let limit = OpPayloadLimit::try_from(u64::try_from(payload.len()).unwrap()).unwrap();
             let (sandboxd, ops) = (&fixture.sandboxd, Some(limit));
-            let sandbox = fixture.try_start(&fixture.run, "ops", sandboxd, image(), ops, startup());
+            let sandbox = fixture.try_start(&fixture.run, "ops", sandboxd, image(), ops);
             let mut sandbox = sandbox.unwrap();
             let session = sandbox.session();
             let put = [Put::File(&relative("payload"), &payload)];
@@ -851,8 +838,7 @@ fn refused_calls() {
         |fixture| {
             let ops = Some(OpPayloadLimit::try_from(64).unwrap());
             let sandboxd = &fixture.sandboxd;
-            let sandbox =
-                fixture.try_start(&fixture.run, "refused", sandboxd, image(), ops, startup());
+            let sandbox = fixture.try_start(&fixture.run, "refused", sandboxd, image(), ops);
             let mut sandbox = sandbox.unwrap();
             // A session for the second `sandboxd`, which it connects to and never serves.
             let second = Listener::bind(fixture.dir.join("refused/second")).unwrap();
@@ -923,8 +909,7 @@ fn turns() {
         |fixture| {
             let ops = Some(OpPayloadLimit::try_from(64).unwrap());
             let sandboxd = &fixture.sandboxd;
-            let sandbox =
-                fixture.try_start(&fixture.run, "turns", sandboxd, image(), ops, startup());
+            let sandbox = fixture.try_start(&fixture.run, "turns", sandboxd, image(), ops);
             let mut sandbox = sandbox.unwrap();
             // The owner holds the first op, and puts `in/held`, while the other callers arrive.
             // `sent` waits until a caller's `sandboxctl` sleeps, which it does only as it waits

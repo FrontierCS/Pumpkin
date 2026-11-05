@@ -80,7 +80,7 @@ is the `Provider` that makes each sandbox a container. A provider is `providers/
   session's owner find them anywhere.
 - **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
   `docker` against the named context alone, so the operator's choice of engine holds. Tests run
-  `docker` directly only to observe containers or build images.
+  `docker` directly only to observe containers, pause them, or build images.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 

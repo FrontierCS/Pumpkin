@@ -14,6 +14,7 @@ stdx = { path = "../stdx" }
 serde_json.workspace = true
 
 [dev-dependencies]
+pumpkin-docker = { path = "../../providers/docker" }
 pumpkin-gateway = { path = "../pumpkin-gateway" }
 pumpkin-provider = { path = "../pumpkin-provider" }
 expect-test.workspace = true

@@ -172,7 +172,7 @@ impl Provider for Sim {
 }
 
 impl Subject for Sim {
-    fn locals(&self) -> Locals {
+    fn locals(&self, _: &Path) -> Locals {
         Locals {
             image: Image::try_from(format!("sim@sha256:{}", "0".repeat(64))).unwrap(),
             sandboxd: PathBuf::from("/sim/sandboxd"),
