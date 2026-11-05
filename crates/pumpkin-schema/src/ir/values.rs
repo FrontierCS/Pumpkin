@@ -370,7 +370,8 @@ impl TryFrom<String> for EnvVar {
 
 impl From<EnvVar> for String {
     fn from(entry: EnvVar) -> Self {
-        format!("{}={}", entry.name, entry.value)
+        let EnvVar { name, value } = entry;
+        format!("{name}={value}")
     }
 }
 
