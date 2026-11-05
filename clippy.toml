@@ -8,3 +8,7 @@ disallowed-types = [
     { path = "std::collections::HashSet", replacement = "std::collections::BTreeSet", reason = "its iteration order follows a seed each process draws at random, so the same input could give other records, error lists or decisions" },
     { path = "std::collections::hash_map::RandomState", reason = "it is a seed each process draws at random, which iteration order then follows: key a `BTreeMap` or `BTreeSet` instead" },
 ]
+
+disallowed-methods = [
+    { path = "std::process::Command::new", replacement = "stdx::process::command", reason = "a child gets only the environment its caller states" },
+]

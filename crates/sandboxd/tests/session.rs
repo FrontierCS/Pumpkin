@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,11 @@ use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{Launch, RelativePath};
+use stdx::process::Environment;
+
+/// What `sandboxd` and the tests' other programs get of the tests' environment: `PATH` alone,
+/// to find the programs they run.
+const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
 /// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
 struct Sandbox {
@@ -46,7 +51,7 @@ impl Sandbox {
         let root = fs::canonicalize(root).unwrap();
         let socket = root.join("gateway.sock");
         let listener = Listener::bind(socket.clone()).unwrap();
-        let sandboxd = Command::new(env!("CARGO_BIN_EXE_sandboxd"))
+        let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY)
             .arg(&socket)
             .spawn()
             .unwrap();
@@ -198,7 +203,7 @@ fn check(name: &str, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect:
     if !left.is_empty() {
         // `kill` fails for any that exited meanwhile, which is as good as killed.
         let pids = left.iter().map(u32::to_string);
-        Command::new("kill")
+        stdx::process::command("kill", PATH_ONLY)
             .args(["--signal", "KILL"])
             .args(pids)
             .status()
@@ -305,7 +310,9 @@ fn refusals() {
             let started = sandbox.session.start(link).map(|_| ());
             lines.push(format!("stdout a link: {}", show_error(sandbox, started)));
             let fifo = sandbox.sh("true", &[]);
-            let made = Command::new("mkfifo").arg(fifo.stdout.as_str()).status();
+            let made = stdx::process::command("mkfifo", PATH_ONLY)
+                .arg(fifo.stdout.as_str())
+                .status();
             assert!(made.unwrap().success());
             let started = sandbox.session.start(fifo).map(|_| ());
             lines.push(format!("stdout a FIFO: {}", show_error(sandbox, started)));

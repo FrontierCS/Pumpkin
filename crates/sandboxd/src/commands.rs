@@ -18,11 +18,12 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
+use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
@@ -164,7 +165,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     output.write(true).create(true).truncate(true);
     let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
     let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
-    let child = Command::new(program)
+    let child = stdx::process::command(program, Environment::Inherited)
         .args(argv.args())
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
         .current_dir(cwd.as_str())

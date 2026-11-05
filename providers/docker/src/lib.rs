@@ -39,12 +39,11 @@
 //! with its role's name, so that `docker ps` shows which is which. The provider runs on a
 //! rootful engine or a rootless one, and its report says which ([`Security::rootless`]).
 
-use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
 use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
@@ -55,6 +54,7 @@ use pumpkin_schema::sandbox::{
 use pumpkin_schema::workflow::Sandbox;
 use serde::Deserialize;
 use stdx::Context;
+use stdx::process::Environment;
 
 /// How long a new container has to connect its `sandboxd` to the session's socket.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -655,12 +655,8 @@ where
     S: AsRef<OsStr>,
 {
     let args: Vec<S> = args.into_iter().collect();
-    let kept = ["HOME", "PATH", "DOCKER_CONFIG"]
-        .into_iter()
-        .filter_map(|name| Some((name, env::var_os(name)?)));
-    let output = Command::new("docker")
-        .env_clear()
-        .envs(kept)
+    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
+    let output = stdx::process::command("docker", kept)
         // One argument, so that a name that begins with `-` can't be taken for an option.
         .arg(format!("--context={}", context.as_str()))
         .args(&args)
