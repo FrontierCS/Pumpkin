@@ -32,7 +32,7 @@
 //! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
 //! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
 //! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them; it
-//! pulls no image, so a role's must be in the engine already. Each container is
+//! pulls no image, so its publish checks that the engine has a role's. Each container is
 //! labelled with its run's [`RunTag`], so that [`Engine::list`] finds a run's containers, and
 //! only those, even when the process that started them is gone, and with its role's name, so
 //! that `docker ps` shows which is which. The provider runs on a rootful engine or a rootless
@@ -48,8 +48,8 @@ use std::process::{ExitStatus, Output, Stdio};
 
 use pumpkin_schema::ir::{Resources, User};
 use pumpkin_schema::provider::{
-    Capabilities, Console, Create, Created, Dial, Listed, Ready, Role, RunTag, SOCKET_NAME,
-    SandboxId,
+    Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
+    SOCKET_NAME, SandboxId,
 };
 use pumpkin_schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
 use serde::{Deserialize, Serialize};
@@ -269,6 +269,39 @@ impl Engine {
         &self.ready
     }
 
+    // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
+    // engine has each image and that `sandboxd` can be mounted, and names each as it is.
+    /// Makes each of `locals` something the engine's sandboxes run, and returns what a create
+    /// names each by, in the same order.
+    ///
+    /// # Errors
+    ///
+    /// Fails, naming it, if the engine has no such image, or `sandboxd` can't be mounted.
+    pub fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
+        let context = &self.report.context;
+        let published = locals.iter().map(|local| match local {
+            Local::Role { image } => {
+                let image = image.to_string();
+                let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", &image];
+                match docker(context, inspect) {
+                    Ok(_) => Ok(Published::from(image)),
+                    Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => {
+                        Err(format!(
+                            "the engine of context `{}` has no image {image}: build or load it \
+                             there first, as the provider pulls none",
+                            context.as_str()
+                        ))
+                    }
+                    Err(error) => Err(fix_reported(error)),
+                }
+            }
+            Local::Sandboxd { path } => (mountable(path, SANDBOXD_PATH))
+                .context("publishing `sandboxd` failed")
+                .map(Published::from),
+        });
+        published.collect()
+    }
+
     /// Creates the container `create` describes and starts its `sandboxd`.
     ///
     /// # Errors
@@ -279,7 +312,8 @@ impl Engine {
         let context = &self.report.context;
         // Creating and starting apart gives the container's ID before anything can fail with
         // a container left behind, so a failure removes this container by its ID.
-        let created = docker(context, &create_args(create)?).map_err(fix_reported)?;
+        let args = create_args(create).context("creating the container failed")?;
+        let created = docker(context, &args).map_err(fix_reported)?;
         let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
         if let Err(error) = docker(context, ["start", &id]) {
             let mut message = fix_reported(error);
@@ -437,6 +471,7 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
         user,
         resources,
     } = role;
+    let sandboxd = Path::new(sandboxd.as_str());
     let User { uid, gid } = *user;
     let Resources {
         cpu_millis,
@@ -486,7 +521,7 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
     args.extend([
         format!("--entrypoint={SANDBOXD_PATH}"),
         "--".to_owned(),
-        image.to_string(),
+        image.as_str().to_owned(),
         format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
     ]);
     if *ops {
@@ -497,6 +532,16 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.
 fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
+    let source = mountable(host, container)?;
+    Ok(format!(
+        "--mount=type=bind,source={source},target={container},readonly"
+    ))
+}
+
+/// The path that a `--mount` of `host`, which must exist, at `container` names: `host`'s own,
+/// resolved, in UTF-8 and without commas, which `--mount` would read as the start of another
+/// option.
+fn mountable(host: &Path, container: &str) -> Result<String, String> {
     let host = host.canonicalize().map_err(|error| {
         format!(
             "{} can't be mounted at {container}: {error}: name a path that exists",
@@ -509,9 +554,7 @@ fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
             host.display()
         ));
     };
-    Ok(format!(
-        "--mount=type=bind,source={source},target={container},readonly"
-    ))
+    Ok(source.to_owned())
 }
 
 /// Removes the container with ID `id`, and its anonymous volumes. `--force` kills the container

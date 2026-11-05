@@ -71,10 +71,10 @@ pub struct Create {
     /// The run the sandbox belongs to, which tags it.
     pub run: RunTag,
     pub role: Role,
-    /// The role's image, as the workflow names it.
-    pub image: Image,
-    /// A static `sandboxd` binary on this host, which the role's user can execute.
-    pub sandboxd: PathBuf,
+    /// The role's image, as this provider's publish gave it.
+    pub image: Published,
+    /// The static `sandboxd`, as this provider's publish gave it.
+    pub sandboxd: Published,
     /// Whether the role's commands make ops: if so, the sandbox has `sandboxctl` at
     /// [`SANDBOXCTL_PATH`](crate::sandbox::SANDBOXCTL_PATH) and its `sandboxd` serves ops; if
     /// not, it is [passive](crate::sandbox).
@@ -89,6 +89,32 @@ pub struct Role {
     pub name: Name,
     pub user: User,
     pub resources: Resources,
+}
+
+/// What a run's sandboxes run that this host has, which a provider publishes.
+#[derive(Debug)]
+pub enum Local {
+    /// A role's image, as the workflow names it.
+    Role { image: Image },
+    /// The static `sandboxd` binary, which a role's user can execute.
+    Sandboxd { path: PathBuf },
+}
+
+/// What a provider's publish made of a [`Local`], for its creates to name: a reference that
+/// only that provider reads, such as an image's digest in its registry.
+#[derive(Clone, Debug)]
+pub struct Published(String);
+
+impl Published {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Published {
+    fn from(reference: String) -> Self {
+        Self(reference)
+    }
 }
 
 /// What a sandbox's `sandboxd` dials to reach the gateway, which accepts it there.
