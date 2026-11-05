@@ -1,7 +1,8 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a
 //! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
 //! policy. Its image digests, the agent's command and the judges' environment are placeholders.
-//! Also the JSON of ops' replies, which `sandboxctl` prints, and the in-sandbox contract.
+//! Also the JSON of ops' replies, which `sandboxctl` prints, the in-sandbox contract, and the run
+//! tags that providers find a run's sandboxes by.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `lwe` compares a round trip of all of
 //! it, and every other IR case is a change to it (`lwe_json`, `lwe_with`).
@@ -13,6 +14,7 @@
 
 use expect_test::{Expect, expect};
 use pumpkin_schema::ir;
+use pumpkin_schema::provider::RunTag;
 use pumpkin_schema::sandbox::op::OpReply;
 use pumpkin_schema::sandbox::{
     MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdout, evidence_dir,
@@ -97,6 +99,46 @@ impl Case for CommandEnv {
         let runs = serde_json::to_string(&command_env(&env)).unwrap();
         format!("{} runs as {runs}", self.0)
     }
+}
+
+/// A run's tag, which parses, or is refused.
+struct Tag(&'static str);
+
+impl Case for Tag {
+    fn outcome(self) -> String {
+        match RunTag::try_from(self.0.to_owned()) {
+            Ok(tag) => format!("`{}` parsed", tag.as_str()),
+            Err(error) => error,
+        }
+    }
+}
+
+/// Tags as runs and tests make them, and tags refused: among them one with a trailing space,
+/// which `docker` trims from a filter's value, so that the tag would find another run's sandboxes,
+/// and ones that start as an option would.
+#[test]
+fn run_tags() {
+    check(
+        [
+            Tag("20261105-122057-9802092b"),
+            Tag("pk-4242-cleanup-other"),
+            Tag("selftest.v2_a"),
+            Tag(""),
+            Tag("pk-run "),
+            Tag("pk/run"),
+            Tag("-pk"),
+            Tag(".pk"),
+        ],
+        &expect![[r#"
+            `20261105-122057-9802092b` parsed
+            `pk-4242-cleanup-other` parsed
+            `selftest.v2_a` parsed
+            the run tag is empty: use only ASCII letters, digits, `_`, `.` and `-`, at least one
+            the run tag `pk-run ` holds ` `: use only ASCII letters, digits, `_`, `.` and `-`
+            the run tag `pk/run` holds `/`: use only ASCII letters, digits, `_`, `.` and `-`
+            the run tag `-pk` starts with `-`: start it with an ASCII letter or digit
+            the run tag `.pk` starts with `.`: start it with an ASCII letter or digit"#]],
+    );
 }
 
 /// Each reply's JSON form, a status's in each of its job's states; and statuses whose fields

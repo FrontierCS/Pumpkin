@@ -48,6 +48,7 @@ use std::time::Duration;
 
 use pumpkin_gateway::{Listener, Put, Session};
 use pumpkin_schema::ir::{Resources, User};
+use pumpkin_schema::provider::RunTag;
 use pumpkin_schema::sandbox::{
     OpPayloadLimit, PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir, pumpkin_subdirs,
 };
@@ -188,23 +189,6 @@ struct InfoJson {
 #[serde(rename_all = "PascalCase")]
 struct ClientInfoJson {
     version: String,
-}
-
-/// The value of the label that finds a run's containers: every container of the run carries
-/// it, and [`Engine::destroy_all`] removes the containers that do.
-#[derive(Debug)]
-pub struct RunTag(String);
-
-impl RunTag {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for RunTag {
-    fn from(tag: String) -> Self {
-        Self(tag)
-    }
 }
 
 /// What [`Engine::start`] needs to start a container.
