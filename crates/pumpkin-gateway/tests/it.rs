@@ -12,7 +12,6 @@ use std::fs;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -249,9 +248,12 @@ fn answer_elsewhere(session: &mut Session, dir: &Path) -> String {
         }
     });
     let message = "from another session".to_owned();
-    let elsewhere = panic::catch_unwind(AssertUnwindSafe(|| {
-        other.reply(mine, OpReply::Refused { message })
-    }));
+    // A reply on the wrong session panics; on a thread of its own, the panic ends that thread
+    // alone, so the test goes on.
+    let elsewhere = thread::scope(|scope| {
+        let reply = scope.spawn(|| other.reply(mine, OpReply::Refused { message }));
+        reply.join()
+    });
     let elsewhere = elsewhere.unwrap_err().downcast::<String>().unwrap();
     let own = outcome(other.reply(own, no_grants()));
     let outcome = format!("op 0 on another session: {elsewhere}; that session's own op 0: {own}");
