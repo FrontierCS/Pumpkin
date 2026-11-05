@@ -21,7 +21,8 @@ harming the host or the run.
 
 The binaries are `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
-parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Engine`, Docker's.
+parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`, a provider a
+run has connected to; `Engine`, Docker's.
 
 ## Code map
 
@@ -58,10 +59,18 @@ exchange. Another program's format, such as `docker info`'s, stays with the code
 - **Architecture Invariant:** it has only its role's privileges, so it is no boundary within its
   sandbox: where the role runs the agent's code, that code can shape what `sandboxd` reports.
 
+**`crates/pumpkin-provider`.** `Provider`, a run's one handle on a provider for every side effect
+on it: it publishes what the run's sandboxes run, creates, lists and deletes them, and reads their
+consoles.
+- **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
+  `pumpkin-schema`.
+- **Architecture Invariant:** every call on sandboxes names its run and keeps to that run's, by
+  its tag, so runs that share a provider never reach each other's sandboxes.
+
 **`providers/docker`.** `pumpkin-docker`, a sandbox as a container that needs no root to start:
 `Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), and
-makes each sandbox a container. A provider is `providers/<name>`, crate `pumpkin-<name>`, which
-holds its platform's calls and its sandboxes' confinement.
+is the `Provider` that makes each sandbox a container. A provider is `providers/<name>`, crate
+`pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
 - **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
   its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
   bounds only its own platform calls, so no provider depends on `pumpkin-gateway` outside its

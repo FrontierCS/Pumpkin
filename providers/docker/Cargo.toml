@@ -9,6 +9,7 @@ publish.workspace = true
 test = false
 
 [dependencies]
+pumpkin-provider = { path = "../../crates/pumpkin-provider" }
 pumpkin-schema = { path = "../../crates/pumpkin-schema" }
 stdx = { path = "../../crates/stdx" }
 serde.workspace = true

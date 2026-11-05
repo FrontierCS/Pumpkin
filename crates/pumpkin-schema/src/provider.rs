@@ -1,8 +1,9 @@
-//! The values that a run and its providers exchange.
+//! The values that a run and its providers exchange through `pumpkin_provider::Provider`.
 //!
-//! A provider declares what holds once it is reached ([`Ready`]), creates the sandboxes a run
-//! asks for ([`Create`]), and says what it made of them. Every sandbox of a run carries the
-//! run's [`RunTag`], by which a provider lists the run's sandboxes, whatever made them.
+//! A provider declares what holds while a run is connected to it ([`Ready`]), creates the
+//! sandboxes the run asks for ([`Create`]), and says what it made of them. Every sandbox of a
+//! run carries the run's [`RunTag`], by which a provider lists the run's sandboxes, whatever
+//! made them.
 
 use std::num::NonZeroU64;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use serde_json::Value;
 
 use crate::ir::{Image, Name, Resources, User};
 
-/// What a provider declares once reached, which holds as long as it is.
+/// What a provider declares when a run connects to it, which holds while the run is connected.
 #[derive(Debug, Serialize)]
 pub struct Ready {
     /// The provider's report of its environment, for the run's record, in a form of its own.
