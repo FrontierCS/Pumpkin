@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use expect_test::{Expect, expect};
 use pumpkin_docker::{ContextName, Engine, Report, Security};
 use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, RefusedOp, Session};
+use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::provider::{
     Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,
@@ -115,7 +116,7 @@ impl Fixture {
             .unwrap(),
         };
         let path = sandboxd.to_owned();
-        let published = engine().publish(&[Local::Role { image }, Local::Sandboxd { path }])?;
+        let published = provider().publish(&[Local::Role { image }, Local::Sandboxd { path }])?;
         let [image, sandboxd] = <[Published; 2]>::try_from(published).unwrap();
         let create = Create {
             run: run.clone(),
@@ -125,7 +126,7 @@ impl Fixture {
             ops: ops.is_some(),
             dial: Dial::Socket { dir },
         };
-        let Created { id } = engine().create(&create)?;
+        let Created { id } = provider().create(&create)?;
         let accepted = listener.accept(by, ops).map_err(|error| error.to_string());
         let set_up = accepted.and_then(|mut session| {
             session
@@ -136,8 +137,8 @@ impl Fixture {
         match set_up {
             Ok(session) => Ok(Started { id, session }),
             Err(error) => {
-                let console = engine().console(run, &id).unwrap();
-                assert_eq!(engine().delete(run, &[id]).unwrap(), []);
+                let console = provider().console(run, &id).unwrap();
+                assert_eq!(provider().delete(run, &[id]).unwrap(), []);
                 Err(format!(
                     "{error}; its console ends: {}",
                     console.text.trim()
@@ -170,14 +171,15 @@ impl Drop for Fixture {
     // engine, no test started a container.
     fn drop(&mut self) {
         if let Ok(engine) = connected() {
+            let provider: &dyn Provider = engine;
             for run in [&self.run, &self.other_run] {
                 if thread::panicking()
                     && let Err(error) = show_logs(run)
                 {
                     eprintln!("the logs of run {} can't be shown: {error}", run.as_str());
                 }
-                let listed = engine.list(run);
-                let deleted = listed.and_then(|listed| engine.delete(run, &ids(listed)));
+                let listed = provider.list(run);
+                let deleted = listed.and_then(|listed| provider.delete(run, &ids(listed)));
                 if let Err(error) = deleted {
                     eprintln!("run {} can't be cleaned up: {error}", run.as_str());
                 }
@@ -202,9 +204,14 @@ fn engine() -> &'static Engine {
     connected().as_ref().unwrap()
 }
 
+/// The engine, as the runtime holds a provider: what the tests start sandboxes through.
+fn provider() -> &'static dyn Provider {
+    engine()
+}
+
 /// The deadline of a start that begins now, by the startup the provider declares.
 fn startup() -> Deadline {
-    let seconds = engine().ready().capabilities.startup_seconds;
+    let seconds = provider().ready().capabilities.startup_seconds;
     Deadline::after(Duration::from_secs(seconds.get()))
 }
 
@@ -559,7 +566,7 @@ fn report() {
                 os,
             } = engine().report();
             let named = [endpoint, client_version, engine_version, kernel, os];
-            let ready = serde_json::to_value(engine().ready()).unwrap();
+            let ready = serde_json::to_value(provider().ready()).unwrap();
             let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
             let mut lines = vec![
                 format!(
@@ -616,8 +623,8 @@ fn cleanup() {
                 named.sort();
                 named
             };
-            let listed = |run| ids(engine().list(run).unwrap());
-            let deleted = |run, ids: &[SandboxId]| named(engine().delete(run, ids).unwrap());
+            let listed = |run| ids(provider().list(run).unwrap());
+            let deleted = |run, ids: &[SandboxId]| named(provider().delete(run, ids).unwrap());
             let left = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#).unwrap();
             let (first, other) = (started[0].1.id.clone(), started[3].1.id.clone());
             let again = [first.clone(), SandboxId::from("pumpkin-none".to_owned())];
@@ -629,7 +636,7 @@ fn cleanup() {
                     "deleting other as this run's: kept {:?}",
                     deleted(run, std::slice::from_ref(&other))
                 ),
-                (engine().console(run, &other).unwrap_err())
+                (provider().console(run, &other).unwrap_err())
                     .replace(other.as_str(), "<other>")
                     .replace(run.as_str(), "<run>"),
                 format!("listed then: {:?}", named(listed(run))),

@@ -1,7 +1,7 @@
 //! The Docker provider: a sandbox for a role as a container that needs no root to start.
 //!
-//! [`Engine`] runs `docker` as an ordinary user against the engine of the operator's
-//! [context](#the-envelope), and makes each sandbox a container that has:
+//! [`Engine`], a [`Provider`], runs `docker` as an ordinary user against the engine of the
+//! operator's [context](#the-envelope), and makes each sandbox a container that has:
 //!
 //! - no network but loopback; the dial's socket, in a host directory mounted read-only, is the
 //!   only way out;
@@ -33,7 +33,7 @@
 //! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
 //! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them; it
 //! pulls no image, so its publish checks that the engine has a role's. Each container is
-//! labelled with its run's [`RunTag`], so that [`Engine::list`] finds a run's containers, and
+//! labelled with its run's [`RunTag`], so that [`Provider::list`] finds a run's containers, and
 //! only those, even when the process that started them is gone, and with its role's name, so
 //! that `docker ps` shows which is which. The provider runs on a rootful engine or a rootless
 //! one, and its report says which ([`Security::rootless`]).
@@ -46,6 +46,7 @@ use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
 
+use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{Resources, User};
 use pumpkin_schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
@@ -116,7 +117,7 @@ impl TryFrom<String> for ContextName {
 #[derive(Debug)]
 pub struct Engine {
     report: Report,
-    /// What [`Engine::ready`] gives: the report as JSON, and the capabilities.
+    /// What [`Provider::ready`] gives: the report as JSON, and the capabilities.
     ready: Ready,
 }
 
@@ -262,22 +263,16 @@ impl Engine {
     pub fn report(&self) -> &Report {
         &self.report
     }
+}
 
-    /// What the engine declares once reached: its report, as JSON, and what a run may rely on of
-    /// its sandboxes.
-    pub fn ready(&self) -> &Ready {
+impl Provider for Engine {
+    fn ready(&self) -> &Ready {
         &self.ready
     }
 
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
     // engine has each image and that `sandboxd` can be mounted, and names each as it is.
-    /// Makes each of `locals` something the engine's sandboxes run, and returns what a create
-    /// names each by, in the same order.
-    ///
-    /// # Errors
-    ///
-    /// Fails, naming it, if the engine has no such image, or `sandboxd` can't be mounted.
-    pub fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
+    fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
         let context = &self.report.context;
         let published = locals.iter().map(|local| match local {
             Local::Role { image } => {
@@ -302,13 +297,7 @@ impl Engine {
         published.collect()
     }
 
-    /// Creates the container `create` describes and starts its `sandboxd`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `docker` can't create or start the container. A container it created, it
-    /// removes, or its error says that removing it failed.
-    pub fn create(&self, create: &Create) -> Result<Created, String> {
+    fn create(&self, create: &Create) -> Result<Created, String> {
         let context = &self.report.context;
         // Creating and starting apart gives the container's ID before anything can fail with
         // a container left behind, so a failure removes this container by its ID.
@@ -328,14 +317,7 @@ impl Engine {
         })
     }
 
-    /// Removes each of `ids` that is a container of `run`, running or not, and returns the rest:
-    /// a container of another run, or none, stays as it is.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `docker` can't list the run's containers, or can't remove one, which leaves the
-    /// others removed.
-    pub fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
         let context = &self.report.context;
         let ours: BTreeSet<String> = of_run(context, run)?.into_iter().collect();
         let (known, unknown): (Vec<&SandboxId>, Vec<&SandboxId>) =
@@ -350,12 +332,7 @@ impl Engine {
         }
     }
 
-    /// The containers of `run`, running or not.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `docker` can't list them.
-    pub fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+    fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
         let ids = of_run(&self.report.context, run)?;
         let listed = ids.into_iter().map(|id| Listed {
             id: SandboxId::from(id),
@@ -363,13 +340,7 @@ impl Engine {
         Ok(listed.collect())
     }
 
-    /// The end of the log of container `id` of `run` ([`Console`]).
-    ///
-    /// # Errors
-    ///
-    /// Fails if `id` is no container of `run`, as for another run's, or if `docker` can't read
-    /// its log.
-    pub fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
+    fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let context = &self.report.context;
         let id = id.as_str();
         if !of_run(context, run)?.iter().any(|ours| ours == id) {
@@ -383,7 +354,7 @@ impl Engine {
     }
 }
 
-/// What [`Engine::ready`] gives of an engine that `report` describes.
+/// What [`Provider::ready`] gives of an engine that `report` describes.
 fn ready(report: &Report) -> Ready {
     #[expect(
         clippy::unreachable,

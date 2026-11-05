@@ -67,6 +67,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "pumpkin-gateway",
+ "pumpkin-provider",
  "pumpkin-schema",
  "serde",
  "serde_json",
@@ -81,6 +82,13 @@ dependencies = [
  "pumpkin-schema",
  "serde_json",
  "stdx",
+]
+
+[[package]]
+name = "pumpkin-provider"
+version = "0.0.0"
+dependencies = [
+ "pumpkin-schema",
 ]
 
 [[package]]
