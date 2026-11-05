@@ -1,7 +1,7 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a
 //! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
 //! policy. Its image digests, the agent's command and the judges' environment are placeholders.
-//! Also the JSON of ops' replies, which `sandboxctl` prints.
+//! Also the JSON of ops' replies, which `sandboxctl` prints, and the in-sandbox contract.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `lwe` compares a round trip of all of
 //! it, and every other IR case is a change to it (`lwe_json`, `lwe_with`).
@@ -13,8 +13,11 @@
 
 use expect_test::{Expect, expect};
 use pumpkin_schema::ir;
-use pumpkin_schema::sandbox::MAX_OP_PAYLOAD_BYTES;
 use pumpkin_schema::sandbox::op::OpReply;
+use pumpkin_schema::sandbox::{
+    MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdout, evidence_dir,
+    pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
+};
 use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::{Value, json};
 
@@ -75,6 +78,27 @@ impl Case for Reply {
     }
 }
 
+/// A relative path below an absolute one, as a role's commands find a path of the in-sandbox
+/// contract below `pumpkin_dir()`.
+struct Joined(ir::AbsolutePath, RelativePath);
+
+impl Case for Joined {
+    fn outcome(self) -> String {
+        self.0.join(&self.1).to_string()
+    }
+}
+
+/// A command's environment as its IR gives it, and as the command runs with it.
+struct CommandEnv(Value);
+
+impl Case for CommandEnv {
+    fn outcome(self) -> String {
+        let env: ir::Env = serde_json::from_value(self.0.clone()).unwrap();
+        let runs = serde_json::to_string(&command_env(&env)).unwrap();
+        format!("{} runs as {runs}", self.0)
+    }
+}
+
 /// Each reply's JSON form, a status's in each of its job's states; and statuses whose fields
 /// don't match their states, which are refused.
 #[test]
@@ -125,6 +149,51 @@ fn op_replies() {
             a job that hasn't finished has no result: give it neither `returned` nor `failure`
             a passed job has a result: give it `returned`, and no `failure`
             a failed job has a result or a failure: give it exactly one of `returned` and `failure`"#]],
+    );
+}
+
+/// The in-sandbox contract: the paths a role's commands and its session's owner share, a
+/// slot's for the LWE judges' slot, and a path below `/`, which keeps its one `/`; and a
+/// command's environment, whose `HOME` is the contract's unless its IR sets one.
+#[test]
+fn in_sandbox_contract() {
+    let slot = ir::Name::try_from("payload".to_owned()).unwrap();
+    let paths = pumpkin_subdirs().into_iter().chain([
+        slot_dir(&slot),
+        slot_payload(&slot),
+        result_file(),
+        evidence_dir(),
+        command_stdout(),
+        command_stderr(),
+    ]);
+    let root = ir::AbsolutePath::try_from("/".to_owned()).unwrap();
+    let paths = paths.map(|path| Joined(pumpkin_dir(), path));
+    check(
+        paths.chain([Joined(root, result_file())]),
+        &expect![[r#"
+            /pumpkin/in
+            /pumpkin/out
+            /pumpkin/home
+            /pumpkin/log
+            /pumpkin/in/payload
+            /pumpkin/in/payload/raw
+            /pumpkin/out/result.json
+            /pumpkin/out/evidence
+            /pumpkin/log/command.stdout
+            /pumpkin/log/command.stderr
+            /out/result.json"#]],
+    );
+    let envs = [
+        json!([]),
+        json!(["MODE=train"]),
+        json!(["MODE=train", "HOME=/workspace"]),
+    ];
+    check(
+        envs.map(CommandEnv),
+        &expect![[r#"
+        [] runs as ["HOME=/pumpkin/home"]
+        ["MODE=train"] runs as ["HOME=/pumpkin/home","MODE=train"]
+        ["MODE=train","HOME=/workspace"] runs as ["MODE=train","HOME=/workspace"]"#]],
     );
 }
 

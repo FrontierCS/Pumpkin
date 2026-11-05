@@ -109,8 +109,8 @@ pub struct JudgeRuntime {
     pub result: ResultSpec,
 }
 
-/// What a judge call writes as its result: the JSON file `result.json` in `out` below
-/// [`pumpkin_dir()`](crate::sandbox::pumpkin_dir), of which
+/// What a judge call writes as its result: the JSON file at
+/// [`result_file()`](crate::sandbox::result_file), of which
 /// its caller sees the status and the fields [`returns`](Self::returns) names.
 ///
 /// Once the judge's command exits, the result alone says how the call went, whatever the exit
@@ -135,7 +135,8 @@ pub struct Command {
     /// The whole command line; the image's own entrypoint and default command are not used.
     pub argv: Argv,
     /// Variables added to the image's environment. The image's variables come first, then
-    /// Pumpkin's own, then these, each overriding the ones before.
+    /// [Pumpkin's own](crate::sandbox::command_env), then these, each overriding the ones
+    /// before.
     #[serde(default, skip_serializing_if = "Env::is_empty")]
     pub env: Env,
     /// The directory the command starts in.

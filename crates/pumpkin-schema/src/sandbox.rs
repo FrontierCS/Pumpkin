@@ -33,7 +33,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::ir::values::RelativePath;
-use crate::ir::{AbsolutePath, Argv, Env};
+use crate::ir::{AbsolutePath, Argv, Env, EnvVar, Name};
 use op::{OpCall, OpReply};
 
 pub mod frame;
@@ -79,11 +79,80 @@ pub fn pumpkin_dir() -> AbsolutePath {
     valid("/pumpkin")
 }
 
-/// The directories below [`pumpkin_dir()`], there before a role's first command starts: `in`
-/// holds what the session's owner puts in, `out` what it collects, `home` the commands' home,
-/// and `log` their output.
+/// The directories below [`pumpkin_dir()`], there before a role's first command starts: the
+/// in-sandbox contract that a task's images are written against, the same for every workflow.
+///
+/// - `in` holds what the session's owner puts in, as a judge call's payload
+///   ([`slot_payload()`]);
+/// - [`out_dir()`] what it collects, as a judge's result ([`result_file()`]) and evidence
+///   ([`evidence_dir()`]);
+/// - `home` the commands' home ([`command_env()`]);
+/// - [`log_dir()`] their output ([`command_stdout()`], [`command_stderr()`]).
+///
+/// The paths these functions give are relative to [`pumpkin_dir()`], which
+/// [`AbsolutePath::join`] joins them to.
 pub fn pumpkin_subdirs() -> [RelativePath; 4] {
-    ["in", "out", "home", "log"].map(valid)
+    [in_dir(), out_dir(), home_dir(), log_dir()]
+}
+
+/// `in`, which the session's owner puts a role's inputs in.
+fn in_dir() -> RelativePath {
+    valid("in")
+}
+
+/// `home`, the home of a role's commands.
+fn home_dir() -> RelativePath {
+    valid("home")
+}
+
+/// `out`, which the session's owner collects a role's results from.
+pub fn out_dir() -> RelativePath {
+    valid("out")
+}
+
+/// `log`, which holds the output of a role's commands.
+pub fn log_dir() -> RelativePath {
+    valid("log")
+}
+
+/// `in/<slot>`, the directory of a judge's slot named `slot`.
+pub fn slot_dir(slot: &Name) -> RelativePath {
+    valid(&format!("{}/{slot}", in_dir()))
+}
+
+/// `in/<slot>/raw`, where a judge call's payload is, in the slot the call names, before the
+/// judge's command starts.
+pub fn slot_payload(slot: &Name) -> RelativePath {
+    valid(&format!("{}/raw", slot_dir(slot)))
+}
+
+/// `out/result.json`, where a judge writes its result: its
+/// [`ResultSpec`](crate::ir::ResultSpec) says how it is read, and what of it the caller sees.
+pub fn result_file() -> RelativePath {
+    valid(&format!("{}/result.json", out_dir()))
+}
+
+/// `out/evidence`, there before a judge's command starts, which holds the files of evidence
+/// that only the operator sees.
+pub fn evidence_dir() -> RelativePath {
+    valid(&format!("{}/evidence", out_dir()))
+}
+
+/// The environment that a role's command, whose IR gives it `env`, runs with: `HOME` first, set
+/// to `home` below [`pumpkin_dir()`], then `env`; or `env` alone, if it sets `HOME` itself.
+pub fn command_env(env: &Env) -> Env {
+    let home = pumpkin_dir().join(&home_dir());
+    env.with_default(valid::<EnvVar>(&format!("HOME={home}")))
+}
+
+/// `log/command.stdout`, where a role's commands write their standard output.
+pub fn command_stdout() -> RelativePath {
+    valid(&format!("{}/command.stdout", log_dir()))
+}
+
+/// `log/command.stderr`, where a role's commands write their standard error.
+pub fn command_stderr() -> RelativePath {
+    valid(&format!("{}/command.stderr", log_dir()))
 }
 
 /// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the session's owner collects
@@ -107,16 +176,18 @@ pub const SANDBOXCTL_PATH: &str = "/.pumpkin/bin/sandboxctl";
 /// there, below [`pumpkin_dir()`], and `sandboxctl` connects there.
 pub const CONTROL_SOCKET: &str = "/pumpkin/sandboxctl/socket";
 
-/// `path`, one of this module's constant paths, as the path type it is.
-fn valid<T: TryFrom<String, Error = String>>(path: &str) -> T {
-    match T::try_from(path.to_owned()) {
-        Ok(path) => path,
+/// `value`, one of this module's constant paths or variables, or a path that holds a slot's
+/// name, as the type it is.
+fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
+    match T::try_from(value.to_owned()) {
+        Ok(value) => value,
         #[expect(
             clippy::unreachable,
             reason = "each of this module's paths is normalized: `/pumpkin` is absolute, and each \
-                      of its directories one plain component; checking them as the crate builds \
-                      would take a `const fn` copy of each path check, and a constructor that \
-                      skips the checks"
+                      of its directories and files, and a slot's `Name`, from a-z, 0-9, `_` and \
+                      `-`, one plain component; `HOME` is a variable's name; checking them as the \
+                      crate builds would take a `const fn` copy of each check, and a constructor \
+                      that skips the checks"
         )]
         Err(error) => unreachable!("{error}"),
     }

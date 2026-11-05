@@ -32,8 +32,10 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 
 **`crates/pumpkin-schema`.** The formats Pumpkin's programs share, never copied into a consumer:
 `ir`, the workflow IR; `workflow`, a workflow parsed; `sandbox`, the sandbox protocol, its `frame`s,
-`tree`s, ops (`sandbox::op`) and the paths every sandbox has. Another program's format, such as
-`docker info`'s, stays with the code that reads it. **API Boundary:** the IR, `sandboxctl`'s JSON.
+`tree`s, ops (`sandbox::op`) and the in-sandbox contract: the paths, limits and environment a
+role's commands and its session's owner share. Another program's format, such as `docker info`'s,
+stays with the code that reads it. **API Boundary:** the IR, the in-sandbox contract,
+`sandboxctl`'s JSON.
 - **Architecture Invariant:** outside its tests, it depends on `serde` and `serde_json` alone,
   because `sandboxd`, a small static binary, depends on it.
 - **Architecture Invariant:** only parsing makes a `workflow::Workflow`, so code past parsing need
@@ -61,7 +63,8 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 starts `Container`s and removes a run's by their `RunTag`. A provider is `providers/<name>`,
 crate `pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
 - **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
-  the paths `sandbox` names, so a role's commands and the session's owner find them anywhere.
+  `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands and the
+  session's owner find them anywhere.
 - **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
   `docker` against the named context alone, so the operator's choice of engine holds. Tests run
   `docker` directly only to observe containers or build images.
