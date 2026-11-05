@@ -105,7 +105,10 @@ impl Listener {
                     if by.remaining().is_none() {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
-                            format!("no sandbox connected to {path} by the deadline"),
+                            format!(
+                                "no sandbox connected to {path} by the deadline: expected its \
+                                 sandbox to connect while the deadline lasts"
+                            ),
                         ));
                     }
                     thread::sleep(Duration::from_millis(10));
