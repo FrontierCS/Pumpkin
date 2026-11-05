@@ -19,7 +19,7 @@
 //! [`Session::next_op`] and answers it with [`Session::reply`]. The gateway authorizes nothing,
 //! but bounds what ops cost the host, and ends a session whose sandbox breaks the ops' rules.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{self, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
@@ -158,7 +158,7 @@ pub struct Session {
 /// sandbox may open an op.
 #[derive(Debug)]
 struct Routes {
-    open: HashMap<u32, Route>,
+    open: BTreeMap<u32, Route>,
     /// The op in flight, by number: opened, and not yet answered.
     op: Option<u32>,
 }
@@ -290,7 +290,7 @@ impl Session {
             .set_write_timeout(Some(REPLY_TIMEOUT))
             .map_err(|error| context("the connection's write timeout can't be set", &error))?;
         let routes = Arc::new(Mutex::new(Routes {
-            open: HashMap::new(),
+            open: BTreeMap::new(),
             op: None,
         }));
         let ended = Arc::new(OnceLock::new());

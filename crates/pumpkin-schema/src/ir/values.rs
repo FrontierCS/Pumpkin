@@ -1,7 +1,7 @@
 //! Values that deserialization checks, so that each one in an IR or a sandbox protocol message
 //! is well formed.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::{fmt, iter};
 
 use serde::{Deserialize, Serialize};
@@ -369,7 +369,7 @@ impl TryFrom<Vec<EnvVar>> for Env {
     type Error = String;
 
     fn try_from(entries: Vec<EnvVar>) -> Result<Self, Self::Error> {
-        let mut names = HashSet::new();
+        let mut names = BTreeSet::new();
         if let Some(entry) = entries.iter().find(|entry| !names.insert(entry.name())) {
             return Err(format!(
                 "`{}` is set more than once: set each name once",
@@ -404,7 +404,7 @@ impl TryFrom<Vec<ModelName>> for Models {
         if models.is_empty() {
             return Err("no models: a model route allows at least one".to_owned());
         }
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         if let Some(model) = models.iter().find(|model| !seen.insert(*model)) {
             return Err(format!(
                 "`{}` is listed more than once: list each model once",

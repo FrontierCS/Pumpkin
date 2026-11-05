@@ -36,6 +36,7 @@ use pumpkin_schema::sandbox::{
     ExitStatus, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
 };
 use pumpkin_schema::workflow::Sandbox;
+use stdx::process::Environment;
 
 /// A small public image, pinned by digest.
 const BUSYBOX: &str =
@@ -150,11 +151,8 @@ fn engine() -> &'static Engine {
 /// `docker`, run as the provider runs it, against the tests' context alone.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
-    let kept = ["HOME", "PATH", "DOCKER_CONFIG"]
-        .into_iter()
-        .filter_map(|name| Some((name, std::env::var_os(name)?)));
-    let mut docker = Command::new("docker");
-    docker.env_clear().envs(kept);
+    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
+    let mut docker = stdx::process::command("docker", kept);
     docker.arg(format!("--context={}", engine().report().context.as_str()));
     docker
 }

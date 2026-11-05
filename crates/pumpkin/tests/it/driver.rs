@@ -18,7 +18,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut run = Run {
         workflow: &workflow,
         ops: 0,
-        jobs: HashMap::new(),
+        jobs: BTreeMap::new(),
         tick_due: None,
         transcript: String::new(),
     };
@@ -70,7 +70,7 @@ struct Run<'w> {
     /// The ops made so far.
     ops: u64,
     /// What each job was made under, for its result's spec.
-    jobs: HashMap<JobId, JudgeCall>,
+    jobs: BTreeMap<JobId, JudgeCall>,
     /// When the core last said it next wants a tick.
     tick_due: Option<Duration>,
     transcript: String,

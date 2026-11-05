@@ -12,17 +12,18 @@
 //! an orphan the kernel hands a sandbox's first process descends from a child, so it arrives
 //! while there are children already.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
+use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
@@ -53,7 +54,7 @@ struct Shared {
 struct State {
     /// The started commands still running, by process ID, each with the stream that started
     /// it. Each leads a process group of its own.
-    running: HashMap<i32, u32>,
+    running: BTreeMap<i32, u32>,
     frozen: bool,
 }
 
@@ -73,7 +74,7 @@ impl Commands {
     /// a child fails, the thread kills the commands and ends `sandboxd`.
     pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
         let state = State {
-            running: HashMap::new(),
+            running: BTreeMap::new(),
             frozen: false,
         };
         let shared = Arc::new(Shared {
@@ -164,7 +165,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     output.write(true).create(true).truncate(true);
     let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
     let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
-    let child = Command::new(program)
+    let child = stdx::process::command(program, Environment::Inherited)
         .args(argv.args())
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
         .current_dir(cwd.as_str())

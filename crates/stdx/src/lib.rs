@@ -1,8 +1,10 @@
 //! Small extensions to the standard library that Pumpkin's crates share.
 
 use std::fmt::Display;
+use std::panic;
 use std::sync::LockResult;
-use std::{panic, process};
+
+pub mod process;
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
 ///
@@ -39,7 +41,7 @@ pub fn abort_on_panic() {
     let report = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         report(info);
-        process::abort();
+        std::process::abort();
     }));
 }
 

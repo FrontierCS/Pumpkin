@@ -2,3 +2,14 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 too-many-lines-threshold = 70
+
+disallowed-types = [
+    { path = "std::collections::HashMap", replacement = "std::collections::BTreeMap", reason = "its iteration order follows a seed each process draws at random, so the same input could give other records, error lists or decisions" },
+    { path = "std::collections::HashSet", replacement = "std::collections::BTreeSet", reason = "its iteration order follows a seed each process draws at random, so the same input could give other records, error lists or decisions" },
+    { path = "std::collections::hash_map::RandomState", reason = "it is a seed each process draws at random, which iteration order then follows: key a `BTreeMap` or `BTreeSet` instead" },
+]
+
+disallowed-methods = [
+    { path = "std::process::Command::new", replacement = "stdx::process::command", reason = "a child gets only the environment its caller states" },
+    { path = "std::panic::catch_unwind", reason = "a panic is a bug that ends the whole process, and `AGENTS.md` says never to catch one outside tests: a test observes one by joining the thread that panicked" },
+]

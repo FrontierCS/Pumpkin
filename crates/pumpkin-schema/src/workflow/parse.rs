@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::{
@@ -33,7 +33,7 @@ const PATTERN: &str = "main.solo_then_judge";
 #[derive(Default)]
 struct Parser<'ir> {
     errors: Errors,
-    role_ids: HashMap<&'ir str, RoleId>,
+    role_ids: BTreeMap<&'ir str, RoleId>,
     /// Every role with an agent runtime, each with its path in the IR.
     agents: Vec<(String, Agent)>,
     judges: Vec<Judge>,
