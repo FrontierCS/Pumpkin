@@ -25,10 +25,9 @@
 //!
 //! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
 //! sandboxes it starts: the session's owner and a role's commands rely on them in any sandbox.
-//! It holds at most [`PUMPKIN_BYTES`], or less where a provider backs it with the role's
-//! memory. A sandbox whose role makes ops also has `sandboxctl` at [`SANDBOXCTL_PATH`], and its
-//! `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox is passive: nothing in it can
-//! make an op, and its session takes none.
+//! It holds at most [`PUMPKIN_BYTES`]. A sandbox whose role makes ops also has `sandboxctl` at
+//! [`SANDBOXCTL_PATH`], and its `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox
+//! is passive: nothing in it can make an op, and its session takes none.
 
 use serde::{Deserialize, Serialize};
 
@@ -158,9 +157,8 @@ pub fn command_stderr() -> RelativePath {
 /// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the session's owner collects
 /// from below it fits in this many.
 ///
-/// A provider may back it with the role's memory, as the Docker provider does, so that its
-/// files and the role's processes share the role's memory limit: a role can keep there at most
-/// the smaller of the two.
+/// A provider may back it with the role's memory, so that its files and the role's processes
+/// share the role's memory limit: a role can keep there at most the smaller of the two.
 pub const PUMPKIN_BYTES: u64 = 1 << 30;
 
 /// Where `sandboxctl` is in a sandbox whose role makes ops, `/.pumpkin/bin/sandboxctl`.

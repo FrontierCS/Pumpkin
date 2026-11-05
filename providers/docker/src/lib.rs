@@ -360,8 +360,8 @@ impl Engine {
     ///
     /// Fails, naming the path, if the session's socket can't be made in the socket directory,
     /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
-    /// container; if its `sandboxd` doesn't connect within 30 s, which a `sandboxd` that exits
-    /// at once still costs, or its session can't be set up; or if the directories can't be
+    /// container; if its `sandboxd` doesn't connect in time, which takes the whole wait even
+    /// when it exits at once, or its session can't be set up; or if the directories can't be
     /// put. Whatever container `docker` created is removed before the error returns, which
     /// quotes the end of the container's logs, and says if removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
