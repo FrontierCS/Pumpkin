@@ -1,3 +1,4 @@
+mod docker;
 mod driver;
 mod provider;
 mod run;

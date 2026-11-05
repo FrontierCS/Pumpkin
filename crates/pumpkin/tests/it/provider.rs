@@ -1,5 +1,8 @@
 //! The conformance suite every [`Provider`] passes, through the trait alone: one [`check`],
-//! whose outcomes are the same for every provider, run against [`Sim`].
+//! whose outcomes are the same for every provider, run against [`Sim`] and against Docker,
+//! whose test is ignored, as the Docker provider's are ([`docker`](crate::docker)). What every
+//! provider shares is tested here; a provider's own tests cover only what its platform adds,
+//! and the tests of `sandboxd` that need a real sandbox, which run on Docker.
 
 #![expect(
     clippy::unwrap_used,
@@ -12,7 +15,7 @@
 
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use expect_test::expect;
@@ -25,12 +28,13 @@ use pumpkin_schema::provider::{
 use pumpkin_schema::sandbox::RelativePath;
 use stdx::{Context, Deadline};
 
+use crate::docker;
 use crate::sim::Sim;
 
 /// A provider under the suite, and how its platform makes a sandbox's `sandboxd` misbehave.
 pub(crate) trait Subject: Provider {
-    /// What the suite publishes.
-    fn locals(&self) -> Locals;
+    /// What the suite publishes, which may need a file in `dir`, a directory the suite removes.
+    fn locals(&self, dir: &Path) -> Locals;
 
     /// Makes sandbox `id`'s `sandboxd` stop reading its session before it answers another
     /// request.
@@ -52,6 +56,12 @@ fn sim() {
     check("sim", &Sim::new());
 }
 
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn docker() {
+    check("docker", docker::engine());
+}
+
 /// A wait that nothing can end sooner, such as an accept of a `sandboxd` that never dials, no
 /// longer than any provider's startup, so that no outcome rests on its length.
 fn soon() -> Deadline {
@@ -67,7 +77,7 @@ fn check(name: &str, subject: &dyn Subject) {
         image,
         sandboxd,
         mute,
-    } = subject.locals();
+    } = subject.locals(&suite.dir);
     let (sandboxd, mute) = (
         Local::Sandboxd { path: sandboxd },
         Local::Sandboxd { path: mute },
