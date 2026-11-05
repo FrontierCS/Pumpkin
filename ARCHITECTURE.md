@@ -37,6 +37,7 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
   not check again what parsing established.
 - **Architecture Invariant:** the IR holds no defaults: an absent field means what its doc says,
   such as no limit; whatever writes the IR picks the defaults.
+- **Architecture Invariant:** no grant names the judge that scores, so the agent never calls it.
 - **Architecture Invariant:** a tree holds only directories and regular files, below the directory
   it is written to: no link, device or `..` crosses a session.
 
@@ -46,14 +47,15 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
   its own `Listener`, which takes one connection.
 - **Architecture Invariant:** everything a session receives is untrusted: a protocol break ends
   the session, and a sandbox costs the host only bounded memory and bounded waits.
-- **Architecture Invariant:** it knows no provider and no driver: of Pumpkin's crates, it depends
-  only on `pumpkin-schema` and `stdx`.
+- **Architecture Invariant:** a passive sandbox, whose role makes no ops, can make none.
+- **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes
+  have the same sessions: of Pumpkin's crates, it depends only on `pumpkin-schema` and `stdx`.
 
 **`crates/sandboxd`.** The supervisor in every sandbox, built static by `cargo xtask sandboxd`:
 `session` serves the gateway (`files`, `commands`), `ops` carries callers' ops, `ctl` is
 `sandboxctl`, and `sys` holds the system calls `std` lacks.
-- **Architecture Invariant:** the protocol's two ends share only `pumpkin-schema`: `sandboxd`
-  depends on `pumpkin-gateway` only in its tests.
+- **Architecture Invariant:** the protocol's two ends share no Pumpkin crate but `pumpkin-schema`
+  and `stdx`, so the protocol is all they agree on: `sandboxd` uses the gateway only in tests.
 - **Architecture Invariant:** it has only its role's privileges, so its reports are untrusted
   wherever the role runs untrusted code.
 
@@ -61,21 +63,29 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 `Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`),
 starts `Container`s and removes a run's by their `RunTag`. A provider is `providers/<name>`,
 crate `pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
+- **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
+  the paths `sandbox` names, so a role's commands and the session's owner find them anywhere.
+- **Architecture Invariant:** each container carries its run's `RunTag`, so a run's containers are
+  found and removed after the process that started them is gone.
 - **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
-  `docker` against the named context alone. Tests run `docker` directly only to observe
-  containers or build images.
+  `docker` against the named context alone, so the operator's choice of engine holds. Tests run
+  `docker` directly only to observe containers or build images.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
 **`crates/pumpkin`.** The host side: the driver. Its decision core, `driver::core`, takes each
 `Event` a runtime observes and returns the `Action`s the runtime is to perform, until one ends the
-run with its `Outcome`; its `ops` rules on ops, and `jobs` meters judge calls.
+run with its `Outcome`; its `ops` rules on ops, `jobs` meters judge calls, and `result` reads a
+call's `result.json` (`JudgeResult`).
 - **Architecture Invariant:** the decision core does no I/O and reads no clock: time reaches it with
   each event, so the same events give the same actions.
 - **Architecture Invariant:** only the decision core authorizes ops: `sandboxd` carries any op any
   code in the sandbox makes, and the gateway bounds only what ops cost the host.
-- **Architecture Invariant:** the agent learns of a judge call only its state and the fields its
-  judge declares (`ResultSpec`).
+- **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
+  left, and the fields its judge declares (`ResultSpec`), so the workflow decides its feedback.
+- **Architecture Invariant:** what a grant has used is counted from its jobs, never in a ledger.
+- **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
+  are gone, so nothing the agent started runs while its submission is judged.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.
@@ -83,10 +93,14 @@ with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check
 ## Cross-cutting concerns
 
 **Errors.** What the world can cause is returned or handled (`AGENTS.md`). **Architecture
-Invariant:** a panic is a bug, and outside tests it ends the whole process: no code catches one.
+Invariant:** a panic is a bug, and outside tests it ends the whole process: no code outside tests
+catches one, since what a panic leaves behind can't be trusted. Release builds abort, and each
+binary that runs threads installs `stdx`'s hook, which aborts in dev builds too.
 
 **Unsafe.** **Architecture Invariant:** `unsafe` is only for a system call `std` lacks, each use
 under `#[expect(unsafe_code, reason = "…")]`, as the workspace's lints and `ci` require.
 
-**Concurrency.** **Architecture Invariant:** threads exist only where I/O blocks, and whatever
-they share says who shares it; ownership is otherwise single, in the types (`&mut`, a `Session`).
+**Concurrency.** Ownership is single, as `AGENTS.md` says. **Architecture Invariant:** threads
+exist only where I/O blocks, and a value they share says beside it who shares it.
+
+**Command lines.** A binary's grammar is an `xflags` `flags` module beside its `main`.

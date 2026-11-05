@@ -27,6 +27,8 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 # expect-test writes every snapshot as a raw string with hashes.
 needless_raw_string_hashes = "allow"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 dbg_macro = "warn"
 doc_paragraphs_missing_punctuation = "warn"
 expect_used = "warn"

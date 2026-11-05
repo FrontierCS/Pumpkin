@@ -40,7 +40,8 @@
 - SET `test = false` on each library and binary target: tests live in the integration test
   binary, and `cargo test` would build each target again for an empty unit-test harness
 - WRITE rustdoc beside the code, and each rule or invariant once, at its home (the type, the
-  constructor, or the protocol's module doc); every other doc links to it
+  constructor, or the protocol's module doc); every other doc links to it, or names it for
+  symbol search, as `ARCHITECTURE.md` does
 - WRITE rustdoc for a public item as its contract (what it does, its errors and panics), not
   how it works
 - WRITE a module doc that says what the module is for and links to where its rules live; it
