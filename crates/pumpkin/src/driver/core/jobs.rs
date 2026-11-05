@@ -186,26 +186,25 @@ impl State {
 impl Jobs {
     /// Adds a job, queued, made under `grant`.
     pub(super) fn add(&mut self, grant: JudgeGrantId) -> JobId {
+        let job = job_id(self.0.len());
         self.0.push(Job {
             grant,
             state: State::Queued,
         });
-        JobId(self.0.len() as u64)
+        job
     }
 
     /// The number the score's job takes: the one after the agent's jobs'.
     pub(super) fn score_job(&self) -> JobId {
-        JobId(self.0.len() as u64 + 1)
+        job_id(self.0.len())
     }
 
     pub(super) fn get(&self, job: JobId) -> Option<&Job> {
-        let index = usize::try_from(job.0.checked_sub(1)?).ok()?;
-        self.0.get(index)
+        self.0.get(job_index(job)?)
     }
 
     pub(super) fn state_mut(&mut self, job: JobId) -> Option<&mut State> {
-        let index = usize::try_from(job.0.checked_sub(1)?).ok()?;
-        Some(&mut self.0.get_mut(index)?.state)
+        Some(&mut self.0.get_mut(job_index(job)?)?.state)
     }
 
     /// Stops every job that is queued or running at `now`, and returns them. A job whose
@@ -225,7 +224,7 @@ impl Jobs {
                 ran,
                 end: End::Stopped,
             };
-            stopped.push(JobId(index as u64 + 1));
+            stopped.push(job_id(index));
         }
         stopped
     }
@@ -254,4 +253,14 @@ impl Jobs {
         }
         usage
     }
+}
+
+/// The number of the job at `index` in [`Jobs`], which numbers its jobs from 1.
+fn job_id(index: usize) -> JobId {
+    JobId(index as u64 + 1)
+}
+
+/// Where job `job` is in [`Jobs`], if its number is one a job can have.
+fn job_index(job: JobId) -> Option<usize> {
+    usize::try_from(job.0.checked_sub(1)?).ok()
 }
