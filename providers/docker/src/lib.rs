@@ -241,11 +241,6 @@ pub struct Container {
 }
 
 impl Container {
-    /// The container's ID.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
     /// The session with the container's `sandboxd`, which the container's owner drives.
     pub fn session(&mut self) -> &mut Session {
         &mut self.session

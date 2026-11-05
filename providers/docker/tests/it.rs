@@ -186,6 +186,21 @@ fn containers(run: &RunTag, format: &str) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// The ID of `run`'s container for role `role`, which `docker ps` finds by its labels.
+fn container_id(run: &RunTag, role: &str) -> String {
+    let listed = containers(run, r#"{{.Label "pumpkin.role"}} {{.ID}}"#).unwrap();
+    let ids: Vec<_> = (listed.iter())
+        .filter_map(|line| line.strip_prefix(role)?.strip_prefix(' '))
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!(
+            "run {} has no one container for role {role}: {listed:?}",
+            run.as_str()
+        );
+    };
+    (*id).to_owned()
+}
+
 /// Prints the logs of the run's containers, for a test that failed.
 fn show_logs(run: &RunTag) -> Result<(), String> {
     for id in containers(run, "{{.ID}}")? {
@@ -327,13 +342,13 @@ fn list(base: &Path, dir: &Path, lines: &mut Vec<String>) {
     }
 }
 
-/// The commands of the container's processes, from the host, by process ID, listed every
+/// The commands of container `id`'s processes, from the host, by process ID, listed every
 /// 10 ms until `done` holds of the list or 30 s pass.
-fn processes(sandbox: &Container, done: impl Fn(&str) -> bool) -> String {
+fn processes(id: &str, done: impl Fn(&str) -> bool) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let top = docker()
-            .args(["top", sandbox.id(), "-o", "pid,args"])
+            .args(["top", id, "-o", "pid,args"])
             .output()
             .unwrap();
         let top = String::from_utf8(top.stdout).unwrap();
@@ -359,6 +374,7 @@ fn judge() {
         "judge",
         |fixture| {
             let mut sandbox = fixture.start(&fixture.run, "judge");
+            let id = container_id(&fixture.run, "judge");
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let put = [Put::Dir(&slot), Put::File(&payload, b"ledger")];
             sandbox.session().put(&absolute("/pumpkin"), &put).unwrap();
@@ -372,11 +388,11 @@ fn judge() {
             // The script exits without waiting for its sleeps, which may not run yet: until
             // then, each shows as the command that starts it.
             let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
-            let before = processes(&sandbox, |listed| sleeping(listed) == 2);
+            let before = processes(&id, |listed| sleeping(listed) == 2);
             lines.push(format!("before freezing: {before}"));
             sandbox.session().freeze().unwrap();
             // Freezing returns once the processes it kills are gone.
-            let after = processes(&sandbox, |_| true);
+            let after = processes(&id, |_| true);
             lines.push(format!("after freezing: {after}"));
             lines.extend(collect(fixture, &mut sandbox, "out"));
             lines.extend(collect(fixture, &mut sandbox, "log"));
@@ -445,8 +461,9 @@ fn confinement() {
                 "rootless or userns, exactly when the uid map isn't the identity: {}",
                 (rootless || userns) != identity
             ));
+            let id = container_id(&fixture.run, "confined");
             let from_host = |args: &[&str]| {
-                let output = docker().args(args).arg(sandbox.id()).output();
+                let output = docker().args(args).arg(&id).output();
                 let output = output.unwrap();
                 let (stdout, stderr) = (output.stdout, output.stderr);
                 String::from_utf8([stdout, stderr].concat()).unwrap()
@@ -528,8 +545,14 @@ fn cleanup() {
             let first = fixture.start(&fixture.run, "first");
             let second = fixture.start(&fixture.run, "second");
             let third = fixture.start(&fixture.run, "third");
-            let other = fixture.start(&fixture.other_run, "other");
-            let volumes = [&first, &second, &third, &other].map(volume);
+            let _other = fixture.start(&fixture.other_run, "other");
+            let volumes = [
+                (&fixture.run, "first"),
+                (&fixture.run, "second"),
+                (&fixture.run, "third"),
+                (&fixture.other_run, "other"),
+            ]
+            .map(|(run, role)| volume(&container_id(run, role)));
             let roles = |run| containers(run, r#"{{.Label "pumpkin.role"}}"#).unwrap();
             first.destroy().unwrap();
             drop(second);
@@ -560,10 +583,10 @@ fn cleanup() {
     );
 }
 
-/// The name of the anonymous volume Docker made for the sandbox's `/volume`.
-fn volume(sandbox: &Container) -> String {
+/// The name of the anonymous volume Docker made for container `id`'s `/volume`.
+fn volume(id: &str) -> String {
     let format = r#"{{range .Mounts}}{{if eq .Destination "/volume"}}{{.Name}}{{end}}{{end}}"#;
-    let inspect = ["inspect", "--format", format, sandbox.id()];
+    let inspect = ["inspect", "--format", format, id];
     let output = docker().args(inspect).output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let name = String::from_utf8(output.stdout).unwrap().trim().to_owned();
