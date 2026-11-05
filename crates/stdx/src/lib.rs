@@ -3,6 +3,7 @@
 use std::fmt::Display;
 use std::panic;
 use std::sync::LockResult;
+use std::time::{Duration, Instant};
 
 pub mod process;
 
@@ -64,4 +65,38 @@ pub fn unpoisoned<T>(locked: LockResult<T>) -> T {
         unreachable!("a thread panicked while holding a lock")
     };
     guard
+}
+
+/// The instant by which an operation is to end, made from the time it has left, so that each
+/// step an operation hands it to ends by the same instant.
+///
+/// ```
+/// use std::time::Duration;
+/// use stdx::Deadline;
+///
+/// assert_eq!(Deadline::after(Duration::MAX).remaining(), Some(Duration::MAX));
+/// let soon = Deadline::after(Duration::from_millis(1));
+/// while let Some(left) = soon.remaining() {
+///     assert!(!left.is_zero());
+/// }
+/// assert_eq!(Deadline::after(Duration::ZERO).remaining(), None);
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Deadline(Option<Instant>);
+
+impl Deadline {
+    /// The deadline `remaining` from now; one past what the clock can hold is never reached.
+    pub fn after(remaining: Duration) -> Self {
+        Self(Instant::now().checked_add(remaining))
+    }
+
+    /// The time left, which is never zero: `None` once the deadline has passed, and
+    /// [`Duration::MAX`] if it is never reached.
+    pub fn remaining(self) -> Option<Duration> {
+        let Some(at) = self.0 else {
+            return Some(Duration::MAX);
+        };
+        let now = Instant::now();
+        (now < at).then(|| at.duration_since(now))
+    }
 }

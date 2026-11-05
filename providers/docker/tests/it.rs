@@ -36,11 +36,17 @@ use pumpkin_schema::sandbox::{
     ExitStatus, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
 };
 use pumpkin_schema::workflow::Sandbox;
+use stdx::Deadline;
 use stdx::process::Environment;
 
 /// A small public image, pinned by digest.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
+
+/// A request's deadline, which only a test that hangs reaches, so no outcome rests on it.
+fn hung() -> Deadline {
+    Deadline::after(Duration::from_secs(60))
+}
 
 /// The environment of one test: its run tags and a directory for sockets and collected files.
 /// Dropping it removes the containers of its runs, after showing their logs if the test failed.
@@ -264,7 +270,7 @@ fn launch(n: u32, script: &str) -> Launch {
 /// to.
 fn sh(sandbox: &mut Container, n: u32, script: &str) -> ExitStatus {
     let session = sandbox.session();
-    let mut process = session.start(launch(n, script)).unwrap();
+    let mut process = session.start(launch(n, script), hung()).unwrap();
     process.wait(Duration::from_secs(30)).unwrap().unwrap()
 }
 
@@ -283,7 +289,7 @@ fn serve(
         if let Some(status) = process.wait(tick).unwrap() {
             return (status, asked);
         }
-        if let Some(arrival) = session.next_op(tick).unwrap() {
+        if let Some(arrival) = session.next_op(tick, hung()).unwrap() {
             asked.push(reply(session, arrival, payload));
         }
     }
@@ -298,7 +304,10 @@ fn collect(fixture: &Fixture, sandbox: &mut Container, dir: &str) -> Vec<String>
         entries: 100,
     };
     let from = absolute(&format!("/pumpkin/{dir}"));
-    sandbox.session().collect(&from, &into, limits).unwrap();
+    sandbox
+        .session()
+        .collect(&from, &into, limits, hung())
+        .unwrap();
     let mut lines = Vec::new();
     list(&into, &into, &mut lines);
     lines
@@ -358,7 +367,10 @@ fn judge() {
             let mut sandbox = fixture.start(&fixture.run, "judge");
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let put = [Put::Dir(&slot), Put::File(&payload, b"ledger")];
-            sandbox.session().put(&absolute("/pumpkin"), &put).unwrap();
+            sandbox
+                .session()
+                .put(&absolute("/pumpkin"), &put, hung())
+                .unwrap();
             let script = r#"
                 printf '{"bytes": %s}' "$(wc -c < ../in/payload/raw)" > ../out/result.json
                 mkdir ../out/evidence && echo kept > ../out/evidence/evidence.txt
@@ -371,7 +383,7 @@ fn judge() {
             let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
             let before = processes(&sandbox, |listed| sleeping(listed) == 2);
             lines.push(format!("before freezing: {before}"));
-            sandbox.session().freeze().unwrap();
+            sandbox.session().freeze(hung()).unwrap();
             // Freezing returns once the processes it kills are gone.
             let after = processes(&sandbox, |_| true);
             lines.push(format!("after freezing: {after}"));
@@ -650,7 +662,9 @@ fn ops() {
             let mut sandbox = sandbox.unwrap();
             let session = sandbox.session();
             let put = [Put::File(&relative("payload"), &payload)];
-            session.put(&absolute("/pumpkin/home"), &put).unwrap();
+            session
+                .put(&absolute("/pumpkin/home"), &put, hung())
+                .unwrap();
             let script = format!(
                 r#"{CTL}
                 cp payload big && printf '!' >> big && ln -s payload link
@@ -667,7 +681,7 @@ fn ops() {
                 echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10)"
                 echo > /.pumpkin/bin/sandboxctl"#
             );
-            let mut process = session.start(launch(1, &script)).unwrap();
+            let mut process = session.start(launch(1, &script), hung()).unwrap();
             let (status, arrived) = serve(session, &mut process, &payload);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(log(fixture, &mut sandbox));
@@ -746,7 +760,7 @@ fn refused_calls() {
                 huge = MAX_OP_PAYLOAD_BYTES + 1,
             );
             let session = sandbox.session();
-            let mut process = session.start(launch(1, &script)).unwrap();
+            let mut process = session.start(launch(1, &script), hung()).unwrap();
             let (status, arrived) = serve(session, &mut process, &[]);
             drop(second);
             let mut lines = vec![format!("{status:?}")];
@@ -822,10 +836,15 @@ fn turns() {
                 wait $fourth; echo "judge train swapped: exit $?: $(cat swapped.out)"
                 ninth=$($ctl status 9 2>&1); echo "status 9: exit $?: $ninth""#;
             let session = sandbox.session();
-            let mut callers = session.start(launch(1, script)).unwrap();
-            let first = session.next_op(Duration::from_secs(30)).unwrap().unwrap();
+            let mut callers = session.start(launch(1, script), hung()).unwrap();
+            let first = session
+                .next_op(Duration::from_secs(30), hung())
+                .unwrap()
+                .unwrap();
             let held = [Put::Dir(&relative("held"))];
-            session.put(&absolute("/pumpkin/in"), &held).unwrap();
+            session
+                .put(&absolute("/pumpkin/in"), &held, hung())
+                .unwrap();
             // No op can arrive while the first is in flight.
             sh(&mut sandbox, 2, "until [ -e ready ]; do sleep 0.01; done");
             let session = sandbox.session();
@@ -926,7 +945,7 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
         }
         &Op::Status { job } => (format!("status {job}"), status(job, remaining)),
     };
-    session.reply(incoming, answer).unwrap();
+    session.reply(incoming, answer, hung()).unwrap();
     asked
 }
 

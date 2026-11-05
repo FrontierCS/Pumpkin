@@ -23,11 +23,17 @@ use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{Launch, RelativePath};
+use stdx::Deadline;
 use stdx::process::Environment;
 
 /// What `sandboxd` and the tests' other programs get of the tests' environment: `PATH` alone,
 /// to find the programs they run.
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
+
+/// A request's deadline, which only a test that hangs reaches, so no outcome rests on it.
+fn hung() -> Deadline {
+    Deadline::after(Duration::from_secs(60))
+}
 
 /// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
 struct Sandbox {
@@ -55,10 +61,10 @@ impl Sandbox {
             .arg(&socket)
             .spawn()
             .unwrap();
-        let mut session = listener.accept(Duration::from_secs(10), None).unwrap();
+        let mut session = listener.accept(hung(), None).unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
-            .put(&absolute(&root), &dirs.each_ref().map(Put::Dir))
+            .put(&absolute(&root), &dirs.each_ref().map(Put::Dir), hung())
             .unwrap();
         Self {
             root,
@@ -98,7 +104,7 @@ impl Sandbox {
             entries: 100,
         };
         let into = collected.join(dir.replace('/', "-"));
-        let outcome = self.session.collect(&self.at(dir), &into, limits);
+        let outcome = self.session.collect(&self.at(dir), &into, limits, hung());
         outcome.map_err(|error| self.show(&error))?;
         let mut lines = Vec::new();
         self.list(&collected, &into, &mut lines);
@@ -229,7 +235,7 @@ fn judge() {
                 .collect();
             let root = absolute(&sandbox.root);
             let put = [Put::Dir(&slot), Put::File(&payload, &raw)];
-            sandbox.session.put(&root, &put).unwrap();
+            sandbox.session.put(&root, &put, hung()).unwrap();
             let script = r#"
                 printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
                 mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
@@ -238,10 +244,10 @@ fn judge() {
                 echo warning >&2
                 exit 3"#;
             let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
-            let mut judge = sandbox.session.start(launch).unwrap();
+            let mut judge = sandbox.session.start(launch, hung()).unwrap();
             let exited = judge.wait(Duration::from_secs(10)).unwrap().unwrap();
             let mut lines = vec![format!("exited: {exited:?}")];
-            sandbox.session.freeze().unwrap();
+            sandbox.session.freeze(hung()).unwrap();
             lines.extend(sandbox.collect("out").unwrap());
             let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
             lines.push(format!("payload collected intact: {}", kept == raw));
@@ -269,17 +275,17 @@ fn freezing() {
         "freezing",
         |sandbox| {
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
-            let mut group = sandbox.session.start(launch).unwrap();
+            let mut group = sandbox.session.start(launch, hung()).unwrap();
             // The shell and both sleeps, so that freezing finds each of them to kill.
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
-            sandbox.session.freeze().unwrap();
+            sandbox.session.freeze(hung()).unwrap();
             let exited = group.wait(Duration::ZERO).unwrap();
             let mut lines = vec![
                 format!("running before freezing: {}", running.len()),
                 format!("exited when frozen: {exited:?}"),
             ];
-            let after = sandbox.session.start(sandbox.sh("true", &[]));
+            let after = sandbox.session.start(sandbox.sh("true", &[]), hung());
             lines.push(format!("start after freezing: {}", after.unwrap_err()));
             lines
         },
@@ -301,31 +307,31 @@ fn refusals() {
             let mut lines = Vec::new();
             let mut missing = sandbox.sh("", &[]);
             missing.argv = Argv::try_from(vec!["/nonexistent/program".to_owned()]).unwrap();
-            let started = sandbox.session.start(missing).map(|_| ());
+            let started = sandbox.session.start(missing, hung()).map(|_| ());
             lines.push(format!("missing program: {}", show_error(sandbox, started)));
             // The role's code can put anything at a command's output paths, such as a link to
             // `sandboxd`'s own standard error, or a FIFO that nothing reads.
             let link = sandbox.sh("echo leaked", &[]);
             std::os::unix::fs::symlink("/proc/self/fd/2", link.stdout.as_str()).unwrap();
-            let started = sandbox.session.start(link).map(|_| ());
+            let started = sandbox.session.start(link, hung()).map(|_| ());
             lines.push(format!("stdout a link: {}", show_error(sandbox, started)));
             let fifo = sandbox.sh("true", &[]);
             let made = stdx::process::command("mkfifo", PATH_ONLY)
                 .arg(fifo.stdout.as_str())
                 .status();
             assert!(made.unwrap().success());
-            let started = sandbox.session.start(fifo).map(|_| ());
+            let started = sandbox.session.start(fifo, hung()).map(|_| ());
             lines.push(format!("stdout a FIFO: {}", show_error(sandbox, started)));
             // Started by name with its own PATH, a missing program is waited for by the
             // standard library itself, which must not race the reaper while another command
             // runs.
             let sleep = sandbox.sh("exec sleep 60", &[]);
-            let _running = sandbox.session.start(sleep).unwrap();
+            let _running = sandbox.session.start(sleep, hung()).unwrap();
             let mut failures: Vec<String> = (0..1000)
                 .map(|_| {
                     let mut by_name = sandbox.sh("", &["PATH=/usr/bin:/bin"]);
                     by_name.argv = Argv::try_from(vec!["no-such-program".to_owned()]).unwrap();
-                    let started = sandbox.session.start(by_name).map(|_| ());
+                    let started = sandbox.session.start(by_name, hung()).map(|_| ());
                     show_error(sandbox, started)
                 })
                 .collect();
@@ -333,7 +339,9 @@ fn refusals() {
             lines.push(format!("missing program by name, 1000 times: {failures:?}"));
             let file = relative("in/file");
             let twice = [Put::File(&file, b"first"), Put::File(&file, b"second")];
-            let put = sandbox.session.put(&absolute(&sandbox.root), &twice);
+            let put = sandbox
+                .session
+                .put(&absolute(&sandbox.root), &twice, hung());
             lines.push(format!("same file twice: {}", show_error(sandbox, put)));
             std::os::unix::fs::symlink("/etc/passwd", sandbox.root.join("out/link")).unwrap();
             lines.push(format!("link: {}", sandbox.collect("out").unwrap_err()));
@@ -367,7 +375,7 @@ fn ending_the_session() {
         "ending",
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
-            sandbox.session.start(launch).unwrap();
+            sandbox.session.start(launch, hung()).unwrap();
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| !found.is_empty());
             vec![format!("running: {}", running.len())]

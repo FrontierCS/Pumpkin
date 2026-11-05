@@ -7,10 +7,15 @@
 //! is talking.
 //!
 //! A sandbox, however buggy, can't harm the host through its session. A message that fails to
-//! parse or comes out of turn, more replies than a waiting request takes, silence for
-//! [`REPLY_TIMEOUT`] while a request waits, or a write the sandbox doesn't read within it ends
-//! the session, which stops the sandbox. A collected tree is written into a new directory of
-//! its own, within [`Limits`].
+//! parse or comes out of turn, or more replies than a waiting request takes, ends the session,
+//! which stops the sandbox. A collected tree is written into a new directory of its own, within
+//! [`Limits`].
+//!
+//! # Deadlines
+//!
+//! Every request waits on the sandbox until the deadline its caller gives, so a slow link makes
+//! it wait, never fail. A request whose deadline passes fails with [`io::ErrorKind::TimedOut`]
+//! and ends the session. A sandbox that closes its connection ends the session at once.
 //!
 //! # Ops
 //!
@@ -29,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{fmt, fs, mem, process};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
@@ -39,14 +44,7 @@ use pumpkin_schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
     ToSandbox, frame,
 };
-
-/// How long a session waits on the sandbox: for its next frame, and for it to read a write.
-///
-/// `sandboxd` answers every request promptly, reads what it is sent, and sends a tree's frames
-/// one after another, so a sandbox that stalls this long is stuck. The limit holds for each
-/// frame and each write, not for a whole request: a tree's transfer is bounded only by its
-/// [`Limits`] times this.
-pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+use stdx::Deadline;
 
 /// How many frames of a tree may wait for the request writing it. While that many wait, the
 /// session reads nothing more.
@@ -86,29 +84,28 @@ impl Listener {
         Ok(Self { listener, path })
     }
 
-    /// Waits up to `timeout` for the sandbox to connect, then removes the socket. The session
+    /// Waits until `by` for the sandbox to connect, then removes the socket. The session
     /// takes ops if `ops` gives the most bytes an op's payload may hold: it holds one payload at
     /// most, and refuses a payload over the limit ([`Arrival::Refused`]), keeping none of its
     /// bytes. With `None`, an op breaks the protocol.
     ///
     /// # Errors
     ///
-    /// Fails with [`io::ErrorKind::TimedOut`] if nothing connects in time, or if accepting the
+    /// Fails with [`io::ErrorKind::TimedOut`] if nothing connects by `by`, or if accepting the
     /// connection or setting up its session fails.
-    pub fn accept(self, timeout: Duration, ops: Option<OpPayloadLimit>) -> io::Result<Session> {
+    pub fn accept(self, by: Deadline, ops: Option<OpPayloadLimit>) -> io::Result<Session> {
         let path = self.path.display();
         self.listener
             .set_nonblocking(true)
             .map_err(|error| context(format_args!("{path} can't be made non-blocking"), &error))?;
-        let deadline = Instant::now() + timeout;
         let stream = loop {
             match self.listener.accept() {
                 Ok((stream, _)) => break stream,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
+                    if by.remaining().is_none() {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
-                            format!("no sandbox connected to {path} within {timeout:?}"),
+                            format!("no sandbox connected to {path} by the deadline"),
                         ));
                     }
                     thread::sleep(Duration::from_millis(10));
@@ -135,8 +132,8 @@ impl Drop for Listener {
 
 /// A sandbox's session, which one owner drives: it alone writes to the sandbox.
 ///
-/// Requests on it block until `sandboxd` answers or the session ends. Dropping it ends the
-/// session, which stops the sandbox.
+/// Requests on it block until `sandboxd` answers, their deadline passes, or the session ends.
+/// Dropping it ends the session, which stops the sandbox.
 #[derive(Debug)]
 pub struct Session {
     /// The session's number, from [`NEXT_SESSION`], which its ops carry.
@@ -285,10 +282,6 @@ impl Process {
 
 impl Session {
     fn new(stream: UnixStream, limit: Option<OpPayloadLimit>) -> io::Result<Self> {
-        // A socket option, so it holds for every handle on the connection.
-        stream
-            .set_write_timeout(Some(REPLY_TIMEOUT))
-            .map_err(|error| context("the connection's write timeout can't be set", &error))?;
         let routes = Arc::new(Mutex::new(Routes {
             open: BTreeMap::new(),
             op: None,
@@ -328,12 +321,13 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails if `sandboxd` can't write them or the session ends.
-    pub fn put(&mut self, dir: &AbsolutePath, entries: &[Put<'_>]) -> io::Result<()> {
-        let (stream, replies) = self.open(Queue::Replies)?;
+    /// Fails if `sandboxd` can't write them, if `by` passes first ([deadlines](crate#deadlines)),
+    /// or if the session ends.
+    pub fn put(&mut self, dir: &AbsolutePath, entries: &[Put<'_>], by: Deadline) -> io::Result<()> {
+        let (stream, replies) = self.open(Queue::Replies, by)?;
         let put = self
-            .send_tree(stream, dir, entries)
-            .and_then(|()| self.done(&replies));
+            .send_tree(stream, dir, entries, by)
+            .and_then(|()| self.done(&replies, by));
         self.close(stream);
         put
     }
@@ -342,12 +336,13 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails if the command doesn't start or the session ends.
-    pub fn start(&mut self, launch: Launch) -> io::Result<Process> {
-        let (stream, replies) = self.open(Queue::Replies)?;
+    /// Fails if the command doesn't start, if `by` passes first ([deadlines](crate#deadlines)),
+    /// or if the session ends.
+    pub fn start(&mut self, launch: Launch, by: Deadline) -> io::Result<Process> {
+        let (stream, replies) = self.open(Queue::Replies, by)?;
         let started = self
-            .send(&ToSandbox::Start { stream, launch }, &[])
-            .and_then(|()| self.done(&replies));
+            .send(&ToSandbox::Start { stream, launch }, &[], by)
+            .and_then(|()| self.done(&replies, by));
         match started {
             // The reader removes the command's route, which outlives this call.
             Ok(()) => Ok(Process {
@@ -367,9 +362,10 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails if `sandboxd` can't kill them or the session ends.
-    pub fn freeze(&mut self) -> io::Result<()> {
-        self.request(|stream| ToSandbox::Freeze { stream })
+    /// Fails if `sandboxd` can't kill them, if `by` passes first ([deadlines](crate#deadlines)),
+    /// or if the session ends.
+    pub fn freeze(&mut self, by: Deadline) -> io::Result<()> {
+        self.request(|stream| ToSandbox::Freeze { stream }, by)
     }
 
     /// Copies the tree in the sandbox's `dir` into `into`, a new directory, within `limits`.
@@ -378,9 +374,16 @@ impl Session {
     /// # Errors
     ///
     /// Fails if `into` exists, if `sandboxd` can't send the tree, if the tree breaks the
-    /// protocol or passes a limit, or if the session ends.
-    pub fn collect(&mut self, dir: &AbsolutePath, into: &Path, limits: Limits) -> io::Result<()> {
-        let (stream, replies) = self.open(Queue::Tree)?;
+    /// protocol or passes a limit, if `by` passes first ([deadlines](crate#deadlines)), or if
+    /// the session ends.
+    pub fn collect(
+        &mut self,
+        dir: &AbsolutePath,
+        into: &Path,
+        limits: Limits,
+        by: Deadline,
+    ) -> io::Result<()> {
+        let (stream, replies) = self.open(Queue::Tree, by)?;
         let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
         let collected = created.and_then(|()| {
             let tree = tree::Writer::new(into.to_owned(), limits);
@@ -390,23 +393,24 @@ impl Session {
                     dir: dir.clone(),
                 },
                 &[],
+                by,
             )?;
-            self.receive_tree(&replies, tree)
+            self.receive_tree(&replies, tree, by)
         });
         self.close(stream);
         collected
     }
 
-    /// Waits up to `timeout` for the next op whose payload has all arrived: `None` if none did.
+    /// Waits up to `wait` for the next op whose payload has all arrived: `None` if none did.
     /// Answer each promptly, as [the protocol](pumpkin_schema::sandbox) requires. A refused
-    /// op's refusal is sent here, which may wait on a write for up to [`REPLY_TIMEOUT`].
+    /// op's refusal is sent here, by `by` ([deadlines](crate#deadlines)).
     ///
     /// # Errors
     ///
     /// Fails once the session has ended and every op that arrived whole before has been handed
     /// out.
-    pub fn next_op(&mut self, timeout: Duration) -> io::Result<Option<Arrival>> {
-        let arrival = match self.ops.recv_timeout(timeout) {
+    pub fn next_op(&mut self, wait: Duration, by: Deadline) -> io::Result<Option<Arrival>> {
+        let arrival = match self.ops.recv_timeout(wait) {
             Ok(arrival) => arrival,
             Err(RecvTimeoutError::Timeout) => return Ok(None),
             Err(RecvTimeoutError::Disconnected) => return Err(ended(&self.ended)),
@@ -416,7 +420,7 @@ impl Session {
             Arrival::Refused(refused) => {
                 self.clear_flight();
                 let message = refused.message.clone();
-                match self.answer(refused.number, OpReply::Refused { message }) {
+                match self.answer(refused.number, OpReply::Refused { message }, by) {
                     #[expect(
                         clippy::unreachable,
                         reason = "the refusal's message, which `Assembler::pass_on` writes, names \
@@ -440,12 +444,13 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails if the reply is too long for a frame, or the session has ended.
+    /// Fails if the reply is too long for a frame, if `by` passes first
+    /// ([deadlines](crate#deadlines)), or if the session has ended.
     ///
     /// # Panics
     ///
     /// Panics if `op` arrived on another session.
-    pub fn reply(&mut self, op: IncomingOp, reply: OpReply) -> io::Result<()> {
+    pub fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Deadline) -> io::Result<()> {
         let IncomingOp {
             session,
             number,
@@ -465,10 +470,10 @@ impl Session {
         // goes first, so that the next op's buffer is never held beside it while the write waits.
         drop(op);
         self.clear_flight();
-        match self.answer(number, reply) {
+        match self.answer(number, reply, by) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                 let message = format!("the reply was too long to send: {error}");
-                self.answer(number, OpReply::Refused { message })?;
+                self.answer(number, OpReply::Refused { message }, by)?;
                 Err(error)
             }
             answered => answered,
@@ -480,9 +485,10 @@ impl Session {
     }
 
     /// Sends `reply` to op `number`, already out of the flight.
-    fn answer(&mut self, number: u32, reply: OpReply) -> io::Result<()> {
+    fn answer(&mut self, number: u32, reply: OpReply, by: Deadline) -> io::Result<()> {
+        self.can_send(by)?;
         let message = ToSandbox::OpReply { op: number, reply };
-        match frame::write(&mut self.connection, &message, &[]) {
+        match frame::write(&mut self.until(by), &message, &[]) {
             // A reply too long for a frame, which `frame::write` refuses before writing
             // anything, so the session goes on, and the op can still be answered.
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
@@ -495,6 +501,7 @@ impl Session {
         stream: u32,
         dir: &AbsolutePath,
         entries: &[Put<'_>],
+        by: Deadline,
     ) -> io::Result<()> {
         self.send(
             &ToSandbox::Put {
@@ -502,12 +509,13 @@ impl Session {
                 dir: dir.clone(),
             },
             &[],
+            by,
         )?;
         for entry in entries {
             match *entry {
                 Put::Dir(path) => {
                     let entry = Entry::Dir { path: path.clone() };
-                    self.send(&ToSandbox::Entry { stream, entry }, &[])?;
+                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
                 }
                 Put::File(path, bytes) => {
                     let size = bytes.len() as u64;
@@ -515,19 +523,24 @@ impl Session {
                         path: path.clone(),
                         size,
                     };
-                    self.send(&ToSandbox::Entry { stream, entry }, &[])?;
+                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
                     for chunk in bytes.chunks(frame::MAX_BODY_BYTES) {
-                        self.send(&ToSandbox::Data { stream }, chunk)?;
+                        self.send(&ToSandbox::Data { stream }, chunk, by)?;
                     }
                 }
             }
         }
-        self.send(&ToSandbox::End { stream }, &[])
+        self.send(&ToSandbox::End { stream }, &[], by)
     }
 
-    fn receive_tree(&self, replies: &Receiver<Reply>, mut tree: tree::Writer) -> io::Result<()> {
+    fn receive_tree(
+        &self,
+        replies: &Receiver<Reply>,
+        mut tree: tree::Writer,
+        by: Deadline,
+    ) -> io::Result<()> {
         loop {
-            match self.receive(replies)? {
+            match self.receive(replies, by)? {
                 (FromSandbox::Entry { entry, .. }, _) => tree.entry(&entry)?,
                 (FromSandbox::Data { .. }, body) => tree.data(&body)?,
                 (FromSandbox::End { .. }, _) => return tree.finish(),
@@ -545,16 +558,18 @@ impl Session {
     }
 
     /// Sends the request `message` builds for a new stream, and waits for its reply.
-    fn request(&mut self, message: impl FnOnce(u32) -> ToSandbox) -> io::Result<()> {
-        let (stream, replies) = self.open(Queue::Replies)?;
+    fn request(&mut self, message: impl FnOnce(u32) -> ToSandbox, by: Deadline) -> io::Result<()> {
+        let (stream, replies) = self.open(Queue::Replies, by)?;
         let done = self
-            .send(&message(stream), &[])
-            .and_then(|()| self.done(&replies));
+            .send(&message(stream), &[], by)
+            .and_then(|()| self.done(&replies, by));
         self.close(stream);
         done
     }
 
-    fn open(&mut self, queue: Queue) -> io::Result<(u32, Receiver<Reply>)> {
+    /// Opens a stream for a request to send by `by`.
+    fn open(&mut self, queue: Queue, by: Deadline) -> io::Result<(u32, Receiver<Reply>)> {
+        self.can_send(by)?;
         let stream = self.next_stream;
         self.next_stream = stream.wrapping_add(1);
         let (sender, replies) = mpsc::sync_channel(match queue {
@@ -562,6 +577,7 @@ impl Session {
             Queue::Tree => QUEUED_TREE_FRAMES,
         });
         let mut routes = lock(&self.routes);
+        // Again under the lock, as the session may have ended since: `end` says why.
         if self.ended.get().is_some() {
             return Err(ended(&self.ended));
         }
@@ -575,41 +591,84 @@ impl Session {
 
     /// Sends a frame. Any failure ends the session: one frame of a request that spans several,
     /// such as a [`put`](Self::put)'s, may be too long after the first was sent.
-    fn send(&mut self, message: &ToSandbox, body: &[u8]) -> io::Result<()> {
-        frame::write(&mut self.connection, message, body).map_err(|error| self.write_failed(&error))
+    fn send(&mut self, message: &ToSandbox, body: &[u8], by: Deadline) -> io::Result<()> {
+        frame::write(&mut self.until(by), message, body).map_err(|error| self.write_failed(&error))
     }
 
-    /// Ends the session after a write that failed with `error`. A write that fails, or that the
-    /// sandbox doesn't read within [`REPLY_TIMEOUT`], may leave part of a frame on the
-    /// connection. The session's reason, which the error returned gives, is the failed write's,
-    /// unless it had ended already.
+    /// The connection, to write to until `by`.
+    fn until(&self, by: Deadline) -> Until<'_> {
+        Until {
+            connection: &self.connection,
+            by,
+        }
+    }
+
+    /// Ends the session after a write that failed with `error`, which may leave part of a frame
+    /// on the connection, and returns the request's error: the deadline's, if it has passed,
+    /// or else the session's, whose reason is the failed write's unless it had ended already.
     fn write_failed(&self, error: &io::Error) -> io::Error {
-        let reason = if matches!(
+        if matches!(
             error.kind(),
             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
         ) {
-            format!("the sandbox read nothing for {REPLY_TIMEOUT:?}")
-        } else {
-            format!("writing to the sandbox failed: {error}")
-        };
+            return self.timed_out(
+                "the sandbox didn't take what was sent before the request's deadline: expected it \
+                 to read while the deadline lasts",
+            );
+        }
+        let reason = format!("writing to the sandbox failed: {error}");
         end(&self.routes, &self.ended, &self.connection, reason);
         ended(&self.ended)
     }
 
-    fn receive(&self, replies: &Receiver<Reply>) -> io::Result<Reply> {
-        match replies.recv_timeout(REPLY_TIMEOUT) {
+    fn receive(&self, replies: &Receiver<Reply>, by: Deadline) -> io::Result<Reply> {
+        // The gateway bounds no wait of its own. A stall the connection rides out may be
+        // latency, which only the operation the request serves knows how long to wait out, as
+        // its deadline says; a sandbox that is gone closes its connection, which ends the
+        // session at once. A deadline that has passed fails at once, even with a frame waiting,
+        // so that a tree sent faster than it is written ends by it too.
+        let received = match by.remaining() {
+            Some(left) => replies.recv_timeout(left),
+            None => Err(RecvTimeoutError::Timeout),
+        };
+        match received {
             Ok(reply) => Ok(reply),
-            Err(RecvTimeoutError::Timeout) => {
-                let silent = format!("the sandbox sent nothing for {REPLY_TIMEOUT:?}");
-                end(&self.routes, &self.ended, &self.connection, silent);
-                Err(ended(&self.ended))
-            }
+            Err(RecvTimeoutError::Timeout) => Err(self.timed_out(
+                "the sandbox didn't answer before the request's deadline: expected its answer \
+                 while the deadline lasts",
+            )),
             Err(RecvTimeoutError::Disconnected) => Err(ended(&self.ended)),
         }
     }
 
-    fn done(&self, replies: &Receiver<Reply>) -> io::Result<()> {
-        match self.receive(replies)? {
+    /// Fails before a request is sent if the session has ended, for its reason, or else if `by`
+    /// has passed, which ends the session though the sandbox has had no part in it.
+    fn can_send(&self, by: Deadline) -> io::Result<()> {
+        if self.ended.get().is_some() {
+            return Err(ended(&self.ended));
+        }
+        if by.remaining().is_none() {
+            return Err(self.timed_out(
+                "the request's deadline passed before it was sent: expected time left to send it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ends the session for `reason`, as a request's deadline has passed, and returns the
+    /// request's error.
+    fn timed_out(&self, reason: &'static str) -> io::Error {
+        end(
+            &self.routes,
+            &self.ended,
+            &self.connection,
+            reason.to_owned(),
+        );
+        io::Error::new(io::ErrorKind::TimedOut, reason)
+    }
+
+    fn done(&self, replies: &Receiver<Reply>, by: Deadline) -> io::Result<()> {
+        match self.receive(replies, by)? {
             (FromSandbox::Done { .. }, _) => Ok(()),
             (FromSandbox::Failed { message, .. }, _) => Err(io::Error::other(message)),
             (
@@ -629,6 +688,29 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Closing the connection ends the session; the reader thread then sees it close.
         let _ = self.connection.shutdown(Shutdown::Both);
+    }
+}
+
+/// Writes to a connection until `by`, after which every write fails as timed out.
+struct Until<'a> {
+    connection: &'a UnixStream,
+    by: Deadline,
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Set before each write, since the socket's timeout bounds each call on its own. A
+        // deadline that has passed fails here, not in the socket, whose `None` would mean no
+        // timeout at all.
+        let Some(left) = self.by.remaining() else {
+            return Err(io::ErrorKind::TimedOut.into());
+        };
+        self.connection.set_write_timeout(Some(left))?;
+        (&mut &*self.connection).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&mut &*self.connection).flush()
     }
 }
 

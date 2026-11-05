@@ -53,10 +53,11 @@ use pumpkin_schema::sandbox::{
 };
 use pumpkin_schema::workflow::Sandbox;
 use serde::Deserialize;
-use stdx::Context;
 use stdx::process::Environment;
+use stdx::{Context, Deadline};
 
-/// How long a new container has to connect its `sandboxd` to the session's socket.
+/// How long a new container has to connect its `sandboxd` to the session's socket and put the
+/// directories a role expects.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
@@ -360,10 +361,11 @@ impl Engine {
     ///
     /// Fails, naming the path, if the session's socket can't be made in the socket directory,
     /// or that directory or `sandboxd` can't be mounted; if `docker` can't create or start the
-    /// container; if its `sandboxd` doesn't connect within 30 s, which a `sandboxd` that exits
-    /// at once still costs, or its session can't be set up; or if the directories can't be
-    /// put. Whatever container `docker` created is removed before the error returns, which
-    /// quotes the end of the container's logs, and says if removing it failed.
+    /// container; if its `sandboxd` doesn't connect and take the directories within 30 s in
+    /// all, which a `sandboxd` that exits at once still costs, or its session can't be set up;
+    /// or if the directories can't be put. Whatever container `docker` created is removed
+    /// before the error returns, which quotes the end of the container's logs, and says if
+    /// removing it failed.
     pub fn start(&self, start: &Start<'_>) -> Result<Container, String> {
         let context = &self.report.context;
         let socket = start.socket_dir.join(SOCKET_NAME);
@@ -495,11 +497,12 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
 /// Accepts the session of container `id`'s `sandboxd`, which takes ops within `ops`, the
 /// payload limit, if any, and puts the directories a role expects.
 fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<Session, String> {
-    let mut session = listener.accept(CONNECT_TIMEOUT, ops).map_err(|error| {
+    let by = Deadline::after(CONNECT_TIMEOUT);
+    let mut session = listener.accept(by, ops).map_err(|error| {
         if error.kind() == io::ErrorKind::TimedOut {
             format!(
-                "the `sandboxd` of container {id} didn't connect: {error}: expected it to \
-                 connect as it starts"
+                "the `sandboxd` of container {id} didn't connect within {CONNECT_TIMEOUT:?}: \
+                 {error}: expected it to connect as it starts"
             )
         } else {
             format!("the session of container {id} can't be set up: {error}")
@@ -507,11 +510,19 @@ fn connect(listener: Listener, id: &str, ops: Option<OpPayloadLimit>) -> Result<
     })?;
     let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
     let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
-    session.put(&root, &puts).map_err(|error| {
-        format!(
-            "the directories under `{root}` can't be put in container {id}: {error}: expected \
-             its `sandboxd` to put them, as the role's user, who owns `{root}`"
-        )
+    session.put(&root, &puts, by).map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            format!(
+                "the `sandboxd` of container {id} didn't put the directories under `{root}` \
+                 within {CONNECT_TIMEOUT:?} of starting: {error}: expected it to put them as it \
+                 starts"
+            )
+        } else {
+            format!(
+                "the directories under `{root}` can't be put in container {id}: {error}: \
+                 expected its `sandboxd` to put them, as the role's user, who owns `{root}`"
+            )
+        }
     })?;
     Ok(session)
 }
