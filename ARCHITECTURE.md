@@ -99,7 +99,4 @@ installs `stdx`'s hook.
 **Unsafe.** **Architecture Invariant:** `unsafe` is only for a system call `std` lacks, each use
 acknowledging the workspace's `unsafe_code` lint with a reason, as `ci` requires.
 
-**Concurrency.** Ownership is single, as `AGENTS.md` says. **Architecture Invariant:** threads
-exist only where I/O blocks, and a value they share says beside it who shares it.
-
-**Command lines.** A binary's grammar is an `xflags` `flags` module beside its `main`.
+**Concurrency.** `AGENTS.md`'s rule on concurrency primitives and single ownership holds throughout.
