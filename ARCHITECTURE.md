@@ -77,13 +77,12 @@ crate `pumpkin-<name>`, which holds its platform's calls and its sandboxes' conf
 `Event` a runtime observes and returns the `Action`s the runtime is to perform, until one ends the
 run with its `Outcome`; its `ops` rules on ops, `jobs` meters judge calls, and `result` reads a
 call's `result.json` (`JudgeResult`).
-- **Architecture Invariant:** the decision core does no I/O and reads no clock: time reaches it with
-  each event, so the same events give the same actions.
+- **Architecture Invariant:** the decision core does no I/O, reads no clock and uses no randomly
+  seeded hash: time reaches it with each event, so the same events give the same actions.
 - **Architecture Invariant:** only the decision core authorizes ops: `sandboxd` carries any op any
   code in the sandbox makes, and the gateway bounds only what ops cost the host.
 - **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
   left, and the fields its judge declares (`ResultSpec`), so the workflow decides its feedback.
-- **Architecture Invariant:** what a grant has used is counted from its jobs, never in a ledger.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
 
@@ -94,11 +93,11 @@ with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check
 
 **Errors.** What the world can cause is returned or handled (`AGENTS.md`). **Architecture
 Invariant:** a panic is a bug, and outside tests it ends the whole process: no code outside tests
-catches one, since what a panic leaves behind can't be trusted. Release builds abort, and each
-binary that runs threads installs `stdx`'s hook, which aborts in dev builds too.
+catches one, since what a panic leaves behind can't be trusted. Each binary that runs threads
+installs `stdx`'s hook.
 
 **Unsafe.** **Architecture Invariant:** `unsafe` is only for a system call `std` lacks, each use
-under `#[expect(unsafe_code, reason = "…")]`, as the workspace's lints and `ci` require.
+acknowledging the workspace's `unsafe_code` lint with a reason, as `ci` requires.
 
 **Concurrency.** Ownership is single, as `AGENTS.md` says. **Architecture Invariant:** threads
 exist only where I/O blocks, and a value they share says beside it who shares it.
