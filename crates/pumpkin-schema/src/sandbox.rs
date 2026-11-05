@@ -49,7 +49,6 @@ pub const MAX_OP_PAYLOAD_BYTES: u64 = 64 << 20;
 pub struct OpPayloadLimit(u64);
 
 impl OpPayloadLimit {
-    /// The limit, in bytes.
     pub fn bytes(self) -> u64 {
         self.0
     }

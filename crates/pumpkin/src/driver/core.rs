@@ -232,8 +232,9 @@ enum Phase {
         job: JobId,
         state: jobs::State,
     },
-    /// The run has finished.
-    Finished { work_end: WorkEnd },
+    Finished {
+        work_end: WorkEnd,
+    },
 }
 
 impl<'w> Core<'w> {
