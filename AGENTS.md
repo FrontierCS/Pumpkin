@@ -32,6 +32,11 @@
   it leaves behind can't be trusted; a binary that runs threads installs `stdx::abort_on_panic`
 - WRITE `unsafe` only to make a system call `std` lacks, each use acknowledging the
   `unsafe_code` lint with a reason
+- WRITE an error type of its own only for the cases a caller branches on, in this process,
+  across a protocol or in a record (an enum, a nested `Result`, a reply's code), or for a check
+  that reports every problem it finds in an input, each with where it is (`ParseErrors`); any
+  other error is a message, in whichever of `String`, `io::Error` or `Box<dyn Error>` needs the
+  fewest conversions, and code never branches on the text of a message Pumpkin wrote
 - WRITE error messages as what is wrong, then what is expected
   (`the program is empty: name one`); passing an error up, add what was being done where the
   error doesn't say it, as `stdx::Context` does
