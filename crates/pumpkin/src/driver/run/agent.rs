@@ -34,7 +34,7 @@ impl Agent {
     ) -> (Option<Self>, Event) {
         let agent = workflow.agent();
         let ops = op_payload_limit(workflow);
-        let started = sandboxes.start("agent", &agent.sandbox, ops, by, inbox, Input::Agent);
+        let started = sandboxes.start("agent", &agent.sandbox, Some(ops), by, inbox, Input::Agent);
         let mut sandbox = match started {
             Ok(sandbox) => sandbox,
             Err(error) => {

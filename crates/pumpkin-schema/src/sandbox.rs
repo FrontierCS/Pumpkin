@@ -125,11 +125,21 @@ pub fn slot_payload(slot: &Name) -> RelativePath {
     valid(&format!("{}/raw", slot_dir(slot)))
 }
 
-/// `out/result.json`, where a judge writes its result: its
+/// `out/result.json`, where a judge writes its result, of at most [`RESULT_MAX_BYTES`]: its
 /// [`ResultSpec`](crate::ir::ResultSpec) says how it is read, and what of it the caller sees.
 pub fn result_file() -> RelativePath {
     valid(&format!("{}/result.json", out_dir()))
 }
+
+/// The most bytes a judge's result ([`result_file()`]) may hold: a larger one is no result,
+/// rejected whole rather than cut short. A judge keeps its bulk output in [`evidence_dir()`].
+// The session's owner collects a result as a file in the sandbox's `out`, then reads it whole
+// into memory to parse it, and a reply returns some of its fields: the bound keeps a result a
+// small document, and what the host holds for it small. A reply has its own bound,
+// `frame::MAX_MESSAGE_BYTES`. Cutting a larger result short would not help, since a JSON document
+// cut short is no document. 1 MiB holds a status, a score and the fields a reply returns with
+// room to spare.
+pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
 /// `out/evidence`, there before a judge's command starts, which holds the files of evidence
 /// that only the operator sees.
