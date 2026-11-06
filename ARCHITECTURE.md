@@ -117,7 +117,8 @@ it to `Run` as a `Provider`.
 
 **`crates/pumpkin-harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
-directory the in-sandbox contract reserves for it.
+directory the in-sandbox contract reserves for it, and each with an adapter, such as `Codex`,
+that writes the agent's runtime that runs it.
 - **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates it depends
   only on `pumpkin-schema`. A harness therefore reaches an agent alike whichever factory builds
   its image, and any factory, in this repository or outside it, may use it.
