@@ -23,7 +23,7 @@ use pumpkin_schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag,
     SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, ToSandbox, frame};
+use pumpkin_schema::sandbox::{Entry, ExitStatus, FromSandbox, RelativePath, ToSandbox, frame};
 use serde_json::json;
 
 use crate::provider::{Locals, Subject};
@@ -36,6 +36,10 @@ pub(crate) const MUTE: &str = "/sim/mute";
 /// the run's list still finds.
 pub(crate) const LOST: &str = "/sim/lost";
 
+/// What every tree the simulated `sandboxd` collects holds: a file of this name, which holds the
+/// same.
+const COLLECTED: &str = "collected";
+
 /// The path of a `sandboxd` that the simulated provider refuses to publish.
 pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 
@@ -44,12 +48,13 @@ pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
 /// A provider whose sandboxes are threads, each running a fake `sandboxd`: it dials, unless its
-/// create names [`MUTE`] or [`LOST`], and then answers each put and start, fails every other
-/// request, and stops reading once [stalled](Subject::stall). It puts nothing. A command whose
-/// program is `exit` exits at once with the status its argument gives; one whose program is
-/// `crash` starts, then its `sandboxd` ends the session; any other runs until the session ends.
-/// It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose create names
-/// [`UNDELETABLE`].
+/// create names [`MUTE`] or [`LOST`], and then answers each request, and stops reading once
+/// [stalled](Subject::stall). It puts nothing, and collects a tree of one file, [`COLLECTED`],
+/// from any directory. A command whose program is `exit` exits at once with the status its
+/// argument gives; one whose program is `stall` starts, then stalls the sandbox; one whose
+/// program is `crash` starts, then its `sandboxd` ends the session; any other runs until the
+/// sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose
+/// create names [`UNDELETABLE`].
 pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
@@ -296,7 +301,7 @@ fn sandboxd(socket: &Path, mute: bool, shared: &Mutex<Status>) {
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more.
 fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
-    let (mut replies, mut crashed) = (Vec::new(), false);
+    let (mut replies, mut crashed) = (Vec::<(FromSandbox, &[u8])>::new(), false);
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, _))) = frame::read::<ToSandbox>(&mut connection) {
         if status(shared).stalled {
@@ -307,31 +312,35 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
         }
         match request {
             ToSandbox::Put { .. } | ToSandbox::Entry { .. } | ToSandbox::Data { .. } => {}
-            ToSandbox::End { stream } => replies.push(FromSandbox::Done { stream }),
+            ToSandbox::End { stream } | ToSandbox::Freeze { stream } => {
+                replies.push((FromSandbox::Done { stream }, &[]));
+            }
             ToSandbox::Start { stream, launch } => {
-                replies.push(FromSandbox::Done { stream });
+                replies.push((FromSandbox::Done { stream }, &[]));
                 match launch.argv.program() {
                     "exit" => {
                         let code = launch.argv.args()[0].parse().unwrap();
                         let status = ExitStatus::Code(code);
-                        replies.push(FromSandbox::Exited { stream, status });
+                        replies.push((FromSandbox::Exited { stream, status }, &[]));
                     }
+                    "stall" => status(shared).stalled = true,
                     "crash" => crashed = true,
                     _ => {}
                 }
             }
-            ToSandbox::Freeze { stream } | ToSandbox::Collect { stream, .. } => {
-                replies.push(FromSandbox::Failed {
-                    stream,
-                    message: "the simulated sandboxd only puts and starts: ask it for those alone"
-                        .to_owned(),
-                });
+            ToSandbox::Collect { stream, .. } => {
+                let path = RelativePath::try_from(COLLECTED.to_owned()).unwrap();
+                let size = u64::try_from(COLLECTED.len()).unwrap();
+                let entry = Entry::File { path, size };
+                replies.push((FromSandbox::Entry { stream, entry }, &[]));
+                replies.push((FromSandbox::Data { stream }, COLLECTED.as_bytes()));
+                replies.push((FromSandbox::End { stream }, &[]));
             }
             // It makes no ops, so a reply to one breaks the protocol, which ends the session.
             ToSandbox::OpReply { .. } => return,
         }
-        for reply in replies.drain(..) {
-            if frame::write(&mut connection, &reply, &[]).is_err() {
+        for (reply, body) in replies.drain(..) {
+            if frame::write(&mut connection, &reply, body).is_err() {
                 return;
             }
         }

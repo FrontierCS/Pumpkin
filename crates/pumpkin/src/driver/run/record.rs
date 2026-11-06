@@ -9,6 +9,10 @@
 //! - `provider.json`: what the run's provider declared, its
 //!   [`Ready`](pumpkin_schema::provider::Ready);
 //! - `log.jsonl`: the run log, which the `log` module lays out;
+//! - `agent/`, for an agent whose sandbox started: its `out` and `log`, what the sandbox held in
+//!   its [`out_dir()`](pumpkin_schema::sandbox::out_dir) and
+//!   [`log_dir()`](pumpkin_schema::sandbox::log_dir) when the work phase ended, as far as they
+//!   were collected; the run log notes what is incomplete;
 //! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields, in
 //!   the run log's JSON form of an outcome (`log::outcome_json`); or
 //!   `{"state": "refused" | "failed", "reason": r}`.
@@ -18,6 +22,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use pumpkin_schema::sandbox::{log_dir, out_dir};
 use serde_json::json;
 use stdx::Context;
 
@@ -127,6 +132,46 @@ fn replace(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
         };
     }
     sync_dir(dir)
+}
+
+/// What `dir`, where a sandbox's [`out_dir()`] and [`log_dir()`] were collected, holds of each,
+/// for the run log: `out, 0 files of 0 bytes; log, 2 files of 481 bytes`.
+pub(super) fn collected(dir: &Path) -> String {
+    let parts = [out_dir(), log_dir()].map(|part| match tree_size(&dir.join(part.as_str())) {
+        Ok(TreeSize { files, bytes }) => {
+            let noun = if files == 1 { "file" } else { "files" };
+            format!("{part}, {files} {noun} of {bytes} bytes")
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => format!("{part}, nothing"),
+        Err(error) => format!("{part}, which can't be read: {error}"),
+    });
+    parts.join("; ")
+}
+
+/// What the files below a directory hold, in all.
+#[derive(Clone, Copy, Debug, Default)]
+struct TreeSize {
+    /// The entries that aren't directories.
+    files: u64,
+    bytes: u64,
+}
+
+/// What the files below `dir` hold, in all.
+fn tree_size(dir: &Path) -> io::Result<TreeSize> {
+    let mut size = TreeSize::default();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            let below = tree_size(&entry.path())?;
+            size.files += below.files;
+            size.bytes += below.bytes;
+        } else {
+            size.files += 1;
+            size.bytes += metadata.len();
+        }
+    }
+    Ok(size)
 }
 
 /// Syncs `dir`, so that the entries made in it, or renamed into it, last.
