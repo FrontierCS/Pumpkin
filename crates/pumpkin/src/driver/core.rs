@@ -191,21 +191,25 @@ pub enum Verdict {
 /// How long a run of `workflow` may last from its start: its hard end, which [`Core::start`]
 /// sets, after the deadline.
 ///
-/// It is the pattern's deadline, its finalize grace and its score's timeout, and three times
-/// `startup`, how long the run's provider may take to start a sandbox, from when the runtime
-/// asks for one to when its session is ready.
+/// It is the sum of four shares: the later of the pattern's deadline and `startup`, its finalize
+/// grace, its score's timeout, and twice `startup`. Here `startup` is how long the run's provider
+/// may take to start a sandbox, from when the runtime asks for one to when its session is ready.
 pub fn lasts(workflow: &Workflow, startup: Duration) -> Duration {
     let Main::SoloThenJudge(pattern) = workflow.main();
-    // The deadline bounds the work phase, and the score's timeout the final judge's command. Of
-    // the startups, one is the final judge's sandbox's, and one the agent's, whose start counts
-    // against the deadline yet may outrun a short one. The grace, which the deadline cuts
-    // short, and the third startup are slack for ending the work phase and collecting what it
-    // left, which nothing else bounds: a margin chosen, not derived.
+    // Each start is attempted once (a failed start isn't retried today), which is why the hard
+    // end counts one startup per start. The core ends the work phase by the deadline, but the
+    // agent's teardown waits for its start, which counts against the deadline yet may outrun a
+    // short one: the teardown begins by the later of the deadline and `startup`. The last
+    // startup and the score's timeout are the final judge's, the run's last sandbox: its start
+    // and its command. The other startup and the grace, which the deadline cuts short, are
+    // slack for ending the work phase and collecting what it left, which nothing else bounds: a
+    // margin chosen, not derived.
     pattern
         .deadline
+        .max(startup)
         .saturating_add(pattern.finalize_grace)
         .saturating_add(pattern.score.timeout)
-        .saturating_add(startup.saturating_mul(3))
+        .saturating_add(startup.saturating_mul(2))
 }
 
 /// A run's decision core.
