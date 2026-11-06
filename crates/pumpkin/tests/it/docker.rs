@@ -30,7 +30,7 @@ const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
 /// The static `sandboxd` that `PUMPKIN_SANDBOXD` names.
-fn sandboxd() -> PathBuf {
+pub(crate) fn sandboxd() -> PathBuf {
     let Some(sandboxd) = std::env::var_os("PUMPKIN_SANDBOXD") else {
         panic!(
             "`PUMPKIN_SANDBOXD` is unset: run the Docker tests with `cargo xtask ci --docker`, \
@@ -66,7 +66,7 @@ fn docker() -> Command {
 /// behind untagged; a build from the cache gives the same ID as the last, so test processes
 /// that run at once share the image.
 // Built alike in `providers/docker/tests/it.rs`: change both.
-fn image() -> Image {
+pub(crate) fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
