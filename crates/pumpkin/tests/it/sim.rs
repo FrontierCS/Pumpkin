@@ -26,7 +26,7 @@ use pumpkin_schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag,
     SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::op::{OpCall, OpReply};
+use pumpkin_schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use pumpkin_schema::sandbox::{
     Entry, ExitStatus, FromSandbox, RESULT_MAX_BYTES, RelativePath, ToSandbox, frame, out_dir,
     pumpkin_dir,
@@ -35,13 +35,25 @@ use serde_json::json;
 
 use crate::provider::{Locals, Subject};
 
-/// The path of a `sandboxd` that never dials: a create that names it, as published, makes a
-/// sandbox whose `sandboxd` prints so, and ends.
+/// The path of a `sandboxd`, or an image's repository, that never dials: a create that names
+/// it, as published, makes a sandbox whose `sandboxd` prints so, and ends.
 pub(crate) const MUTE: &str = "/sim/mute";
 
 /// The path of a `sandboxd` whose create fails, leaving behind a sandbox, as [`MUTE`]'s, that
 /// the run's list still finds.
 pub(crate) const LOST: &str = "/sim/lost";
+
+/// An image's repository whose create returns [`SLOW_CREATE`] after it starts the sandbox,
+/// whose `sandboxd` has dialed by then.
+pub(crate) const SLOW: &str = "/sim/slow";
+
+/// How long a create of [`SLOW`] takes: far longer than a run takes to act on what its agent
+/// does as the create begins, or a `sandboxd` takes to dial, and far shorter than the startup of
+/// the providers whose tests use it.
+const SLOW_CREATE: Duration = Duration::from_secs(2);
+
+/// How long a command that awaits a job's state waits between the `status` ops it makes.
+const AWAIT_POLL: Duration = Duration::from_millis(10);
 
 /// What every tree the simulated `sandboxd` collects holds: a file of this name, which holds the
 /// same.
@@ -50,11 +62,12 @@ const COLLECTED: &str = "collected";
 /// The path of a `sandboxd` that the simulated provider refuses to publish.
 pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 
-/// The path of a `sandboxd` that dials, but whose sandbox the simulated provider refuses to
-/// delete.
+/// The path of a `sandboxd`, or an image's repository, that dials, but whose sandbox the
+/// simulated provider refuses to delete.
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
-/// The path of a `sandboxd` whose sandbox's delete waits [`LINGER`] before it deletes it.
+/// The path of a `sandboxd`, or an image's repository, whose sandbox's delete waits [`LINGER`]
+/// before it deletes it.
 pub(crate) const LINGERING: &str = "/sim/lingering";
 
 /// How long a delete of a [`LINGERING`] sandbox takes: seconds longer than the hard end of the
@@ -71,7 +84,8 @@ const LINGER: Duration = Duration::from_secs(10);
 /// exits with 0, unless it has, or its `sandboxd` ends the session as a step asks; `judge`
 /// judges the payload put at the path its argument gives ([`judge`]); any other runs until the
 /// sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose
-/// create names [`UNDELETABLE`]; it takes [`LINGER`] to delete one that names [`LINGERING`].
+/// create names [`UNDELETABLE`]; it takes [`SLOW_CREATE`] to create one that names [`SLOW`],
+/// and [`LINGER`] to delete one that names [`LINGERING`].
 pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
@@ -167,10 +181,14 @@ impl Provider for Sim {
 
     fn create(&self, create: &Create) -> Result<Created, String> {
         let Dial::Socket { dir } = &create.dial;
-        let (socket, lost) = (dir.join(SOCKET_NAME), create.sandboxd.as_str() == LOST);
-        let mute = lost || create.sandboxd.as_str() == MUTE;
-        let undeletable = create.sandboxd.as_str() == UNDELETABLE;
-        let lingering = create.sandboxd.as_str() == LINGERING;
+        let image = create.image.as_str();
+        let repository = image
+            .split_once('@')
+            .map_or(image, |(repository, _)| repository);
+        let names = |fault: &str| create.sandboxd.as_str() == fault || repository == fault;
+        let (socket, lost) = (dir.join(SOCKET_NAME), names(LOST));
+        let (mute, undeletable, lingering) =
+            (lost || names(MUTE), names(UNDELETABLE), names(LINGERING));
         let parent = fs::metadata(dir.parent().unwrap()).unwrap();
         let mode = parent.permissions().mode() & 0o777;
         let shared = Arc::new(Mutex::default());
@@ -179,6 +197,9 @@ impl Provider for Sim {
             .name("sim-sandboxd".to_owned())
             .spawn(move || sandboxd(&socket, mute, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
+        if names(SLOW) {
+            thread::sleep(SLOW_CREATE);
+        }
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
         state.next += 1;
@@ -251,10 +272,15 @@ impl Provider for Sim {
     }
 }
 
+/// An image of `repository`, pinned by a digest of zeros.
+pub(crate) fn image(repository: &str) -> Image {
+    Image::try_from(format!("{repository}@sha256:{}", "0".repeat(64))).unwrap()
+}
+
 impl Subject for Sim {
     fn locals(&self, _: &Path) -> Locals {
         Locals {
-            image: Image::try_from(format!("sim@sha256:{}", "0".repeat(64))).unwrap(),
+            image: image("sim"),
             sandboxd: PathBuf::from("/sim/sandboxd"),
             mute: PathBuf::from(MUTE),
         }
@@ -331,6 +357,8 @@ enum Step {
         payload: Vec<u8>,
         less: Option<u64>,
     },
+    /// `status` of `job`, made until its reply gives `state`.
+    Await { job: u64, state: String },
     /// A wait, in seconds, before the next step.
     Sleep(u64),
     /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
@@ -352,6 +380,8 @@ struct Caller {
     less: Option<u64>,
     /// The seconds the last `ops` reply left, once one has come.
     left: Option<u64>,
+    /// The job whose `status` the op in flight asks, and the state it awaits, if it awaits one.
+    awaiting: Option<(u64, String)>,
     /// Whether the command has exited.
     exited: bool,
 }
@@ -359,7 +389,8 @@ struct Caller {
 impl Caller {
     /// Takes the reply to the op in flight, `reply`: if it is an `ops` that breaks the op's
     /// bound, or that follows no `ops` reply, the command exits with 1 at once, taking no more
-    /// steps; else it goes on ([`Caller::next`]).
+    /// steps; if it gives another state than the one awaited, it asks again after
+    /// [`AWAIT_POLL`]; else it goes on ([`Caller::next`]).
     fn answered(&mut self, reply: &OpReply, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
         if let OpReply::Ops(ops) = reply {
             let left = ops.remaining_seconds;
@@ -372,6 +403,14 @@ impl Caller {
                 self.exit(1, replies);
             }
             self.left = Some(left);
+        }
+        if let Some((job, state)) = self.awaiting.take()
+            && state_name(reply) != state
+        {
+            thread::sleep(AWAIT_POLL);
+            self.make(OpCall::Status { job }, Vec::new(), None, replies);
+            self.awaiting = Some((job, state));
+            return false;
         }
         self.next(replies)
     }
@@ -387,6 +426,10 @@ impl Caller {
                     payload,
                     less,
                 }) => (call, payload, less),
+                Some(Step::Await { job, state }) => {
+                    self.awaiting = Some((job, state));
+                    (OpCall::Status { job }, Vec::new(), None)
+                }
                 Some(Step::Sleep(seconds)) => {
                     thread::sleep(Duration::from_secs(seconds));
                     continue;
@@ -401,13 +444,25 @@ impl Caller {
                     return false;
                 }
             };
-            (self.op, self.less) = (self.op + 1, less);
-            let (op, size) = (self.op, u64::try_from(payload.len()).unwrap());
-            replies.push((FromSandbox::Op { op, call, size }, Vec::new()));
-            if size > 0 {
-                replies.push((FromSandbox::OpData { op }, payload));
-            }
+            self.make(call, payload, less, replies);
             return matches!(self.steps.front(), Some(Step::Crash));
+        }
+    }
+
+    /// Makes an op of `call`, with `payload`, whose reply is bounded by `less`, as [`Step::Op`]
+    /// gives it, in `replies`.
+    fn make(
+        &mut self,
+        call: OpCall,
+        payload: Vec<u8>,
+        less: Option<u64>,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    ) {
+        (self.op, self.less) = (self.op + 1, less);
+        let (op, size) = (self.op, u64::try_from(payload.len()).unwrap());
+        replies.push((FromSandbox::Op { op, call, size }, Vec::new()));
+        if size > 0 {
+            replies.push((FromSandbox::OpData { op }, payload));
         }
     }
 
@@ -422,10 +477,24 @@ impl Caller {
     }
 }
 
+/// The state a status reply gives, as `sandboxctl` prints it, or `""` for any other reply.
+fn state_name(reply: &OpReply) -> &'static str {
+    let OpReply::Status(StatusReply { state, .. }) = reply else {
+        return "";
+    };
+    match state {
+        JobState::Queued => "queued",
+        JobState::Running => "running",
+        JobState::Passed { .. } => "passed",
+        JobState::Failed(_) => "failed",
+    }
+}
+
 /// The step that `arg` gives: an op, `ops`, which `ops at least <seconds> less` bounds, `status
 /// <job>`, `judge <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant>
 /// <payload>`, a final submission, where a payload that is a number is that many bytes of `x`,
-/// and any other is its own bytes; or `sleep <seconds>`, `exit` or `crash`.
+/// and any other is its own bytes; `await <job> <state>`, which makes `status <job>` until its
+/// reply's state is `state`; or `sleep <seconds>`, `exit` or `crash`.
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
@@ -447,6 +516,10 @@ fn step(arg: &str) -> Step {
             let finalize = kind == "finalize";
             let grant = grant();
             (OpCall::Submit { grant, finalize }, payload(), None)
+        }
+        ["await", job, state] => {
+            let (job, state) = (job.parse().unwrap(), state.to_owned());
+            return Step::Await { job, state };
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["exit"] => return Step::Exit,
@@ -586,6 +659,7 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
                             op: 0,
                             less: None,
                             left: None,
+                            awaiting: None,
                             exited: false,
                         });
                         crashed = made.next(&mut replies);

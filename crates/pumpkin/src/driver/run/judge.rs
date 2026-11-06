@@ -5,13 +5,14 @@
 //! ([`slot_payload`](pumpkin_schema::sandbox::slot_payload)), and [`outputs`] collects and
 //! parses the judge's result under its [`ResultSpec`](pumpkin_schema::ir::ResultSpec).
 //!
-//! A call's thread waits on an inbox of its own, into which its session hands what its reader
-//! reads.
+//! A call's thread waits on an inbox of its own ([`Message`]), into which its session hands
+//! what its reader reads, and the loop the core's stop. A stop takes effect before the command
+//! starts, as the thread takes what its inbox holds then, and while the command runs.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
-use std::{fs, io};
+use std::{fs, io, iter};
 
 use pumpkin_gateway::{Arrival, Put, Session};
 use pumpkin_schema::ir::Name;
@@ -40,11 +41,8 @@ pub(super) struct Call<'r> {
     pub(super) dir: PathBuf,
     pub(super) sandboxes: &'r Sandboxes<'r>,
     pub(super) clock: Clock,
-    /// What its session's reader hands over ([`Listener::accept`]): at most its command's exit,
-    /// as it runs one command, and its end, since a passive session hands out no op.
-    ///
-    /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
-    pub(super) inbox: Inbox<Arrival>,
+    /// What reaches the call's thread.
+    pub(super) inbox: Inbox<Message>,
     /// A sender into the loop's inbox, which takes the call's reports.
     pub(super) reports: Sender<Input>,
 }
@@ -60,6 +58,17 @@ pub(super) struct Deadlines {
     pub(super) collect: Deadline,
 }
 
+/// What reaches a judge call's thread through its inbox.
+pub(super) enum Message {
+    /// What its session's reader handed over ([`Listener::accept`]): at most its command's
+    /// exit, as it runs one command, and its end, since a passive session hands out no op.
+    ///
+    /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
+    Session(Arrival),
+    /// The core's stop.
+    Stop,
+}
+
 /// What a judge call's thread reports to the loop.
 pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a call's time from its
@@ -71,13 +80,21 @@ pub(super) enum Report {
     Undeleted(String),
 }
 
+/// How a judge's command ended.
+enum Ended {
+    /// It exited, or ran until its timeout.
+    Ran,
+    /// The core stopped the call.
+    Stopped,
+}
+
 /// Runs a judge call to its end, reporting as it goes.
 pub(super) fn run(call: &Call<'_>) {
     let job = call.job;
     let name = format!("job-{}", job.0);
     let (sandbox, by) = (&call.judge.sandbox, call.deadlines.startup);
     let inbox = call.inbox.sender();
-    let started = (call.sandboxes).start(&name, sandbox, None, by, inbox, |arrival| arrival);
+    let started = (call.sandboxes).start(&name, sandbox, None, by, inbox, Message::Session);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(error) => {
@@ -96,13 +113,17 @@ pub(super) fn run(call: &Call<'_>) {
 fn judge(call: &Call<'_>, session: &mut Session) -> Event {
     let job = call.job;
     let failed = |reason: String| Event::JudgeFailed { job, reason };
+    if call.stopped() {
+        return failed("the call was stopped before its command started".to_owned());
+    }
     let timeout = match start(call, session) {
         Ok(timeout) => timeout,
         Err(reason) => return failed(reason),
     };
-    if let Err(reason) = wait(call, timeout) {
-        return failed(format!("the judge's session ended: {reason}"));
-    }
+    let ended = match wait(call, timeout) {
+        Ok(ended) => ended,
+        Err(reason) => return failed(format!("the judge's session ended: {reason}")),
+    };
     let by = call.deadlines.collect;
     if let Err(error) = session.freeze(by) {
         return failed(format!("freezing the judge's sandbox failed: {error}"));
@@ -111,7 +132,10 @@ fn judge(call: &Call<'_>, session: &mut Session) -> Event {
     if let Err(error) = collect(session, &log_dir(), &call.dir, PUMPKIN, by) {
         call.note(format!("job {}'s log is incomplete: {error}", job.0));
     }
-    Event::JudgeCollected { job, result }
+    match ended {
+        Ended::Ran => Event::JudgeCollected { job, result },
+        Ended::Stopped => failed("the call was stopped".to_owned()),
+    }
 }
 
 /// Puts the payload in the judge's slot, and the evidence directory, and starts its command,
@@ -136,21 +160,22 @@ fn start(call: &Call<'_>, session: &mut Session) -> Result<Deadline, String> {
     Ok(timeout)
 }
 
-/// Waits for the command to exit, until `timeout`, and reports its exit or its timeout. Fails
-/// with the reason the session ended, if it ended first.
-fn wait(call: &Call<'_>, timeout: Deadline) -> Result<(), String> {
+/// Waits for the command to exit, until `timeout`, or for a stop, and reports its exit or its
+/// timeout. Fails with the reason the session ended, if it ended first.
+fn wait(call: &Call<'_>, timeout: Deadline) -> Result<Ended, String> {
     let job = call.job;
     match call.inbox.wait(timeout) {
         None => {
             call.event(Event::JudgeTimedOut { job });
-            Ok(())
+            Ok(Ended::Ran)
         }
+        Some(Message::Stop) => Ok(Ended::Stopped),
         // The sandbox runs one command, so the exit is its.
-        Some(Arrival::Exited { process: _, status }) => {
+        Some(Message::Session(Arrival::Exited { process: _, status })) => {
             call.event(Event::JudgeExited { job, status });
-            Ok(())
+            Ok(Ended::Ran)
         }
-        Some(Arrival::Ended { reason }) => Err(reason),
+        Some(Message::Session(Arrival::Ended { reason })) => Err(reason),
         #[expect(
             clippy::unreachable,
             reason = "the judge's session was accepted without an op payload limit, and such a \
@@ -158,7 +183,7 @@ fn wait(call: &Call<'_>, timeout: Deadline) -> Result<(), String> {
                       type for a passive session's arrivals would split the gateway's `pub` \
                       `Arrival` by the kind of session"
         )]
-        Some(Arrival::Op(_) | Arrival::Refused(_)) => {
+        Some(Message::Session(Arrival::Op(_) | Arrival::Refused(_))) => {
             unreachable!("job {}'s passive session handed out an op", job.0)
         }
     }
@@ -202,6 +227,13 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 impl Call<'_> {
+    /// Whether the core has stopped the call, by what its inbox holds, which this takes. Before
+    /// the command starts, the only other message can be its session's end, after which what the
+    /// call asks of the session fails for that reason.
+    fn stopped(&self) -> bool {
+        iter::from_fn(|| self.inbox.take()).any(|message| matches!(message, Message::Stop))
+    }
+
     /// Reports an event, observed now.
     fn event(&self, event: Event) {
         self.report(Report::Event(self.clock.now(), event));

@@ -2,14 +2,14 @@
 //! the run's record.
 //!
 //! [`Run::prepare`] parses a workflow and begins its record, and [`Run::execute`] runs it to
-//! its outcome, one thread driving the core as [`Core`] says, while the final judge's call runs
-//! on a thread of its own, the `judge` module's. Between the core's ticks, the driving thread
-//! waits on one inbox, into which the agent's session hands what it reads, and the judge call's
+//! its outcome, one thread driving the core as [`Core`] says, while each judge call runs on a
+//! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
+//! on one inbox, into which the agent's session hands what it reads, and each judge call's
 //! thread its reports. Its sandboxes start on one path, the `sandbox` module's, and the agent's
 //! is the `agent` module's. The record's files and the run log's records, and when each is
 //! written, are laid out in the `record` and `log` modules.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, Scope};
@@ -34,7 +34,7 @@ mod record;
 mod sandbox;
 
 use agent::Agent;
-use judge::{Deadlines, Report};
+use judge::{Deadlines, Message, Report};
 use log::Log;
 use record::Payloads;
 use sandbox::Sandboxes;
@@ -125,6 +125,7 @@ impl Run {
             agent: None,
             unanswered: None,
             next_op: 0,
+            stops: BTreeMap::new(),
             pending: VecDeque::new(),
             inbox: Inbox::new(),
         };
@@ -269,8 +270,7 @@ struct Runtime<'r> {
     startup: Duration,
     /// The run's record.
     dir: &'r Path,
-    /// The run's sandboxes, and its only way to its provider, which the judge call's thread
-    /// shares.
+    /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
     sandboxes: &'r Sandboxes<'r>,
     clock: Clock,
     log: Log,
@@ -281,6 +281,8 @@ struct Runtime<'r> {
     unanswered: Option<(OpId, Unanswered)>,
     /// The number the next op takes, counting from 0.
     next_op: u64,
+    /// A sender into each judge call's inbox, by job, through which the core's stop reaches it.
+    stops: BTreeMap<JobId, Sender<Message>>,
     /// Events that performing actions produced, to feed the core next.
     pending: VecDeque<(Duration, Event)>,
     /// What reaches the loop from other threads, which it waits on until the core's next tick.
@@ -294,8 +296,8 @@ enum Input {
     ///
     /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
     Agent(Arrival),
-    /// The judge call's report, from its thread: at most its command's start and end, a note,
-    /// and its last report.
+    /// A judge call's report, from its thread: at most its command's start and end, a note, and
+    /// its last report.
     Judge(Report),
 }
 
@@ -353,15 +355,19 @@ impl<T> Inbox<T> {
 
 impl<'r> Runtime<'r> {
     /// Drives the run from its start, `unix` after the Unix epoch, until the core finishes or
-    /// abandons it, and waits for its judge call's thread; then gives the core what is left in
-    /// the inbox ([`Runtime::drain`]).
+    /// abandons it, and waits for its judge calls' threads, stopping those still running; then
+    /// gives the core what is left in the inbox ([`Runtime::drain`]).
     fn drive(&mut self, unix: Duration) -> Result<Outcome, String> {
         let (mut core, actions) = Core::start(self.workflow, self.startup);
         self.log.start(self.workflow, unix, &actions)?;
-        // The judge call's thread borrows the run's workflow and sandboxes, and the scope ends
-        // once the thread has, so that no sandbox starts after the run's end, and the drain
-        // takes all the call reported.
-        let end = thread::scope(|scope| self.turns(scope, &mut core, actions))?;
+        // Judge calls' threads borrow the run's workflow and sandboxes, and the scope ends once
+        // each has, so that no sandbox starts after the run's end, and the drain takes all they
+        // reported.
+        let end = thread::scope(|scope| {
+            let end = self.turns(scope, &mut core, actions);
+            self.stop_jobs();
+            end
+        })?;
         // Only the core's end drains the inbox: after a failure of the runtime's own, such as a
         // record it couldn't write, the core may still be taking ops, and would decide on ones
         // that nothing acts on.
@@ -369,7 +375,7 @@ impl<'r> Runtime<'r> {
     }
 
     /// Performs `actions`, the core's, then feeds the core each event and performs what it
-    /// decides, until it ends the run: returns how, with its outcome or why it has none. The
+    /// decides, until it ends the run: returns how, with its outcome or why it has none. Each
     /// judge call runs on a thread of `scope`.
     fn turns<'s>(
         &mut self,
@@ -441,7 +447,7 @@ impl<'r> Runtime<'r> {
         }
     }
 
-    /// The event that `input` brings the core, if the core waits on it: the judge call's report
+    /// The event that `input` brings the core, if the core waits on it: a judge call's report
     /// at its own time ([`Runtime::report`]), and else at the time the loop took it. An op whose
     /// payload the gateway refused is refused by `due`, the core's next tick, and goes to the run
     /// log, since the core neither decides on it nor learns of it.
@@ -519,7 +525,7 @@ impl<'r> Runtime<'r> {
         self.answer(what, by, |agent, by| agent.refuse(refused, by))
     }
 
-    /// Takes what is left in the inbox once the core has finished or abandoned the run, and the
+    /// Takes what is left in the inbox once the core has finished or abandoned the run, and every
     /// judge call's thread has ended, as the loop does ([`Runtime::arrived`]): the core refuses
     /// each op, as it does every op after its end, and the run log notes that the refusal wasn't
     /// sent.
@@ -561,7 +567,7 @@ impl<'r> Runtime<'r> {
         Ok(())
     }
 
-    /// Performs the core's actions, in order, starting the judge call on a thread of `scope`, and
+    /// Performs the core's actions, in order, starting judge calls on threads of `scope`, and
     /// returns how the run ended, if one of them ended it: with its outcome, or why it has none.
     fn perform<'s>(
         &mut self,
@@ -587,27 +593,25 @@ impl<'r> Runtime<'r> {
                 }
                 Action::StartJudge {
                     job,
-                    call: JudgeCall::Score,
+                    call,
                     payload,
                     timeout,
-                } => self.start_judge(scope, job, &payload, timeout)?,
-                Action::StartJudge {
-                    job,
-                    call: JudgeCall::Grant(_),
-                    payload: _,
-                    timeout: _,
-                } => {
-                    // This runtime runs none of the agent's judge calls: each fails as it starts.
-                    let reason = "this runtime runs no judge call of the agent's yet".to_owned();
-                    let event = Event::JudgeFailed { job, reason };
-                    self.pending.push_back((self.clock.now(), event));
+                } => self.start_judge(scope, core, job, call, &payload, timeout)?,
+                Action::StopJudge { job } => {
+                    #[expect(
+                        clippy::unreachable,
+                        reason = "the core stops only a job it has started, and the `StartJudge` \
+                                  that started it, performed before, kept a sender into its \
+                                  call's inbox, even if the call then failed as it started; a \
+                                  type tying the stop to the start would carry the runtime's \
+                                  sender through the core, which holds no runtime state"
+                    )]
+                    let Some(stop) = self.stops.get(&job) else {
+                        unreachable!("job {} was stopped, but never started", job.0)
+                    };
+                    // A call whose thread has ended has nothing left to stop.
+                    let _ = stop.send(Message::Stop);
                 }
-                // The core stops only the agent's jobs, and this runtime fails each as it starts
-                // it, a failure the core takes as its next event, so the core stops a job only as
-                // it takes the job's failure, at or past the end of the work phase, which it
-                // checks before it applies an event. Nothing runs to stop, and the failure is the
-                // job's last report.
-                Action::StopJudge { job: _ } => {}
                 Action::TearDownAgent => self.tear_down_agent()?,
                 Action::Finish { outcome } => end = Some(Ok(outcome)),
                 // Only a reply can follow it in its batch: the refusal of an op taken at the hard
@@ -685,18 +689,24 @@ impl<'r> Runtime<'r> {
         }
     }
 
-    /// Starts job `job`, the final judge's call on `payload`, whose command runs for at most
+    /// Starts job `job`, a judge call of `call` on `payload` whose command runs for at most
     /// `timeout`, on a thread of `scope`'s, which reports to the loop. The job fails, with
     /// nothing started, if its start is due by a time that has passed, or if the thread doesn't
     /// start.
     fn start_judge<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
+        core: &Core<'_>,
         job: JobId,
+        call: JudgeCall,
         payload: &PayloadRef,
         timeout: Duration,
     ) -> Result<(), String> {
-        let deadlines = self.judge_deadlines(timeout);
+        let deadlines = self.judge_deadlines(core, call, timeout);
+        // The core may stop a job before it takes the job's failure to start, so the job's
+        // sender is kept first.
+        let inbox = Inbox::new();
+        self.stops.insert(job, inbox.sender());
         // The loop can be held past a call's start, by the agent's teardown's delete or a sync of
         // the run log, and a sandbox created for a start already due would only be deleted, at
         // or past the hard end at worst.
@@ -708,7 +718,7 @@ impl<'r> Runtime<'r> {
             self.pending.push_back((self.clock.now(), event));
             return Ok(());
         }
-        let slot = self.workflow.call_slot(JudgeCall::Score);
+        let slot = self.workflow.call_slot(call);
         let jobs = self.dir.join("jobs");
         fs::create_dir_all(&jobs).context(jobs.display())?;
         let dir = jobs.join(job.0.to_string());
@@ -723,7 +733,7 @@ impl<'r> Runtime<'r> {
             dir,
             sandboxes: self.sandboxes,
             clock: self.clock,
-            inbox: Inbox::new(),
+            inbox,
             reports: self.inbox.sender(),
         };
         let spawned = thread::Builder::new()
@@ -737,18 +747,41 @@ impl<'r> Runtime<'r> {
         Ok(())
     }
 
-    /// By when the steps of the final judge's call, whose command runs for at most `timeout`,
+    /// By when the steps of a judge call of `call`, whose command runs for at most `timeout`,
     /// starting now, are to be done.
-    fn judge_deadlines(&self, timeout: Duration) -> Deadlines {
+    fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
         let startup = self.clock.now().saturating_add(self.startup);
         let at = |time| self.clock.deadline(time);
-        // The final judge's command starts in time to run its whole timeout before the hard end,
-        // by which what it left is collected.
-        let start = self.hard_end().saturating_sub(timeout);
-        Deadlines {
-            startup: at(startup.min(start)),
-            start: at(start),
-            collect: at(self.hard_end()),
+        match call {
+            // A call of the agent's ends with the work phase, which ends by the core's next act
+            // of its own, and what it left is collected by the agent's teardown's end, which
+            // leaves the final judge its share of the hard end.
+            JudgeCall::Grant(_) => {
+                let start = at(startup.min(self.answers_due(core)));
+                Deadlines {
+                    startup: start,
+                    start,
+                    collect: at(self.teardown_end()),
+                }
+            }
+            // The final judge's command starts in time to run its whole timeout before the hard
+            // end, by which what it left is collected.
+            JudgeCall::Score => {
+                let start = self.hard_end().saturating_sub(timeout);
+                Deadlines {
+                    startup: at(startup.min(start)),
+                    start: at(start),
+                    collect: at(self.hard_end()),
+                }
+            }
+        }
+    }
+
+    /// Stops every judge call's thread that still runs, as the run's end does.
+    fn stop_jobs(&self) {
+        for stop in self.stops.values() {
+            // A call whose thread has ended has nothing left to stop.
+            let _ = stop.send(Message::Stop);
         }
     }
 
