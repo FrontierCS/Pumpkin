@@ -1,5 +1,6 @@
 //! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
-//! record of its run, whose `outcome.json` it prints. The test on Docker is ignored, as the
+//! record of its run, whose `outcome.json` it prints, with the model route of a workflow that
+//! has one reaching a stand-in model provider ([`StandIn`]). The test on Docker is ignored, as the
 //! Docker provider's are, and fails without `PUMPKIN_SANDBOXD`, which `cargo xtask ci --docker`
 //! sets; it reaches Docker through the context that `PUMPKIN_DOCKER_CONTEXT` names, `default`
 //! if it is unset.
@@ -15,13 +16,16 @@
 )]
 
 use std::fmt::Display;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread::JoinHandle;
 use std::{env, fs, iter, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin_docker::{ContextName, Engine};
-use pumpkin_schema::sandbox::SANDBOXCTL_PATH;
+use pumpkin_schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
 use stdx::process::Environment;
 
@@ -50,9 +54,11 @@ impl Scratch {
         Self(dir)
     }
 
-    /// Writes `contents` into the directory's file `name`.
+    /// Writes `contents` into the directory's file `name`, making its directory if need be.
     fn write(&self, name: &str, contents: &(impl Display + ?Sized)) {
-        fs::write(self.0.join(name), contents.to_string()).unwrap();
+        let path = self.0.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents.to_string()).unwrap();
     }
 
     /// `pumpkin` with `args`, to run in the directory.
@@ -141,15 +147,34 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
     named?.split_once(" records into ")
 }
 
-/// The files of `record`, a run's, its `outcome.json`, and whether `stdout` is that.
+/// The files of `record`, a run's, its run log's note on the upstream that served its model
+/// route and its record of how each model request was answered, what the agent's `out` held of
+/// a model's answer, if anything, its `outcome.json`, and whether `stdout` is that.
 fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
-    vec![
-        format!("record: {}", files(record, record).join(", ")),
-        format!("outcome.json: {compact}"),
-        format!("printed outcome.json: {}", stdout == outcome),
-    ]
+    let mut lines = vec![format!("record: {}", files(record, record).join(", "))];
+    let log = fs::read_to_string(record.join("log.jsonl")).unwrap();
+    for line in log.lines() {
+        let logged: Value = serde_json::from_str(line).unwrap();
+        let note = logged["note"].as_str();
+        if let Some(note) = note.filter(|note| note.starts_with("the agent's model route goes to "))
+        {
+            lines.push(format!("the run log notes: {note}"));
+        }
+        if logged["event"]["kind"] == "model_answered" {
+            lines.push(format!("the run log records: {}", logged["event"]));
+        }
+    }
+    if let Ok(answer) = fs::read_to_string(record.join("agent/out/answer")) {
+        lines.push(format!(
+            "the agent's answer: {}",
+            answer.replace('\n', "\\n")
+        ));
+    }
+    lines.push(format!("outcome.json: {compact}"));
+    lines.push(format!("printed outcome.json: {}", stdout == outcome));
+    lines
 }
 
 /// The files and empty directories below `dir`, by their paths from `base`, sorted.
@@ -259,9 +284,10 @@ fn unrunnable() {
 /// What `run` finds wrong in the deployment's configuration, which it reads for a workflow with
 /// a model route, exits with 1: a configuration that can't be read, where `HOME` places it or
 /// where `--config` names it, `HOME` unset where it would place it, and the configurations
-/// [`write_configurations`] writes to be refused. Past a configuration it accepts, and past a
-/// broken one that a workflow without a route doesn't read, it reaches for the engine, which it
-/// can't without `docker` on `PATH`.
+/// [`write_configurations`] writes to be refused. Past a configuration it accepts, whose key it
+/// reads from the file that the configuration names below its own directory, and past a broken
+/// one that a workflow without a route doesn't read, it reaches for the engine, which it can't
+/// without `docker` on `PATH`.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -284,15 +310,22 @@ fn configurations() {
     home.env("HOME", scratch.0.join("home"));
     let mut homeless = run("lwe.json", &[]);
     homeless.env_remove("HOME");
-    let mut served = config("served");
+    let mut served = config("conf/served");
     let mut unrouted = run("unrouted.json", &["--config", "docker.toml"]);
     for command in [&mut served, &mut unrouted] {
         command.env("PATH", scratch.0.join("nowhere"));
     }
-    let refused = ["missing", "docker", "broken", "inline", "priced", "keyless"];
-    let refused = refused
-        .into_iter()
-        .chain(["invalid", "twice", "again", "query", "fragment"]);
+    let refused = [
+        "missing", "docker", "broken", "inline", "priced", "keyless", "invalid",
+    ];
+    let refused = (refused.into_iter()).chain([
+        "twice",
+        "again",
+        "query",
+        "fragment",
+        "unserved",
+        "conf/unkeyed",
+    ]);
     let commands = [home, homeless]
         .into_iter()
         .chain(refused.map(config))
@@ -303,96 +336,104 @@ fn configurations() {
         false,
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/home pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs
-        exit status: Some(1)
-        pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write the upstreams of the workflow's model route there, or name another file with `--config`
-        $ env -u HOME pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs
-        exit status: Some(1)
-        pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config missing.toml
-        exit status: Some(1)
-        pumpkin: the configuration missing.toml can't be read (No such file or directory (os error 2)): write the upstreams of the workflow's model route there, or name another file with `--config`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config docker.toml
-        exit status: Some(1)
-        pumpkin: docker.toml: TOML parse error at line 6, column 2
-          |
-        6 | [docker]
-          |  ^^^^^^
-        unknown field `docker`, expected `upstreams`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config broken.toml
-        exit status: Some(1)
-        pumpkin: broken.toml: TOML parse error at line 1, column 19
-          |
-        1 | [upstreams.gateway
-          |                   ^
-        unclosed table, expected `]`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config inline.toml
-        exit status: Some(1)
-        pumpkin: inline.toml: TOML parse error at line 3, column 1
-          |
-        3 | key = "sk-1"
-          | ^^^
-        unknown field `key`, expected one of `url`, `key_file`, `models`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config priced.toml
-        exit status: Some(1)
-        pumpkin: priced.toml: TOML parse error at line 4, column 73
-          |
-        4 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", price = 1 }]
-          |                                                                         ^^^^^
-        unknown field `price`, expected `name` or `upstream_name`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config keyless.toml
-        exit status: Some(1)
-        pumpkin: keyless.toml: TOML parse error at line 1, column 1
-          |
-        1 | [upstreams.gateway]
-          | ^^^^^^^^^^^^^^^^^^^
-        missing field `key_file`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config invalid.toml
-        exit status: Some(1)
-        pumpkin: invalid.toml: TOML parse error at line 1, column 12
-          |
-        1 | [upstreams.Gateway]
-          |            ^^^^^^^
-        `Gateway` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config twice.toml
-        exit status: Some(1)
-        pumpkin: twice.toml: TOML parse error at line 6, column 12
-          |
-        6 | [upstreams.gateway]
-          |            ^^^^^^^
-        duplicate key
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config again.toml
-        exit status: Some(1)
-        pumpkin: again.toml: `gpt-6-astra` is listed more than once: list each model once, under the upstream that serves it
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config query.toml
-        exit status: Some(1)
-        pumpkin: query.toml: TOML parse error at line 2, column 7
-          |
-        2 | url = "https://models.example.com/v1?project=1"
-          |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        the upstream's URL has a query or a fragment: name the API's base URL alone, below which the route reaches `/responses`
-        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config fragment.toml
-        exit status: Some(1)
-        pumpkin: fragment.toml: TOML parse error at line 2, column 7
-          |
-        2 | url = "https://models.example.com/v1#v2"
-          |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        the upstream's URL has a query or a fragment: name the API's base URL alone, below which the route reaches `/responses`
-        $ PATH=<scratch>/nowhere pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config served.toml
-        exit status: Some(1)
-        pumpkin: the Docker context `nowhere` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists
-        $ PATH=<scratch>/nowhere pumpkin run unrouted.json --docker-context nowhere --sandboxd sandboxd --runs runs --config docker.toml
-        exit status: Some(1)
-        pumpkin: the Docker context `nowhere` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists"#]],
+            $ HOME=<scratch>/home pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs
+            exit status: Some(1)
+            pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write the upstreams of the workflow's model route there, or name another file with `--config`
+            $ env -u HOME pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs
+            exit status: Some(1)
+            pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config missing.toml
+            exit status: Some(1)
+            pumpkin: the configuration missing.toml can't be read (No such file or directory (os error 2)): write the upstreams of the workflow's model route there, or name another file with `--config`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config docker.toml
+            exit status: Some(1)
+            pumpkin: docker.toml: TOML parse error at line 6, column 2
+              |
+            6 | [docker]
+              |  ^^^^^^
+            unknown field `docker`, expected `upstreams`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config broken.toml
+            exit status: Some(1)
+            pumpkin: broken.toml: TOML parse error at line 1, column 19
+              |
+            1 | [upstreams.gateway
+              |                   ^
+            unclosed table, expected `]`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config inline.toml
+            exit status: Some(1)
+            pumpkin: inline.toml: TOML parse error at line 3, column 1
+              |
+            3 | key = "sk-1"
+              | ^^^
+            unknown field `key`, expected one of `url`, `key_file`, `models`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config priced.toml
+            exit status: Some(1)
+            pumpkin: priced.toml: TOML parse error at line 4, column 73
+              |
+            4 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", price = 1 }]
+              |                                                                         ^^^^^
+            unknown field `price`, expected `name` or `upstream_name`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config keyless.toml
+            exit status: Some(1)
+            pumpkin: keyless.toml: TOML parse error at line 1, column 1
+              |
+            1 | [upstreams.gateway]
+              | ^^^^^^^^^^^^^^^^^^^
+            missing field `key_file`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config invalid.toml
+            exit status: Some(1)
+            pumpkin: invalid.toml: TOML parse error at line 1, column 12
+              |
+            1 | [upstreams.Gateway]
+              |            ^^^^^^^
+            `Gateway` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config twice.toml
+            exit status: Some(1)
+            pumpkin: twice.toml: TOML parse error at line 6, column 12
+              |
+            6 | [upstreams.gateway]
+              |            ^^^^^^^
+            duplicate key
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config again.toml
+            exit status: Some(1)
+            pumpkin: again.toml: `gpt-6-astra` is listed more than once: list each model once, under the upstream that serves it
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config query.toml
+            exit status: Some(1)
+            pumpkin: query.toml: TOML parse error at line 2, column 7
+              |
+            2 | url = "https://models.example.com/v1?project=1"
+              |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            the upstream's URL has a query or a fragment: name the API's base URL alone, below which the route reaches `/responses`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config fragment.toml
+            exit status: Some(1)
+            pumpkin: fragment.toml: TOML parse error at line 2, column 7
+              |
+            2 | url = "https://models.example.com/v1#v2"
+              |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            the upstream's URL has a query or a fragment: name the API's base URL alone, below which the route reaches `/responses`
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config unserved.toml
+            exit status: Some(1)
+            pumpkin: unserved.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: list them all under one
+            $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config conf/unkeyed.toml
+            exit status: Some(1)
+            pumpkin: conf/unkeyed.toml: the key file conf/missing can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
+            $ PATH=<scratch>/nowhere pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config conf/served.toml
+            exit status: Some(1)
+            pumpkin: the Docker context `nowhere` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists
+            $ PATH=<scratch>/nowhere pumpkin run unrouted.json --docker-context nowhere --sandboxd sandboxd --runs runs --config docker.toml
+            exit status: Some(1)
+            pumpkin: the Docker context `nowhere` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists"#]],
     );
 }
 
 /// Writes into `scratch` the deployment's configurations that [`configurations`] gives `run`,
-/// each named for what it holds: `served`, of two upstreams; and, to be refused, `docker`,
-/// with a key that a configuration doesn't have; `broken`, which isn't TOML; `inline`, with an
-/// upstream's key in place of its file; `priced`, with a key that a model doesn't have; `keyless`, without an upstream's
-/// file; `invalid`, with an invalid name; `twice`, with two upstreams of one name; `again`,
-/// with one model listed twice; and `query` and `fragment`, with a URL that has one.
+/// each named for what it holds: `conf/served`, of two upstreams, beside the key file `conf/key`;
+/// and, to be refused, `docker`, with a key that a configuration doesn't have; `broken`, which
+/// isn't TOML; `inline`, with an upstream's key in place of its file; `priced`, with a key that a
+/// model doesn't have; `keyless`, without an upstream's file; `invalid`, with an invalid name;
+/// `twice`, with two upstreams of one name; `again`, with one model listed twice; `query` and
+/// `fragment`, with a URL that has one; `unserved`, without the workflow's model; and
+/// `conf/unkeyed`, whose key file is missing.
 fn write_configurations(scratch: &Scratch) {
     let table = |name: &str, model: &str| {
         format!(
@@ -405,8 +446,9 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
     };
     let gateway = table("gateway", "gpt-6-astra");
     let direct = table("direct", "flash");
+    scratch.write("conf/key", "sk-test\n");
     let configs = [
-        ("served", format!("{gateway}\n{direct}")),
+        ("conf/served", format!("{gateway}\n{direct}")),
         ("docker", format!("{gateway}\n[docker]\n")),
         (
             "broken",
@@ -426,6 +468,8 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
         ),
         ("query", gateway.replace("/v1", "/v1?project=1")),
         ("fragment", gateway.replace("/v1", "/v1#v2")),
+        ("unserved", direct),
+        ("conf/unkeyed", gateway.replace("\"key\"", "\"missing\"")),
     ];
     for (name, config) in configs {
         scratch.write(&format!("{name}.toml"), &config);
@@ -455,9 +499,9 @@ fn image(scratch: &Scratch, engine: &Engine) -> String {
     built.unwrap().image.as_str().to_owned()
 }
 
-/// The fixture's workflow, without the agent's model route, which `pumpkin run` refuses, with
-/// `argv` as the agent's command, the final judge as [`SCORE`] says, and every role running
-/// `image` with a small machine's share.
+/// The fixture's workflow, without the agent's model route, with `argv` as the agent's command,
+/// the final judge as [`SCORE`] says, and every role running `image` with a small machine's
+/// share.
 fn workflow(image: &str, argv: &[&str]) -> Value {
     let mut ir: Value = serde_json::from_str(LWE).unwrap();
     ir["roles"][0].as_object_mut().unwrap().remove("egress");
@@ -473,10 +517,89 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     ir
 }
 
-/// Runs on Docker: a workflow it refuses, with a model route that its configuration serves,
-/// before any sandbox starts; one whose agent exits
-/// without a submission, recorded below `HOME` whatever `XDG_DATA_HOME` says; and one whose
-/// agent submits a payload, which the final judge scores.
+/// Writes into `scratch` the workflow `asks.json`, [`workflow`]'s with the fixture's model route,
+/// whose agent asks its model and keeps the answer in its `out`; and the configuration
+/// `conf/pumpkin.toml`, whose one upstream, the stand-in at `address`, serves the route's model
+/// as `vendor/gpt-6-astra`, with its key in `conf/key`.
+fn write_asks(scratch: &Scratch, image: &str, address: &str) {
+    let config = format!(
+        r#"[upstreams.provider]
+url = "http://{address}/v1/"
+key_file = "key"
+models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra" }}]
+"#
+    );
+    scratch.write("conf/pumpkin.toml", &config);
+    fs::write(scratch.0.join("conf/key"), "sk-test\n").unwrap();
+    let body = r#"{"model": "gpt-6-astra", "store": false, "input": "hi"}"#;
+    let ask = format!(
+        "wget -q -O /pumpkin/out/answer --header 'content-type: application/json' \
+         --post-data '{body}' http://127.0.0.1:{MODEL_PORT}/responses"
+    );
+    let mut asks = workflow(image, &["sh", "-c", &ask]);
+    let lwe: Value = serde_json::from_str(LWE).unwrap();
+    asks["roles"][0]["egress"] = lwe["roles"][0]["egress"].clone();
+    scratch.write("asks.json", &asks);
+}
+
+/// A stand-in for a model provider, on the loopback, which answers each `POST` with a whole
+/// stream that echoes the request's line, its `authorization` and its body.
+struct StandIn {
+    address: String,
+    thread: JoinHandle<()>,
+}
+
+impl StandIn {
+    fn start() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let thread = thread::spawn(move || {
+            for connection in listener.incoming() {
+                let mut connection = connection.unwrap();
+                let mut reader = BufReader::new(&connection);
+                let mut head = Vec::new();
+                while head.last().is_none_or(|line: &String| !line.is_empty()) {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    head.push(line.trim_end().to_owned());
+                }
+                // The connection that `stop` makes holds no request.
+                if head[0].is_empty() {
+                    return;
+                }
+                let header = |name| head.iter().find_map(|line| line.strip_prefix(name));
+                let length = header("content-length: ").unwrap();
+                let mut body = vec![0; length.parse().unwrap()];
+                reader.read_exact(&mut body).unwrap();
+                let body = String::from_utf8(body).unwrap();
+                let echo = format!(
+                    "data: {} {:?} {body}\n\n",
+                    head[0],
+                    header("authorization: ")
+                );
+                let stream = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     transfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{echo}\r\n0\r\n\r\n",
+                    echo.len()
+                );
+                connection.write_all(stream.as_bytes()).unwrap();
+            }
+        });
+        Self { address, thread }
+    }
+
+    fn stop(self) {
+        drop(TcpStream::connect(&self.address).unwrap());
+        self.thread.join().unwrap();
+    }
+}
+
+/// Runs on Docker: a workflow whose agent asks its model, through its route, as the
+/// configuration's upstream serves it, a stand-in, which takes the key that the configuration
+/// names, gets the request renamed for it, with that key, and which the run
+/// log names, with how the request was answered; one whose agent exits without a submission,
+/// recorded below `HOME` whatever `XDG_DATA_HOME` says; and one whose agent submits a payload,
+/// which the final judge scores.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn runs_on_docker() {
@@ -485,13 +608,8 @@ fn runs_on_docker() {
     let context = env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
     let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
     let image = image(&scratch, &engine);
-    scratch.write("lwe.json", &serde_json::from_str::<Value>(LWE).unwrap());
-    let upstream = r#"[upstreams.provider]
-url = "https://models.example.com/v1"
-key_file = "key"
-models = [{ name = "gpt-6-astra", upstream_name = "gpt-6-astra" }]
-"#;
-    scratch.write("pumpkin.toml", upstream);
+    let stand_in = StandIn::start();
+    write_asks(&scratch, &image, &stand_in.address);
     scratch.write("exits.json", &workflow(&image, &["true"]));
     let submit = format!("printf six > six && {SANDBOXCTL_PATH} submit submit six --finalize");
     scratch.write("submits.json", &workflow(&image, &["sh", "-c", &submit]));
@@ -509,7 +627,10 @@ models = [{ name = "gpt-6-astra", upstream_name = "gpt-6-astra" }]
         .env("XDG_DATA_HOME", scratch.0.join("xdg"))
         .env("DOCKER_CONFIG", &docker_config);
     let commands = [
-        run("lwe.json", &["--runs", "runs", "--config", "pumpkin.toml"]),
+        run(
+            "asks.json",
+            &["--runs", "runs", "--config", "conf/pumpkin.toml"],
+        ),
         exits,
         run("submits.json", &["--runs", "runs"]),
     ];
@@ -518,6 +639,7 @@ models = [{ name = "gpt-6-astra", upstream_name = "gpt-6-astra" }]
         (&context[..], "--docker-context <context> "),
         (&sandboxd[..], "<sandboxd>"),
         (&docker_config[..], "<docker config>"),
+        (&stand_in.address[..], "<stand-in>"),
     ];
     let rootful = !engine.report().security.rootless;
     check(
@@ -526,9 +648,15 @@ models = [{ name = "gpt-6-astra", upstream_name = "gpt-6-astra" }]
         rootful,
         &shown,
         &expect![[r#"
-        $ pumpkin run lwe.json --docker-context <context> --sandboxd <sandboxd> --runs runs --config pumpkin.toml
-        exit status: Some(1)
-        pumpkin: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one
+        $ pumpkin run asks.json --docker-context <context> --sandboxd <sandboxd> --runs runs --config conf/pumpkin.toml
+        exit status: Some(3)
+        pumpkin: run <id> records into runs/<id>
+        record: agent/log/command.stderr, agent/log/command.stdout, agent/out/answer, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+        the run log notes: the agent's model route goes to the upstream `provider`, which takes `gpt-6-astra` as `vendor/gpt-6-astra`
+        the run log records: {"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200}
+        the agent's answer: data: POST /v1/responses HTTP/1.1 Some("Bearer sk-test") {"input":"hi","model":"vendor/gpt-6-astra","store":false}\n\n
+        outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        printed outcome.json: true
         $ DOCKER_CONFIG=<docker config> HOME=<scratch>/home XDG_DATA_HOME=<scratch>/xdg pumpkin run exits.json --docker-context <context> --sandboxd <sandboxd>
         exit status: Some(3)
         pumpkin: run <id> records into <scratch>/home/.local/share/pumpkin/runs/<id>
@@ -542,4 +670,5 @@ models = [{ name = "gpt-6-astra", upstream_name = "gpt-6-astra" }]
         outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":3},"score":3},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         printed outcome.json: true"#]],
     );
+    stand_in.stop();
 }

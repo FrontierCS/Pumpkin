@@ -1,14 +1,14 @@
 //! The deployment's configuration, which `pumpkin run` reads, as TOML: the model upstreams that
-//! a workflow's model route may reach, each a table of its own, `[upstreams.<name>]`.
-//! [`Config`] and the types it holds say what each key means; every key is required, and any
-//! other refused.
+//! a workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
+//! [`serving`](Config::serving) picks the one that serves it. [`Config`] and the types it holds
+//! say what each key means; every key is required, and any other refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pumpkin::model_route::UpstreamUrl;
-use pumpkin_schema::ir::{ModelName, Name};
+use pumpkin::model_route::{self, Key, Serving, UpstreamUrl};
+use pumpkin_schema::ir::{ModelName, Models, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
 
@@ -25,11 +25,6 @@ pub(crate) struct Config {
 #[serde(deny_unknown_fields)]
 struct Upstream {
     /// The endpoint of the API, read from its base URL ([`endpoint`]).
-    #[expect(
-        dead_code,
-        reason = "only serving a model route would read it, and `Run::prepare` refuses a \
-                  workflow with one"
-    )]
     #[serde(deserialize_with = "endpoint")]
     url: UpstreamUrl,
     /// The file that holds the API's key, which [`read`] puts below the configuration's
@@ -47,12 +42,55 @@ struct Upstream {
 struct Model {
     name: ModelName,
     /// The name that the upstream takes for it.
-    #[expect(
-        dead_code,
-        reason = "only serving a model route would read it, and `Run::prepare` refuses a \
-                  workflow with one"
-    )]
     upstream_name: ModelName,
+}
+
+impl Config {
+    /// How a run serves a model route that allows `models`: through the upstream that serves
+    /// every one of them, with the key read from its file.
+    ///
+    /// # Errors
+    ///
+    /// Fails if no upstream serves every model, or if the key can't be read.
+    pub(crate) fn serving(self, models: &Models) -> Result<Serving, String> {
+        let serves = |upstream: &Upstream| {
+            let served =
+                |model: &ModelName| upstream.models.iter().any(|served| served.name == *model);
+            models.as_slice().iter().all(served)
+        };
+        // At most one does: each model is listed once, and a route allows one at least.
+        let Some((name, upstream)) = self
+            .upstreams
+            .into_iter()
+            .find(|(_, upstream)| serves(upstream))
+        else {
+            let named: Vec<String> = models
+                .as_slice()
+                .iter()
+                .map(|model| format!("`{model}`"))
+                .collect();
+            return Err(format!(
+                "no upstream serves every model that the workflow's route allows, {}: list them \
+                 all under one",
+                named.join(", ")
+            ));
+        };
+        let Upstream {
+            url,
+            key_file,
+            models,
+        } = upstream;
+        let upstream = model_route::Upstream::new(url, Key::read(&key_file)?);
+        let models = models
+            .into_iter()
+            .map(|model| (model.name, model.upstream_name));
+        let models = models.collect();
+        Ok(Serving {
+            name,
+            upstream,
+            models,
+        })
+    }
 }
 
 /// The endpoint of an upstream's API, read from its base URL: `/responses` below it, once the
