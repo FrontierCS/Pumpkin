@@ -6,7 +6,12 @@
 //! - `record.json`: `{"record_version": "pumpkin.record/v0"}`, the version of the record's
 //!   form ([`RECORD_VERSION`]), written first;
 //! - `ir.json`: the workflow's IR;
-//! - `outcome.json`: how the run ended: `{"state": "refused", "reason": r}`.
+//! - `provider.json`: what the run's provider declared, its
+//!   [`Ready`](pumpkin_schema::provider::Ready);
+//! - `log.jsonl`: the run log, which the `log` module lays out;
+//! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields, in
+//!   the run log's JSON form of an outcome (`log::outcome_json`); or
+//!   `{"state": "refused" | "failed", "reason": r}`.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -66,7 +71,7 @@ fn create_dirs(dir: &Path) -> Result<(), String> {
 
 /// The time since the Unix epoch of `time`, a time by the machine's clock: a time before the
 /// epoch is the clock's error.
-fn since_epoch(time: SystemTime) -> Result<Duration, String> {
+pub(super) fn since_epoch(time: SystemTime) -> Result<Duration, String> {
     (time.duration_since(UNIX_EPOCH))
         .map_err(|_| "the clock reads before 1970-01-01: set the system clock".to_owned())
 }
@@ -125,7 +130,7 @@ fn replace(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Syncs `dir`, so that the entries made in it, or renamed into it, last.
-fn sync_dir(dir: &Path) -> Result<(), String> {
+pub(super) fn sync_dir(dir: &Path) -> Result<(), String> {
     File::open(dir)
         .and_then(|dir| dir.sync_all())
         .context(dir.display())
