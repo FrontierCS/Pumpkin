@@ -20,25 +20,27 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
 use pumpkin_docker::{Built, ContextName, Engine, Report, Security};
-use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, Session};
+use pumpkin_gateway::{Arrival, IncomingModelRequest, Listener, Op, Process, Put, Session};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::provider::{
     Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,
 };
+use pumpkin_schema::sandbox::frame::MAX_MESSAGE_BYTES;
 use pumpkin_schema::sandbox::op::{
     Failed, Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
     StatusReply, SubmitReply, SubmitState,
 };
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{
-    ExitStatus, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, dir_mode, file_mode,
+    ExitStatus, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
+    MAX_OP_PAYLOAD_BYTES, MODEL_PORT, OpPayloadLimit, RelativePath, dir_mode, file_mode,
 };
 use stdx::process::Environment;
 use stdx::{Context, Deadline};
@@ -1186,6 +1188,225 @@ fn turns() {
             owner: status 3
             owner: status 9"#]],
     );
+}
+
+/// A harness's requests to the model endpoint, from inside a sandbox, which has no network but
+/// loopback, and the test, as the session's owner, responding ([`respond`]). The endpoint listens
+/// on the loopback alone. Of eight requests at once, a full flight is held while the one past it is
+/// refused (503); then the flight is answered. A body far larger than its client's buffers arrives
+/// whole, though the client sends a byte past its request and reads only once `sandboxd` has
+/// stopped writing. Then a request is streamed whole, one cut short, one refused by the owner, and
+/// one ended without a head; one of HTTP/1.9 answered 204, then cut short, and one answered 103, an
+/// interim status, get nothing, and one of `HEAD` a head alone, though the owner sends data for
+/// each; and a chunked body, two lengths that differ, a length with a sign, a chunked body with a
+/// length, one over the protocol's bound, HTTP/1.0, of `HEAD` with a head alone and of `POST` with
+/// a body, and a head over the endpoint's bound are refused before they reach the session. A second
+/// `sandboxd`, which a command starts with `--model`, serves the endpoint, on a session of its own
+/// that takes model requests, since the provider starts none with it.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn model_endpoint() {
+    check(
+        "model",
+        |fixture| {
+            let mut sandbox = fixture.start(&fixture.run, "model");
+            let listener = Listener::bind(fixture.dir.join("model/second")).unwrap();
+            let script = format!(
+                r#"
+                /.pumpkin/sandboxd /.pumpkin/gateway/second --model &
+                until [ -e ../in/up ]; do sleep 0.01; done
+                awk '$2 ~ /:{MODEL_PORT:04X}$/ && $4 == "0A" {{ print "listening on", $2 }}' /proc/net/tcp
+                post() {{ printf "$1" | nc -w 30 127.0.0.1 {MODEL_PORT} | tr -d '\r' | tr '\n' '|'; echo; }}
+                for n in 1 2 3 4 5 6 7 8; do post 'POST /held HTTP/1.1\r\n\r\n' > flight-$n & held="$held $!"; done
+                wait $held
+                echo "the flight: $(grep -l ' 200 ' flight-* | wc -l) answered; $(grep -h ' 503 ' flight-*)"
+                writing() {{ awk '$2 ~ /:{MODEL_PORT:04X}$/ && ($4 == "01" || $4 == "08") {{ found = 1 }} END {{ exit !found }}' /proc/net/tcp; }}
+                late() {{ printf 'POST /late HTTP/1.1\r\n\r\n'; until [ -e ../in/late ]; do sleep 0.01; done; printf x; }}
+                echo "a body past the client's buffers, with a byte sent late: $(late | nc -w 30 127.0.0.1 {MODEL_PORT} | {{ until [ -e ../in/late ] && ! writing; do sleep 0.01; done; wc -c; }}) bytes"
+                post 'POST /responses HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{{"model":"m"}}'
+                post 'POST /responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n{{}}'
+                post 'GET /models HTTP/1.1\r\nAccept:  */*  \r\n\r\n'
+                echo "ended without a head: [$(post 'POST /headless HTTP/1.1\r\n\r\n')]"
+                echo "answered 204, then cut short: [$(post 'POST /empty HTTP/1.9\r\nContent-Length: 2\r\n\r\n{{}}')]"
+                echo "answered 103, an interim status: [$(post 'POST /interim HTTP/1.1\r\n\r\n')]"
+                post 'HEAD /models HTTP/1.1\r\n\r\n'
+                post 'POST /responses HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n'
+                post 'POST /responses HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n'
+                post 'POST /responses HTTP/1.1\r\nContent-Length: +0\r\n\r\n'
+                post 'POST /responses HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n'
+                post 'POST /responses HTTP/1.1\r\nContent-Length: {over}\r\n\r\n'
+                post 'HEAD /models HTTP/1.0\r\n\r\n'
+                post 'POST /responses HTTP/1.0\r\n\r\n'
+                post "GET / HTTP/1.1\r\nx: $(head -c {pad} /dev/zero | tr '\0' a)""#,
+                over = MAX_MODEL_REQUEST_BYTES + 1,
+                // A head of 16 KiB, the endpoint's bound, with no end: all of it is read, so
+                // the refusal reaches the client before the connection closes.
+                pad = (16 << 10) - "GET / HTTP/1.1\r\nx: ".len(),
+            );
+            let session = sandbox.session();
+            let process = session.start(launch(1, &script), hung()).unwrap();
+            let (sender, models) = mpsc::channel();
+            let accepted = listener.accept(hung(), None, true, sender, |arrival| arrival);
+            let mut second = accepted.unwrap();
+            // Served once the second `sandboxd` serves the endpoint, which the clients wait for.
+            let up = [Put::Dir(&relative("up"), dir_mode())];
+            second.put(&absolute("/pumpkin/in"), &up, hung()).unwrap();
+            let mut asked = hold_flight(&mut sandbox, &models);
+            asked.push(respond_late(&mut sandbox, &mut second, &models));
+            let (status, rest) = serve_models(&mut sandbox, process, &models);
+            asked.extend(rest);
+            let mut lines = vec![format!("{status:?}")];
+            lines.extend(log(fixture, &mut sandbox));
+            lines.extend(asked);
+            lines
+        },
+        &expect![[r#"
+            Code(0)
+            listening on 0100007F:2BE3
+            the flight: 7 answered; HTTP/1.1 503 Service Unavailable|content-type: application/json|content-length: 86|connection: close||{"error":{"message":"7 model requests are in flight already: wait for one to finish"}}
+            a body past the client's buffers, with a byte sent late: 1048657 bytes
+            HTTP/1.1 200 OK|content-type: text/event-stream|transfer-encoding: chunked|connection: close||9|data: 1|||9|data: 2|||0||
+            HTTP/1.1 200 OK|content-type: text/event-stream|transfer-encoding: chunked|connection: close||9|data: 1|||
+            HTTP/1.1 404 Not Found|content-type: application/json|transfer-encoding: chunked|connection: close||9|data: 1|||0||
+            ended without a head: []
+            answered 204, then cut short: []
+            answered 103, an interim status: []
+            HTTP/1.1 200 OK|content-type: text/event-stream|connection: close||
+            HTTP/1.1 411 Length Required|content-type: application/json|content-length: 82|connection: close||{"error":{"message":"a chunked body is refused: send its content-length instead"}}
+            HTTP/1.1 400 Bad Request|content-type: application/json|content-length: 70|connection: close||{"error":{"message":"the content-length is not one number: send one"}}
+            HTTP/1.1 400 Bad Request|content-type: application/json|content-length: 70|connection: close||{"error":{"message":"the content-length is not one number: send one"}}
+            HTTP/1.1 411 Length Required|content-type: application/json|content-length: 82|connection: close||{"error":{"message":"a chunked body is refused: send its content-length instead"}}
+            HTTP/1.1 413 Content Too Large|content-type: application/json|content-length: 73|connection: close||{"error":{"message":"the body is 67108865 bytes: send at most 67108864"}}
+            HTTP/1.1 426 Upgrade Required|content-type: application/json|upgrade: HTTP/1.1|connection: upgrade|content-length: 72|connection: close||
+            HTTP/1.1 426 Upgrade Required|content-type: application/json|upgrade: HTTP/1.1|connection: upgrade|content-length: 72|connection: close||{"error":{"message":"the request's version is HTTP/1.0: send HTTP/1.1"}}
+            HTTP/1.1 431 Request Header Fields Too Large|content-type: application/json|content-length: 89|connection: close||{"error":{"message":"the request's head holds more than 16384 bytes: send at most that"}}
+            owner: POST /held [] "", held
+            owner: POST /late [] ""
+            owner: POST /responses [("host", "x"), ("content-type", "application/json"), ("content-length", "13")] "{\"model\":\"m\"}"
+            owner: POST /responses [("content-length", "2")] "{}"
+            owner: GET /models [("accept", "*/*")] ""
+            owner: POST /headless [] "": InvalidInput
+            owner: POST /empty [("content-length", "2")] "{}"
+            owner: POST /interim [] ""
+            owner: HEAD /models [] """#]],
+    );
+}
+
+/// Takes a full flight of model requests from `models`, then answers them once a command in the
+/// sandbox finds that the client past the flight was refused. Returns what they asked, each
+/// once.
+fn hold_flight(sandbox: &mut Started, models: &Receiver<Arrival>) -> Vec<String> {
+    let held: Vec<IncomingModelRequest> = (0..MAX_MODEL_REQUESTS_IN_FLIGHT)
+        .map(|_| next_model_request(models))
+        .collect();
+    let refused = "until grep -qs ' 503 ' flight-*; do sleep 0.01; done";
+    assert_eq!(sh(sandbox, 2, refused), ExitStatus::Code(0));
+    let mut asked: Vec<String> = held.into_iter().map(respond).collect();
+    asked.dedup();
+    asked.iter().map(|line| format!("{line}, held")).collect()
+}
+
+/// Answers the request for `/late` from `models`, which arrive on `second` ([`respond`]), once
+/// its client has sent a byte past it, which `sandboxd` leaves unread, as a command in the
+/// sandbox finds. Returns what it asked.
+fn respond_late(sandbox: &mut Started, second: &mut Session, models: &Receiver<Arrival>) -> String {
+    let incoming = next_model_request(models);
+    // `sandboxd` has read the request, and reads no further, so the byte the client sends once
+    // told to waits unread in `sandboxd`'s queue, where the command finds it.
+    let late = [Put::Dir(&relative("late"), dir_mode())];
+    second.put(&absolute("/pumpkin/in"), &late, hung()).unwrap();
+    let unread = format!(
+        "until awk '$2 ~ /:{MODEL_PORT:04X}$/ && $4 != \"0A\" && $5 !~ /:0+$/ {{ found = 1 }} \
+         END {{ exit !found }}' /proc/net/tcp; do sleep 0.01; done"
+    );
+    assert_eq!(sh(sandbox, 3, &unread), ExitStatus::Code(0));
+    respond(incoming)
+}
+
+/// The next of `models`, which must be a model request that arrives within 30 s.
+fn next_model_request(models: &Receiver<Arrival>) -> IncomingModelRequest {
+    match models.recv_timeout(Duration::from_secs(30)) {
+        Ok(Arrival::ModelRequest(incoming)) => incoming,
+        arrived => panic!("a model request was to arrive within 30 s, not {arrived:?}"),
+    }
+}
+
+/// Waits for `process` to exit as the session's owner does, answering each model request that
+/// arrives on `models`, another session's, meanwhile ([`respond`]). Returns how it exited, which
+/// it has 30 s to, and what each request asked.
+fn serve_models(
+    sandbox: &mut Started,
+    process: Process,
+    models: &Receiver<Arrival>,
+) -> (ExitStatus, Vec<String>) {
+    let tick = Duration::from_millis(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut asked = Vec::new();
+    while Instant::now() < deadline {
+        match sandbox.arrivals.recv_timeout(tick) {
+            Ok(Arrival::Exited {
+                process: exited,
+                status,
+            }) if exited == process => return (status, asked),
+            Err(RecvTimeoutError::Timeout) => {}
+            arrived => panic!("the command's exit was to arrive, not {arrived:?}"),
+        }
+        match models.recv_timeout(tick) {
+            Ok(Arrival::ModelRequest(incoming)) => asked.push(respond(incoming)),
+            Err(RecvTimeoutError::Timeout) => {}
+            arrived => panic!("a model request was to arrive, not {arrived:?}"),
+        }
+    }
+    panic!("the clients ran on for 30 s, having asked {asked:?}");
+}
+
+/// Responds to a model request as the session's owner: to `/headless` with a head too long for a
+/// frame, and to `/late` with 200 and a body of 1 MiB; to any other with 204 for `/empty`, 103 for
+/// `/interim`, 404 for a `GET` and 200 otherwise, then one event, then the end for an empty body, a
+/// cut for a body of `{}`, and a second event and the end for any other. Each head also frames the
+/// body, which `sandboxd` frames itself, so it drops that field. Returns what it asked.
+fn respond(incoming: IncomingModelRequest) -> String {
+    let request = &incoming.request;
+    let body = String::from_utf8_lossy(&request.body).into_owned();
+    let asked = format!(
+        "owner: {} {} {:?} {body:?}",
+        request.method, request.path, request.headers
+    );
+    if request.path == "/headless" {
+        // A head too long for a frame, which ends the request without a response.
+        let headers = vec![("x-pad".to_owned(), "a".repeat(MAX_MESSAGE_BYTES))];
+        let refused = incoming.respond(200, headers, hung()).unwrap_err();
+        return format!("{asked}: {:?}", refused.kind());
+    }
+    if request.path == "/late" {
+        // Far more than the client's buffers hold, yet within what the kernel queues to send on
+        // `sandboxd`'s socket, so that much of it is still queued there as `sandboxd` closes.
+        let mut response = incoming.respond(200, Vec::new(), hung()).unwrap();
+        response.send("a".repeat(1 << 20).as_bytes()).unwrap();
+        response.end().unwrap();
+        return asked;
+    }
+    let (status, kind) = match (request.method.as_str(), request.path.as_str()) {
+        (_, "/empty") => (204, "text/event-stream"),
+        (_, "/interim") => (103, "text/event-stream"),
+        ("GET", _) => (404, "application/json"),
+        _ => (200, "text/event-stream"),
+    };
+    let headers = [("content-type", kind), ("Content-Length", "1")];
+    let headers = (headers.iter())
+        .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    let mut response = incoming.respond(status, headers, hung()).unwrap();
+    response.send(b"data: 1\n\n").unwrap();
+    match body.as_str() {
+        "" => response.end().unwrap(),
+        "{}" => response.cut().unwrap(),
+        _ => {
+            response.send(b"data: 2\n\n").unwrap();
+            response.end().unwrap();
+        }
+    }
+    asked
 }
 
 /// The lines of the first command's standard output, from the sandbox's `/pumpkin/log`, and

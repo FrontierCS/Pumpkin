@@ -917,9 +917,12 @@ impl Drop for Session {
 }
 
 impl IncomingModelRequest {
-    /// Starts the response with `status` and `headers`, which `sandboxd` passes on to the
-    /// client, and returns it, to stream its body by `by` ([deadlines](crate#deadlines)). A
-    /// response that hasn't ended by `by` ends the session at its next frame, or as it drops.
+    /// Starts the response with `status` and `headers`, and returns it, to stream its body by
+    /// `by` ([deadlines](crate#deadlines)). A response that hasn't ended by `by` ends the session
+    /// at its next frame, or as it drops. `sandboxd` passes the headers on to the client, except
+    /// those that frame a message, which it writes itself, and drops the body of a response that
+    /// HTTP gives none: one to `HEAD`, or with a status of 204 or 304. Of a response with a status
+    /// of 1xx, which is interim, it writes nothing, and ends the client's connection.
     ///
     /// # Errors
     ///
