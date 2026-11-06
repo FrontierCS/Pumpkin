@@ -7,9 +7,11 @@
 //! is talking.
 //!
 //! A sandbox, however buggy, can't harm the host through its session. A message that fails to
-//! parse or comes out of turn, or more replies than a waiting request takes, ends the session,
-//! which stops the sandbox. A collected tree is written into a new directory of its own, within
-//! [`Limits`].
+//! parse or comes out of turn, more replies than a waiting request takes, or a malformed tree
+//! ends the session, which stops the sandbox. A late reply, on a stream whose request has
+//! returned, is dropped, since a request that gives up closes its stream while `sandboxd` may
+//! still be answering. A collected tree is written into a new directory of its own, within
+//! [`Limits`]: a tree that passes them fails only its collect.
 //!
 //! # Deadlines
 //!
@@ -153,45 +155,66 @@ pub struct Session {
     // Shared with the reader thread, which may end the session. Set under the routes' lock,
     // which `end` explains.
     ended: Arc<OnceLock<String>>,
-    next_stream: u32,
     /// The reader thread, `Some` until the drop joins it.
     reader: Option<JoinHandle<()>>,
 }
 
 /// Where frames from the sandbox go: the requests waiting for them and the commands running, by
-/// stream, and whether the sandbox may open an op.
+/// stream, which streams have been opened, and whether the sandbox may open an op.
 #[derive(Debug)]
 struct Routes {
     open: BTreeMap<u32, Route>,
+    /// The stream the next request opens: requests open streams in order from 1, so every
+    /// stream from 1 below it has been opened.
+    next_stream: u32,
     /// The op in flight, by number: opened, and not yet answered.
     op: Option<u32>,
 }
 
-/// Where the frames on a stream go.
+/// Where the frames on a stream go. Each route takes only the replies named here: any other
+/// breaks the protocol.
 #[derive(Debug)]
 enum Route {
-    /// To a request, which the session's owner waits on.
-    Request {
-        sender: SyncSender<Reply>,
-        queue: Queue,
-    },
+    /// To a request, which the session's owner waits on, for its reply: done, or failed with
+    /// `sandboxd`'s message. A second that finds the queue full breaks the protocol.
+    Reply(SyncSender<Result<(), String>>),
+    /// To a command's start, as `Reply`; once it is done, the command runs (`Running`).
+    Start(SyncSender<Result<(), String>>),
+    /// To a request writing a tree as its parts arrive, until its end or `sandboxd`'s failure.
+    Tree(SyncSender<Result<Part, String>>),
     /// To the owner, as an arrival: a started command's exit, its stream's last frame.
     Running,
 }
 
-/// What a request waits for.
-#[derive(Clone, Copy, Debug)]
-enum Queue {
-    /// A reply: a frame that finds the queue full breaks the protocol.
-    Replies,
-    /// A command's start's reply, as `Replies`; once it is `Done`, the command runs
-    /// ([`Route::Running`]).
-    Start,
-    /// A tree, whose frames wait for the request to write them.
-    Tree,
+/// A [`FromSandbox`] that a stream carries, without its stream.
+enum Reply {
+    Done,
+    Failed(String),
+    Exited(ExitStatus),
+    Part(Part),
 }
 
-type Reply = (FromSandbox, Vec<u8>);
+/// A part of a tree being collected.
+enum Part {
+    Entry(Entry),
+    /// Bytes of the file being collected, the frame's body.
+    Data(Vec<u8>),
+    End,
+}
+
+impl Reply {
+    /// The frame's type, as the protocol names it.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Failed(_) => "failed",
+            Self::Exited(_) => "exited",
+            Self::Part(Part::Entry(_)) => "entry",
+            Self::Part(Part::Data(_)) => "data",
+            Self::Part(Part::End) => "end",
+        }
+    }
+}
 
 /// What to put in a sandbox: a directory, or a file with its bytes.
 #[derive(Clone, Copy, Debug)]
@@ -312,6 +335,7 @@ impl Session {
     ) -> io::Result<Self> {
         let routes = Arc::new(Mutex::new(Routes {
             open: BTreeMap::new(),
+            next_stream: 1,
             op: None,
         }));
         let ended = Arc::new(OnceLock::new());
@@ -335,7 +359,6 @@ impl Session {
             connection: stream,
             routes,
             ended,
-            next_stream: 1,
             reader: Some(reader),
         })
     }
@@ -373,7 +396,7 @@ impl Session {
     /// Fails if `sandboxd` can't write them, if `by` passes first ([deadlines](crate#deadlines)),
     /// or if the session ends.
     pub fn put(&mut self, dir: &AbsolutePath, entries: &[Put<'_>], by: Deadline) -> io::Result<()> {
-        let (stream, replies) = self.open(Queue::Replies, by)?;
+        let (stream, replies) = self.open(Route::Reply, by)?;
         let put = self
             .send_tree(stream, dir, entries, by)
             .and_then(|()| self.done(&replies, by));
@@ -388,7 +411,7 @@ impl Session {
     /// Fails if the command doesn't start, if `by` passes first ([deadlines](crate#deadlines)),
     /// or if the session ends.
     pub fn start(&mut self, launch: Launch, by: Deadline) -> io::Result<Process> {
-        let (stream, replies) = self.open(Queue::Start, by)?;
+        let (stream, replies) = self.open(Route::Start, by)?;
         let started = self
             .send(&ToSandbox::Start { stream, launch }, &[], by)
             .and_then(|()| self.done(&replies, by));
@@ -421,9 +444,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails if `into` exists, if `sandboxd` can't send the tree, if the tree breaks the
-    /// protocol or passes a limit, if `by` passes first ([deadlines](crate#deadlines)), or if
-    /// the session ends.
+    /// Fails if `into` exists, if `sandboxd` can't send the tree, if the tree passes a limit or
+    /// can't be written, if `by` passes first ([deadlines](crate#deadlines)), or if the session
+    /// ends, as a tree that breaks the protocol ends it.
     pub fn collect(
         &mut self,
         dir: &AbsolutePath,
@@ -431,7 +454,7 @@ impl Session {
         limits: Limits,
         by: Deadline,
     ) -> io::Result<()> {
-        let (stream, replies) = self.open(Queue::Tree, by)?;
+        let (stream, parts) = self.open(Route::Tree, by)?;
         let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
         let collected = created.and_then(|()| {
             let tree = tree::Writer::new(into.to_owned(), limits);
@@ -443,7 +466,7 @@ impl Session {
                 &[],
                 by,
             )?;
-            self.receive_tree(&replies, tree, by)
+            self.receive_tree(stream, &parts, tree, by)
         });
         self.close(stream);
         collected
@@ -585,33 +608,77 @@ impl Session {
         self.send(&ToSandbox::End { stream }, &[], by)
     }
 
+    /// Writes the tree whose parts arrive on `stream` with `tree`, until its end.
     fn receive_tree(
         &self,
-        replies: &Receiver<Reply>,
+        stream: u32,
+        parts: &Receiver<Result<Part, String>>,
         mut tree: tree::Writer,
         by: Deadline,
     ) -> io::Result<()> {
         loop {
-            match self.receive(replies, by)? {
-                (FromSandbox::Entry { entry, .. }, _) => tree.entry(&entry)?,
-                (FromSandbox::Data { .. }, body) => tree.data(&body)?,
-                (FromSandbox::End { .. }, _) => return tree.finish(),
-                (FromSandbox::Failed { message, .. }, _) => return Err(io::Error::other(message)),
-                // The reader passes op frames to the assembler, never to a request.
-                (
-                    other @ (FromSandbox::Done { .. }
-                    | FromSandbox::Exited { .. }
-                    | FromSandbox::Op { .. }
-                    | FromSandbox::OpData { .. }),
-                    _,
-                ) => return Err(unexpected(&other)),
+            match self.receive(parts, by)? {
+                Ok(Part::Entry(entry)) => self.created(stream, tree.entry(&entry))?,
+                Ok(Part::Data(bytes)) => self.written(stream, tree.data(&bytes))?,
+                Ok(Part::End) => return self.written(stream, tree.finish()),
+                Err(message) => return Err(io::Error::other(message)),
             }
         }
     }
 
+    /// Returns `written`, what came of writing a part of the tree that arrives on `stream`,
+    /// after ending the session if it shows the tree malformed.
+    fn written(&self, stream: u32, written: io::Result<()>) -> io::Result<()> {
+        match written {
+            // A malformed tree breaks the protocol. The writer fails with `InvalidData` where the
+            // parts don't fit together, as file data past its file's size, and no system error
+            // has that kind. Any other error fails this collect alone: a limit passed,
+            // `FileTooLarge`, is the request's own bound, not a break, and the host failing to
+            // write is no fault of the sandbox's.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                Err(self.malformed(stream, &error))
+            }
+            written => written,
+        }
+    }
+
+    /// As [`written`](Self::written), for creating an entry.
+    fn created(&self, stream: u32, created: io::Result<()>) -> io::Result<()> {
+        match created {
+            // Creating an entry fails with `NotFound`, `NotADirectory` or `AlreadyExists` where
+            // its parent is missing or a file, or its path is taken. In `into`, new and left to
+            // this collect, only the tree's own earlier entries can cause that, given that `into`
+            // is on a filesystem that neither folds case nor normalizes names: on one that does,
+            // a correct `sandboxd` that sends `A` and `a` would meet `AlreadyExists`, and end the
+            // session. Only creating an entry names a path the tree chose; writing a file's bytes
+            // goes to a file already open, so a system error there is the host's.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::NotADirectory
+                        | io::ErrorKind::AlreadyExists
+                ) =>
+            {
+                Err(self.malformed(stream, &error))
+            }
+            created => self.written(stream, created),
+        }
+    }
+
+    /// Ends the session, as the tree that arrives on `stream` is malformed, which `error` shows,
+    /// and returns the request's error.
+    fn malformed(&self, stream: u32, error: &io::Error) -> io::Error {
+        let reason = broke(&format!(
+            "the tree it sent on stream {stream} is malformed: {error}"
+        ));
+        end(&self.routes, &self.ended, &self.connection, reason);
+        ended(&self.ended)
+    }
+
     /// Sends the request `message` builds for a new stream, and waits for its reply.
     fn request(&mut self, message: impl FnOnce(u32) -> ToSandbox, by: Deadline) -> io::Result<()> {
-        let (stream, replies) = self.open(Queue::Replies, by)?;
+        let (stream, replies) = self.open(Route::Reply, by)?;
         let done = self
             .send(&message(stream), &[], by)
             .and_then(|()| self.done(&replies, by));
@@ -619,25 +686,33 @@ impl Session {
         done
     }
 
-    /// Opens a stream for a request to send by `by`.
-    fn open(&mut self, queue: Queue, by: Deadline) -> io::Result<(u32, Receiver<Reply>)> {
+    /// Opens a stream for a request to send by `by`, whose replies `route` takes.
+    fn open<R>(
+        &mut self,
+        route: fn(SyncSender<R>) -> Route,
+        by: Deadline,
+    ) -> io::Result<(u32, Receiver<R>)> {
         self.can_send(by)?;
-        let stream = self.next_stream;
-        self.next_stream = stream.wrapping_add(1);
-        // One frame in every queue. A reply, or a start's reply, is the one frame its request
-        // waits for: a second that arrives before it is taken finds the queue full, which
-        // breaks the protocol (see `route_reply`). A tree's frames get one frame of slack, so
-        // the reader hands over a frame it has read and goes on reading while the request
-        // writes the one before. The gateway then holds at most three of a tree's frames, each
-        // with up to a frame's 1 MiB body; more slack would hold more memory without speeding a
-        // transfer that goes at the pace of the slower side.
+        // One item in every queue. A put's, a freeze's or a start's queue holds its outcome,
+        // done or failed, the one reply its request takes. A second outcome breaks the protocol
+        // if it arrives before the first is taken, as it finds the queue full, or after a
+        // start's `done` and before the command's exit, as it then reaches the running command,
+        // whose stream carries only that exit, not the queue. Any other second outcome goes
+        // unread: into the emptied queue until the request closes its stream, or onto the
+        // closed stream after (see `route_reply`). A collect's queue holds its tree's parts, or
+        // its failure, and one of slack lets the reader hand over a part it has read and go on
+        // reading while the request writes the one before. The gateway then holds at most three
+        // of a tree's parts, each holding at most a frame's 1 MiB body; more slack would hold
+        // more memory without speeding a transfer that goes at the pace of the slower side.
         let (sender, replies) = mpsc::sync_channel(1);
         let mut routes = lock(&self.routes);
         // Again under the lock, as the session may have ended since: `end` says why.
         if self.ended.get().is_some() {
             return Err(ended(&self.ended));
         }
-        routes.open.insert(stream, Route::Request { sender, queue });
+        let stream = routes.next_stream;
+        routes.next_stream = stream.wrapping_add(1);
+        routes.open.insert(stream, route(sender));
         Ok((stream, replies))
     }
 
@@ -677,7 +752,7 @@ impl Session {
         ended(&self.ended)
     }
 
-    fn receive(&self, replies: &Receiver<Reply>, by: Deadline) -> io::Result<Reply> {
+    fn receive<R>(&self, replies: &Receiver<R>, by: Deadline) -> io::Result<R> {
         // The gateway bounds no wait of its own. A stall the connection rides out may be
         // latency, which only the operation the request serves knows how long to wait out, as
         // its deadline says; a sandbox that is gone closes its connection, which ends the
@@ -723,20 +798,8 @@ impl Session {
         io::Error::new(io::ErrorKind::TimedOut, reason)
     }
 
-    fn done(&self, replies: &Receiver<Reply>, by: Deadline) -> io::Result<()> {
-        match self.receive(replies, by)? {
-            (FromSandbox::Done { .. }, _) => Ok(()),
-            (FromSandbox::Failed { message, .. }, _) => Err(io::Error::other(message)),
-            (
-                other @ (FromSandbox::Exited { .. }
-                | FromSandbox::Entry { .. }
-                | FromSandbox::Data { .. }
-                | FromSandbox::End { .. }
-                | FromSandbox::Op { .. }
-                | FromSandbox::OpData { .. }),
-                _,
-            ) => Err(unexpected(&other)),
-        }
+    fn done(&self, replies: &Receiver<Result<(), String>>, by: Deadline) -> io::Result<()> {
+        self.receive(replies, by)?.map_err(io::Error::other)
     }
 }
 
@@ -809,13 +872,21 @@ fn route(
         let outcome = match message {
             FromSandbox::Op { op, call, size } => ops.open(routes, op, call, size),
             FromSandbox::OpData { op } => ops.data(op, &body),
-            reply @ (FromSandbox::Done { stream }
-            | FromSandbox::Failed { stream, .. }
-            | FromSandbox::Exited { stream, .. }
-            | FromSandbox::Entry { stream, .. }
-            | FromSandbox::Data { stream }
-            | FromSandbox::End { stream }) => {
-                route_reply(routes, stream, (reply, body), &ops.owner)
+            FromSandbox::Done { stream } => route_reply(routes, stream, Reply::Done, &ops.owner),
+            FromSandbox::Failed { stream, message } => {
+                route_reply(routes, stream, Reply::Failed(message), &ops.owner)
+            }
+            FromSandbox::Exited { stream, status } => {
+                route_reply(routes, stream, Reply::Exited(status), &ops.owner)
+            }
+            FromSandbox::Entry { stream, entry } => {
+                route_reply(routes, stream, Reply::Part(Part::Entry(entry)), &ops.owner)
+            }
+            FromSandbox::Data { stream } => {
+                route_reply(routes, stream, Reply::Part(Part::Data(body)), &ops.owner)
+            }
+            FromSandbox::End { stream } => {
+                route_reply(routes, stream, Reply::Part(Part::End), &ops.owner)
             }
         };
         if let Err(reason) = outcome {
@@ -859,9 +930,10 @@ impl Drop for AbortOnUnwind {
     }
 }
 
-/// Hands a reply to the request waiting on `stream`, or a started command's exit to `owner`. A
-/// reply for no waiting request is dropped: its request has given up. Removes the route after
-/// the command's exit, or once its receiver is gone.
+/// Hands a reply to the request waiting on `stream`, or a started command's exit to `owner`, or
+/// drops it if `stream` has closed. Removes the route after the command's exit, or once its
+/// receiver is gone. Fails if no request has opened `stream`, or if its route takes no such
+/// reply, or no more.
 fn route_reply(
     routes: &Mutex<Routes>,
     stream: u32,
@@ -875,35 +947,65 @@ fn route_reply(
     };
     let mut locked = lock(routes);
     let Some(route) = locked.open.get_mut(&stream) else {
+        if !(1..locked.next_stream).contains(&stream) {
+            let expected = "nothing on a stream no request has opened";
+            return Err(out_of_turn(stream, &reply, expected));
+        }
+        // A request closes its stream as it returns, even if it gave up before `sandboxd` was
+        // done answering, as a collect does at a limit its tree passes, or any request at its
+        // deadline. `sandboxd` can't know, and may still be sending what it had begun, so a
+        // reply on a closed stream is an expected race, not a break.
         return Ok(());
     };
-    let Route::Request { sender, queue } = route else {
-        let FromSandbox::Exited { status, .. } = reply.0 else {
-            return Err(more());
-        };
-        locked.open.remove(&stream);
-        drop(locked);
-        let process = Process {
-            session: owner.session,
-            stream,
-        };
-        owner.arrived(Arrival::Exited { process, status });
-        return Ok(());
-    };
-    let (sender, queue) = (sender.clone(), *queue);
-    // A command runs once its start is done, and its stream then carries only its exit.
-    if let (Queue::Start, FromSandbox::Done { .. }) = (queue, &reply.0) {
-        *route = Route::Running;
-    }
-    drop(locked);
-    let given_up = match queue {
-        // The request writes the tree as it reads it, or drops the queue when it fails.
-        Queue::Tree => sender.send(reply).is_err(),
-        Queue::Replies | Queue::Start => match sender.try_send(reply) {
-            Ok(()) => false,
-            Err(TrySendError::Disconnected(_)) => true,
-            Err(TrySendError::Full(_)) => return Err(more()),
-        },
+    let given_up = match route {
+        Route::Reply(sender) | Route::Start(sender) => {
+            let answer = match reply {
+                Reply::Done => Ok(()),
+                Reply::Failed(message) => Err(message),
+                Reply::Exited(_) | Reply::Part(_) => {
+                    return Err(out_of_turn(stream, &reply, "`done` or `failed`"));
+                }
+            };
+            let sender = sender.clone();
+            // A command runs once its start is done, and its stream then carries only its exit.
+            if matches!(route, Route::Start(_)) && answer.is_ok() {
+                *route = Route::Running;
+            }
+            drop(locked);
+            match sender.try_send(answer) {
+                Ok(()) => false,
+                Err(TrySendError::Disconnected(_)) => true,
+                Err(TrySendError::Full(_)) => return Err(more()),
+            }
+        }
+        Route::Tree(sender) => {
+            let part = match reply {
+                Reply::Part(part) => Ok(part),
+                Reply::Failed(message) => Err(message),
+                Reply::Done | Reply::Exited(_) => {
+                    let expected = "`entry`, `data`, `end` or `failed`";
+                    return Err(out_of_turn(stream, &reply, expected));
+                }
+            };
+            let sender = sender.clone();
+            drop(locked);
+            // The request writes the tree as it reads it, or drops the queue when it fails.
+            sender.send(part).is_err()
+        }
+        Route::Running => {
+            let status = match reply {
+                Reply::Exited(status) => status,
+                Reply::Done | Reply::Failed(_) | Reply::Part(_) => return Err(more()),
+            };
+            locked.open.remove(&stream);
+            drop(locked);
+            let process = Process {
+                session: owner.session,
+                stream,
+            };
+            owner.arrived(Arrival::Exited { process, status });
+            false
+        }
     };
     if given_up {
         lock(routes).open.remove(&stream);
@@ -1127,13 +1229,6 @@ fn ended(ended: &OnceLock<String>) -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, reason.clone())
 }
 
-fn unexpected(message: &FromSandbox) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        broke(&format!("it sent {message:?} out of turn")),
-    )
-}
-
 /// `error`, prefixed with what failed, as `<what>: <error>`, keeping its kind.
 fn context(what: impl fmt::Display, error: &io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("{what}: {error}"))
@@ -1142,4 +1237,13 @@ fn context(what: impl fmt::Display, error: &io::Error) -> io::Error {
 /// Why a session ends when the sandbox does `what`.
 fn broke(what: &str) -> String {
     format!("the sandbox broke the protocol: {what}")
+}
+
+/// Why a session ends when the sandbox sends `reply` on `stream`, where only what `expected`
+/// names may come.
+fn out_of_turn(stream: u32, reply: &Reply, expected: &str) -> String {
+    broke(&format!(
+        "it sent `{}` on stream {stream} out of turn: expected {expected}",
+        reply.name()
+    ))
 }
