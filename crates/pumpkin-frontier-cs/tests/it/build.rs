@@ -103,17 +103,22 @@ impl Run {
 }
 
 /// Makes a task named `task`, whose agent recipe copies its `notes` and whose verifier recipe
-/// copies itself, each into an empty image, runs `pumpkin-frontier-cs build` on it through
-/// `context` as each of `runs` says, and compares with `expect` what each run shows, as
-/// [`run_build`] gives it; then what the runs left in their temporary directory, the files of
-/// the agent's image, and the tags each image has for the task, the agent's base's too. Removes
-/// each such tag afterwards, and so each image no other task tags.
+/// copies itself, each with its `id`, which holds this process's ID, into an empty image, runs
+/// `pumpkin-frontier-cs build` on it through `context` as each of `runs` says, and compares with
+/// `expect` what each run shows, as [`run_build`] gives it; then what the runs left in their
+/// temporary directory, the files of the agent's image, and the tags each image has for the
+/// task, the agent's base's too, each with its digest as `<digest>`, as the digests cover `id`.
+/// Removes each such tag afterwards, and so each image, which no other process has.
 fn check(task: &str, context: &str, runs: &[Run], expect: &Expect) {
     let scratch =
         std::env::temp_dir().join(format!("pumpkin-frontier-cs-{}-{task}", std::process::id()));
     let dir = scratch.join(task);
     put(&dir, "notes", b"one", 0o644);
-    let (agent, verifier) = ("COPY notes /", "COPY verifier/Dockerfile /");
+    // An image is named by its content, so another process's test that built the same inputs
+    // would have the same image, which removing its last tag here would delete, even between
+    // that test's build and its `docker tag`. With this process's ID, the images are its own.
+    put(&dir, "id", std::process::id().to_string().as_bytes(), 0o644);
+    let (agent, verifier) = ("COPY notes id /", "COPY verifier/Dockerfile id /");
     for (recipe, step) in [
         ("agent-base/Dockerfile", agent),
         ("verifier/Dockerfile", verifier),
@@ -159,29 +164,22 @@ fn check(task: &str, context: &str, runs: &[Run], expect: &Expect) {
         .map(|entry| entry.unwrap().file_name());
     let left: Vec<_> = left.collect();
     lines.push(format!("left in the runs' temporary directory: {left:?}"));
-    let digest = images.first().map(|agent| {
-        let (shown, digest) = agent_image(&scratch, agent, &prefix);
-        lines.extend(shown);
-        digest
-    });
+    if let Some(agent) = images.first() {
+        lines.extend(agent_image(&scratch, agent, &prefix));
+    }
     for (letter, image) in (b'A'..).map(char::from).zip(&images) {
-        lines.push(format!("{letter}: {}", untag(image, &prefix).join(" ")));
+        lines.push(format!("{letter}: {}", untag(image, &prefix)));
     }
     fs::remove_dir_all(&scratch).unwrap();
-    let mut lines = lines
+    let lines = lines
         .join("\n")
         .replace(&scratch.display().to_string(), "<scratch>");
-    // The agent's tag is the digest of a recipe that names its base by the base's repository,
-    // which holds this process's ID.
-    if let Some(digest) = digest {
-        lines = lines.replace(&digest, "<digest>");
-    }
     expect.assert_eq(&lines.replace(&std::process::id().to_string(), "<pid>"));
 }
 
 /// What `check` shows of `agent`, the agent's image, whose tags start with `prefix`: its files,
-/// and the tags of its base, which it removes; and the digest its tag holds.
-fn agent_image(scratch: &Path, agent: &str, prefix: &str) -> (Vec<String>, String) {
+/// and the tags of its base, which it removes.
+fn agent_image(scratch: &Path, agent: &str, prefix: &str) -> Vec<String> {
     let [tag] = <[String; 1]>::try_from(tags(agent, &format!("{prefix}agent:"))).unwrap();
     let mut lines = vec![format!("A holds:\n{}", exported(scratch, &tag))];
     let listed = [
@@ -195,10 +193,9 @@ fn agent_image(scratch: &Path, agent: &str, prefix: &str) -> (Vec<String>, Strin
     let reference = format!("reference={prefix}agent-base");
     let bases = docker().args(listed).arg(reference).output().unwrap();
     for base in String::from_utf8(bases.stdout).unwrap().lines() {
-        lines.push(format!("A's base: {}", untag(base, prefix).join(" ")));
+        lines.push(format!("A's base: {}", untag(base, prefix)));
     }
-    let (_, digest) = tag.rsplit_once(':').unwrap();
-    (lines, digest.to_owned())
+    lines
 }
 
 /// Runs `pumpkin-frontier-cs build` on the task in `dir` through `context`, with `temp` as its
@@ -329,8 +326,8 @@ fn tags(image: &str, prefix: &str) -> Vec<String> {
 }
 
 /// Removes the tags that `image` has which start with `prefix`, and so the image if no other tag
-/// names it, and returns them, sorted.
-fn untag(image: &str, prefix: &str) -> Vec<String> {
+/// names it, and shows them, sorted, each with its digest as `<digest>`.
+fn untag(image: &str, prefix: &str) -> String {
     let tags = tags(image, prefix);
     for tag in &tags {
         let removed = docker().args(["image", "rm", tag]).output();
@@ -338,7 +335,11 @@ fn untag(image: &str, prefix: &str) -> Vec<String> {
             eprintln!("the test's image tag {tag} can't be removed");
         }
     }
-    tags
+    let shown = tags.iter().map(|tag| {
+        let (repository, _) = tag.rsplit_once(':').unwrap();
+        format!("{repository}:<digest>")
+    });
+    shown.collect::<Vec<_>>().join(" ")
 }
 
 /// A task's images are built, each tagged by the digest of its recipe and the task's files, and
@@ -393,10 +394,11 @@ fn build() {
               -r--r--r-- 0/0 harness/codex-0.167.0/codex-package.json
               dr-xr-xr-x 0/0 harness/codex-0.167.0/codex-path/
               -r-xr-xr-x 0/0 harness/codex-0.167.0/codex-path/rg
+              -rw-r--r-- 0/0 id
               -rw-r--r-- 0/0 notes
-            A's base: pumpkin-frontier-cs/tiny-<pid>/agent-base:181862722d663e8de1aa193668d40dc05e54e25432dba40cd166cffa43dd6592
+            A's base: pumpkin-frontier-cs/tiny-<pid>/agent-base:<digest>
             A: pumpkin-frontier-cs/tiny-<pid>/agent:<digest>
-            B: pumpkin-frontier-cs/tiny-<pid>/verifier:83bfeac20ed3c170893778c2fdab88c1186849c2c413921f3177d64a8a9a55ce"#]],
+            B: pumpkin-frontier-cs/tiny-<pid>/verifier:<digest>"#]],
     );
 }
 

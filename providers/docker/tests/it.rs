@@ -772,6 +772,9 @@ fn builds() {
                 ));
                 fs::remove_file(dir.join(name)).unwrap();
             }
+            // Without `id`, the inputs are the same in every process, so the tag the refusal
+            // names pins the digest's text; the lookup fails before anything is built.
+            fs::remove_file(dir.join("id")).unwrap();
             let repository = "pumpkin-docker-tests/Builds";
             let uppercase = engine().build(&dir, "Dockerfile", repository, |_| Ok(()));
             let refused = redact(fixture, &uppercase.unwrap_err());
@@ -779,17 +782,17 @@ fn builds() {
             lines
         },
         &expect![[r#"
-            built: A, tagged :ab502e7558d2e6db5017d90239cc5dd02d1333f86dc196dd6230a67fb9dc00cf
-            another content: B, tagged :1c042791ca468b29c6683836ec3f357728cb8febc26fd3514595b6cfea292c15
-            the first inputs, their tag moved to B: B, tagged :1c042791ca468b29c6683836ec3f357728cb8febc26fd3514595b6cfea292c15 :ab502e7558d2e6db5017d90239cc5dd02d1333f86dc196dd6230a67fb9dc00cf
-            another mode: C, tagged :b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa
-            another recipe: C, tagged :1988a91be3c0b7d92b2ab70ce229c81757339de6aca4806fcfbc488337e7a56d :b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa
-            built before, now refused by the check: refused "FROM scratch\nCOPY file /file\n"
+            built: A, tagged :1
+            another content: B, tagged :2
+            the first inputs, their tag moved to B: B, tagged :1 :2
+            another mode: C, tagged :3
+            another recipe: C, tagged :3 :4
+            built before, now refused by the check: refused "FROM scratch\nCOPY file id /\n"
             an absent recipe: `absent/Dockerfile` is no regular file in <dir>/context: name the build's recipe by its path there
             a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
             a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
-            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
+            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:e72ff5add1fd15aa47b0cfb11b1b0cc7d18baa49c54fdbaafbb140f329b1564a` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
     );
 }
 
@@ -814,51 +817,62 @@ fn put(dir: &Path, path: &str, text: &str, mode: u32) {
     fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// The images a test builds in `repository`, by their IDs in the order they were first built.
-/// Dropping it removes each tag they have in `repository`, and so each image no other
-/// repository tags.
+/// The images a test builds in `repository`, by their IDs in the order they were first built,
+/// and the tags it has shown, in the order they were first shown. Dropping it removes each tag
+/// the images have in `repository`, and so each image no other repository tags.
 struct Builds<'f> {
     fixture: &'f Fixture,
     repository: String,
     seen: Vec<String>,
+    shown: Vec<String>,
 }
 
 impl<'f> Builds<'f> {
     /// The images of a test that builds with `context`, in the fixture's directory, as its
-    /// context: a recipe that copies `file`, which holds `one`, into an empty image, at
-    /// `Dockerfile` and at `other/Dockerfile`; each in a repository of this process's own.
+    /// context: a recipe that copies `file`, which holds `one`, and `id`, which holds this
+    /// process's ID, into an empty image, at `Dockerfile` and at `other/Dockerfile`; each in a
+    /// repository of this process's own.
     fn new(fixture: &'f Fixture) -> Self {
         let dir = fixture.dir.join("context");
-        let recipe = "FROM scratch\nCOPY file /file\n";
+        let recipe = "FROM scratch\nCOPY file id /\n";
         put(&dir, "Dockerfile", recipe, 0o644);
         put(&dir, "other/Dockerfile", recipe, 0o644);
         put(&dir, "file", "one", 0o644);
+        // An image is named by its content, so another process's test that built the same
+        // inputs would have the same image, which removing its last tag here would delete, even
+        // between that test's build and its `docker tag`. With this process's ID, the images
+        // are its own.
+        put(&dir, "id", &std::process::id().to_string(), 0o644);
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         Self {
             fixture,
             repository: format!("pumpkin-docker-tests/builds-{}", std::process::id()),
             seen: Vec::new(),
+            shown: Vec::new(),
         }
     }
 
     /// Builds `recipe` with the fixture's `context` as its context, and shows the image, by the
     /// letter of its first build, and its tags in the repository, and the tag the build returned
-    /// if it is none of them; or why the build failed.
+    /// if it is none of them, each by the number of its first showing, as their digests cover
+    /// `id`; or why the build failed.
     fn build(&mut self, recipe: &str) -> String {
         let dir = self.fixture.dir.join("context");
         let (image, returned) = match engine().build(&dir, recipe, &self.repository, |_| Ok(())) {
             Ok(Built { image, tag }) => (image.as_str().to_owned(), tag),
             Err(error) => return redact(self.fixture, &error),
         };
-        if !self.seen.contains(&image) {
-            self.seen.push(image.clone());
-        }
-        let index = self.seen.iter().position(|seen| *seen == image).unwrap();
+        let index = first_seen(&mut self.seen, &image);
         let letter = char::from(b'A' + u8::try_from(index).unwrap());
-        let prefix = format!("{}:", self.repository);
+        // The returned tag first, so that a new tag's number doesn't rest on how tags sort.
+        let returned = 1 + first_seen(&mut self.shown, &returned);
         let tags = self.tags(&image);
-        let stray = (!tags.contains(&returned)).then(|| format!(", but returned {returned}"));
-        let tags: Vec<String> = (tags.iter()).map(|tag| tag.replace(&prefix, ":")).collect();
+        let mut tags: Vec<usize> = (tags.iter())
+            .map(|tag| 1 + first_seen(&mut self.shown, tag))
+            .collect();
+        tags.sort_unstable();
+        let stray = (!tags.contains(&returned)).then(|| format!(", but returned :{returned}"));
+        let tags: Vec<String> = tags.iter().map(|number| format!(":{number}")).collect();
         format!(
             "{letter}, tagged {}{}",
             tags.join(" "),
@@ -896,6 +910,15 @@ impl Drop for Builds<'_> {
             }
         }
     }
+}
+
+/// The index of `item` in `list`, which gets it at its end if it lacks it.
+fn first_seen(list: &mut Vec<String>, item: &str) -> usize {
+    if let Some(index) = list.iter().position(|listed| listed == item) {
+        return index;
+    }
+    list.push(item.to_owned());
+    list.len() - 1
 }
 
 /// Once a sandbox's container has stopped, its console holds what its `sandboxd` printed: here a
