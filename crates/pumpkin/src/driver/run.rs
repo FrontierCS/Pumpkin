@@ -9,6 +9,7 @@
 //! out in the `record` and `log` modules.
 
 use std::collections::VecDeque;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -17,9 +18,9 @@ use pumpkin_gateway::Arrival;
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir;
 use pumpkin_schema::provider::{RunTag, SandboxId};
-use pumpkin_schema::workflow::Workflow;
+use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::json;
-use stdx::Deadline;
+use stdx::{Context, Deadline};
 
 use crate::driver::core::{Action, Core, Event, Outcome, lasts};
 
@@ -111,6 +112,7 @@ impl Run {
         let mut runtime = Runtime {
             workflow: &self.workflow,
             startup,
+            dir: &self.dir,
             sandboxes,
             clock,
             log: Log::create(&self.dir)?,
@@ -164,6 +166,11 @@ impl Clock {
     fn now(self) -> Duration {
         self.start.elapsed()
     }
+
+    /// The deadline at `at`, a time since the run started.
+    fn deadline(self, at: Duration) -> Deadline {
+        Deadline::after(at.saturating_sub(self.now()))
+    }
 }
 
 /// `outcome`, failed also for `then`'s error, if it has one: both reasons are kept.
@@ -191,6 +198,8 @@ struct Runtime<'r> {
     workflow: &'r Workflow,
     /// The longest the provider takes to start a sandbox.
     startup: Duration,
+    /// The run's record.
+    dir: &'r Path,
     /// The run's sandboxes, and its only way to its provider.
     sandboxes: Sandboxes<'r>,
     clock: Clock,
@@ -233,6 +242,14 @@ impl Runtime<'_> {
     /// The run's hard end, since it started, as the core has it.
     fn hard_end(&self) -> Duration {
         lasts(self.workflow, self.startup)
+    }
+
+    /// When the agent's teardown is to end, since the run started: the hard end, less the final
+    /// judge's startup and timeout, so that the final judge still has both.
+    fn teardown_end(&self) -> Duration {
+        let Main::SoloThenJudge(pattern) = self.workflow.main();
+        let final_judge = self.startup.saturating_add(pattern.score.timeout);
+        self.hard_end().saturating_sub(final_judge)
     }
 
     /// Waits for the next event: one that performing an action produced; else the core's tick, if
@@ -284,9 +301,10 @@ impl Runtime<'_> {
                 // No agent: the core waits on nothing from the agent's session. The loop tears the
                 // agent down in the batch that hears of its end, or of its command's failed start,
                 // so whatever of the session's it takes after that batch comes here, such as its
-                // end as the teardown drops it, or the exit of a command whose start failed at its
-                // deadline just as the sandbox said it started. So does the end of a session that
-                // the start path dropped after its set-up failed.
+                // command's exit as the teardown's freeze kills it, its end as the teardown drops
+                // it, or the exit of a command whose start failed at its deadline just as the
+                // sandbox said it started. So does the end of a session that the start path
+                // dropped after its set-up failed.
                 let event = self.agent.as_mut()?.arrived(arrival)?;
                 Some((self.clock.now(), event))
             }
@@ -331,13 +349,29 @@ impl Runtime<'_> {
         Ok(None)
     }
 
-    /// Deletes the agent's sandbox, which kills whatever runs in it.
+    /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed. A
+    /// failure to write the record, or to delete the sandbox, is returned once both have been
+    /// tried, joined if both fail.
     fn tear_down_agent(&mut self) -> Result<(), String> {
-        let Some(agent) = self.agent.take() else {
+        let Some(mut agent) = self.agent.take() else {
             let note = "the agent's sandbox never started: nothing was collected";
             return self.log.note(self.clock.now(), note);
         };
-        agent.delete(&self.sandboxes)
+        let collected = self.collect_agent(&mut agent);
+        let deleted = agent.delete(&self.sandboxes);
+        failed_also(collected, deleted)
+    }
+
+    /// Freezes the agent's sandbox and collects what it holds into the record's `agent`, by the
+    /// teardown's end, and notes in the run log what was collected and what failed.
+    fn collect_agent(&mut self, agent: &mut Agent) -> Result<(), String> {
+        let dir = self.dir.join("agent");
+        fs::create_dir(&dir).context(dir.display())?;
+        let mut notes = agent.freeze_and_collect(&dir, self.clock.deadline(self.teardown_end()));
+        let collected = record::collected(&dir);
+        notes.push(format!("collected from the agent's sandbox: {collected}"));
+        let at = self.clock.now();
+        notes.iter().try_for_each(|note| self.log.note(at, note))
     }
 
     /// Deletes every sandbox the run's provider still lists of it, and notes which.

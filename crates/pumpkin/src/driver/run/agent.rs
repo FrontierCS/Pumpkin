@@ -1,13 +1,15 @@
 //! The agent's sandbox, which runs the agent's IR command and takes no ops.
 
+use std::path::Path;
 use std::sync::mpsc::Sender;
 
 use pumpkin_gateway::{Arrival, Process};
+use pumpkin_schema::sandbox::{log_dir, out_dir};
 use pumpkin_schema::workflow::Workflow;
 use stdx::{Context, Deadline};
 
 use super::Input;
-use super::sandbox::{Sandboxes, Started, launch};
+use super::sandbox::{PUMPKIN, Sandboxes, Started, collect, launch};
 use crate::driver::core::Event;
 
 /// The agent's sandbox, from when it starts until it is deleted.
@@ -74,6 +76,22 @@ impl Agent {
         };
         self.process = None;
         Some(event)
+    }
+
+    /// Freezes the sandbox, then collects its [`out_dir()`] and [`log_dir()`] into `dir`, all by
+    /// `by`. Returns what failed, if anything.
+    pub(super) fn freeze_and_collect(&mut self, dir: &Path, by: Deadline) -> Vec<String> {
+        let session = &mut self.sandbox.session;
+        let mut failures = Vec::new();
+        if let Err(error) = session.freeze(by) {
+            failures.push(format!("freezing the agent's sandbox failed: {error}"));
+        }
+        for part in [out_dir(), log_dir()] {
+            if let Err(error) = collect(session, &part, dir, PUMPKIN, by) {
+                failures.push(format!("the agent's {part} is incomplete: {error}"));
+            }
+        }
+        failures
     }
 
     /// Ends the agent's sandbox, with whatever still runs in it, by [`Sandboxes::delete`].

@@ -1,5 +1,5 @@
 //! The runtime's one start path, which every sandbox of a run starts on ([`Sandboxes`]), and
-//! what each role's sandbox needs of it: its IR command launched.
+//! what each role's sandbox needs of it: its IR command launched, and what it wrote collected.
 //!
 //! The provider's side of each step is [`Provider`]'s, and the session's [`Session`]'s.
 
@@ -16,9 +16,21 @@ use pumpkin_schema::ir::{Command, Image};
 use pumpkin_schema::provider::{
     Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::{Launch, command_env, command_stderr, command_stdout, pumpkin_dir};
+use pumpkin_schema::sandbox::tree::Limits;
+use pumpkin_schema::sandbox::{
+    Launch, PUMPKIN_BYTES, RelativePath, command_env, command_stderr, command_stdout, pumpkin_dir,
+};
 use pumpkin_schema::workflow::{Sandbox, Workflow};
 use stdx::{Context, Deadline};
+
+/// The most entries a collected tree may hold.
+const ENTRIES: u64 = 100_000;
+
+/// What a sandbox's `/pumpkin` holds at most: anything collected from below it fits.
+pub(super) const PUMPKIN: Limits = Limits {
+    bytes: PUMPKIN_BYTES,
+    entries: ENTRIES,
+};
 
 /// The sandboxes of one run on its provider: what they run, published, and the directory of
 /// their socket directories, which only the gateway's user may enter. Dropping it removes that
@@ -201,4 +213,20 @@ pub(super) fn launch(command: &Command) -> Launch {
         stdout: pumpkin_dir().join(&command_stdout()),
         stderr: pumpkin_dir().join(&command_stderr()),
     }
+}
+
+/// Collects the sandbox's `dir`, below [`pumpkin_dir()`], into the same path below `record`, a
+/// new directory there, within `limits`, by `by`. After a failure, it holds what arrived before
+/// it.
+pub(super) fn collect(
+    session: &mut Session,
+    dir: &RelativePath,
+    record: &Path,
+    limits: Limits,
+    by: Deadline,
+) -> Result<(), String> {
+    let from = pumpkin_dir().join(dir);
+    session
+        .collect(&from, &record.join(dir.as_str()), limits, by)
+        .context(format_args!("collecting {from} failed"))
 }
