@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use pumpkin_schema::ir::Name;
 use stdx::Context;
 
+use crate::recipe;
+
 /// A task ported from FrontierCS, as its directory describes it.
 #[derive(Debug)]
 pub struct Task {
@@ -18,15 +20,20 @@ pub struct Task {
 
 impl Task {
     /// The task in `dir`, a ported task's directory: its problem id is the directory's name,
-    /// which is all of the directory that `load` reads.
+    /// and its images' recipes must pass the check of the factory's `recipe` module. The name
+    /// and the recipes are all of the directory that `load` reads. The recipes are checked as
+    /// `load` reads them, and [`Task::build`] builds them as they are when it runs.
     ///
     /// # Errors
     ///
-    /// Fails, naming the directory, if its name isn't a problem id.
+    /// Fails, naming the directory, if its name isn't a problem id; or, naming the recipe, if
+    /// a recipe can't be read, or, with its line, if the check refuses it.
     pub fn load(dir: &Path) -> Result<Self, String> {
+        let problem_id = problem_id(dir)?;
+        recipe::check(dir)?;
         Ok(Self {
             dir: dir.to_owned(),
-            problem_id: problem_id(dir)?,
+            problem_id,
         })
     }
 }

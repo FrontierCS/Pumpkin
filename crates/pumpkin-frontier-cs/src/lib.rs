@@ -4,6 +4,7 @@
 //! both.
 
 mod images;
+mod recipe;
 mod task;
 
 pub use images::Images;

@@ -5,13 +5,7 @@ use pumpkin_schema::ir::Image;
 use serde::Serialize;
 use stdx::Context;
 
-use crate::Task;
-
-/// Where a task's directory holds the recipe of the agent's image.
-const AGENT_RECIPE: &str = "agent-base/Dockerfile";
-
-/// Where a task's directory holds the recipe of the verifier's image.
-const VERIFIER_RECIPE: &str = "verifier/Dockerfile";
+use crate::{Task, recipe};
 
 /// A ported task's images, by their IDs, as JSON writes them: `{"agent": <ID>, "verifier":
 /// <ID>}`.
@@ -37,8 +31,8 @@ impl Task {
             (engine.build(&self.dir, recipe, &repository)).context(&repository)
         };
         Ok(Images {
-            agent: image("agent", AGENT_RECIPE)?,
-            verifier: image("verifier", VERIFIER_RECIPE)?,
+            agent: image("agent", recipe::AGENT)?,
+            verifier: image("verifier", recipe::VERIFIER)?,
         })
     }
 }

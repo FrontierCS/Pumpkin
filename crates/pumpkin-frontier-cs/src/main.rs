@@ -34,9 +34,10 @@ mod flags {
             /// inputs: the agent's from `agent-base/Dockerfile`, and the verifier's from
             /// `verifier/Dockerfile`, with the task's directory as their context, each tagged
             /// `pumpkin-frontier-cs/<problem id>/<agent or verifier>:<digest>` by the digest of
-            /// the build's options, its recipe and its context's files. A build's progress goes
-            /// to standard error. Prints the images' IDs as JSON, and exits with 0, 2 on a usage
-            /// error, and 1 on any other error.
+            /// the build's options, its recipe and its context's files. Refuses first a recipe
+            /// that may have Docker fetch an image not pinned by digest, a frontend or a URL. A
+            /// build's progress goes to standard error. Prints the images' IDs as JSON, and exits
+            /// with 0, 2 on a usage error, and 1 on any other error.
             cmd build {
                 /// The task's directory, `tasks/frontier-cs/<problem id>`.
                 required task: PathBuf
