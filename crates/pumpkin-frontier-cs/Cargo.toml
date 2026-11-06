@@ -15,6 +15,7 @@ test = false
 
 [dependencies]
 pumpkin-docker = { path = "../../providers/docker" }
+pumpkin-harness = { path = "../pumpkin-harness" }
 pumpkin-schema = { path = "../pumpkin-schema" }
 stdx = { path = "../stdx" }
 serde.workspace = true

@@ -110,9 +110,15 @@ whose files `record` lays out, and its run log, whose records `log` does.
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
 
+**`crates/pumpkin-harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
+`Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
+directory the in-sandbox contract reserves for it.
+- **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates it depends
+  only on `pumpkin-schema`, so a harness reaches an agent alike whichever factory builds its image.
+
 **`crates/pumpkin-frontier-cs`.** The FrontierCS factory, which builds the images of a task
 ported from FrontierCS as data, each in `tasks/frontier-cs/<problem id>/`, from its `Task`, read
-once from that directory.
+once from that directory, and adds Codex to its agent's.
 - **Architecture Invariant:** no crate depends on it, so nothing that runs a workflow knows
   where a task came from.
 

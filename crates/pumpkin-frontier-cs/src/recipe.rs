@@ -1,5 +1,6 @@
 //! A ported task's image recipes, `agent-base/Dockerfile` and `verifier/Dockerfile` in its
-//! directory, and the check [`Task::load`](crate::Task::load) makes of them, as [`check`] does.
+//! directory, and the check that [`Task::load`](crate::Task::load) makes of them, and
+//! [`Task::build`](crate::Task::build) again of the bytes it builds, as [`check`] does.
 //!
 //! An image's tag names what it is built from only where its recipe pins all that its build
 //! fetches (`Engine::build`). So the check refuses a recipe that may have Docker fetch:
@@ -54,24 +55,35 @@ const INERT: [&str; 13] = [
     "WORKDIR",
 ];
 
-/// Checks the recipes in `dir`, a ported task's directory, as the [module](self) says.
+/// Checks the recipes in `dir`, a ported task's directory, as [`check`] does.
 ///
 /// # Errors
 ///
-/// Fails if a recipe can't be read as UTF-8, or on the first thing the check refuses, naming
-/// the recipe and the line its instruction starts on.
-pub(crate) fn check(dir: &Path) -> Result<(), String> {
+/// Fails, naming the recipe, if a recipe can't be read, or as [`check`] does.
+pub(crate) fn check_all(dir: &Path) -> Result<(), String> {
     for recipe in [AGENT, VERIFIER] {
         let path = dir.join(recipe);
-        let text = fs::read_to_string(&path).map_err(|error| {
+        let text = fs::read(&path).map_err(|error| {
             format!(
                 "{}: {error}: give a ported task's directory, which holds this recipe in UTF-8",
                 path.display()
             )
         })?;
-        read(&text).map_err(|(line, error)| format!("{}:{line}: {error}", path.display()))?;
+        check(&path, &text)?;
     }
     Ok(())
+}
+
+/// Checks `text`, the recipe at `path`, as the [module](self) says.
+///
+/// # Errors
+///
+/// Fails, naming `path`, if `text` isn't UTF-8, or on the first thing the check refuses, with
+/// the line its instruction starts on.
+pub(crate) fn check(path: &Path, text: &[u8]) -> Result<(), String> {
+    let text = str::from_utf8(text)
+        .map_err(|error| format!("{}: {error}: write the recipe in UTF-8", path.display()))?;
+    read(text).map_err(|(line, error)| format!("{}:{line}: {error}", path.display()))
 }
 
 /// Checks `text`, a recipe, an instruction at a time, with its continued lines joined as

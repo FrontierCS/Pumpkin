@@ -52,26 +52,51 @@ const FORM: &str = "pumpkin-build/1";
 // make an image of its own even from the cache. `--provenance` is Buildx's, from its version
 // 0.10. Docker 23.0 ships Buildx 0.10.2 as a plugin, which `docker build` runs when it is
 // installed; without it, `docker build` falls back to the classic builder, which has no such
-// option, so the provider needs Docker 23.0 or later with its Buildx plugin.
+// option. And the recipe that adds a harness to an agent's image (`Pin::recipe`) fetches with
+// `ADD --checksum`, which BuildKit's Dockerfile frontend takes outside its labs channel only
+// from BuildKit 0.12, which Docker 25.0 is the first to ship. So the provider needs Docker 25.0
+// or later with its Buildx plugin.
 const OPTIONS: [&str; 1] = ["--provenance=false"];
+
+/// An image that [`Engine::build`] built or found.
+#[derive(Debug)]
+pub struct Built {
+    /// The image's ID.
+    pub image: Image,
+    /// The tag `build` found the image by or gave it, `<repository>:<hex>`, by which a recipe's
+    /// `FROM` can name it, until another build of the same inputs moves it to its own image.
+    pub tag: String,
+}
 
 impl Engine {
     /// The image that `recipe`, a Dockerfile's path in `dir`, builds with `dir` as its context,
     /// tagged `<repository>:<hex>`, the hexadecimal digits of the digest of the build's inputs:
     /// the options it is built with, `recipe`, and the path, permission bits and content of
-    /// each directory and regular file in `dir`, but not their owners or times. It is the image
-    /// the engine has under that tag, or else one built now, with its progress on this
-    /// process's standard error, and then tagged. The tag covers what an image is built from
-    /// only where its recipe names by digest whatever it fetches, such as its base images.
+    /// each directory and regular file in `dir`, but not their owners or times. Once `check`
+    /// has passed the recipe's bytes, those the digest covers, it is the image the engine has
+    /// under that tag, or else one built now, with its progress on this process's standard
+    /// error, and then tagged. The tag covers what an image is built from only where its recipe
+    /// names by digest whatever it fetches, such as its base images.
     ///
     /// # Errors
     ///
     /// Fails if `dir` can't be read, or holds anything but directories and regular files, or a
     /// name that isn't UTF-8 or holds whitespace or a control character; if `recipe` is no
-    /// regular file in it; if `docker` can't look the tag up, build the image, as its progress
-    /// then says, or tag it; or if `dir` changed during the build.
-    pub fn build(&self, dir: &Path, recipe: &str, repository: &str) -> Result<Image, String> {
-        let hex = Inputs::read(dir, recipe)?.digest();
+    /// regular file in it; as `check` does; if `docker` can't look the tag up, build the image,
+    /// as its progress then says, or tag it; or if `dir` changed during the build.
+    pub fn build(
+        &self,
+        dir: &Path,
+        recipe: &str,
+        repository: &str,
+        check: impl FnOnce(&[u8]) -> Result<(), String>,
+    ) -> Result<Built, String> {
+        let inputs = Inputs::read(dir, recipe)?;
+        // The check reads the very bytes the digest covers, so the image comes from bytes it
+        // passed: a found one, as its tag names them, and one built now, as it is tagged only
+        // if the inputs, read again after the build, have the same digest.
+        check(&inputs.text)?;
+        let hex = inputs.digest();
         let tag = format!("{repository}:{hex}");
         let context = &self.report.context;
         let found = image_id(context, &tag).map_err(|error| {
@@ -80,7 +105,8 @@ impl Engine {
             ))
         })?;
         if let Some(id) = found {
-            return Image::try_from(id);
+            let image = Image::try_from(id)?;
+            return Ok(Built { image, tag });
         }
         let image = build_untagged(context, dir, recipe, &hex)?;
         // The build reads a file when its recipe copies it, which can be minutes after the
@@ -100,7 +126,7 @@ impl Engine {
         let tagged = docker(context, ["tag", "--", image.as_str(), &tag]);
         tagged
             .map_err(|error| fix_reported(format!("{image} can't be tagged `{tag}`: {error}")))?;
-        Ok(image)
+        Ok(Built { image, tag })
     }
 }
 
@@ -153,6 +179,8 @@ fn build_untagged(
 struct Inputs {
     /// The recipe's path in the context, which names a regular file there.
     recipe: String,
+    /// The recipe's bytes, whose SHA-256 its entry in `entries` holds.
+    text: Vec<u8>,
     /// The context's permission bits.
     root: u32,
     /// Each directory and regular file below the context's root, by its path.
@@ -172,15 +200,21 @@ impl Inputs {
         let metadata = fs::metadata(dir).context(dir.display())?;
         let mut entries = BTreeMap::new();
         read_dir(dir, "", &mut entries)?;
-        let Some(Entry::File { .. }) = entries.get(recipe) else {
+        let Some(Entry::File { sha256, .. }) = entries.get_mut(recipe) else {
             return Err(format!(
                 "`{}` is no regular file in {}: name the build's recipe by its path there",
                 recipe.escape_debug(),
                 dir.display()
             ));
         };
+        // Read again, whole, and hashed from these bytes, so that the digest covers the very
+        // bytes a check of `text` reads, even if the file changed since it was first hashed.
+        let path = dir.join(recipe);
+        let text = fs::read(&path).context(path.display())?;
+        *sha256 = hex(&Sha256::digest(&text));
         Ok(Self {
             recipe: recipe.to_owned(),
+            text,
             root: metadata.permissions().mode() & PERMISSION_BITS,
             entries,
         })

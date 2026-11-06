@@ -20,9 +20,9 @@ pub struct Task {
 
 impl Task {
     /// The task in `dir`, a ported task's directory: its problem id is the directory's name,
-    /// and its images' recipes must pass the check of the factory's `recipe` module. The name
-    /// and the recipes are all of the directory that `load` reads. The recipes are checked as
-    /// `load` reads them, and [`Task::build`] builds them as they are when it runs.
+    /// and its images' recipes must pass the check of the factory's `recipe` module, which
+    /// [`Task::build`] makes again of the bytes it builds. The name and the recipes are all of
+    /// the directory that `load` reads.
     ///
     /// # Errors
     ///
@@ -30,7 +30,7 @@ impl Task {
     /// a recipe can't be read, or, with its line, if the check refuses it.
     pub fn load(dir: &Path) -> Result<Self, String> {
         let problem_id = problem_id(dir)?;
-        recipe::check(dir)?;
+        recipe::check_all(dir)?;
         Ok(Self {
             dir: dir.to_owned(),
             problem_id,

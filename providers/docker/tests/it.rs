@@ -25,7 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{ContextName, Engine, Report, Security};
+use pumpkin_docker::{Built, ContextName, Engine, Report, Security};
 use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, Session};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
@@ -726,8 +726,9 @@ fn redact(fixture: &Fixture, message: &str) -> String {
 
 /// A build is tagged by its inputs, and found by that tag rather than built again: another
 /// file's content, another mode or another recipe gives another tag, and the same inputs give
-/// the image their tag names, even one another build made. A context that can't name its
-/// inputs is refused before anything is built, and so is a repository that Docker can't tag.
+/// the image their tag names, even one another build made, unless the check refuses the recipe
+/// it is given. A context that can't name its inputs is refused before anything is built, and
+/// so is a repository that Docker can't tag.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn builds() {
@@ -752,6 +753,10 @@ fn builds() {
                 "another recipe: {}",
                 builds.build("other/Dockerfile")
             ));
+            let refuse = |text: &[u8]| Err(format!("refused {:?}", String::from_utf8_lossy(text)));
+            let refused = engine().build(&dir, "Dockerfile", &builds.repository, refuse);
+            let refused = redact(fixture, &refused.unwrap_err());
+            lines.push(format!("built before, now refused by the check: {refused}"));
             lines.push(format!(
                 "an absent recipe: {}",
                 builds.build("absent/Dockerfile")
@@ -767,7 +772,8 @@ fn builds() {
                 ));
                 fs::remove_file(dir.join(name)).unwrap();
             }
-            let uppercase = engine().build(&dir, "Dockerfile", "pumpkin-docker-tests/Builds");
+            let repository = "pumpkin-docker-tests/Builds";
+            let uppercase = engine().build(&dir, "Dockerfile", repository, |_| Ok(()));
             let refused = redact(fixture, &uppercase.unwrap_err());
             lines.push(format!("an uppercase repository: {refused}"));
             lines
@@ -778,6 +784,7 @@ fn builds() {
             the first inputs, their tag moved to B: B, tagged :1c042791ca468b29c6683836ec3f357728cb8febc26fd3514595b6cfea292c15 :ab502e7558d2e6db5017d90239cc5dd02d1333f86dc196dd6230a67fb9dc00cf
             another mode: C, tagged :b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa
             another recipe: C, tagged :1988a91be3c0b7d92b2ab70ce229c81757339de6aca4806fcfbc488337e7a56d :b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa
+            built before, now refused by the check: refused "FROM scratch\nCOPY file /file\n"
             an absent recipe: `absent/Dockerfile` is no regular file in <dir>/context: name the build's recipe by its path there
             a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
@@ -835,11 +842,12 @@ impl<'f> Builds<'f> {
     }
 
     /// Builds `recipe` with the fixture's `context` as its context, and shows the image, by the
-    /// letter of its first build, and its tags in the repository, or why the build failed.
+    /// letter of its first build, and its tags in the repository, and the tag the build returned
+    /// if it is none of them; or why the build failed.
     fn build(&mut self, recipe: &str) -> String {
         let dir = self.fixture.dir.join("context");
-        let image = match engine().build(&dir, recipe, &self.repository) {
-            Ok(image) => image.as_str().to_owned(),
+        let (image, returned) = match engine().build(&dir, recipe, &self.repository, |_| Ok(())) {
+            Ok(Built { image, tag }) => (image.as_str().to_owned(), tag),
             Err(error) => return redact(self.fixture, &error),
         };
         if !self.seen.contains(&image) {
@@ -849,8 +857,13 @@ impl<'f> Builds<'f> {
         let letter = char::from(b'A' + u8::try_from(index).unwrap());
         let prefix = format!("{}:", self.repository);
         let tags = self.tags(&image);
+        let stray = (!tags.contains(&returned)).then(|| format!(", but returned {returned}"));
         let tags: Vec<String> = (tags.iter()).map(|tag| tag.replace(&prefix, ":")).collect();
-        format!("{letter}, tagged {}", tags.join(" "))
+        format!(
+            "{letter}, tagged {}{}",
+            tags.join(" "),
+            stray.unwrap_or_default()
+        )
     }
 
     /// The tags `image` has in the repository, sorted, or none if the engine has no such image.

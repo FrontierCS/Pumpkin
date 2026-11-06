@@ -37,7 +37,7 @@
 //! containers, and only those, even when the process that started them is gone, and with its
 //! role's name, so that `docker ps` shows which is which. The provider runs on a rootful engine
 //! or a rootless one, and its report says which ([`Security::rootless`]). It builds and tags
-//! images on Docker 23.0 or later with its Buildx plugin ([`Engine::build`]).
+//! images on Docker 25.0 or later with its Buildx plugin ([`Engine::build`]).
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -59,6 +59,8 @@ use stdx::Context;
 use stdx::process::Environment;
 
 mod build;
+
+pub use build::Built;
 
 /// The most seconds a sandbox's start takes, as [`Capabilities::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();

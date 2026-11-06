@@ -136,6 +136,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "pumpkin-docker",
+ "pumpkin-harness",
  "pumpkin-schema",
  "serde",
  "serde_json",
@@ -151,6 +152,14 @@ dependencies = [
  "pumpkin-schema",
  "serde_json",
  "stdx",
+]
+
+[[package]]
+name = "pumpkin-harness"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "pumpkin-schema",
 ]
 
 [[package]]
