@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, mem};
 
@@ -110,7 +110,6 @@ impl Run {
         let sandboxes = Sandboxes::create(provider, self.tag(), &self.workflow, sandboxd)?;
         let clock = Clock::start();
         let unix = record::since_epoch(clock.unix)?;
-        let (sender, inbox) = mpsc::channel();
         let mut runtime = Runtime {
             workflow: &self.workflow,
             startup,
@@ -123,8 +122,7 @@ impl Run {
             unanswered: None,
             next_op: 0,
             pending: VecDeque::new(),
-            inbox,
-            sender,
+            inbox: Inbox::new(),
         };
         let outcome = runtime.drive(unix);
         let outcome = failed_also(outcome, runtime.sweep());
@@ -281,11 +279,7 @@ struct Runtime<'r> {
     /// Events that performing actions produced, to feed the core next.
     pending: VecDeque<(Duration, Event)>,
     /// What reaches the loop from other threads, which it waits on until the core's next tick.
-    inbox: Receiver<Input>,
-    /// The inbox's sender, which the runtime clones for each session's sink.
-    // Kept, so that the inbox never disconnects while the loop waits on it, with or without a
-    // session.
-    sender: Sender<Input>,
+    inbox: Inbox<Input>,
 }
 
 /// What reaches the loop through its inbox.
@@ -295,6 +289,57 @@ enum Input {
     ///
     /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
     Agent(Arrival),
+}
+
+/// What other threads send a thread, in the order they sent it, for it to wait on.
+struct Inbox<T> {
+    receiver: Receiver<T>,
+    // Kept, so that the inbox never disconnects while its owner waits on it, whoever else holds
+    // a sender.
+    sender: Sender<T>,
+}
+
+impl<T> Inbox<T> {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self { receiver, sender }
+    }
+
+    /// A sender into the inbox.
+    fn sender(&self) -> Sender<T> {
+        self.sender.clone()
+    }
+
+    /// What arrives first by `until`, or once it has passed, what the inbox holds, if anything.
+    fn wait(&self, until: Deadline) -> Option<T> {
+        let Some(left) = until.remaining() else {
+            return self.take();
+        };
+        match self.receiver.recv_timeout(left) {
+            Ok(item) => Some(item),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => disconnected(),
+        }
+    }
+
+    /// What the inbox holds first, if anything.
+    fn take(&self) -> Option<T> {
+        match self.receiver.try_recv() {
+            Ok(item) => Some(item),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => disconnected(),
+        }
+    }
+}
+
+#[expect(
+    clippy::unreachable,
+    reason = "an inbox holds a sender of its own, so its channel can't disconnect while the inbox \
+              is borrowed to wait on it; `std`'s channel reports a disconnection, which a channel \
+              with a sender never has, in the same errors as a timeout and an empty channel"
+)]
+fn disconnected() -> ! {
+    unreachable!("an inbox disconnected, though it holds a sender")
 }
 
 impl Runtime<'_> {
@@ -354,23 +399,15 @@ impl Runtime<'_> {
         let Some(due) = core.tick_due() else {
             unreachable!("the run is still going, yet the core has no tick due")
         };
+        let until = self.clock.deadline(due);
         loop {
-            let now = self.clock.now();
-            let Some(wait) = due.checked_sub(now).filter(|wait| !wait.is_zero()) else {
-                return Ok((now, Event::Tick));
+            let input = if until.remaining().is_none() {
+                None
+            } else {
+                self.inbox.wait(until)
             };
-            let input = match self.inbox.recv_timeout(wait) {
-                Ok(input) => input,
-                // The tick is due, which the next turn finds.
-                Err(RecvTimeoutError::Timeout) => continue,
-                #[expect(
-                    clippy::unreachable,
-                    reason = "the runtime keeps `sender` for as long as it waits on the inbox; no \
-                              type says so, since a receiver can't know of its owner's sender"
-                )]
-                Err(RecvTimeoutError::Disconnected) => {
-                    unreachable!("the inbox disconnected, though the runtime keeps a sender")
-                }
+            let Some(input) = input else {
+                return Ok((self.clock.now(), Event::Tick));
             };
             if let Some(event) = self.arrived(input, due)? {
                 return Ok(event);
@@ -449,7 +486,7 @@ impl Runtime<'_> {
         // this drops it then, its sandbox left to the sweep: either way, its reader has handed
         // over all it will by now.
         self.agent = None;
-        while let Ok(input) = self.inbox.try_recv() {
+        while let Some(input) = self.inbox.take() {
             let Some((at, event)) = self.arrived(input, self.answers_due(core))? else {
                 continue;
             };
@@ -483,7 +520,7 @@ impl Runtime<'_> {
                     // The agent starts at the run's start, so its startup ends long before the
                     // hard end, which counts it.
                     let by = Deadline::after(self.startup);
-                    let sender = self.sender.clone();
+                    let sender = self.inbox.sender();
                     let (agent, event) = Agent::start(&self.sandboxes, self.workflow, by, sender);
                     self.agent = agent;
                     self.pending.push_back((self.clock.now(), event));
