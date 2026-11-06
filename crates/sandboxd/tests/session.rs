@@ -14,15 +14,16 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin_gateway::{Listener, Put, Session};
+use pumpkin_gateway::{Arrival, Listener, Process, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{Launch, RelativePath};
+use pumpkin_schema::sandbox::{ExitStatus, Launch, RelativePath};
 use stdx::Deadline;
 use stdx::process::Environment;
 
@@ -39,6 +40,7 @@ fn hung() -> Deadline {
 struct Sandbox {
     root: PathBuf,
     session: Session,
+    arrivals: Receiver<Arrival>,
     sandboxd: Child,
     commands: Cell<u32>,
 }
@@ -61,7 +63,9 @@ impl Sandbox {
             .arg(&socket)
             .spawn()
             .unwrap();
-        let mut session = listener.accept(hung(), None).unwrap();
+        let (sender, arrivals) = mpsc::channel();
+        let accepted = listener.accept(hung(), None, sender, |arrival| arrival);
+        let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
             .put(&absolute(&root), &dirs.each_ref().map(Put::Dir), hung())
@@ -69,8 +73,21 @@ impl Sandbox {
         Self {
             root,
             session,
+            arrivals,
             sandboxd,
             commands: Cell::new(0),
+        }
+    }
+
+    /// How `process` exited, if its exit is what arrives next, within `wait`.
+    fn exit(&self, process: Process, wait: Duration) -> Option<ExitStatus> {
+        match self.arrivals.recv_timeout(wait) {
+            Ok(Arrival::Exited {
+                process: exited,
+                status,
+            }) if exited == process => Some(status),
+            Err(RecvTimeoutError::Timeout) => None,
+            arrived => panic!("the exit of {process:?} was to arrive, not {arrived:?}"),
         }
     }
 
@@ -190,19 +207,26 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
     panic!("sandboxd ran on 10 s after its session ended: it should exit with the session");
 }
 
-/// Runs `scenario` against a new sandbox, ends the session, and checks what the scenario
-/// reported, how `sandboxd` exited, and how many processes were left running in the sandbox,
-/// against `expect`. Those left get 2 s to exit, and are then killed.
+/// Runs `scenario` against a new sandbox, ends the session by dropping it, and checks what the
+/// scenario reported, what arrived after it, how `sandboxd` exited, and how many processes were
+/// left running in the sandbox, against `expect`. Those left get 2 s to exit, and are then
+/// killed.
 fn check(name: &str, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
     let mut sandbox = Sandbox::start(name);
     let mut lines = scenario(&mut sandbox);
     let Sandbox {
         root,
         session,
+        arrivals,
         mut sandboxd,
         ..
     } = sandbox;
     drop(session);
+    lines.extend(
+        arrivals
+            .try_iter()
+            .map(|arrival| format!("then {arrival:?}")),
+    );
     lines.push(format!("sandboxd: {}", exited(&mut sandboxd)));
     let left = processes(&root, Duration::from_secs(2), <[u32]>::is_empty);
     lines.push(format!("left running: {}", left.len()));
@@ -244,8 +268,8 @@ fn judge() {
                 echo warning >&2
                 exit 3"#;
             let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
-            let mut judge = sandbox.session.start(launch, hung()).unwrap();
-            let exited = judge.wait(Duration::from_secs(10)).unwrap().unwrap();
+            let judge = sandbox.session.start(launch, hung()).unwrap();
+            let exited = sandbox.exit(judge, Duration::from_secs(10)).unwrap();
             let mut lines = vec![format!("exited: {exited:?}")];
             sandbox.session.freeze(hung()).unwrap();
             lines.extend(sandbox.collect("out").unwrap());
@@ -262,6 +286,7 @@ fn judge() {
             payload collected intact: true
             log/1.stderr: warning
             log/1.stdout: home=/pumpkin/home mode=train in $ROOT/home
+            then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
     );
@@ -275,12 +300,12 @@ fn freezing() {
         "freezing",
         |sandbox| {
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
-            let mut group = sandbox.session.start(launch, hung()).unwrap();
+            let group = sandbox.session.start(launch, hung()).unwrap();
             // The shell and both sleeps, so that freezing finds each of them to kill.
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
             sandbox.session.freeze(hung()).unwrap();
-            let exited = group.wait(Duration::ZERO).unwrap();
+            let exited = sandbox.exit(group, Duration::ZERO);
             let mut lines = vec![
                 format!("running before freezing: {}", running.len()),
                 format!("exited when frozen: {exited:?}"),
@@ -293,6 +318,7 @@ fn freezing() {
             running before freezing: 3
             exited when frozen: Some(Signal(9))
             start after freezing: the sandbox is frozen: start commands before freezing it
+            then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
     );
@@ -359,6 +385,7 @@ fn refusals() {
             same file twice: in/file: File exists (os error 17)
             link: $ROOT/out/link is neither a directory nor a regular file: collect only those
             missing: $ROOT/missing: No such file or directory (os error 2)
+            then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
     );
@@ -382,6 +409,7 @@ fn ending_the_session() {
         },
         &expect![[r#"
             running: 1
+            then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
     );

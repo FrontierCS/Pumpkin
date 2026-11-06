@@ -20,9 +20,10 @@
 //! # Ops
 //!
 //! A sandbox whose session takes ops ([`Listener::accept`]) may make them, as
-//! [the protocol](pumpkin_schema::sandbox) describes: the owner takes each with
-//! [`Session::next_op`] and answers it with [`Session::reply`]. The gateway authorizes nothing,
-//! but bounds what ops cost the host, and ends a session whose sandbox breaks the ops' rules.
+//! [the protocol](pumpkin_schema::sandbox) describes: each reaches the owner as an [`Arrival`],
+//! which it answers with [`Session::reply`], or [`Session::refuse`] if the payload was over the
+//! session's limit. The gateway authorizes nothing, but bounds what ops cost the host, and ends a
+//! session whose sandbox breaks the ops' rules.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Write};
@@ -31,9 +32,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs, mem, process};
 
@@ -45,19 +46,6 @@ use pumpkin_schema::sandbox::{
     ToSandbox, frame, pumpkin_dir, pumpkin_subdirs,
 };
 use stdx::Deadline;
-
-/// How many frames of a tree may wait for the request writing it. While that many wait, the
-/// session reads nothing more.
-// One frame of slack. Reading the socket and writing to disk overlap without any, as the reader
-// reads a frame while the request writes the one before; the slack lets the reader hand over
-// the frame it has read and go on reading before that write ends. The gateway then holds at
-// most three frames of a tree, one being written, one waiting and one being read, each with up
-// to a frame's 1 MiB body; more would hold more without speeding the transfer, which goes at
-// the pace of the slower side.
-const QUEUED_TREE_FRAMES: usize = 1;
-
-/// How many frames may wait for any other request: its reply and, for a command, its exit.
-const QUEUED_REPLIES: usize = 2;
 
 /// The number of the next session the process makes, which tells it apart from every other, so
 /// that an op is answered only on the session it arrived on.
@@ -84,16 +72,26 @@ impl Listener {
         Ok(Self { listener, path })
     }
 
-    /// Waits until `by` for the sandbox to connect, then removes the socket. The session
-    /// takes ops if `ops` gives the most bytes an op's payload may hold: it holds one payload at
-    /// most, and refuses a payload over the limit ([`Arrival::Refused`]), keeping none of its
-    /// bytes. With `None`, an op breaks the protocol.
+    /// Waits until `by` for the sandbox to connect, then removes the socket. The session's
+    /// reader thread sends each [`Arrival`] on `arrivals` as `wrap` makes it; `wrap` runs on the
+    /// reader, which it holds up, so it only wraps.
+    /// Only [`Arrival::Exited`] names its session, so give each live session a receiver of its
+    /// own; one may serve the next session once this one has dropped ([`Session`]).
+    /// The session takes ops if `ops` gives the most bytes an op's payload may hold: it holds
+    /// one payload at most, and keeps none of the bytes of a payload over the limit
+    /// ([`Arrival::Refused`]). With `None`, an op breaks the protocol.
     ///
     /// # Errors
     ///
     /// Fails with [`io::ErrorKind::TimedOut`] if nothing connects by `by`, or if accepting the
     /// connection or setting up its session fails.
-    pub fn accept(self, by: Deadline, ops: Option<OpPayloadLimit>) -> io::Result<Session> {
+    pub fn accept<T: Send + 'static>(
+        self,
+        by: Deadline,
+        ops: Option<OpPayloadLimit>,
+        arrivals: Sender<T>,
+        wrap: fn(Arrival) -> T,
+    ) -> io::Result<Session> {
         let path = self.path.display();
         self.listener
             .set_nonblocking(true)
@@ -122,7 +120,13 @@ impl Listener {
         stream
             .set_nonblocking(false)
             .map_err(|error| context("the sandbox's connection can't be made blocking", &error))?;
-        Session::new(stream, ops)
+        // Unbounded, so the reader never waits on its owner; the protocol bounds what waits
+        // there: the op in flight, the exit of each command the owner started, and the end. An
+        // owner that has dropped its receiver hears nothing more, as it chose.
+        let send = move |arrival| {
+            let _ = arrivals.send(wrap(arrival));
+        };
+        Session::new(stream, ops, Box::new(send))
     }
 }
 
@@ -136,26 +140,26 @@ impl Drop for Listener {
 /// A sandbox's session, which one owner drives: it alone writes to the sandbox.
 ///
 /// Requests on it block until `sandboxd` answers, their deadline passes, or the session ends.
-/// Dropping it ends the session, which stops the sandbox.
+/// Dropping it ends the session, which stops the sandbox, and returns once the reader has sent
+/// its last arrival, the end.
 #[derive(Debug)]
 pub struct Session {
-    /// The session's number, from [`NEXT_SESSION`], which its ops carry.
+    /// The session's number, from [`NEXT_SESSION`], which its ops and commands carry.
     id: u64,
     connection: UnixStream,
     // Shared with the reader thread, which routes the sandbox's frames by them, and removes a
     // route once its command has exited or nothing receives from it.
     routes: Arc<Mutex<Routes>>,
-    // Shared with the reader thread, which may end the session, and with each `Process`, which
-    // reports why it ended. Set under the routes' lock, which `end` explains.
+    // Shared with the reader thread, which may end the session. Set under the routes' lock,
+    // which `end` explains.
     ended: Arc<OnceLock<String>>,
     next_stream: u32,
-    /// The op that has arrived whole, or that the gateway refuses, if any, from the reader
-    /// thread.
-    ops: Receiver<Arrival>,
+    /// The reader thread, `Some` until the drop joins it.
+    reader: Option<JoinHandle<()>>,
 }
 
-/// Where frames from the sandbox go: the requests waiting for them, by stream, and whether the
-/// sandbox may open an op.
+/// Where frames from the sandbox go: the requests waiting for them and the commands running, by
+/// stream, and whether the sandbox may open an op.
 #[derive(Debug)]
 struct Routes {
     open: BTreeMap<u32, Route>,
@@ -163,20 +167,26 @@ struct Routes {
     op: Option<u32>,
 }
 
-/// The way to a request waiting for frames.
-#[derive(Clone, Debug)]
-struct Route {
-    // The reader thread sends the request's frames, which the session's owner receives.
-    sender: SyncSender<Reply>,
-    queue: Queue,
+/// Where the frames on a stream go.
+#[derive(Debug)]
+enum Route {
+    /// To a request, which the session's owner waits on.
+    Request {
+        sender: SyncSender<Reply>,
+        queue: Queue,
+    },
+    /// To the owner, as an arrival: a started command's exit, its stream's last frame.
+    Running,
 }
 
 /// What a request waits for.
 #[derive(Clone, Copy, Debug)]
 enum Queue {
-    /// A reply and, for a command, its exit: a frame that finds the queue full breaks the
-    /// protocol.
+    /// A reply: a frame that finds the queue full breaks the protocol.
     Replies,
+    /// A command's start's reply, as `Replies`; once it is `Done`, the command runs
+    /// ([`Route::Running`]).
+    Start,
     /// A tree, whose frames wait for the request to write them.
     Tree,
 }
@@ -221,93 +231,104 @@ pub enum Op {
     Status { job: u64 },
 }
 
-/// What arrived for the session's owner, as [`Session::next_op`] hands it out: an op to answer,
-/// or word of one that the gateway refused itself.
+/// What the session's reader hands its owner ([`Listener::accept`]), in the order the sandbox
+/// sent it, ending with the session's end, once.
 #[derive(Debug)]
 #[must_use = "an arrival may hold an op, and an op dropped unanswered wedges the sandbox's ops: \
-              answer each with `Session::reply`"]
+              answer each with `Session::reply` or `Session::refuse`"]
 pub enum Arrival {
     /// An op that arrived whole, for the owner to answer.
     Op(IncomingOp),
-    /// An op whose payload was over the session's limit. The gateway refused it, and sent the
-    /// refusal unless the session had ended, so the owner answers nothing, but learns that the
-    /// op was made.
+    /// An op whose payload was over the session's limit, for the owner to refuse.
     Refused(RefusedOp),
+    /// The exit of the command [`Session::start`] returned `process` for.
+    Exited {
+        process: Process,
+        status: ExitStatus,
+    },
+    /// The session's end, for `reason`, for which its requests fail too.
+    Ended { reason: String },
 }
 
-/// An op that the gateway refused, since its payload was over the session's limit, and whose
-/// refusal it sent unless the session had ended: what a record of the op needs.
+/// An op whose payload was over the session's limit, which all arrived and was dropped, in
+/// flight until [`Session::refuse`] answers it, on the session that handed it out: what a
+/// record of the op needs.
 #[derive(Debug)]
+#[must_use = "an op dropped unanswered wedges the sandbox's ops, which wait on it for good: \
+              answer it with `Session::refuse`"]
+// Read through its methods, so that what a record of the op says, and the refusal that
+// `Session::refuse` sends, are what the session saw.
 pub struct RefusedOp {
+    /// The number of the session the op arrived on.
+    session: u64,
     /// The sandbox's number for the op, which the refusal names.
     number: u32,
+    call: OpCall,
+    size: u64,
+    payload_limit: OpPayloadLimit,
+}
+
+impl RefusedOp {
     /// What the op asked: a call that takes a payload, an [`OpCall::Judge`] or an
     /// [`OpCall::Submit`].
-    pub call: OpCall,
-    /// The payload's size, in bytes, which all arrived and was dropped.
-    pub size: u64,
+    pub fn call(&self) -> &OpCall {
+        &self.call
+    }
+
+    /// The payload's size, in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
     /// The limit the payload was over, which the session was accepted with.
-    pub payload_limit: OpPayloadLimit,
-    /// Why the op was refused: the message its refusal carries.
-    pub message: String,
-}
+    pub fn payload_limit(&self) -> OpPayloadLimit {
+        self.payload_limit
+    }
 
-/// A command started in a sandbox.
-#[derive(Debug)]
-pub struct Process {
-    replies: Receiver<Reply>,
-    // Shared with the session and its reader thread, which record why the session ended.
-    ended: Arc<OnceLock<String>>,
-    exited: Option<ExitStatus>,
-}
-
-impl Process {
-    /// Waits up to `timeout` for the command to exit: `None` if it is still running.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the session ends first.
-    pub fn wait(&mut self, timeout: Duration) -> io::Result<Option<ExitStatus>> {
-        if let Some(status) = self.exited {
-            return Ok(Some(status));
-        }
-        match self.replies.recv_timeout(timeout) {
-            Ok((FromSandbox::Exited { status, .. }, _)) => {
-                self.exited = Some(status);
-                Ok(Some(status))
-            }
-            Ok((other, _)) => Err(unexpected(&other)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Err(ended(&self.ended)),
-        }
+    /// Why the op is refused: the message that [`Session::refuse`] sends.
+    pub fn message(&self) -> String {
+        format!(
+            "the payload is {} bytes, more than the limit of {1}: send at most {1}",
+            self.size,
+            self.payload_limit.bytes()
+        )
     }
 }
 
+/// A command started in a sandbox, which its exit names ([`Arrival::Exited`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Process {
+    /// The number of the session it runs on.
+    session: u64,
+    /// The stream it was started on, which its exit comes on.
+    stream: u32,
+}
+
 impl Session {
-    fn new(stream: UnixStream, limit: Option<OpPayloadLimit>) -> io::Result<Self> {
+    fn new(
+        stream: UnixStream,
+        limit: Option<OpPayloadLimit>,
+        send: Box<dyn Fn(Arrival) + Send>,
+    ) -> io::Result<Self> {
         let routes = Arc::new(Mutex::new(Routes {
             open: BTreeMap::new(),
             op: None,
         }));
         let ended = Arc::new(OnceLock::new());
-        // From the reader thread to the owner. Every arrival is the op in flight, so the queue
-        // never holds more than one.
-        let (arrivals, ops) = mpsc::sync_channel(1);
-        let reader = stream
+        let incoming = stream
             .try_clone()
             .map_err(|error| context("the connection can't be cloned for its reader", &error))?;
         let (reader_routes, reader_ended) = (Arc::clone(&routes), Arc::clone(&ended));
         let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let assembler = Assembler {
-            session: id,
-            arrivals,
+            owner: Owner { session: id, send },
             limit,
             open: None,
         };
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
-        thread::Builder::new()
+        let reader = thread::Builder::new()
             .name("session".to_owned())
-            .spawn(move || route(&reader, &reader_routes, &reader_ended, assembler))
+            .spawn(move || route(&incoming, &reader_routes, &reader_ended, assembler))
             .map_err(|error| context("the session's reader thread didn't start", &error))?;
         Ok(Self {
             id,
@@ -315,7 +336,7 @@ impl Session {
             routes,
             ended,
             next_stream: 1,
-            ops,
+            reader: Some(reader),
         })
     }
 
@@ -360,23 +381,22 @@ impl Session {
         put
     }
 
-    /// Starts a command.
+    /// Starts a command, whose exit arrives naming the [`Process`] this returns.
     ///
     /// # Errors
     ///
     /// Fails if the command doesn't start, if `by` passes first ([deadlines](crate#deadlines)),
     /// or if the session ends.
     pub fn start(&mut self, launch: Launch, by: Deadline) -> io::Result<Process> {
-        let (stream, replies) = self.open(Queue::Replies, by)?;
+        let (stream, replies) = self.open(Queue::Start, by)?;
         let started = self
             .send(&ToSandbox::Start { stream, launch }, &[], by)
             .and_then(|()| self.done(&replies, by));
         match started {
-            // The reader removes the command's route, which outlives this call.
+            // The reader removes the command's route at its exit, which outlives this call.
             Ok(()) => Ok(Process {
-                replies,
-                ended: Arc::clone(&self.ended),
-                exited: None,
+                session: self.id,
+                stream,
             }),
             Err(error) => {
                 self.close(stream);
@@ -429,46 +449,9 @@ impl Session {
         collected
     }
 
-    /// Waits up to `wait` for the next op whose payload has all arrived: `None` if none did.
-    /// Answer each promptly, as [the protocol](pumpkin_schema::sandbox) requires. A refused
-    /// op's refusal is sent here, by `by` ([deadlines](crate#deadlines)).
-    ///
-    /// # Errors
-    ///
-    /// Fails once the session has ended and every op that arrived whole before has been handed
-    /// out.
-    pub fn next_op(&mut self, wait: Duration, by: Deadline) -> io::Result<Option<Arrival>> {
-        let arrival = match self.ops.recv_timeout(wait) {
-            Ok(arrival) => arrival,
-            Err(RecvTimeoutError::Timeout) => return Ok(None),
-            Err(RecvTimeoutError::Disconnected) => return Err(ended(&self.ended)),
-        };
-        match &arrival {
-            Arrival::Op(_) => {}
-            Arrival::Refused(refused) => {
-                self.clear_flight();
-                let message = refused.message.clone();
-                match self.answer(refused.number, OpReply::Refused { message }, by) {
-                    #[expect(
-                        clippy::unreachable,
-                        reason = "the refusal's message, which `Assembler::pass_on` writes, names \
-                                  only the payload's size and the limit, so its frame's message is \
-                                  under 200 bytes, far under `frame::MAX_MESSAGE_BYTES`, 64 KiB"
-                    )]
-                    Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-                        unreachable!("the refusal of op {} is too long: {error}", refused.number)
-                    }
-                    // Any other failed write has ended the session, which the next call
-                    // reports; the op is handed out all the same.
-                    Ok(()) | Err(_) => {}
-                }
-            }
-        }
-        Ok(Some(arrival))
-    }
-
-    /// Answers an op, which lets the sandbox send its next. A reply too long for a frame reaches
-    /// the caller as a refusal that says so.
+    /// Answers an op, which lets the sandbox send its next, as
+    /// [the protocol](pumpkin_schema::sandbox) requires promptly. A reply too long for a frame
+    /// reaches the caller as a refusal that says so.
     ///
     /// # Errors
     ///
@@ -484,20 +467,10 @@ impl Session {
             number,
             op,
         } = op;
-        #[expect(
-            clippy::unreachable,
-            reason = "the owner answers each op on the session that handed it out, as this \
-                      method's contract requires; a lifetime brand tying each op to its session \
-                      would reshape all of `Session`'s `pub` API"
-        )]
-        if session != self.id {
-            unreachable!("op {number} was answered on a session other than the one it arrived on")
-        }
-        // The op leaves the flight once, before its answer is written: the sandbox may open the
-        // next as soon as it reads an answer, which a second clearing would drop. Its payload
-        // goes first, so that the next op's buffer is never held beside it while the write waits.
+        // Its payload goes first, so that the next op's buffer is never held beside it while the
+        // write waits.
         drop(op);
-        self.clear_flight();
+        self.clear_flight(session, number);
         match self.answer(number, reply, by) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                 let message = format!("the reply was too long to send: {error}");
@@ -508,7 +481,58 @@ impl Session {
         }
     }
 
-    fn clear_flight(&self) {
+    /// Answers an op whose payload was over the limit with its refusal, as [`Session::reply`]
+    /// answers any other.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `by` passes first ([deadlines](crate#deadlines)), or if the session has ended.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `refused` arrived on another session.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the op, as `reply` does, answers it once"
+    )]
+    pub fn refuse(&mut self, refused: RefusedOp, by: Deadline) -> io::Result<()> {
+        let message = refused.message();
+        let RefusedOp {
+            session,
+            number,
+            call: _,
+            size: _,
+            payload_limit: _,
+        } = refused;
+        self.clear_flight(session, number);
+        match self.answer(number, OpReply::Refused { message }, by) {
+            #[expect(
+                clippy::unreachable,
+                reason = "the refusal's message is `RefusedOp::message`, which names only the \
+                          payload's size, a `u64`, and the limit, so its frame's message is under \
+                          200 bytes, far under `frame::MAX_MESSAGE_BYTES`, 64 KiB"
+            )]
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                unreachable!("the refusal of op {number} is too long: {error}")
+            }
+            answered => answered,
+        }
+    }
+
+    /// Takes op `number`, which arrived on session `session`, out of the flight, before its
+    /// answer is written.
+    fn clear_flight(&self, session: u64, number: u32) {
+        #[expect(
+            clippy::unreachable,
+            reason = "the owner answers each op on the session that handed it out, as the \
+                      contracts of `reply` and `refuse` require; a lifetime brand tying each op to \
+                      its session would reshape all of `Session`'s `pub` API"
+        )]
+        if session != self.id {
+            unreachable!("op {number} was answered on a session other than the one it arrived on")
+        }
+        // Before the answer, since the sandbox may open the next op as soon as it reads one,
+        // which a later clearing would drop.
         lock(&self.routes).op = None;
     }
 
@@ -600,16 +624,20 @@ impl Session {
         self.can_send(by)?;
         let stream = self.next_stream;
         self.next_stream = stream.wrapping_add(1);
-        let (sender, replies) = mpsc::sync_channel(match queue {
-            Queue::Replies => QUEUED_REPLIES,
-            Queue::Tree => QUEUED_TREE_FRAMES,
-        });
+        // One frame in every queue. A reply, or a start's reply, is the one frame its request
+        // waits for: a second that arrives before it is taken finds the queue full, which
+        // breaks the protocol (see `route_reply`). A tree's frames get one frame of slack, so
+        // the reader hands over a frame it has read and goes on reading while the request
+        // writes the one before. The gateway then holds at most three of a tree's frames, each
+        // with up to a frame's 1 MiB body; more slack would hold more memory without speeding a
+        // transfer that goes at the pace of the slower side.
+        let (sender, replies) = mpsc::sync_channel(1);
         let mut routes = lock(&self.routes);
         // Again under the lock, as the session may have ended since: `end` says why.
         if self.ended.get().is_some() {
             return Err(ended(&self.ended));
         }
-        routes.open.insert(stream, Route { sender, queue });
+        routes.open.insert(stream, Route::Request { sender, queue });
         Ok((stream, replies))
     }
 
@@ -714,8 +742,25 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Closing the connection ends the session; the reader thread then sees it close.
-        let _ = self.connection.shutdown(Shutdown::Both);
+        // Ending the session shuts the connection both ways, which wakes the reader thread's
+        // read and fails the sandbox's sends from then on, so the reader reads only what it had
+        // not yet read before it ends.
+        let reason = "the owner dropped the session".to_owned();
+        end(&self.routes, &self.ended, &self.connection, reason);
+        // Nothing else holds the reader up: its sends to the owner never block; a tree's frames
+        // wait only for a `collect`, which has returned, dropping their queue, before anything
+        // can drop the session; and it takes the routes' lock only around steps that never
+        // block, as this thread does, which holds it no longer.
+        #[expect(
+            clippy::unreachable,
+            reason = "a panic on the reader thread aborts the process (`AbortOnUnwind` in `route`), \
+                      so the thread never ends in one"
+        )]
+        if let Some(reader) = self.reader.take()
+            && reader.join().is_err()
+        {
+            unreachable!("the session's reader thread panicked")
+        }
     }
 }
 
@@ -743,7 +788,8 @@ impl Write for Until<'_> {
 }
 
 /// Reads frames from the sandbox until the session ends: each reply goes to the request
-/// waiting on its stream, and each op's frames to `ops`.
+/// waiting on its stream, each op's frames to `ops`, and each command's exit, then the end, to
+/// the owner.
 fn route(
     connection: &UnixStream,
     routes: &Mutex<Routes>,
@@ -768,16 +814,33 @@ fn route(
             | FromSandbox::Exited { stream, .. }
             | FromSandbox::Entry { stream, .. }
             | FromSandbox::Data { stream }
-            | FromSandbox::End { stream }) => route_reply(routes, stream, (reply, body)),
+            | FromSandbox::End { stream }) => {
+                route_reply(routes, stream, (reply, body), &ops.owner)
+            }
         };
         if let Err(reason) = outcome {
             break reason;
         }
     };
-    // Before `ops`, a parameter, drops, which closes its sender to the owner: the owner, seeing
-    // it closed, asks why the session ended, which must be known by then.
-    end(routes, ended, connection, reason);
+    // Last, since only this thread reaches the owner, and with the reason the session recorded
+    // first, such as a request's deadline's, whose closing of the connection ended the read.
+    let reason = end(routes, ended, connection, reason).to_owned();
+    ops.owner.arrived(Arrival::Ended { reason });
     mem::forget(unwinding);
+}
+
+/// The session's owner, as the reader thread reaches it.
+struct Owner {
+    /// The number of the session, which its ops and commands carry.
+    session: u64,
+    /// Sends an arrival to the owner, as [`Listener::accept`] was asked to.
+    send: Box<dyn Fn(Arrival) + Send>,
+}
+
+impl Owner {
+    fn arrived(&self, arrival: Arrival) {
+        (self.send)(arrival);
+    }
 }
 
 /// Aborts the process as it drops, which only a panic unwinding past it lets happen.
@@ -796,29 +859,53 @@ impl Drop for AbortOnUnwind {
     }
 }
 
-/// Hands a reply to the request waiting on `stream`. A reply for no waiting request is
-/// dropped: its request has given up. Removes the route after a command's exit (its stream's
-/// last frame) or once its receiver is gone.
-fn route_reply(routes: &Mutex<Routes>, stream: u32, reply: Reply) -> Result<(), String> {
-    let Some(route) = lock(routes).open.get(&stream).cloned() else {
+/// Hands a reply to the request waiting on `stream`, or a started command's exit to `owner`. A
+/// reply for no waiting request is dropped: its request has given up. Removes the route after
+/// the command's exit, or once its receiver is gone.
+fn route_reply(
+    routes: &Mutex<Routes>,
+    stream: u32,
+    reply: Reply,
+    owner: &Owner,
+) -> Result<(), String> {
+    let more = || {
+        broke(&format!(
+            "it sent more on stream {stream} than a request takes"
+        ))
+    };
+    let mut locked = lock(routes);
+    let Some(route) = locked.open.get_mut(&stream) else {
         return Ok(());
     };
-    let exited = matches!(reply.0, FromSandbox::Exited { .. });
-    let given_up = match route.queue {
+    let Route::Request { sender, queue } = route else {
+        let FromSandbox::Exited { status, .. } = reply.0 else {
+            return Err(more());
+        };
+        locked.open.remove(&stream);
+        drop(locked);
+        let process = Process {
+            session: owner.session,
+            stream,
+        };
+        owner.arrived(Arrival::Exited { process, status });
+        return Ok(());
+    };
+    let (sender, queue) = (sender.clone(), *queue);
+    // A command runs once its start is done, and its stream then carries only its exit.
+    if let (Queue::Start, FromSandbox::Done { .. }) = (queue, &reply.0) {
+        *route = Route::Running;
+    }
+    drop(locked);
+    let given_up = match queue {
         // The request writes the tree as it reads it, or drops the queue when it fails.
-        Queue::Tree => route.sender.send(reply).is_err(),
-        Queue::Replies => match route.sender.try_send(reply) {
+        Queue::Tree => sender.send(reply).is_err(),
+        Queue::Replies | Queue::Start => match sender.try_send(reply) {
             Ok(()) => false,
             Err(TrySendError::Disconnected(_)) => true,
-            Err(TrySendError::Full(_)) => {
-                return Err(broke(&format!(
-                    "it sent more on stream {stream} than a request takes"
-                )));
-            }
+            Err(TrySendError::Full(_)) => return Err(more()),
         },
     };
-    // A command's `Process` outlives the call that started it, so no call closes its route.
-    if exited || given_up {
+    if given_up {
         lock(routes).open.remove(&stream);
     }
     Ok(())
@@ -826,10 +913,8 @@ fn route_reply(routes: &Mutex<Routes>, stream: u32, reply: Reply) -> Result<(), 
 
 /// Assembles the op the sandbox sends, on the reader thread, and passes it on whole.
 struct Assembler {
-    /// The number of the session the ops arrive on.
-    session: u64,
-    // To the session's owner, which takes each op with `Session::next_op`.
-    arrivals: SyncSender<Arrival>,
+    /// The session's owner, which takes each op.
+    owner: Owner,
     /// The most bytes an op's payload may hold, if the session takes ops.
     limit: Option<OpPayloadLimit>,
     /// The op whose payload is arriving, by number.
@@ -926,36 +1011,21 @@ impl Assembler {
             due: _,
             payload,
         } = assembly;
-        let arrival = match payload {
+        let session = self.owner.session;
+        self.owner.arrived(match payload {
             Payload::Kept(payload) => Arrival::Op(IncomingOp {
-                session: self.session,
+                session,
                 number,
                 op: whole(call, payload),
             }),
             Payload::Dropped { size, limit } => Arrival::Refused(RefusedOp {
+                session,
                 number,
                 call,
                 size,
                 payload_limit: limit,
-                message: format!(
-                    "the payload is {size} bytes, more than the limit of {0}: send at most {0}",
-                    limit.bytes()
-                ),
             }),
-        };
-        match self.arrivals.try_send(arrival) {
-            // The owner has dropped the session, so nobody is left to answer.
-            Ok(()) | Err(TrySendError::Disconnected(_)) => {}
-            #[expect(
-                clippy::unreachable,
-                reason = "the queue holds one arrival, and holds none now: an op leaves the flight \
-                          only once the owner has taken its arrival, to answer it or as `next_op` \
-                          refuses it, and the sandbox may open the next op only after that"
-            )]
-            Err(TrySendError::Full(_)) => {
-                unreachable!("op {number} arrived while the queue held another op's arrival")
-            }
-        }
+        });
     }
 }
 
@@ -1018,16 +1088,23 @@ fn whole(call: OpCall, payload: Vec<u8>) -> Op {
 }
 
 /// Ends the session, unless it has ended already: closes the connection, which stops the
-/// sandbox, records why in `ended`, and wakes every request waiting on it.
-fn end(routes: &Mutex<Routes>, ended: &OnceLock<String>, connection: &UnixStream, reason: String) {
+/// sandbox, records why in `ended`, and wakes every request waiting on it. Returns the reason
+/// recorded: `reason`, unless the session had ended already.
+fn end<'a>(
+    routes: &Mutex<Routes>,
+    ended: &'a OnceLock<String>,
+    connection: &UnixStream,
+    reason: String,
+) -> &'a str {
     let mut routes = lock(routes);
     // Closed first, under the lock, so that no write reaches the sandbox once anything can
     // learn the session ended: an owner woken by the end may still answer an op. A connection
     // already closed is fine. The reason is set under the lock too, so that no route opens
     // after the routes are cleared. A reason already set is the session's.
     let _ = connection.shutdown(Shutdown::Both);
-    let _ = ended.set(reason);
+    let recorded = ended.get_or_init(|| reason);
     routes.open.clear();
+    recorded
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1040,11 +1117,9 @@ fn ended(ended: &OnceLock<String>) -> io::Error {
         clippy::unreachable,
         reason = "every way to learn that the session ended follows the reason's recording: `end` \
                   records it before it closes the routes, which close otherwise only after a frame \
-                  that ends their request or once nothing receives from them; the ops' sender \
-                  closes only after the reader thread has ended the session, which a panic there \
-                  can't skip, as it aborts the process; and the rest call `end` or check the \
-                  reason first; sending the reason as each channel's last message would need \
-                  room in queues that may be full"
+                  that ends their request or once nothing receives from them; and the rest call \
+                  `end` or check the reason first; sending the reason as each channel's last \
+                  message would need room in queues that may be full"
     )]
     let Some(reason) = ended.get() else {
         unreachable!("the session ended without a reason")

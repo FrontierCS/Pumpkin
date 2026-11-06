@@ -13,12 +13,14 @@ use std::fs;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
+use std::panic;
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin_gateway::{Arrival, Listener, Put, RefusedOp, Session};
+use pumpkin_gateway::{Arrival, IncomingOp, Listener, Process, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, Resources};
 use pumpkin_schema::sandbox::op::{OpReply, OpsReply};
 use pumpkin_schema::sandbox::tree::Limits;
@@ -28,8 +30,8 @@ use pumpkin_schema::sandbox::{
 use serde_json::{Value, json};
 use stdx::Deadline;
 
-/// What the gateway asks of the fake sandbox, and what came of it.
-type Action = fn(&mut Session, &Path) -> String;
+/// What the gateway asks of the fake sandbox, given what arrives, and what came of it.
+type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
 /// The frames the fake sandbox sends in answer to the request on `stream`, with
 /// [`await_reply`], [`pause`] and [`until_hang_up`] where it waits, before it ends the session.
@@ -75,20 +77,47 @@ fn check(name: &str, ops: Option<OpPayloadLimit>, cases: &[(Action, Answer)], ex
 }
 
 /// What came of `action`, and the op replies the fake sandbox heard, if any.
+///
+/// # Panics
+///
+/// Panics unless `action` returns within [`HUNG`], which only an action that hangs takes.
 fn run(dir: &Path, ops: Option<OpPayloadLimit>, action: Action, answer: Answer) -> String {
-    let (mut session, sandbox) = connect(dir, ops, answer);
-    let outcome = action(&mut session, dir);
-    heard(outcome, session, sandbox)
+    let (mut session, arrivals, sandbox) = connect(dir, ops, answer);
+    let dir = dir.to_owned();
+    let (outcome, session, arrivals) = bounded("the action", move || {
+        let outcome = action(&mut session, &arrivals, &dir);
+        (outcome, session, arrivals)
+    });
+    heard(outcome, session, arrivals, sandbox)
+}
+
+/// What `f` returns, run on a thread of its own, so that an `f` that hangs fails the test
+/// rather than hanging it.
+///
+/// # Panics
+///
+/// Panics if `f` does, or unless it returns within [`HUNG`], saying that `what` took longer.
+fn bounded<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static) -> R {
+    let (returned, result) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        // The receiver is gone only if the test has failed already.
+        let _ = returned.send(f());
+    });
+    match result.recv_timeout(HUNG) {
+        Ok(returned) => returned,
+        Err(RecvTimeoutError::Timeout) => panic!("{what} took over {HUNG:?}"),
+        Err(RecvTimeoutError::Disconnected) => panic::resume_unwind(thread.join().unwrap_err()),
+    }
 }
 
 /// A session, accepted with `ops`, with a fake sandbox in the new directory `dir` that answers
-/// the session's first request with `answer`'s frames, and the sandbox's thread, which returns
-/// the op replies it heard.
+/// the session's first request with `answer`'s frames, what arrives for the session's owner,
+/// and the sandbox's thread, which returns the op replies it heard.
 fn connect(
     dir: &Path,
     ops: Option<OpPayloadLimit>,
     answer: Answer,
-) -> (Session, JoinHandle<Vec<String>>) {
+) -> (Session, Receiver<Arrival>, JoinHandle<Vec<String>>) {
     fs::create_dir(dir).unwrap();
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
@@ -124,15 +153,37 @@ fn connect(
         while hear_reply(&mut connection, &mut replies) {}
         replies
     });
-    let session = listener.accept(hung(), ops).unwrap();
+    let (sender, arrivals) = mpsc::channel();
+    let session = listener
+        .accept(hung(), ops, sender, |arrival| arrival)
+        .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
-    (session, sandbox)
+    (session, arrivals, sandbox)
 }
 
 /// `outcome`, and the op replies that `sandbox` heard by the end of `session`, if any.
-fn heard(outcome: String, session: Session, sandbox: JoinHandle<Vec<String>>) -> String {
-    drop(session);
+///
+/// # Panics
+///
+/// Panics unless dropping `session` returns within [`HUNG`], by when its reader has sent
+/// whatever was left to arrive, and stopped.
+fn heard(
+    outcome: String,
+    session: Session,
+    arrivals: Receiver<Arrival>,
+    sandbox: JoinHandle<Vec<String>>,
+) -> String {
+    let (left, closed) = bounded("dropping the session", move || {
+        drop(session);
+        let left = arrivals.try_iter().count();
+        let closed = matches!(arrivals.try_recv(), Err(TryRecvError::Disconnected));
+        (left, closed)
+    });
+    assert!(
+        closed,
+        "the session's reader ran on after its drop, with {left} arrivals sent"
+    );
     let replies = sandbox.join().unwrap();
     if replies.is_empty() {
         outcome
@@ -185,7 +236,7 @@ fn stream_of(request: &ToSandbox) -> Option<u32> {
 }
 
 /// Collects `/out` within small limits, and lists the files that arrived.
-fn collect(session: &mut Session, dir: &Path) -> String {
+fn collect(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let into = dir.join("collected");
     let limits = Limits {
         bytes: 8,
@@ -205,17 +256,21 @@ fn outcome(outcome: std::io::Result<()>) -> String {
     }
 }
 
-/// Starts a command and, while it runs, freezes the sandbox.
-fn start_and_freeze(session: &mut Session, _: &Path) -> String {
+/// How to run `true`.
+fn launch() -> Launch {
     let path = |path: &str| AbsolutePath::try_from(path.to_owned()).unwrap();
-    let launch = Launch {
+    Launch {
         argv: Argv::try_from(vec!["true".to_owned()]).unwrap(),
         env: Env::default(),
         cwd: path("/"),
         stdout: path("/stdout"),
         stderr: path("/stderr"),
-    };
-    let process = session.start(launch, hung());
+    }
+}
+
+/// Starts a command and, while it runs, freezes the sandbox.
+fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
+    let process = session.start(launch(), hung());
     let frozen = session.freeze(hung());
     format!(
         "start: {}; freeze: {}",
@@ -226,44 +281,94 @@ fn start_and_freeze(session: &mut Session, _: &Path) -> String {
 
 /// Asks for an op payload limit over the protocol's, which is refused, then answers ops as
 /// [`ops`] does.
-fn over_the_cap(session: &mut Session, dir: &Path) -> String {
+fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let refused = OpPayloadLimit::try_from(MAX_OP_PAYLOAD_BYTES + 1).unwrap_err();
-    format!("op payload limit: {refused}; {}", ops(session, dir))
+    format!(
+        "op payload limit: {refused}; {}",
+        ops(session, arrivals, dir)
+    )
 }
 
-/// Freezes the sandbox, whose answer may carry ops, then answers each op that arrives whole,
-/// and notes each the gateway refused, until the session ends.
-fn ops(session: &mut Session, _: &Path) -> String {
-    let mut lines = vec![format!("freeze: {}", outcome(session.freeze(hung())))];
+/// Freezes the sandbox, whose answer may carry ops, then takes what arrives ([`take`]).
+fn ops(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+    let frozen = outcome(session.freeze(hung()));
+    format!("freeze: {frozen}; {}", take(session, arrivals, None))
+}
+
+/// Starts a command, whose stream carries what the fake sandbox answers, then takes what
+/// arrives ([`take`]).
+fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+    let process = session.start(launch(), hung()).unwrap();
+    format!("started; {}", take(session, arrivals, Some(process)))
+}
+
+/// Answers each op that arrives, refuses each whose payload was over the limit, and notes each
+/// command's exit, saying whether it is `started`'s, until the session's end, and then anything
+/// that arrives after it.
+fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Process>) -> String {
+    let mut lines = Vec::new();
     loop {
-        match session.next_op(HUNG, hung()) {
-            Ok(Some(Arrival::Op(op))) => {
+        let Some(arrival) = next(arrivals) else {
+            panic!("the session's reader stopped before the session's end arrived");
+        };
+        match arrival {
+            Arrival::Op(op) => {
                 lines.push(format!("{:?}", op.op));
                 if let Err(error) = session.reply(op, no_grants(), hung()) {
                     lines.push(format!("reply: {:?}: {error}", error.kind()));
                 }
             }
-            Ok(Some(Arrival::Refused(refused))) => {
-                let RefusedOp {
-                    call,
-                    size,
-                    payload_limit,
-                    message,
-                    ..
-                } = refused;
+            Arrival::Refused(refused) => {
                 lines.push(format!(
-                    "refused {call:?} of {size} bytes over {}: {message}",
-                    payload_limit.bytes()
+                    "refused {:?} of {} bytes over {}: {}",
+                    refused.call(),
+                    refused.size(),
+                    refused.payload_limit().bytes(),
+                    refused.message()
                 ));
+                if let Err(error) = session.refuse(refused, hung()) {
+                    lines.push(format!("refuse: {:?}: {error}", error.kind()));
+                }
             }
-            Ok(None) => panic!("neither an op nor the session's end came within {HUNG:?}"),
-            Err(error) => {
-                lines.push(format!("{:?}: {error}", error.kind()));
+            Arrival::Exited { process, status } => {
+                let whose = if started == Some(process) {
+                    "the"
+                } else {
+                    "another"
+                };
+                lines.push(format!("{whose} command exited: {status:?}"));
+            }
+            Arrival::Ended { reason } => {
+                lines.push(format!("ended: {reason}"));
                 break;
             }
         }
     }
+    if let Some(after) = next(arrivals) {
+        lines.push(format!("then {after:?}"));
+    }
     lines.join("; ")
+}
+
+/// The next arrival, or `None` once the session's reader has stopped.
+///
+/// # Panics
+///
+/// Panics if nothing arrives within [`HUNG`].
+fn next(arrivals: &Receiver<Arrival>) -> Option<Arrival> {
+    match arrivals.recv_timeout(HUNG) {
+        Ok(arrival) => Some(arrival),
+        Err(RecvTimeoutError::Disconnected) => None,
+        Err(RecvTimeoutError::Timeout) => panic!("nothing arrived within {HUNG:?}"),
+    }
+}
+
+/// The next arrival, which must be an op that arrived whole.
+fn next_op(arrivals: &Receiver<Arrival>) -> IncomingOp {
+    match next(arrivals) {
+        Some(Arrival::Op(op)) => op,
+        arrived => panic!("an op was to arrive, not {arrived:?}"),
+    }
 }
 
 /// An `ops` reply with no grants.
@@ -278,42 +383,64 @@ fn no_grants() -> OpReply {
     })
 }
 
-/// Freezes the sandbox, whose answer carries op 0, and another session's, whose answer does
-/// too, takes each op, and answers the first on the other session, then the other's own.
-fn answer_elsewhere(session: &mut Session, dir: &Path) -> String {
+/// Starts a command on the session, whose sandbox's answer carries op 0, and on another
+/// session, whose sandbox's answer carries op 0 and then op 1, over the limit, and notes
+/// whether the two commands, each on its session's first stream, compare equal. Then answers
+/// the first session's op 0 on the other session, the other's own, and refuses the other's op 1
+/// on the first session.
+fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let ops = Some(OpPayloadLimit::try_from(0).unwrap());
-    let (mut other, sandbox) = connect(&dir.join("other"), ops, |s| {
-        vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
+    let (mut other, others, sandbox) = connect(&dir.join("other"), ops, |s| {
+        vec![
+            done(s),
+            op(0, json!({ "kind": "ops" }), 0),
+            await_reply(),
+            train(1, 1),
+            op_data(1, b"x"),
+            await_reply(),
+        ]
     });
-    let [mine, own] = [&mut *session, &mut other].map(|session| {
-        session.freeze(hung()).unwrap();
-        match session.next_op(HUNG, hung()).unwrap() {
-            Some(Arrival::Op(op)) => op,
-            arrival => panic!("an op was to arrive, not {arrival:?}"),
-        }
-    });
+    let [(mine, my_command), (own, its_command)] =
+        [(&mut *session, arrivals), (&mut other, &others)].map(|(session, arrivals)| {
+            let process = session.start(launch(), hung()).unwrap();
+            (next_op(arrivals), process)
+        });
     let message = "from another session".to_owned();
-    // A reply on the wrong session panics; on a thread of its own, the panic ends that thread
-    // alone, so the test goes on.
-    let elsewhere = thread::scope(|scope| {
-        let reply = scope.spawn(|| other.reply(mine, OpReply::Refused { message }, hung()));
-        reply.join()
-    });
-    let elsewhere = elsewhere.unwrap_err().downcast::<String>().unwrap();
+    let elsewhere = panicked(|| other.reply(mine, OpReply::Refused { message }, hung()));
     let own = outcome(other.reply(own, no_grants(), hung()));
-    let outcome = format!("op 0 on another session: {elsewhere}; that session's own op 0: {own}");
-    heard(outcome, other, sandbox)
+    let refused = match next(&others) {
+        Some(Arrival::Refused(refused)) => refused,
+        arrived => panic!("a refused op was to arrive, not {arrived:?}"),
+    };
+    let refusal = panicked(|| session.refuse(refused, hung()));
+    let outcome = format!(
+        "the sessions' commands equal: {}; op 0 on another session: {elsewhere}; that session's \
+         own op 0: {own}; its op 1 refused on another session: {refusal}",
+        my_command == its_command
+    );
+    heard(outcome, other, others, sandbox)
+}
+
+/// What came of `answer`, or the message of its panic, on a thread of its own, where a panic
+/// ends that thread alone, so the test goes on.
+fn panicked(answer: impl FnOnce() -> std::io::Result<()> + Send) -> String {
+    match thread::scope(|scope| scope.spawn(answer).join()) {
+        Ok(answered) => outcome(answered),
+        Err(panic) => format!("panicked: {}", panic.downcast::<String>().unwrap()),
+    }
 }
 
 /// Freezes the sandbox, whose answer carries two ops, one after the other, then answers the
 /// first with a reply too long for a frame, and the second with a short one.
-fn too_long_reply(session: &mut Session, _: &Path) -> String {
+fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     let mut lines = vec![format!("freeze: {}", outcome(session.freeze(hung())))];
     for message in ["x".repeat(frame::MAX_MESSAGE_BYTES), "no".to_owned()] {
-        lines.push(match session.next_op(HUNG, hung()).unwrap().unwrap() {
-            Arrival::Op(op) => outcome(session.reply(op, OpReply::Refused { message }, hung())),
-            Arrival::Refused(refused) => format!("{refused:?}"),
-        });
+        let op = next_op(arrivals);
+        lines.push(outcome(session.reply(
+            op,
+            OpReply::Refused { message },
+            hung(),
+        )));
     }
     lines.join("; ")
 }
@@ -336,7 +463,7 @@ fn freezes(session: &mut Session, by: Deadline) -> String {
 
 /// Freezes the sandbox, which then ends the session, and again ([`freezes`]), which fails only
 /// once the session has ended, then once more by a deadline that has passed.
-fn after_the_end(session: &mut Session, _: &Path) -> String {
+fn after_the_end(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let ended = freezes(session, hung());
     let late = outcome(session.freeze(Deadline::after(Duration::ZERO)));
     format!("{ended}; then by a passed deadline {late}")
@@ -352,17 +479,15 @@ fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
 
 /// Freezes the sandbox, whose answer carries an op, answers the op by a deadline that has
 /// passed, and freezes it again ([`then_freeze`]).
-fn late_reply(session: &mut Session, _: &Path) -> String {
+fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     session.freeze(hung()).unwrap();
-    let Some(Arrival::Op(op)) = session.next_op(HUNG, hung()).unwrap() else {
-        panic!("an op was to arrive");
-    };
+    let op = next_op(arrivals);
     let replied = session.reply(op, no_grants(), Deadline::after(Duration::ZERO));
     then_freeze(session, replied)
 }
 
 /// Collects `/out` by a [`short`] deadline, within limits no tree reaches.
-fn collect_short(session: &mut Session, dir: &Path) -> String {
+fn collect_short(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let limits = Limits {
         bytes: u64::MAX,
         entries: u64::MAX,
@@ -499,9 +624,9 @@ fn sandbox_answers() {
             }),
             (collect, |s| vec![file(s, "f", 2), end(s)]),
             (collect, |s| vec![reply("failed", s)]),
-            // `start` takes at most the first `done` and the command's queue holds two frames,
-            // so the fourth overflows it, however the reader and the owner interleave.
-            (start_and_freeze, |s| vec![done(s); 4]),
+            // A started command's stream carries only its exit, so a second `done` breaks the
+            // protocol.
+            (start_and_freeze, |s| vec![done(s); 2]),
             // The command's route goes at its exit, its stream's last frame, so later ones drop.
             (start_and_freeze, |s| {
                 let mut flood = vec![done(s)];
@@ -591,15 +716,15 @@ fn sandbox_ops() {
             }),
         ],
         &expect![[r#"
-            freeze: ok; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; Submit { grant: Name("submit"), finalize: true, payload: [97, 98, 99, 100] }; Status { job: 3 }; ConnectionAborted: the sandbox ended the session; the sandbox heard op 7: {"kind":"refused","message":"the payload is 5 bytes, more than the limit of 4: send at most 4"}, op 8: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 9: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
-            freeze: ok; ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open
-            freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 7 with a payload of 67108865 bytes, more than the protocol's 67108864
-            freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 9 with a payload of 3 bytes, for a call that takes none
-            freeze: ok; ConnectionAborted: the sandbox broke the protocol: it sent 3 bytes of op 7's payload, past its size: 2 were left
-            freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
-            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; Judge { grant: Name("train"), payload: [97] }; reply: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open
-            freeze: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; Judge { grant: Name("train"), payload: [] }; reply: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
-            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open
+            freeze: ok; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; Submit { grant: Name("submit"), finalize: true, payload: [97, 98, 99, 100] }; Status { job: 3 }; ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"refused","message":"the payload is 5 bytes, more than the limit of 4: send at most 4"}, op 8: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 9: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+            freeze: ok; ended: the sandbox broke the protocol: it sent data for op 7, which is not open
+            freeze: ok; ended: the sandbox broke the protocol: it opened op 7 with a payload of 67108865 bytes, more than the protocol's 67108864
+            freeze: ok; ended: the sandbox broke the protocol: it opened op 9 with a payload of 3 bytes, for a call that takes none
+            freeze: ok; ended: the sandbox broke the protocol: it sent 3 bytes of op 7's payload, past its size: 2 were left
+            freeze: ok; ended: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; Judge { grant: Name("train"), payload: [97] }; reply: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; ended: the sandbox broke the protocol: it sent data for op 7, which is not open
+            freeze: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; Judge { grant: Name("train"), payload: [] }; reply: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; ended: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; refuse: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; ended: the sandbox broke the protocol: it sent data for op 99, which is not open
             freeze: ok; InvalidInput: the message is 65602 bytes: a frame's message holds at most 65536; ok; the sandbox heard op 7: {"kind":"refused","message":"the reply was too long to send: the message is 65602 bytes: a frame's message holds at most 65536"}, op 8: {"kind":"refused","message":"no"}"#]],
     );
     check(
@@ -607,14 +732,15 @@ fn sandbox_ops() {
         None,
         &[(over_the_cap, |s| vec![done(s), train(7, 0)])],
         &expect![
-            "op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ConnectionAborted: the sandbox broke the protocol: it opened op 7, but the session takes no ops"
+            "op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ended: the sandbox broke the protocol: it opened op 7, but the session takes no ops"
         ],
     );
 }
 
-/// An op answered on a session other than the one it arrived on panics before anything is
-/// sent: every sandbox numbers its ops from 0, so the other's would take the answer for its own
-/// op 0's.
+/// An op answered or refused on a session other than the one it arrived on panics before
+/// anything is sent: every sandbox numbers its ops from 0, so the other's would take the answer
+/// for one of its own. Two sessions' commands never compare equal, though each session numbers
+/// its streams alike.
 #[test]
 fn another_sessions_op() {
     check(
@@ -624,7 +750,7 @@ fn another_sessions_op() {
             vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
         })],
         &expect![[
-            r#"op 0 on another session: internal error: entered unreachable code: op 0 was answered on a session other than the one it arrived on; that session's own op 0: ok; the sandbox heard op 0: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
+            r#"the sessions' commands equal: false; op 0 on another session: panicked: internal error: entered unreachable code: op 0 was answered on a session other than the one it arrived on; that session's own op 0: ok; its op 1 refused on another session: panicked: internal error: entered unreachable code: op 1 was answered on a session other than the one it arrived on; the sandbox heard op 0: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
         ]],
     );
 }
@@ -642,18 +768,18 @@ fn deadlines() {
             // reads on: the requests wait, as their deadlines haven't passed. It answers the put
             // before it has read it all, which the gateway takes once the put is all written.
             (
-                |session, _| freezes(session, hung()),
+                |session, _, _| freezes(session, hung()),
                 |s| vec![pause(), done(s)],
             ),
             (
-                |session, _| outcome(put_large(session, hung())),
+                |session, _, _| outcome(put_large(session, hung())),
                 |s| vec![pause(), done(s), await_reply()],
             ),
             // The sandbox answers nothing, reads nothing past a large put's first frame, or
             // sends a tree that never ends, until the gateway hangs up.
-            (|session, _| freezes(session, short()), |_| vec![stall()]),
+            (|session, _, _| freezes(session, short()), |_| vec![stall()]),
             (
-                |session, _| {
+                |session, _, _| {
                     let put = put_large(session, short());
                     then_freeze(session, put)
                 },
@@ -662,9 +788,16 @@ fn deadlines() {
             (collect_short, |s| {
                 vec![file(s, "f", u64::MAX), until_hang_up(data(s, b"x"))]
             }),
+            // In frames of a full body, which the request takes longer to write than the reader
+            // takes to read, so that the reader waits on the request's queue as the deadline
+            // passes, and must not go on waiting there once the request has failed.
+            (collect_short, |s| {
+                let body = vec![b'x'; frame::MAX_BODY_BYTES];
+                vec![file(s, "f", u64::MAX), until_hang_up(data(s, &body))]
+            }),
             // A deadline that has passed before a request or a reply starts, which sends nothing.
             (
-                |session, _| freezes(session, Deadline::after(Duration::ZERO)),
+                |session, _, _| freezes(session, Deadline::after(Duration::ZERO)),
                 |_| Vec::new(),
             ),
             (late_reply, |s| {
@@ -680,9 +813,42 @@ fn deadlines() {
             TimedOut: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts; then ConnectionAborted: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts
             TimedOut: the sandbox didn't take what was sent before the request's deadline: expected it to read while the deadline lasts; then ConnectionAborted: the sandbox didn't take what was sent before the request's deadline: expected it to read while the deadline lasts
             TimedOut: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts
+            TimedOut: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts
             TimedOut: the request's deadline passed before it was sent: expected time left to send it; then ConnectionAborted: the request's deadline passed before it was sent: expected time left to send it
             TimedOut: the request's deadline passed before it was sent: expected time left to send it; then ConnectionAborted: the request's deadline passed before it was sent: expected time left to send it
             ok; then ConnectionAborted: the sandbox ended the session; then by a passed deadline ConnectionAborted: the sandbox ended the session
             ConnectionAborted: the sandbox ended the session; arrived ["a/"]"#]],
+    );
+}
+
+/// What arrives for the session's owner does in the order the sandbox sent it, ending with the
+/// session's end, which a session that the sandbox keeps open reaches as it drops ([`heard`]).
+#[test]
+fn arrivals() {
+    check(
+        "arrivals",
+        Some(OpPayloadLimit::try_from(0).unwrap()),
+        &[
+            // An op the command made before it exited, its exit, and an op one of its children
+            // made after.
+            (start_and_take, |s| {
+                vec![
+                    done(s),
+                    op(7, json!({ "kind": "ops" }), 0),
+                    reply("exited", s),
+                    await_reply(),
+                    op(8, json!({ "kind": "status", "job": 3 }), 0),
+                    await_reply(),
+                ]
+            }),
+            // The sandbox goes on sending, reading nothing, until the gateway hangs up.
+            (
+                |session, _, _| outcome(session.freeze(hung())),
+                |s| vec![done(s), stall()],
+            ),
+        ],
+        &expect![[r#"
+            started; Ops; the command exited: Code(0); Status { job: 3 }; ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 8: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+            ok"#]],
     );
 }
