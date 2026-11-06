@@ -1,13 +1,14 @@
 //! A simulated provider, [`Sim`], which stands in for a platform: each sandbox is a thread of
 //! this process, running a fake `sandboxd` that dials its create's [`Dial`] at once and answers
-//! the session's requests, running each command by its program ([`Sim`]).
+//! the session's requests, running each command by its program, which may make ops ([`Sim`]).
 
 #![expect(
     clippy::unwrap_used,
+    clippy::panic,
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
@@ -16,13 +17,15 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use pumpkin_provider::Provider;
-use pumpkin_schema::ir::Image;
+use pumpkin_schema::ir::{Image, Name};
 use pumpkin_schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag,
     SOCKET_NAME, SandboxId,
 };
+use pumpkin_schema::sandbox::op::{OpCall, OpReply};
 use pumpkin_schema::sandbox::{Entry, ExitStatus, FromSandbox, RelativePath, ToSandbox, frame};
 use serde_json::json;
 
@@ -52,9 +55,11 @@ pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 /// [stalled](Subject::stall). It puts nothing, and collects a tree of one file, [`COLLECTED`],
 /// from any directory. A command whose program is `exit` exits at once with the status its
 /// argument gives; one whose program is `stall` starts, then stalls the sandbox; one whose
-/// program is `crash` starts, then its `sandboxd` ends the session; any other runs until the
-/// sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose
-/// create names [`UNDELETABLE`].
+/// program is `crash` starts, then its `sandboxd` ends the session; one whose program is `ops`
+/// takes the steps its arguments give ([`step`]), making each op once the one before it is
+/// answered, then exits with 0, unless it has, or its `sandboxd` ends the session as a step
+/// asks; any other runs until the sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and
+/// to delete a sandbox whose create names [`UNDELETABLE`].
 pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
@@ -298,10 +303,145 @@ fn sandboxd(socket: &Path, mute: bool, shared: &Mutex<Status>) {
     }
 }
 
+/// A step of a command that makes ops.
+enum Step {
+    /// An op, with its payload, and, if bounded, the fewest seconds by which its reply must
+    /// leave less time than the last `ops` reply did.
+    Op {
+        call: OpCall,
+        payload: Vec<u8>,
+        less: Option<u64>,
+    },
+    /// A wait, in seconds, before the next step.
+    Sleep(u64),
+    /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
+    /// process the command left would.
+    Exit,
+    /// The session's end, which its `sandboxd` makes.
+    Crash,
+}
+
+/// A command that makes ops.
+struct Caller {
+    /// The command's stream, on which it exits.
+    stream: u32,
+    /// The steps still to take, in order.
+    steps: VecDeque<Step>,
+    /// The number of the op in flight.
+    op: u32,
+    /// The bound on the reply to the op in flight, as [`Step::Op`] gives it.
+    less: Option<u64>,
+    /// The seconds the last `ops` reply left, once one has come.
+    left: Option<u64>,
+    /// Whether the command has exited.
+    exited: bool,
+}
+
+impl Caller {
+    /// Takes the reply to the op in flight, `reply`: if it is an `ops` that breaks the op's
+    /// bound, or that follows no `ops` reply, the command exits with 1 at once, taking no more
+    /// steps; else it goes on ([`Caller::next`]).
+    fn answered(&mut self, reply: &OpReply, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
+        if let OpReply::Ops(ops) = reply {
+            let left = ops.remaining_seconds;
+            if let Some(less) = self.less
+                && self
+                    .left
+                    .is_none_or(|last| left.saturating_add(less) > last)
+            {
+                self.steps.clear();
+                self.exit(1, replies);
+            }
+            self.left = Some(left);
+        }
+        self.next(replies)
+    }
+
+    /// Takes the steps up to the next op, and makes it, or exits with 0 once there are none,
+    /// unless it has exited, in `replies`. Returns whether the session is to end: once the op
+    /// before an end is sent, before its answer.
+    fn next(&mut self, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
+        loop {
+            let (call, payload, less) = match self.steps.pop_front() {
+                Some(Step::Op {
+                    call,
+                    payload,
+                    less,
+                }) => (call, payload, less),
+                Some(Step::Sleep(seconds)) => {
+                    thread::sleep(Duration::from_secs(seconds));
+                    continue;
+                }
+                Some(Step::Exit) => {
+                    self.exit(0, replies);
+                    continue;
+                }
+                Some(Step::Crash) => return true,
+                None => {
+                    self.exit(0, replies);
+                    return false;
+                }
+            };
+            (self.op, self.less) = (self.op + 1, less);
+            let (op, size) = (self.op, u64::try_from(payload.len()).unwrap());
+            replies.push((FromSandbox::Op { op, call, size }, Vec::new()));
+            if size > 0 {
+                replies.push((FromSandbox::OpData { op }, payload));
+            }
+            return matches!(self.steps.front(), Some(Step::Crash));
+        }
+    }
+
+    /// Exits with `code`, in `replies`, unless it has exited.
+    fn exit(&mut self, code: i32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        if self.exited {
+            return;
+        }
+        let (stream, status) = (self.stream, ExitStatus::Code(code));
+        replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+        self.exited = true;
+    }
+}
+
+/// The step that `arg` gives: an op, `ops`, which `ops at least <seconds> less` bounds, `status
+/// <job>`, `judge <grant> <size>`, `submit <grant> <size>` or `finalize <grant> <size>`, a final
+/// submission, where the payload is `size` bytes of `x`; or `sleep <seconds>`, `exit` or `crash`.
+fn step(arg: &str) -> Step {
+    let words: Vec<&str> = arg.split(' ').collect();
+    let grant = || Name::try_from(words[1].to_owned()).unwrap();
+    let payload = || vec![b'x'; words[2].parse().unwrap()];
+    let (call, payload, less) = match words[..] {
+        ["ops"] => (OpCall::Ops, Vec::new(), None),
+        ["ops", "at", "least", seconds, "less"] => {
+            (OpCall::Ops, Vec::new(), Some(seconds.parse().unwrap()))
+        }
+        ["status", job] => {
+            let job = job.parse().unwrap();
+            (OpCall::Status { job }, Vec::new(), None)
+        }
+        ["judge", _, _] => (OpCall::Judge { grant: grant() }, payload(), None),
+        [kind @ ("submit" | "finalize"), _, _] => {
+            let finalize = kind == "finalize";
+            let grant = grant();
+            (OpCall::Submit { grant, finalize }, payload(), None)
+        }
+        ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
+        ["exit"] => return Step::Exit,
+        ["crash"] => return Step::Crash,
+        _ => panic!("`{arg}` is no step of the simulated sandboxd's"),
+    };
+    Step::Op {
+        call,
+        payload,
+        less,
+    }
+}
+
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more.
 fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
-    let (mut replies, mut crashed) = (Vec::<(FromSandbox, &[u8])>::new(), false);
+    let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
+    let mut caller: Option<Caller> = None;
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, _))) = frame::read::<ToSandbox>(&mut connection) {
         if status(shared).stalled {
@@ -313,18 +453,30 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
         match request {
             ToSandbox::Put { .. } | ToSandbox::Entry { .. } | ToSandbox::Data { .. } => {}
             ToSandbox::End { stream } | ToSandbox::Freeze { stream } => {
-                replies.push((FromSandbox::Done { stream }, &[]));
+                replies.push((FromSandbox::Done { stream }, Vec::new()));
             }
             ToSandbox::Start { stream, launch } => {
-                replies.push((FromSandbox::Done { stream }, &[]));
+                replies.push((FromSandbox::Done { stream }, Vec::new()));
                 match launch.argv.program() {
                     "exit" => {
                         let code = launch.argv.args()[0].parse().unwrap();
                         let status = ExitStatus::Code(code);
-                        replies.push((FromSandbox::Exited { stream, status }, &[]));
+                        replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
                     }
                     "stall" => status(shared).stalled = true,
                     "crash" => crashed = true,
+                    "ops" => {
+                        let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
+                        let made = caller.insert(Caller {
+                            stream,
+                            steps,
+                            op: 0,
+                            less: None,
+                            left: None,
+                            exited: false,
+                        });
+                        crashed = made.next(&mut replies);
+                    }
                     _ => {}
                 }
             }
@@ -332,15 +484,19 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
                 let path = RelativePath::try_from(COLLECTED.to_owned()).unwrap();
                 let size = u64::try_from(COLLECTED.len()).unwrap();
                 let entry = Entry::File { path, size };
-                replies.push((FromSandbox::Entry { stream, entry }, &[]));
-                replies.push((FromSandbox::Data { stream }, COLLECTED.as_bytes()));
-                replies.push((FromSandbox::End { stream }, &[]));
+                replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
+                let body = COLLECTED.as_bytes().to_vec();
+                replies.push((FromSandbox::Data { stream }, body));
+                replies.push((FromSandbox::End { stream }, Vec::new()));
             }
-            // It makes no ops, so a reply to one breaks the protocol, which ends the session.
-            ToSandbox::OpReply { .. } => return,
+            ToSandbox::OpReply { op, reply } => match &mut caller {
+                Some(caller) if caller.op == op => crashed = caller.answered(&reply, &mut replies),
+                // A reply to no op in flight breaks the protocol, which ends the session.
+                Some(_) | None => return,
+            },
         }
         for (reply, body) in replies.drain(..) {
-            if frame::write(&mut connection, &reply, body).is_err() {
+            if frame::write(&mut connection, &reply, &body).is_err() {
                 return;
             }
         }

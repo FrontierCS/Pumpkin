@@ -9,20 +9,21 @@
 //! out in the `record` and `log` modules.
 
 use std::collections::VecDeque;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
+use std::{fs, io, mem};
 
-use pumpkin_gateway::Arrival;
+use pumpkin_gateway::{Arrival, IncomingOp, Op, RefusedOp};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir;
 use pumpkin_schema::provider::{RunTag, SandboxId};
+use pumpkin_schema::sandbox::op::OpReply;
 use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
-use crate::driver::core::{Action, Core, Event, Outcome, lasts};
+use crate::driver::core::{Action, Core, Event, OpId, Outcome, PayloadRef, Request, lasts};
 
 mod agent;
 mod log;
@@ -31,6 +32,7 @@ mod sandbox;
 
 use agent::Agent;
 use log::Log;
+use record::Payloads;
 use sandbox::Sandboxes;
 
 /// A run, prepared: its workflow parsed, and its record begun.
@@ -116,7 +118,10 @@ impl Run {
             sandboxes,
             clock,
             log: Log::create(&self.dir)?,
+            payloads: Payloads::create(&self.dir)?,
             agent: None,
+            unanswered: None,
+            next_op: 0,
             pending: VecDeque::new(),
             inbox,
             sender,
@@ -182,6 +187,68 @@ fn failed_also<T>(outcome: Result<T, String>, then: Result<(), String>) -> Resul
     }
 }
 
+/// Whether `reply` accepts the call it answers.
+fn accepts(reply: &OpReply) -> bool {
+    match reply {
+        OpReply::Judge(_) | OpReply::Submit(_) => true,
+        OpReply::Ops(_) | OpReply::Status(_) | OpReply::Refused { .. } => false,
+    }
+}
+
+/// An op of the agent's, awaiting the core's reply.
+enum Unanswered {
+    /// An op that carries no payload: `ops` or `status`.
+    Query(IncomingOp),
+    /// A judge call or a submission, with its payload, taken out of the op, and the payload's
+    /// reference.
+    Call {
+        incoming: IncomingOp,
+        payload: Vec<u8>,
+        reference: PayloadRef,
+    },
+}
+
+/// What `incoming`, an op of the agent's, asks the core, and the op, to answer once the core
+/// replies.
+fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
+    let (request, call) = match &mut incoming.op {
+        Op::Ops => (Request::Ops, None),
+        Op::Judge { grant, payload } => {
+            let payload = mem::take(payload);
+            let reference = record::reference(&payload);
+            let request = Request::Judge {
+                grant: grant.clone(),
+                payload: reference.clone(),
+            };
+            (request, Some((payload, reference)))
+        }
+        Op::Submit {
+            grant,
+            finalize,
+            payload,
+        } => {
+            let payload = mem::take(payload);
+            let reference = record::reference(&payload);
+            let request = Request::Submit {
+                grant: grant.clone(),
+                finalize: *finalize,
+                payload: reference.clone(),
+            };
+            (request, Some((payload, reference)))
+        }
+        Op::Status { job } => (Request::Status { job: *job }, None),
+    };
+    let unanswered = match call {
+        Some((payload, reference)) => Unanswered::Call {
+            incoming,
+            payload,
+            reference,
+        },
+        None => Unanswered::Query(incoming),
+    };
+    (request, unanswered)
+}
+
 /// Why a workflow with a model route is refused. Parsing has refused a route on a judge.
 fn model_route(workflow: &Workflow) -> Option<String> {
     let agent = &workflow.agent().sandbox;
@@ -204,7 +271,13 @@ struct Runtime<'r> {
     sandboxes: Sandboxes<'r>,
     clock: Clock,
     log: Log,
+    payloads: Payloads,
     agent: Option<Agent>,
+    /// The op the core is to answer, by the number the runtime gave it, if one is: the agent's
+    /// session hands out an op only once the one before it has been answered.
+    unanswered: Option<(OpId, Unanswered)>,
+    /// The number the next op takes, counting from 0.
+    next_op: u64,
     /// Events that performing actions produced, to feed the core next.
     pending: VecDeque<(Duration, Event)>,
     /// What reaches the loop from other threads, which it waits on until the core's next tick.
@@ -217,23 +290,27 @@ struct Runtime<'r> {
 
 /// What reaches the loop through its inbox.
 enum Input {
-    /// What the agent's session's reader handed over ([`Listener::accept`]): at most its
-    /// command's exit, then its end, as the session takes no ops and runs one command.
+    /// What the agent's session's reader handed over ([`Listener::accept`]): at most the op in
+    /// flight, as the session holds one, its command's exit, as it runs one command, and its end.
     ///
     /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
     Agent(Arrival),
 }
 
 impl Runtime<'_> {
-    /// Drives the run from its start, `unix` after the Unix epoch, to its outcome.
+    /// Drives the run from its start, `unix` after the Unix epoch, until the core finishes or
+    /// abandons it, then gives the core what is left in the inbox ([`Runtime::drain`]).
     fn drive(&mut self, unix: Duration) -> Result<Outcome, String> {
         let (mut core, mut actions) = Core::start(self.workflow, self.startup);
         self.log.start(self.workflow, unix, &actions)?;
+        // Only the core's end drains the inbox: after a failure of the runtime's own, such as a
+        // record it couldn't write, the core may still be taking ops, and would decide on ones
+        // that nothing acts on.
         loop {
-            if let Some(outcome) = self.perform(actions)? {
-                return Ok(outcome);
+            if let Some(end) = self.perform(&core, actions)? {
+                return failed_also(end, self.drain(&mut core));
             }
-            let (at, event) = self.next_event(&core);
+            let (at, event) = self.next_event(&core)?;
             actions = core.handle(at, event.clone());
             self.log.event(self.workflow, at, &event, &actions)?;
         }
@@ -252,19 +329,27 @@ impl Runtime<'_> {
         self.hard_end().saturating_sub(final_judge)
     }
 
+    /// When the answer to an op is due, since the run started: the next time the core acts of
+    /// itself ([`Core::tick_due`]), or the hard end once it won't.
+    fn answers_due(&self, core: &Core<'_>) -> Duration {
+        // An answer the agent doesn't read then holds the loop no later than the time it would
+        // act on next anyway.
+        core.tick_due().unwrap_or_else(|| self.hard_end())
+    }
+
     /// Waits for the next event: one that performing an action produced; else the core's tick, if
     /// it is due; else what arrives in the inbox before the tick is due, and else the tick then.
-    /// The wait ends at the tick's time, which arrivals the core doesn't wait on, dropped as they
+    /// The wait ends at the tick's time, which arrivals the core doesn't wait on, handled as they
     /// come, don't move.
-    fn next_event(&mut self, core: &Core<'_>) -> (Duration, Event) {
+    fn next_event(&mut self, core: &Core<'_>) -> Result<(Duration, Event), String> {
         if let Some(event) = self.pending.pop_front() {
-            return event;
+            return Ok(event);
         }
         #[expect(
             clippy::unreachable,
-            reason = "`perform` returns on `Finish` or `Abandon` before this is called, and \
-                      `tick_due` is `Some` in every phase where the run is still going, so \
-                      `None` here is a bug"
+            reason = "`drive` calls this only until `perform` returns the run's end, on \
+                      `Finish` or `Abandon`, and `tick_due` is `Some` in every phase where the \
+                      run is still going, so `None` here is a bug"
         )]
         let Some(due) = core.tick_due() else {
             unreachable!("the run is still going, yet the core has no tick due")
@@ -272,7 +357,7 @@ impl Runtime<'_> {
         loop {
             let now = self.clock.now();
             let Some(wait) = due.checked_sub(now).filter(|wait| !wait.is_zero()) else {
-                return (now, Event::Tick);
+                return Ok((now, Event::Tick));
             };
             let input = match self.inbox.recv_timeout(wait) {
                 Ok(input) => input,
@@ -287,32 +372,111 @@ impl Runtime<'_> {
                     unreachable!("the inbox disconnected, though the runtime keeps a sender")
                 }
             };
-            if let Some(event) = self.arrived(input) {
-                return event;
+            if let Some(event) = self.arrived(input, due)? {
+                return Ok(event);
             }
         }
     }
 
     /// The event that `input` brings the core, if the core waits on it, at the time the loop
-    /// took it.
-    fn arrived(&mut self, input: Input) -> Option<(Duration, Event)> {
-        match input {
-            Input::Agent(arrival) => {
-                // No agent: the core waits on nothing from the agent's session. The loop tears the
-                // agent down in the batch that hears of its end, or of its command's failed start,
-                // so whatever of the session's it takes after that batch comes here, such as its
-                // command's exit as the teardown's freeze kills it, its end as the teardown drops
-                // it, or the exit of a command whose start failed at its deadline just as the
-                // sandbox said it started. So does the end of a session that the start path
-                // dropped after its set-up failed.
-                let event = self.agent.as_mut()?.arrived(arrival)?;
-                Some((self.clock.now(), event))
+    /// took it. An op whose payload the gateway refused is refused by `due`, the core's next
+    /// tick, and goes to the run log, since the core neither decides on it nor learns of it.
+    fn arrived(
+        &mut self,
+        input: Input,
+        due: Duration,
+    ) -> Result<Option<(Duration, Event)>, String> {
+        let at = self.clock.now();
+        let Input::Agent(arrival) = input;
+        // Ops are taken as usual even once the agent's session has closed: the core has ended
+        // the work phase, or the run, by then, so it refuses each, and the run log notes that
+        // the answer wasn't sent.
+        let event = match arrival {
+            Arrival::Op(incoming) => Some(self.op(incoming)),
+            Arrival::Refused(refused) => {
+                self.refuse(at, refused, self.clock.deadline(due))?;
+                None
             }
-        }
+            // With no agent, the core waits on neither. The loop tears the agent down in the
+            // batch that hears of its end, or of its command's failed start, so whatever of the
+            // session's it takes after that batch comes here, such as its command's exit as the
+            // teardown's freeze kills it, its end as the teardown drops it, or the exit of a
+            // command whose start failed at its deadline just as the sandbox said it started. So
+            // does the end of a session that the start path dropped after its set-up failed.
+            Arrival::Exited { process, status } => {
+                (self.agent.as_mut()).and_then(|agent| agent.exited(process, status))
+            }
+            Arrival::Ended { reason } => {
+                (self.agent.as_mut()).and_then(|agent| agent.ended(&reason))
+            }
+        };
+        Ok(event.map(|event| (at, event)))
     }
 
-    /// Performs the core's actions, in order: the outcome once one finishes the run.
-    fn perform(&mut self, actions: Vec<Action>) -> Result<Option<Outcome>, String> {
+    /// Gives the core `incoming`, an op of the agent's: the event of its arrival, under the next
+    /// number. Its payload is stored only once the core accepts it ([`Runtime::reply`]).
+    fn op(&mut self, incoming: IncomingOp) -> Event {
+        let (request, unanswered) = request(incoming);
+        let op = OpId(self.next_op);
+        self.next_op += 1;
+        #[expect(
+            clippy::unreachable,
+            reason = "the agent's session hands out an op only once the one before it has been \
+                      answered, by `Session::reply`, which only `Runtime::reply` reaches, taking \
+                      that op from here, or by `Session::refuse`, for an op that never comes \
+                      here; the session's one op in flight is a rule of the protocol behind its \
+                      `pub` API, which a type showing it would reshape"
+        )]
+        if let Some((earlier, _)) = self.unanswered.replace((op, unanswered)) {
+            unreachable!("op {} arrived while op {} was unanswered", op.0, earlier.0)
+        }
+        Event::OpArrived { op, request }
+    }
+
+    /// Refuses `refused`, an op of the agent's whose payload the gateway refused, taken at `at`,
+    /// by `by`, and records it in the run log.
+    fn refuse(&mut self, at: Duration, refused: RefusedOp, by: Deadline) -> Result<(), String> {
+        self.log.refused(self.workflow, at, &refused)?;
+        let what = "the refusal of an op whose payload was over the agent's limit";
+        self.answer(what, by, |agent, by| agent.refuse(refused, by))
+    }
+
+    /// Takes what is left in the inbox once the core has finished or abandoned the run, as the
+    /// loop does ([`Runtime::arrived`]): the core refuses each op, as it does every op after its
+    /// end, and the run log notes that the refusal wasn't sent.
+    fn drain(&mut self, core: &mut Core<'_>) -> Result<(), String> {
+        // Its teardown has dropped the agent's session, unless the run was abandoned first, and
+        // this drops it then, its sandbox left to the sweep: either way, its reader has handed
+        // over all it will by now.
+        self.agent = None;
+        while let Ok(input) = self.inbox.try_recv() {
+            let Some((at, event)) = self.arrived(input, self.answers_due(core))? else {
+                continue;
+            };
+            let actions = core.handle(at, event.clone());
+            self.log.event(self.workflow, at, &event, &actions)?;
+            #[expect(
+                clippy::unreachable,
+                reason = "after `Finish` or `Abandon`, the core only refuses the ops that still \
+                          arrive, as `Action::Finish` and `Action::Abandon` say, so it ends the \
+                          run no more; a type showing it would split the core's actions by the \
+                          run's phase"
+            )]
+            if self.perform(core, actions)?.is_some() {
+                unreachable!("the core ended the run it had ended")
+            }
+        }
+        Ok(())
+    }
+
+    /// Performs the core's actions, in order, and returns how the run ended, if one of them
+    /// ended it: with its outcome, or why it has none.
+    fn perform(
+        &mut self,
+        core: &Core<'_>,
+        actions: Vec<Action>,
+    ) -> Result<Option<Result<Outcome, String>>, String> {
+        let mut end = None;
         for action in actions {
             match action {
                 Action::StartAgent => {
@@ -324,29 +488,101 @@ impl Runtime<'_> {
                     self.agent = agent;
                     self.pending.push_back((self.clock.now(), event));
                 }
-                #[expect(
-                    clippy::unreachable,
-                    reason = "the core replies to ops, and starts and stops judge calls, only for \
-                              the ops it was given, and this runtime gives it none; a type that \
-                              left these out would split the core's `Action`, which every \
-                              runtime of the core shares"
-                )]
-                Action::Reply { .. } | Action::StartJudge { .. } | Action::StopJudge { .. } => {
-                    unreachable!("the core asked for {action:?}, though it was given no op")
+                Action::Reply { op, reply } => {
+                    let by = self.clock.deadline(self.answers_due(core));
+                    self.reply(op, reply, by)?;
                 }
+                Action::StartJudge {
+                    job,
+                    call: _,
+                    payload: _,
+                    timeout: _,
+                } => {
+                    // This runtime runs no judge call: each fails as it starts.
+                    let reason = "this runtime runs no judge call yet".to_owned();
+                    let event = Event::JudgeFailed { job, reason };
+                    self.pending.push_back((self.clock.now(), event));
+                }
+                // This runtime fails each job as it starts it, a failure the core takes as its
+                // next event, so the core stops a job only as it takes the job's failure, at or
+                // past the end of the work phase, which it checks before it applies an event.
+                // Nothing runs to stop, and the failure is the job's last report.
+                Action::StopJudge { job: _ } => {}
                 Action::TearDownAgent => self.tear_down_agent()?,
-                Action::Finish { outcome } => return Ok(Some(outcome)),
+                Action::Finish { outcome } => end = Some(Ok(outcome)),
+                // Only a reply can follow it in its batch: the refusal of an op taken at the hard
+                // end, by which its answer was due, so `answer` notes it unsent, and the op ends
+                // with the agent's sandbox, which the run's end deletes.
                 Action::Abandon => {
-                    return Err(format!(
+                    end = Some(Err(format!(
                         "the run was still going at its hard end, {} s after it started: \
                          expected it to end within its deadline, its finalize grace, its final \
                          judge's timeout and its sandboxes' startups",
                         self.hard_end().as_secs()
-                    ));
+                    )));
                 }
             }
         }
-        Ok(None)
+        Ok(end)
+    }
+
+    /// Answers op `op` with `reply`, by `by`. An op the core accepted has its payload stored
+    /// first, since a judge call reads it, now or in the final phase; a refused op's bytes are
+    /// never written.
+    fn reply(&mut self, op: OpId, reply: OpReply, by: Deadline) -> Result<(), String> {
+        #[expect(
+            clippy::unreachable,
+            reason = "the core answers every op it is given exactly once (`Core`), and the \
+                      runtime gives it each op once, under a number that only this takes away; \
+                      a type tying the reply to its op would carry the gateway's `IncomingOp` \
+                      through the core, which does no I/O"
+        )]
+        let Some((_, unanswered)) = self.unanswered.take().filter(|(id, _)| *id == op) else {
+            unreachable!("op {} was answered twice, or never given to the core", op.0)
+        };
+        let incoming = match unanswered {
+            Unanswered::Query(incoming) => incoming,
+            Unanswered::Call {
+                incoming,
+                payload,
+                reference,
+            } => {
+                if accepts(&reply) {
+                    self.payloads.store(&payload, &reference)?;
+                }
+                incoming
+            }
+        };
+        let what = format!("op {}'s reply", op.0);
+        self.answer(&what, by, |agent, by| agent.reply(incoming, reply, by))
+    }
+
+    /// Sends an answer to an op of the agent's, `what`, by `by`, with `write`, unless `by` has
+    /// passed or the agent's sandbox is gone. The run log notes an answer that isn't sent, or
+    /// fails.
+    fn answer(
+        &mut self,
+        what: &str,
+        by: Deadline,
+        write: impl FnOnce(&mut Agent, Deadline) -> io::Result<()>,
+    ) -> Result<(), String> {
+        let sent = match &mut self.agent {
+            // A write past `by` would end the session, which the agent's teardown still needs,
+            // for a delay of the host's own, such as hashing the payload, the log's sync or
+            // storing the payload. The op stays in flight, which wedges the agent's ops, but
+            // only until the core's next act: while the agent works, `by` is the end of the work
+            // phase (`Core::tick_due`), so that act tears the agent down; after `Abandon`, the
+            // run's end drops it.
+            Some(_) if by.remaining().is_none() => Err(format!(
+                "{what} wasn't sent: it was due by the core's next act, which has come"
+            )),
+            Some(agent) => write(agent, by).context(format_args!("{what} failed")),
+            None => Err(format!("{what} wasn't sent: the agent's sandbox is gone")),
+        };
+        match sent {
+            Ok(()) => Ok(()),
+            Err(note) => self.log.note(self.clock.now(), &note),
+        }
     }
 
     /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed. A

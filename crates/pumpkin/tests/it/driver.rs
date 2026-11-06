@@ -436,7 +436,8 @@ fn one_call_at_a_time() {
 
 /// The deadline ends the work phase, and bounds a train call's timeout before it. The final
 /// judge waits until the agent and its stopped job are gone, and a final judge that times out
-/// leaves no score.
+/// leaves no score. A job whose failure comes at the deadline is stopped as the failure is
+/// taken, which is its last report: the final judge starts at once.
 #[test]
 fn deadline() {
     check(
@@ -479,6 +480,29 @@ fn deadline() {
             180600 collected 1 {"status": "passed", "raw_score": 7}
               finish: no score; work ended at the deadline; the stored submission, op 1's payload of 10 bytes, got no result, Timeout
               (no tick due)
+        "#]],
+    );
+    check(
+        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
+        r"
+        50000 submit submit 10
+        59999 judge train 10
+        60000 judge_failed 0 this runtime runs no judge call yet
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 60000)
+            50000 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":10}
+            59999 judge train 10
+              reply to op 2: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 2's payload of 10 bytes, with a timeout of 1ms
+            60000 judge_failed 0 this runtime runs no judge call yet
+              stop job 0
+              tear down the agent
+              start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 260000)
         "#]],
     );
 }

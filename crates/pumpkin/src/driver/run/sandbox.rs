@@ -18,7 +18,8 @@ use pumpkin_schema::provider::{
 };
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{
-    Launch, PUMPKIN_BYTES, RelativePath, command_env, command_stderr, command_stdout, pumpkin_dir,
+    Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
+    command_stdout, pumpkin_dir,
 };
 use pumpkin_schema::workflow::{Sandbox, Workflow};
 use stdx::{Context, Deadline};
@@ -97,14 +98,16 @@ impl<'p> Sandboxes<'p> {
         })
     }
 
-    /// Starts a passive sandbox for `sandbox`'s role, its socket directory named `name` within
-    /// the run, and accepts its session, set up, by `by`, its arrivals sent on `arrivals` as
-    /// `wrap` makes them ([`Listener::accept`]). A sandbox that doesn't start by then is deleted,
-    /// with its console quoted in the error, which says if deleting it failed.
+    /// Starts a sandbox for `sandbox`'s role that makes ops, whose payloads hold at most `ops`,
+    /// its socket directory named `name` within the run, and accepts its session, set up, by
+    /// `by`, its arrivals sent on `arrivals` as `wrap` makes them ([`Listener::accept`]). A
+    /// sandbox that doesn't start by then is deleted, with its console quoted in the error, which
+    /// says if deleting it failed.
     pub(super) fn start<T: Send + 'static>(
         &self,
         name: &str,
         sandbox: &Sandbox,
+        ops: OpPayloadLimit,
         by: Deadline,
         arrivals: Sender<T>,
         wrap: fn(Arrival) -> T,
@@ -140,12 +143,12 @@ impl<'p> Sandboxes<'p> {
             },
             image: image.clone(),
             sandboxd: self.sandboxd.clone(),
-            ops: false,
+            ops: true,
             dial: Dial::Socket { dir },
         };
         let Created { id } = self.provider.create(&create)?;
         let session = listener
-            .accept(by, None, arrivals, wrap)
+            .accept(by, Some(ops), arrivals, wrap)
             .map_err(|error| error.to_string())
             .and_then(|mut session| session.set_up(by).map(|()| session));
         match session {
