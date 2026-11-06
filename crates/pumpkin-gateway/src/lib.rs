@@ -17,7 +17,9 @@
 //!
 //! Every request waits on the sandbox until the deadline its caller gives, so a slow link makes
 //! it wait, never fail. A request whose deadline passes fails with [`io::ErrorKind::TimedOut`]
-//! and ends the session. A sandbox that closes its connection ends the session at once.
+//! and ends the session. A sandbox that closes its connection ends the session at once. The
+//! owner's requests and the responses to model requests take turns to write whole frames, so a
+//! frame may also wait behind another writer's, until that writer's deadline.
 //!
 //! # Ops
 //!
@@ -30,10 +32,10 @@
 //! # Model requests
 //!
 //! A sandbox whose session takes model requests ([`Listener::accept`]) may make them, as the
-//! protocol describes: each reaches the owner as an [`Arrival`] once its body has arrived. The
-//! gateway sends no response, so each stays in flight until the session ends. Here too it
-//! decides nothing, but bounds what model requests cost the host, and ends a session whose
-//! sandbox breaks their rules.
+//! protocol describes: each reaches the owner as an [`Arrival`] once its body has arrived, and
+//! the owner answers it with [`IncomingModelRequest::respond`], whose response streams back from
+//! any thread, beside the owner's requests. Here too the gateway decides nothing, but bounds what
+//! model requests cost the host, and ends a session whose sandbox breaks their rules.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Write};
@@ -153,21 +155,30 @@ impl Drop for Listener {
     }
 }
 
-/// A sandbox's session, which one owner drives: it alone writes to the sandbox.
+/// A sandbox's session, which one owner drives, while the responses to its model requests
+/// stream back beside it ([`IncomingModelRequest::respond`]).
 ///
-/// Requests on it block until `sandboxd` answers, their deadline passes, or the session ends.
-/// Dropping it ends the session, which stops the sandbox, and returns once the reader has sent
-/// its last arrival, the end.
+/// Requests on it block until `sandboxd` answers, their deadline passes, or the session ends,
+/// and their frames may wait behind other writers' ([deadlines](crate#deadlines)). Dropping it
+/// ends the session, which stops the sandbox, and returns once the reader has sent its last
+/// arrival, the end.
 #[derive(Debug)]
 pub struct Session {
     /// The session's number, from [`NEXT_SESSION`], which its ops and commands carry.
     id: u64,
+    /// The connection, which ends the session without waiting for a writer.
     connection: UnixStream,
+    // The connection's writing end, shared with the responses to model requests, which stream
+    // from the threads that serve them while the owner sends requests. Each writer holds it for
+    // a whole frame, so that frames never interleave.
+    writer: Arc<Mutex<UnixStream>>,
     // Shared with the reader thread, which routes the sandbox's frames by them, removes a route
-    // once its command has exited or nothing receives from it, and puts model requests in flight.
+    // once its command has exited or nothing receives from it, and puts model requests in
+    // flight; and with the responses to model requests, which take theirs out.
     routes: Arc<Mutex<Routes>>,
-    // Shared with the reader thread, which may end the session. Set under the routes' lock,
-    // which `end` explains.
+    // Shared with the reader thread, which may end the session, and with each response to a
+    // model request, which reports why it ended. Set under the routes' lock, which `end`
+    // explains.
     ended: Arc<OnceLock<String>>,
     /// The reader thread, `Some` until the drop joins it.
     reader: Option<JoinHandle<()>>,
@@ -274,15 +285,17 @@ pub enum Op {
 /// What the session's reader hands its owner ([`Listener::accept`]), in the order the sandbox
 /// sent it, ending with the session's end, once.
 #[derive(Debug)]
-#[must_use = "an arrival may hold an op, and an op dropped unanswered wedges the sandbox's ops: \
-              answer each with `Session::reply` or `Session::refuse`"]
+#[must_use = "an arrival may hold an op, which dropped unanswered wedges the sandbox's ops, or a \
+              model request, which dropped unanswered holds its client and its place in the \
+              flight: answer each with `Session::reply`, `Session::refuse` or \
+              `IncomingModelRequest::respond`"]
 pub enum Arrival {
     /// An op that arrived whole, for the owner to answer.
     Op(IncomingOp),
     /// An op whose payload was over the session's limit, for the owner to refuse.
     Refused(RefusedOp),
-    /// A model request that arrived whole.
-    ModelRequest(ModelRequest),
+    /// A model request that arrived whole, for the owner to answer.
+    ModelRequest(IncomingModelRequest),
     /// The exit of the command [`Session::start`] returned `process` for.
     Exited {
         process: Process,
@@ -337,6 +350,16 @@ impl RefusedOp {
     }
 }
 
+/// A request that a client in the sandbox made to its model endpoint, whole, and in flight until
+/// its response ends.
+#[derive(Debug)]
+#[must_use = "a model request dropped unanswered holds its client, and its place in the flight, \
+              until the session ends: answer it with `IncomingModelRequest::respond`"]
+pub struct IncomingModelRequest {
+    pub request: ModelRequest,
+    responder: Responder,
+}
+
 /// An HTTP request to a sandbox's model endpoint, as its client sent it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelRequest {
@@ -347,6 +370,30 @@ pub struct ModelRequest {
     pub headers: Vec<(String, String)>,
     /// The body, of at most [`MAX_MODEL_REQUEST_BYTES`].
     pub body: Vec<u8>,
+}
+
+/// The response to a model request, streaming to its client by the deadline that
+/// [`respond`](IncomingModelRequest::respond) gave. [`end`](Self::end) ends it whole;
+/// [`cut`](Self::cut), or dropping it unended, cuts it short, so that its client doesn't take it
+/// as whole.
+#[derive(Debug)]
+pub struct ModelResponse {
+    responder: Responder,
+    by: Deadline,
+    /// Whether the response has ended, which takes its request out of flight.
+    finished: bool,
+}
+
+/// The way to respond to model request `request`.
+#[derive(Debug)]
+struct Responder {
+    request: u32,
+    // Shared with the session's owner, and with the responses to the other model requests.
+    writer: Arc<Mutex<UnixStream>>,
+    // Shared with the session and its reader thread, which puts model requests in flight.
+    routes: Arc<Mutex<Routes>>,
+    // Shared with the session and its reader thread, which record why the session ended.
+    ended: Arc<OnceLock<String>>,
 }
 
 /// A command started in a sandbox, which its exit names ([`Arrival::Exited`]).
@@ -372,6 +419,10 @@ impl Session {
             models: BTreeSet::new(),
         }));
         let ended = Arc::new(OnceLock::new());
+        let writer = stream
+            .try_clone()
+            .map_err(|error| context("the connection can't be cloned for its writer", &error))?;
+        let writer = Arc::new(Mutex::new(writer));
         let incoming = stream
             .try_clone()
             .map_err(|error| context("the connection can't be cloned for its reader", &error))?;
@@ -381,6 +432,7 @@ impl Session {
             owner: Owner { session: id, send },
             limit,
             open: None,
+            writer: Arc::clone(&writer),
             takes_models,
             models: BTreeMap::new(),
         };
@@ -392,6 +444,7 @@ impl Session {
         Ok(Self {
             id,
             connection: stream,
+            writer,
             routes,
             ended,
             reader: Some(reader),
@@ -598,16 +651,27 @@ impl Session {
         lock(&self.routes).op = None;
     }
 
-    /// Sends `reply` to op `number`, already out of the flight.
+    /// Sends `reply` to op `number`, already out of the flight. A reply too long for a frame
+    /// leaves the session open, so that the op can still be answered.
     fn answer(&mut self, number: u32, reply: OpReply, by: Deadline) -> io::Result<()> {
-        self.can_send(by)?;
+        can_send(
+            &self.routes,
+            &self.ended,
+            &self.connection,
+            by,
+            Due::Request,
+        )?;
         let message = ToSandbox::OpReply { op: number, reply };
-        match frame::write(&mut self.until(by), &message, &[]) {
-            // A reply too long for a frame, which `frame::write` refuses before writing
-            // anything, so the session goes on, and the op can still be answered.
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
-            written => written.map_err(|error| self.write_failed(&error)),
-        }
+        let writer = lock(&self.writer);
+        write(
+            &self.routes,
+            &self.ended,
+            &writer,
+            &message,
+            &[],
+            by,
+            Due::Request,
+        )
     }
 
     fn send_tree(
@@ -741,7 +805,13 @@ impl Session {
         route: fn(SyncSender<R>) -> Route,
         by: Deadline,
     ) -> io::Result<(u32, Receiver<R>)> {
-        self.can_send(by)?;
+        can_send(
+            &self.routes,
+            &self.ended,
+            &self.connection,
+            by,
+            Due::Request,
+        )?;
         // One item in every queue. A put's, a freeze's or a start's queue holds its outcome,
         // done or failed, the one reply its request takes. A second outcome breaks the protocol
         // if it arrives before the first is taken, as it finds the queue full, or after a
@@ -772,33 +842,25 @@ impl Session {
     /// Sends a frame. Any failure ends the session: one frame of a request that spans several,
     /// such as a [`put`](Self::put)'s, may be too long after the first was sent.
     fn send(&mut self, message: &ToSandbox, body: &[u8], by: Deadline) -> io::Result<()> {
-        frame::write(&mut self.until(by), message, body).map_err(|error| self.write_failed(&error))
-    }
-
-    /// The connection, to write to until `by`.
-    fn until(&self, by: Deadline) -> Until<'_> {
-        Until {
-            connection: &self.connection,
+        let writer = lock(&self.writer);
+        match write(
+            &self.routes,
+            &self.ended,
+            &writer,
+            message,
+            body,
             by,
-        }
-    }
-
-    /// Ends the session after a write that failed with `error`, which may leave part of a frame
-    /// on the connection, and returns the request's error: the deadline's, if it has passed,
-    /// or else the session's, whose reason is the failed write's unless it had ended already.
-    fn write_failed(&self, error: &io::Error) -> io::Error {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            Due::Request,
         ) {
-            return self.timed_out(
-                "the sandbox didn't take what was sent before the request's deadline: expected it \
-                 to read while the deadline lasts",
-            );
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(write_failed(
+                &self.routes,
+                &self.ended,
+                &writer,
+                &error,
+                Due::Request,
+            )),
+            sent => sent,
         }
-        let reason = format!("writing to the sandbox failed: {error}");
-        end(&self.routes, &self.ended, &self.connection, reason);
-        ended(&self.ended)
     }
 
     fn receive<R>(&self, replies: &Receiver<R>, by: Deadline) -> io::Result<R> {
@@ -813,38 +875,16 @@ impl Session {
         };
         match received {
             Ok(reply) => Ok(reply),
-            Err(RecvTimeoutError::Timeout) => Err(self.timed_out(
+            Err(RecvTimeoutError::Timeout) => Err(timed_out(
+                &self.routes,
+                &self.ended,
+                &self.connection,
                 "the sandbox didn't answer before the request's deadline: expected its answer \
-                 while the deadline lasts",
+                 while the deadline lasts"
+                    .to_owned(),
             )),
             Err(RecvTimeoutError::Disconnected) => Err(ended(&self.ended)),
         }
-    }
-
-    /// Fails before a request is sent if the session has ended, for its reason, or else if `by`
-    /// has passed, which ends the session though the sandbox has had no part in it.
-    fn can_send(&self, by: Deadline) -> io::Result<()> {
-        if self.ended.get().is_some() {
-            return Err(ended(&self.ended));
-        }
-        if by.remaining().is_none() {
-            return Err(self.timed_out(
-                "the request's deadline passed before it was sent: expected time left to send it",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Ends the session for `reason`, as a request's deadline has passed, and returns the
-    /// request's error.
-    fn timed_out(&self, reason: &'static str) -> io::Error {
-        end(
-            &self.routes,
-            &self.ended,
-            &self.connection,
-            reason.to_owned(),
-        );
-        io::Error::new(io::ErrorKind::TimedOut, reason)
     }
 
     fn done(&self, replies: &Receiver<Result<(), String>>, by: Deadline) -> io::Result<()> {
@@ -862,7 +902,7 @@ impl Drop for Session {
         // Nothing else holds the reader up: its sends to the owner never block; a tree's frames
         // wait only for a `collect`, which has returned, dropping their queue, before anything
         // can drop the session; and it takes the routes' lock only around steps that never
-        // block, as this thread does, which holds it no longer.
+        // block, as every holder does, and this thread holds it no longer.
         #[expect(
             clippy::unreachable,
             reason = "a panic on the reader thread aborts the process (`AbortOnUnwind` in `route`), \
@@ -874,6 +914,211 @@ impl Drop for Session {
             unreachable!("the session's reader thread panicked")
         }
     }
+}
+
+impl IncomingModelRequest {
+    /// Starts the response with `status` and `headers`, which `sandboxd` passes on to the
+    /// client, and returns it, to stream its body by `by` ([deadlines](crate#deadlines)). A
+    /// response that hasn't ended by `by` ends the session at its next frame, or as it drops.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the head is too long for a frame, which cuts the request short without a
+    /// response, if `by` passes first, or if the session has ended.
+    pub fn respond(
+        self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        by: Deadline,
+    ) -> io::Result<ModelResponse> {
+        let Self {
+            request: _,
+            responder,
+        } = self;
+        let request = responder.request;
+        let response = ModelResponse {
+            responder,
+            by,
+            finished: false,
+        };
+        let head = ToSandbox::ModelResponse {
+            request,
+            status,
+            headers,
+        };
+        // A response that fails to start drops here, cut short.
+        response.responder.send(&head, &[], by)?;
+        Ok(response)
+    }
+}
+
+impl ModelResponse {
+    /// Sends `bytes` of the body on to the client.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the response's deadline passes first, or if the session has ended.
+    pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let request = self.responder.request;
+        for chunk in bytes.chunks(frame::MAX_BODY_BYTES) {
+            self.responder
+                .send(&ToSandbox::ModelData { request }, chunk, self.by)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the response whole.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the response's deadline passes first, or if the session has ended.
+    pub fn end(mut self) -> io::Result<()> {
+        self.finish(false)
+    }
+
+    /// Ends the response cut short, so that its client doesn't take it as whole.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the response's deadline passes first, or if the session has ended.
+    pub fn cut(mut self) -> io::Result<()> {
+        self.finish(true)
+    }
+
+    /// Ends the response, `cut` short or not. Its request leaves the flight first, since the
+    /// sandbox may open another as soon as the end reaches it.
+    fn finish(&mut self, cut: bool) -> io::Result<()> {
+        self.finished = true;
+        let request = self.responder.request;
+        lock(&self.responder.routes).models.remove(&request);
+        self.responder
+            .send(&ToSandbox::ModelEnd { request, cut }, &[], self.by)
+    }
+}
+
+impl Drop for ModelResponse {
+    fn drop(&mut self) {
+        if !self.finished {
+            // A session that has ended has no client left to tell.
+            let _ = self.finish(true);
+        }
+    }
+}
+
+impl Responder {
+    /// Sends a frame of the response by `by`, as [`write`] does, once the session's owner and
+    /// the other responses let it write.
+    fn send(&self, message: &ToSandbox, body: &[u8], by: Deadline) -> io::Result<()> {
+        let writer = lock(&self.writer);
+        can_send(&self.routes, &self.ended, &writer, by, Due::Response)?;
+        write(
+            &self.routes,
+            &self.ended,
+            &writer,
+            message,
+            body,
+            by,
+            Due::Response,
+        )
+    }
+}
+
+/// Whose deadline a frame is written by, which the reason for the session's end names if it
+/// passes: a request's, which the owner's reply to an op shares, or a response's.
+#[derive(Clone, Copy, Debug)]
+enum Due {
+    Request,
+    Response,
+}
+
+impl Due {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+        }
+    }
+}
+
+/// Fails before a frame due by `by` is sent if the session has ended, for its reason, or else if
+/// `by` has passed, which ends the session, through `connection`, though the sandbox has had no
+/// part in it.
+fn can_send(
+    routes: &Mutex<Routes>,
+    ended: &OnceLock<String>,
+    connection: &UnixStream,
+    by: Deadline,
+    due: Due,
+) -> io::Result<()> {
+    if ended.get().is_some() {
+        return Err(self::ended(ended));
+    }
+    if by.remaining().is_none() {
+        let reason = format!(
+            "the {}'s deadline passed before it was sent: expected time left to send it",
+            due.noun()
+        );
+        return Err(timed_out(routes, ended, connection, reason));
+    }
+    Ok(())
+}
+
+/// Ends the session, through `connection`, for `reason`, as a deadline has passed, and returns the
+/// error of the request or the response it was due by.
+fn timed_out(
+    routes: &Mutex<Routes>,
+    ended: &OnceLock<String>,
+    connection: &UnixStream,
+    reason: String,
+) -> io::Error {
+    end(routes, ended, connection, reason.clone());
+    io::Error::new(io::ErrorKind::TimedOut, reason)
+}
+
+/// Writes a frame to `connection`, the writer whose lock the caller holds, by `by`. A frame too
+/// long, which `frame::write` refuses before writing anything, fails with
+/// [`io::ErrorKind::InvalidInput`] and leaves the session open; any other failure ends it
+/// ([`write_failed`]).
+fn write(
+    routes: &Mutex<Routes>,
+    ended: &OnceLock<String>,
+    connection: &UnixStream,
+    message: &ToSandbox,
+    body: &[u8],
+    by: Deadline,
+    due: Due,
+) -> io::Result<()> {
+    match frame::write(&mut Until { connection, by }, message, body) {
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
+        written => written.map_err(|error| write_failed(routes, ended, connection, &error, due)),
+    }
+}
+
+/// Ends the session, through `connection`, after a write of a frame due by `due`'s deadline that
+/// failed with `error`, which may leave part of a frame on the connection, and returns the
+/// writer's error: the deadline's, if it has passed, or else the session's, whose reason is the
+/// failed write's unless it had ended already.
+fn write_failed(
+    routes: &Mutex<Routes>,
+    ended: &OnceLock<String>,
+    connection: &UnixStream,
+    error: &io::Error,
+    due: Due,
+) -> io::Error {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    ) {
+        let reason = format!(
+            "the sandbox didn't take what was sent before the {}'s deadline: expected it to read \
+             while the deadline lasts",
+            due.noun()
+        );
+        return timed_out(routes, ended, connection, reason);
+    }
+    let reason = format!("writing to the sandbox failed: {error}");
+    end(routes, ended, connection, reason);
+    self::ended(ended)
 }
 
 /// Writes to a connection until `by`, after which every write fails as timed out.
@@ -904,8 +1149,8 @@ impl Write for Until<'_> {
 /// exit, then the end, to the owner.
 fn route(
     connection: &UnixStream,
-    routes: &Mutex<Routes>,
-    ended: &OnceLock<String>,
+    routes: &Arc<Mutex<Routes>>,
+    ended: &Arc<OnceLock<String>>,
     mut ops: Assembler,
 ) {
     // A panic here would skip `end`, leaving the session open with its owner waiting on it, so
@@ -934,9 +1179,9 @@ fn route(
                     headers,
                     body: Vec::new(),
                 };
-                ops.open_model(routes, request, head, size)
+                ops.open_model(routes, ended, request, head, size)
             }
-            FromSandbox::ModelData { request } => ops.model_data(request, &body),
+            FromSandbox::ModelData { request } => ops.model_data(routes, ended, request, &body),
             FromSandbox::Done { stream } => route_reply(routes, stream, Reply::Done, &ops.owner),
             FromSandbox::Failed { stream, message } => {
                 route_reply(routes, stream, Reply::Failed(message), &ops.owner)
@@ -1088,6 +1333,9 @@ struct Assembler {
     /// The op whose payload is arriving, by number.
     open: Option<(u32, Assembly)>,
     takes_models: bool,
+    // Shared with the session, and handed to the response to each model request, which writes
+    // through it.
+    writer: Arc<Mutex<UnixStream>>,
     /// The model requests whose bodies are arriving, by number, each with the bytes still due.
     models: BTreeMap<u32, (ModelRequest, u64)>,
 }
@@ -1204,7 +1452,8 @@ impl Assembler {
     /// at once if it has no body.
     fn open_model(
         &mut self,
-        routes: &Mutex<Routes>,
+        routes: &Arc<Mutex<Routes>>,
+        ended: &Arc<OnceLock<String>>,
         number: u32,
         head: ModelRequest,
         size: u64,
@@ -1256,7 +1505,7 @@ impl Assembler {
             ..head
         };
         if size == 0 {
-            self.pass_on_model(request);
+            self.pass_on_model(routes, ended, number, request);
         } else {
             self.models.insert(number, (request, size));
         }
@@ -1265,7 +1514,13 @@ impl Assembler {
 
     /// Adds bytes to model request `number`'s body, and passes the request on once the body's
     /// last byte has arrived.
-    fn model_data(&mut self, number: u32, bytes: &[u8]) -> Result<(), String> {
+    fn model_data(
+        &mut self,
+        routes: &Arc<Mutex<Routes>>,
+        ended: &Arc<OnceLock<String>>,
+        number: u32,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         // Bytes for a request never opened, or for one whose body has all arrived, break the
         // protocol. Unlike a reply on a stream that its request has closed, which `route_reply`
         // drops, they can't be the late end of an answer the gateway gave up on: a body ends at
@@ -1284,16 +1539,30 @@ impl Assembler {
         };
         request.body.extend_from_slice(bytes);
         if due == 0 {
-            self.pass_on_model(request);
+            self.pass_on_model(routes, ended, number, request);
         } else {
             self.models.insert(number, (request, due));
         }
         Ok(())
     }
 
-    /// Passes a model request on to the session's owner, now that its body has all arrived.
-    fn pass_on_model(&self, request: ModelRequest) {
-        self.owner.arrived(Arrival::ModelRequest(request));
+    /// Passes model request `number` on to the session's owner, now that its body has all
+    /// arrived, with the way to respond to it.
+    fn pass_on_model(
+        &self,
+        routes: &Arc<Mutex<Routes>>,
+        ended: &Arc<OnceLock<String>>,
+        number: u32,
+        request: ModelRequest,
+    ) {
+        let responder = Responder {
+            request: number,
+            writer: Arc::clone(&self.writer),
+            routes: Arc::clone(routes),
+            ended: Arc::clone(ended),
+        };
+        let incoming = IncomingModelRequest { request, responder };
+        self.owner.arrived(Arrival::ModelRequest(incoming));
     }
 }
 
