@@ -17,6 +17,9 @@
 //!   its [`out_dir()`](pumpkin_schema::sandbox::out_dir) and
 //!   [`log_dir()`](pumpkin_schema::sandbox::log_dir) when the work phase ended, as far as they
 //!   were collected; the run log notes what is incomplete;
+//! - `jobs/<n>/`, for job `n`'s judge call: its `out` and `log`, what the judge's sandbox held in
+//!   them once its command ended, as far as they were collected, but a result over
+//!   [`RESULT_MAX_BYTES`](pumpkin_schema::sandbox::RESULT_MAX_BYTES), which is removed;
 //! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields, in
 //!   the run log's JSON form of an outcome (`log::outcome_json`); or
 //!   `{"state": "refused" | "failed", "reason": r}`.
@@ -171,7 +174,7 @@ impl Payloads {
     /// Stores `bytes`, whose reference is `payload`, by [`replace`], unless they are stored
     /// already: a file has a digest's name only once it holds all of its bytes.
     pub(super) fn store(&self, bytes: &[u8], payload: &PayloadRef) -> Result<(), String> {
-        let path = self.dir.join(hex(&payload.digest));
+        let path = self.path(&payload.digest);
         match fs::symlink_metadata(&path) {
             Ok(_) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -179,6 +182,11 @@ impl Payloads {
             }
             Err(error) => Err(error).context(path.display()),
         }
+    }
+
+    /// Where the payload whose digest is `digest` is stored.
+    pub(super) fn path(&self, digest: &Sha256Digest) -> PathBuf {
+        self.dir.join(hex(digest))
     }
 }
 

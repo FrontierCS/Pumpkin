@@ -4,7 +4,9 @@
 //! is acted on. A record is one of:
 //!
 //! - an event: `{"seq": n, "at_ns": "t", "event": e, "actions": [a, ...]}`, which the runtime
-//!   observed `t` nanoseconds after the run started, with the actions the core decided on. The
+//!   observed `t` nanoseconds after the run started, with the actions the core decided on. A
+//!   judge call's events, and its notes, are at the times its thread observed them, which may
+//!   come before an earlier record's, as the loop takes them later. The
 //!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u"}`, at `u`
 //!   nanoseconds after the Unix epoch by the driving machine's clock, with the core's first
 //!   actions. Like it, an op the gateway refused, since its payload was over the agent's limit,

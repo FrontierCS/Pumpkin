@@ -8,9 +8,9 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fs, iter};
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::core::lasts;
@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use crate::docker;
 use crate::run::{Runs, compact, files};
-use crate::sim::{LOST, MUTE, Sim, UNDELETABLE, UNPUBLISHED};
+use crate::sim::{LINGERING, LOST, MUTE, Sim, UNDELETABLE, UNPUBLISHED};
 
 const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json");
 
@@ -61,11 +61,12 @@ impl Platform for Engine {
 /// Prepares `ir` as test `name` and executes it on `provider`, with `sandboxd`, and checks
 /// what becomes of it: what `execute` returns, the record's files, the payloads it holds,
 /// whether its `provider.json` is what the provider declared, its `outcome.json`, its log, when
-/// its last record came ([`when`]), the agent's standard output, if collected, whether the
-/// run's socket directories are left, what the platform shows ([`Platform`]), and what the
-/// run's list finds once it has ended. Each record's time is shown only if it is 0 or isn't a
-/// decimal string, the run's start only if it isn't within the call to `execute`, the time left
-/// in a reply as `<s>`, and the socket directories as `<sockets>`.
+/// its last record came ([`when`]), whether `execute` returned once the hard end had passed, if
+/// it did, the standard output of the agent and of each judge call, if collected, whether the
+/// run's socket directories are left, what the platform shows ([`Platform`]), and what the run's
+/// list finds once it has ended. Each record's time is shown only if it is 0 or isn't a decimal
+/// string, the run's start only if it isn't within the call to `execute`, the time left in a
+/// reply as `<s>`, and the socket directories as `<sockets>`.
 fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect: &Expect) {
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
@@ -120,11 +121,11 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
         let last = when(&ir, provider, Duration::from_nanos(last));
         lines.push(format!("its last record came {last}"));
     }
-    let stdout = record.join("agent").join(command_stdout().as_str());
-    if let Ok(stdout) = fs::read_to_string(stdout) {
-        lines.push("the agent's standard output:".to_owned());
-        lines.extend(stdout.lines().map(str::to_owned));
+    // By the whole call's time, which the run's clock starts within.
+    if Duration::from_nanos(started.end() - started.start()) >= hard_end(&ir, provider) {
+        lines.push("execute returned once the hard end had passed".to_owned());
     }
+    lines.extend(standard_outputs(&record));
     lines.push(format!("socket directories left: {}", sockets.exists()));
     lines.extend(provider.shown());
     let listed = provider.list(&tag.unwrap()).unwrap();
@@ -136,6 +137,26 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
     expect.assert_eq(&lines.join("\n").replace(&sockets, "<sockets>"));
 }
 
+/// The standard output that `record`, a run's, holds of the agent's command and of each judge
+/// call's, in the order of the jobs' numbers.
+fn standard_outputs(record: &Path) -> Vec<String> {
+    let jobs = fs::read_dir(record.join("jobs")).into_iter().flatten();
+    let job = |entry: fs::DirEntry| entry.file_name().into_string().unwrap().parse().unwrap();
+    let mut jobs: Vec<u64> = jobs.map(|entry| job(entry.unwrap())).collect();
+    jobs.sort_unstable();
+    let jobs = (jobs.into_iter()).map(|job| (format!("job {job}'s"), format!("jobs/{job}")));
+    let agent = ("the agent's".to_owned(), "agent".to_owned());
+    let mut lines = Vec::new();
+    for (whose, dir) in iter::once(agent).chain(jobs) {
+        let stdout = record.join(dir).join(command_stdout().as_str());
+        if let Ok(stdout) = fs::read_to_string(stdout) {
+            lines.push(format!("{whose} standard output:"));
+            lines.extend(stdout.lines().map(str::to_owned));
+        }
+    }
+    lines
+}
+
 /// When `last`, a time since a run of `ir` on `provider` started, came: before the agent's
 /// teardown was to end, at most the hard end ([`lasts`]) less the final judge's startup and
 /// timeout; before the hard end; or after it.
@@ -143,9 +164,9 @@ fn when(ir: &ir::Workflow, provider: &dyn Provider, last: Duration) -> &'static 
     let workflow = Workflow::parse(ir).unwrap();
     let Main::SoloThenJudge(pattern) = workflow.main();
     let startup = provider.ready().capabilities.startup_seconds.get();
-    let startup = Duration::from_secs(startup);
-    let hard_end = lasts(&workflow, startup);
-    let teardown_end = hard_end.saturating_sub(startup + pattern.score.timeout);
+    let hard_end = hard_end(ir, provider);
+    let teardown_end =
+        hard_end.saturating_sub(Duration::from_secs(startup) + pattern.score.timeout);
     if last < teardown_end {
         "before the agent's teardown was to end"
     } else if last < hard_end {
@@ -153,6 +174,12 @@ fn when(ir: &ir::Workflow, provider: &dyn Provider, last: Duration) -> &'static 
     } else {
         "once the hard end had passed"
     }
+}
+
+/// The hard end ([`lasts`]) of a run of `ir` on `provider`.
+fn hard_end(ir: &ir::Workflow, provider: &dyn Provider) -> Duration {
+    let startup = provider.ready().capabilities.startup_seconds.get();
+    lasts(&Workflow::parse(ir).unwrap(), Duration::from_secs(startup))
 }
 
 /// The fixture's workflow, without the agent's model route, which the driver refuses, and with
@@ -166,16 +193,32 @@ fn workflow(argv: &[&str]) -> Value {
 }
 
 /// The workflow of the runs whose agents make ops: [`workflow`]'s, with `argv` as the agent's
-/// command and `deadline` as the pattern's deadline, in seconds, room in the train judge's slot
-/// for 8 bytes and in the score's for 16, the most an op of the agent's may carry, and a call
-/// timeout of 1 s, shorter than the time left in any run that makes its calls soon after it
+/// command and `deadline` as the pattern's deadline, in seconds; both judges judging the payload
+/// in their slot as the simulated provider's `judge` command does; room in the train judge's
+/// slot for 8 bytes and in the score's for 16, the most an op of the agent's may carry; and a
+/// call timeout of 1 s, shorter than the time left in any run that makes its calls soon after it
 /// starts, so that it is each call's timeout.
 fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = workflow(argv);
     ir["main"]["solo_then_judge"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
+    for role in [1, 2] {
+        let judge = &mut ir["roles"][role]["runtime"]["judge"];
+        judge["command"]["argv"] = json!(["judge", "/pumpkin/in/payload/raw"]);
+    }
     ir["roles"][1]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(8);
     ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(16);
     ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(deadline);
+    ir
+}
+
+/// [`ops_workflow`]'s workflow, with the run's other shares of its hard end as short as they
+/// go: no finalize grace, and a score timeout of 1 s, so that a run that waits for its
+/// teardown's end or its hard end waits seconds.
+fn short_workflow(argv: &[&str], deadline: u64) -> Value {
+    let mut ir = ops_workflow(argv, deadline);
+    let pattern = &mut ir["main"]["solo_then_judge"];
+    pattern["finalize_grace_seconds"] = json!(0);
+    pattern["score"]["timeout_seconds"] = json!(1);
     ir
 }
 
@@ -389,10 +432,11 @@ fn unpublished() {
 /// A run whose agent makes ops: `ops`; `status` of a job it doesn't have; a judge call to a
 /// grant it doesn't hold; one with a payload over the grant's slot, which the core refuses; one
 /// over the most an op may carry, which the gateway refuses, without the core; one the core
-/// accepts, whose call fails, as this runtime runs no judge call; `status` of that job; and a
-/// final submission, whose score fails too, so that the run finishes without a score. Every
-/// reply reaches the agent, which makes each op once the one before it is answered, and exits
-/// once the last is; the record keeps the accepted payloads alone.
+/// accepts, whose call fails as it starts, as this runtime runs none of the agent's calls;
+/// `status` of that job; and a final submission, which the final judge scores. Every reply
+/// reaches the agent, which makes each op once the one before it is answered, and exits once
+/// the last is; the record keeps the accepted payloads alone, and what the final judge's
+/// sandbox held.
 #[test]
 fn ops() {
     let argv = [
@@ -414,11 +458,11 @@ fn ops() {
         &ops_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            record: agent/log/collected, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            finished, with score Some(Number(6))
+            record: agent/log/collected, agent/out/collected, ir.json, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"this runtime runs no judge call yet"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
@@ -428,15 +472,48 @@ fn ops() {
             {"actions":[{"kind":"reply","op":3,"reply":{"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:a73add1aecea03a894ca65d99bc5e91d21b58cdb728343bbcb6cf6cf38b809f5","size":9}}},"seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"judge","payload":{"over":16,"size":17}}},"seq":6}
             {"actions":[{"kind":"reply","op":4,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":12000}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":4,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"this runtime runs no judge call yet"},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"this runtime runs no judge call of the agent's yet"},"seq":8}
             {"actions":[{"kind":"reply","op":5,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":12000},"state":"failed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":5,"request":{"job":"0","kind":"status"}},"seq":9}
             {"actions":[{"kind":"reply","op":6,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":6,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":10}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"error","reason":"this runtime runs no judge call yet"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_failed","reason":"this runtime runs no judge call yet"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"passed":true,"returned":{"raw_score":6},"score":6}},"seq":15}
             its last record came before the agent's teardown was to end
             socket directories left: false
-            their directory's mode at each create: ["700"]
+            their directory's mode at each create: ["700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
+/// A run whose agent finalizes a submission whose final judge writes a result over the most a
+/// result may hold: the result is removed from the record, and the run finishes with no score.
+#[test]
+fn result_over_the_limit() {
+    check(
+        "result-over-the-limit",
+        &Sim::new(),
+        &ops_workflow(&["ops", "finalize submit large"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
+            payloads hold: ["large"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"seq":2}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":3}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":6}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"invalid":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one","job":0,"kind":"judge_collected"},"seq":7}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
             listed once it ended: []"#]],
     );
 }
@@ -466,13 +543,44 @@ fn crashes_with_an_op_in_flight() {
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
             {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":12000}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12}}},"seq":2}
             {"at_ns":"<ns>","note":"op 0's reply failed: the sandbox ended the session","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"this runtime runs no judge call yet"},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"this runtime runs no judge call of the agent's yet"},"seq":4}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"seq":5}
             {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: the sandbox ended the session","seq":6}
             {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox ended the session","seq":7}
             {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":8}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":9}
             its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+/// A run whose agent finalizes a submission, and whose agent's sandbox's delete, in the teardown
+/// that follows, outlasts the run's hard end: the final judge's start is due by then, so its
+/// call fails with no sandbox created, and the run is abandoned.
+#[test]
+fn torn_down_past_the_hard_end() {
+    check(
+        "torn-down-past-the-hard-end",
+        &Sim::with_startup(SHORT_STARTUP),
+        &short_workflow(&["ops", "finalize submit 6"], 2),
+        LINGERING,
+        &expect![[r#"
+            failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
+            record: agent/log/collected, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
+            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"seq":4}
+            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":5}
+            its last record came once the hard end had passed
+            execute returned once the hard end had passed
             socket directories left: false
             their directory's mode at each create: ["700"]
             listed once it ended: []"#]],
@@ -522,28 +630,44 @@ fn late_ops() {
     );
 }
 
-/// The ops of [`ops`]'s agent made on Docker, through `sandboxctl`, which prints the reply each
-/// got, and exits with 1 for a refusal and 2 for a job that failed.
+/// What the agent of the run on Docker does: [`ops`]'s agent's ops, through `sandboxctl`, whose
+/// path stands as `SANDBOXCTL`, printing the reply each got; `sandboxctl` exits with 1 for a
+/// refusal and 2 for a job that failed.
+const AGENT: &str = r#"
+    x() { head -c "$1" /dev/zero | tr '\0' x > "$2"; }
+    x 6 six && x 9 nine && x 17 seventeen
+    ctl() {
+        out=$(SANDBOXCTL "$@" 2>&1)
+        echo "sandboxctl $*: exit $?: $out" | sed 's/"remaining_seconds":[0-9]*/"remaining_seconds":"<s>"/'
+    }
+    ctl ops
+    ctl status 0
+    ctl judge nope six
+    ctl judge train nine
+    ctl judge train seventeen
+    ctl judge train six
+    ctl status 0
+    ctl submit submit six --finalize"#;
+
+/// What the judges of the run on Docker do with the payload in their slot, as the simulated
+/// provider's `judge` command does: for `slow`, run past any call's timeout; for any other,
+/// write a passed result whose `raw_score` is the payload's size, and evidence, and print who
+/// judged it, and where.
+const JUDGE: &str = r#"
+    payload=/pumpkin/in/payload/raw
+    if [ "$(cat $payload)" = slow ]; then sleep 300; fi
+    bytes=$(wc -c < $payload)
+    printf '{"status": "passed", "raw_score": %s}\n' $bytes > /pumpkin/out/result.json
+    echo kept > /pumpkin/out/evidence/evidence.txt
+    echo "judged $bytes bytes as $(id -u), with HOME=$HOME, in $(pwd)""#;
+
+/// The ops of [`ops`]'s agent made on Docker, as [`AGENT`] says, and its judges' calls, as
+/// [`JUDGE`] says.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn ops_on_docker() {
-    let script = r#"
-        x() { head -c "$1" /dev/zero | tr '\0' x > "$2"; }
-        x 6 six && x 9 nine && x 17 seventeen
-        ctl() {
-            out=$(SANDBOXCTL "$@" 2>&1)
-            echo "sandboxctl $*: exit $?: $out" | sed 's/"remaining_seconds":[0-9]*/"remaining_seconds":"<s>"/'
-        }
-        ctl ops
-        ctl status 0
-        ctl judge nope six
-        ctl judge train nine
-        ctl judge train seventeen
-        ctl judge train six
-        ctl status 0
-        ctl submit submit six --finalize"#
-        // Spliced in, since `format!` would need each of the shell's braces doubled.
-        .replace("SANDBOXCTL", SANDBOXCTL_PATH);
+    // Spliced in, since `format!` would need each of the shell's braces doubled.
+    let script = AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
     // A deadline far later than the agent's last op, so that a slow engine makes the run wait
     // longer, never end differently.
     let mut ir = ops_workflow(&["sh", "-c", &script], 300);
@@ -552,6 +676,10 @@ fn ops_on_docker() {
         role["image"] = json!(image.as_str());
         role["resources"] = json!({ "cpu_millis": 500, "memory_bytes": 256 << 20 });
     }
+    for role in [1, 2] {
+        let command = &mut ir["roles"][role]["runtime"]["judge"]["command"];
+        command["argv"] = json!(["sh", "-c", JUDGE]);
+    }
     let sandboxd = docker::sandboxd();
     check(
         "ops-on-docker",
@@ -559,11 +687,11 @@ fn ops_on_docker() {
         &ir,
         sandboxd.to_str().unwrap(),
         &expect![[r#"
-            finished, with score None
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            finished, with score Some(Number(6))
+            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, ir.json, jobs/1/log/command.stderr, jobs/1/log/command.stdout, jobs/1/out/evidence/evidence.txt, jobs/1/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"this runtime runs no judge call yet"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
@@ -573,12 +701,14 @@ fn ops_on_docker() {
             {"actions":[{"kind":"reply","op":3,"reply":{"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:a73add1aecea03a894ca65d99bc5e91d21b58cdb728343bbcb6cf6cf38b809f5","size":9}}},"seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"judge","payload":{"over":16,"size":17}}},"seq":6}
             {"actions":[{"kind":"reply","op":4,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":12000}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":4,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"this runtime runs no judge call yet"},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"this runtime runs no judge call of the agent's yet"},"seq":8}
             {"actions":[{"kind":"reply","op":5,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":12000},"state":"failed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":5,"request":{"job":"0","kind":"status"}},"seq":9}
             {"actions":[{"kind":"reply","op":6,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":6,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":10}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 1233 bytes","seq":12}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"error","reason":"this runtime runs no judge call yet"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_failed","reason":"this runtime runs no judge call yet"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"passed":true,"returned":{"raw_score":6},"score":6}},"seq":15}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             sandboxctl ops: exit 0: {"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"judge","name":"train","max_bytes":8,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":1},{"kind":"submit","name":"submit","max_bytes":16}]}
@@ -589,6 +719,8 @@ fn ops_on_docker() {
             sandboxctl judge train six: exit 0: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
             sandboxctl status 0: exit 2: {"kind":"status","job":0,"state":"failed","failure":{"code":"judge_error","message":"the judge failed before giving a result"},"remaining":{"calls":99,"seconds":12000}}
             sandboxctl submit submit six --finalize: exit 0: {"kind":"submit","state":"accepted","remaining_seconds":"<s>"}
+            job 1's standard output:
+            judged 6 bytes as 65532, with HOME=/pumpkin/home, in /pumpkin/home
             socket directories left: false
             listed once it ended: []"#]],
     );

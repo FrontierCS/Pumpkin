@@ -125,11 +125,18 @@ pub fn slot_payload(slot: &Name) -> RelativePath {
     valid(&format!("{}/raw", slot_dir(slot)))
 }
 
-/// `out/result.json`, where a judge writes its result: its
+/// `out/result.json`, where a judge writes its result, of at most [`RESULT_MAX_BYTES`]: its
 /// [`ResultSpec`](crate::ir::ResultSpec) says how it is read, and what of it the caller sees.
 pub fn result_file() -> RelativePath {
     valid(&format!("{}/result.json", out_dir()))
 }
+
+/// The most bytes a judge's result ([`result_file()`]) may hold, as many as a frame's body
+/// ([`frame::MAX_BODY_BYTES`]): a larger one is no result, rather than one cut short.
+// The session's owner reads a result whole, as a frame's reader does a body, under the same
+// bound, and a reply returns some of its fields, so it is a small document; what a judge keeps in
+// bulk goes in its evidence. A JSON document cut short is no document.
+pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
 /// `out/evidence`, there before a judge's command starts, which holds the files of evidence
 /// that only the operator sees.

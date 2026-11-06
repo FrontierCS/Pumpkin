@@ -1,6 +1,7 @@
 //! A simulated provider, [`Sim`], which stands in for a platform: each sandbox is a thread of
 //! this process, running a fake `sandboxd` that dials its create's [`Dial`] at once and answers
-//! the session's requests, running each command by its program, which may make ops ([`Sim`]).
+//! the session's requests, running each command by its program, which may make ops or judge a
+//! payload ([`Sim`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -20,13 +21,16 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use pumpkin_provider::Provider;
-use pumpkin_schema::ir::{Image, Name};
+use pumpkin_schema::ir::{AbsolutePath, Image, Name};
 use pumpkin_schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag,
     SOCKET_NAME, SandboxId,
 };
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
-use pumpkin_schema::sandbox::{Entry, ExitStatus, FromSandbox, RelativePath, ToSandbox, frame};
+use pumpkin_schema::sandbox::{
+    Entry, ExitStatus, FromSandbox, RESULT_MAX_BYTES, RelativePath, ToSandbox, frame, out_dir,
+    pumpkin_dir,
+};
 use serde_json::json;
 
 use crate::provider::{Locals, Subject};
@@ -50,16 +54,24 @@ pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 /// delete.
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
+/// The path of a `sandboxd` whose sandbox's delete waits [`LINGER`] before it deletes it.
+pub(crate) const LINGERING: &str = "/sim/lingering";
+
+/// How long a delete of a [`LINGERING`] sandbox takes: seconds longer than the hard end of the
+/// runs whose tests use it.
+const LINGER: Duration = Duration::from_secs(10);
+
 /// A provider whose sandboxes are threads, each running a fake `sandboxd`: it dials, unless its
 /// create names [`MUTE`] or [`LOST`], and then answers each request, and stops reading once
-/// [stalled](Subject::stall). It puts nothing, and collects a tree of one file, [`COLLECTED`],
-/// from any directory. A command whose program is `exit` exits at once with the status its
-/// argument gives; one whose program is `stall` starts, then stalls the sandbox; one whose
-/// program is `crash` starts, then its `sandboxd` ends the session; one whose program is `ops`
-/// takes the steps its arguments give ([`step`]), making each op once the one before it is
-/// answered, then exits with 0, unless it has, or its `sandboxd` ends the session as a step
-/// asks; any other runs until the sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and
-/// to delete a sandbox whose create names [`UNDELETABLE`].
+/// [stalled](Subject::stall). It keeps the files put, and collects a tree of one file,
+/// [`COLLECTED`], from any directory, and from `out` a judge's result too. A command whose
+/// program is `exit` exits at once with the status its argument gives; `stall` starts, then
+/// stalls the sandbox; `crash` starts, then its `sandboxd` ends the session; `ops` takes the
+/// steps its arguments give ([`step`]), making each op once the one before it is answered, then
+/// exits with 0, unless it has, or its `sandboxd` ends the session as a step asks; `judge`
+/// judges the payload put at the path its argument gives ([`judge`]); any other runs until the
+/// sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose
+/// create names [`UNDELETABLE`]; it takes [`LINGER`] to delete one that names [`LINGERING`].
 pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
@@ -79,6 +91,7 @@ struct State {
 struct Sandbox {
     run: RunTag,
     undeletable: bool,
+    lingering: bool,
     // Shared with the sandbox's thread, which prints to its console and hands over its
     // connection.
     shared: Arc<Mutex<Status>>,
@@ -157,6 +170,7 @@ impl Provider for Sim {
         let (socket, lost) = (dir.join(SOCKET_NAME), create.sandboxd.as_str() == LOST);
         let mute = lost || create.sandboxd.as_str() == MUTE;
         let undeletable = create.sandboxd.as_str() == UNDELETABLE;
+        let lingering = create.sandboxd.as_str() == LINGERING;
         let parent = fs::metadata(dir.parent().unwrap()).unwrap();
         let mode = parent.permissions().mode() & 0o777;
         let shared = Arc::new(Mutex::default());
@@ -173,6 +187,7 @@ impl Provider for Sim {
         let sandbox = Sandbox {
             run,
             undeletable,
+            lingering,
             shared,
             thread,
         };
@@ -256,14 +271,18 @@ fn status(shared: &Mutex<Status>) -> MutexGuard<'_, Status> {
 }
 
 /// Tells a deleted sandbox's thread to end, closing its connection if it has one, and waits
-/// until it has.
+/// until it has, after [`LINGER`] if it is [`LINGERING`].
 fn stop(sandbox: Sandbox) {
     let Sandbox {
         run: _,
         undeletable: _,
+        lingering,
         shared,
         thread,
     } = sandbox;
+    if lingering {
+        thread::sleep(LINGER);
+    }
     let mut status = status(&shared);
     status.deleted = true;
     if let Some(connection) = status.connection.take() {
@@ -404,12 +423,16 @@ impl Caller {
 }
 
 /// The step that `arg` gives: an op, `ops`, which `ops at least <seconds> less` bounds, `status
-/// <job>`, `judge <grant> <size>`, `submit <grant> <size>` or `finalize <grant> <size>`, a final
-/// submission, where the payload is `size` bytes of `x`; or `sleep <seconds>`, `exit` or `crash`.
+/// <job>`, `judge <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant>
+/// <payload>`, a final submission, where a payload that is a number is that many bytes of `x`,
+/// and any other is its own bytes; or `sleep <seconds>`, `exit` or `crash`.
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
-    let payload = || vec![b'x'; words[2].parse().unwrap()];
+    let payload = || match words[2].parse() {
+        Ok(size) => vec![b'x'; size],
+        Err(_) => words[2].as_bytes().to_vec(),
+    };
     let (call, payload, less) = match words[..] {
         ["ops"] => (OpCall::Ops, Vec::new(), None),
         ["ops", "at", "least", seconds, "less"] => {
@@ -437,13 +460,101 @@ fn step(arg: &str) -> Step {
     }
 }
 
+/// The files put in a sandbox, by path.
+#[derive(Default)]
+struct Files {
+    by_path: BTreeMap<String, Vec<u8>>,
+    /// The directory of the tree being put, if one is.
+    dir: Option<AbsolutePath>,
+    /// The path of the file being put, if one is.
+    file: Option<String>,
+}
+
+impl Files {
+    fn entry(&mut self, entry: Entry) {
+        let (Some(dir), Entry::File { path, .. }) = (&self.dir, entry) else {
+            return;
+        };
+        let path = dir.join(&path).to_string();
+        self.by_path.insert(path.clone(), Vec::new());
+        self.file = Some(path);
+    }
+
+    fn data(&mut self, body: &[u8]) {
+        let file = (self.file.as_ref()).and_then(|file| self.by_path.get_mut(file));
+        file.unwrap().extend_from_slice(body);
+    }
+}
+
+/// What a `judge` command, whose exit comes on `stream`, does with `payload`, the file put at
+/// the path its argument gives, if there is one: for `slow`, it runs until the sandbox is
+/// frozen; for `stall`, it stalls the sandbox; for any other, it writes the result
+/// `{"status": "passed", "raw_score": n}`, where `n` is the payload's size, which it returns,
+/// and exits with 0, the result padded with spaces to a byte over [`RESULT_MAX_BYTES`] for
+/// `large`. Without a payload, it exits with 1.
+fn judge(
+    payload: Option<&Vec<u8>>,
+    stream: u32,
+    replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    shared: &Mutex<Status>,
+) -> Option<Vec<u8>> {
+    let exit = |code| {
+        let status = ExitStatus::Code(code);
+        (FromSandbox::Exited { stream, status }, Vec::new())
+    };
+    match payload.map(Vec::as_slice) {
+        Some(b"slow") => None,
+        Some(b"stall") => {
+            status(shared).stalled = true;
+            None
+        }
+        Some(payload) => {
+            replies.push(exit(0));
+            let result = json!({ "status": "passed", "raw_score": payload.len() });
+            let mut result = result.to_string().into_bytes();
+            if payload == b"large" {
+                result.resize(usize::try_from(RESULT_MAX_BYTES).unwrap() + 1, b' ');
+            }
+            Some(result)
+        }
+        None => {
+            replies.push(exit(1));
+            None
+        }
+    }
+}
+
+/// Collects `dir` on `stream`, in `replies`: [`COLLECTED`], and from `out` the judge's
+/// `result` too, if it wrote one.
+fn collect(
+    stream: u32,
+    dir: &AbsolutePath,
+    result: Option<&[u8]>,
+    replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+) {
+    let mut tree = vec![(COLLECTED, COLLECTED.as_bytes())];
+    if *dir == pumpkin_dir().join(&out_dir()) {
+        tree.extend(result.map(|result| ("result.json", result)));
+    }
+    for (path, body) in tree {
+        let path = RelativePath::try_from(path.to_owned()).unwrap();
+        let size = u64::try_from(body.len()).unwrap();
+        let entry = Entry::File { path, size };
+        replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
+        for data in body.chunks(frame::MAX_BODY_BYTES) {
+            replies.push((FromSandbox::Data { stream }, data.to_vec()));
+        }
+    }
+    replies.push((FromSandbox::End { stream }, Vec::new()));
+}
+
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more.
 fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
-    let mut caller: Option<Caller> = None;
+    let (mut caller, mut files, mut result) = (None::<Caller>, Files::default(), None);
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
-    while let Ok(Some((request, _))) = frame::read::<ToSandbox>(&mut connection) {
+    while let Ok(Some((request, body))) = frame::read::<ToSandbox>(&mut connection) {
         if status(shared).stalled {
             // It reads nothing more, as a stuck `sandboxd`, and answers nothing; the connection
             // stays open, by the clone its status keeps until a delete shuts it down, so the
@@ -451,7 +562,9 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
             return;
         }
         match request {
-            ToSandbox::Put { .. } | ToSandbox::Entry { .. } | ToSandbox::Data { .. } => {}
+            ToSandbox::Put { dir, .. } => files.dir = Some(dir),
+            ToSandbox::Entry { entry, .. } => files.entry(entry),
+            ToSandbox::Data { .. } => files.data(&body),
             ToSandbox::End { stream } | ToSandbox::Freeze { stream } => {
                 replies.push((FromSandbox::Done { stream }, Vec::new()));
             }
@@ -477,17 +590,15 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
                         });
                         crashed = made.next(&mut replies);
                     }
+                    "judge" => {
+                        let payload = files.by_path.get(&launch.argv.args()[0]);
+                        result = judge(payload, stream, &mut replies, shared);
+                    }
                     _ => {}
                 }
             }
-            ToSandbox::Collect { stream, .. } => {
-                let path = RelativePath::try_from(COLLECTED.to_owned()).unwrap();
-                let size = u64::try_from(COLLECTED.len()).unwrap();
-                let entry = Entry::File { path, size };
-                replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
-                let body = COLLECTED.as_bytes().to_vec();
-                replies.push((FromSandbox::Data { stream }, body));
-                replies.push((FromSandbox::End { stream }, Vec::new()));
+            ToSandbox::Collect { stream, dir } => {
+                collect(stream, &dir, result.as_deref(), &mut replies);
             }
             ToSandbox::OpReply { op, reply } => match &mut caller {
                 Some(caller) if caller.op == op => crashed = caller.answered(&reply, &mut replies),

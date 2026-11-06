@@ -106,7 +106,7 @@ whose files `record` lays out, and its run log, whose records `log` does.
 - **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends
   on no provider's crate, only its tests do, so a new provider changes no runtime code.
 - **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
-  the loop that drives a run reaches its provider only through `Sandboxes`; and a run's end deletes
+  the runtime reaches a run's provider only through `Sandboxes`; and a run's end deletes
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
 
