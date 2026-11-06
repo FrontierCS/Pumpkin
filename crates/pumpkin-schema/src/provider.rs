@@ -80,6 +80,9 @@ pub struct Create {
     /// [`SANDBOXCTL_PATH`](crate::sandbox::SANDBOXCTL_PATH) and its `sandboxd` serves ops; if
     /// not, it is [passive](crate::sandbox).
     pub ops: bool,
+    /// Whether the sandbox's `sandboxd` serves the model endpoint, at
+    /// [`MODEL_PORT`](crate::sandbox::MODEL_PORT), as a role with a model route needs.
+    pub model: bool,
     pub dial: Dial,
 }
 

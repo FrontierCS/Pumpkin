@@ -144,6 +144,7 @@ impl<'p> Sandboxes<'p> {
             image: image.clone(),
             sandboxd: self.sandboxd.clone(),
             ops: ops.is_some(),
+            model: false,
             dial: Dial::Socket { dir },
         };
         let Created { id } = self.provider.create(&create)?;

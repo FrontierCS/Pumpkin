@@ -20,8 +20,8 @@
 //!   `/dev/shm` and `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so
 //!   what they hold counts against the memory limit;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
-//!   read-only, and `sandboxd` serving ops; any other sandbox is
-//!   [passive](pumpkin_schema::sandbox).
+//!   read-only, and `sandboxd` serving ops; other sandboxes are [passive](pumpkin_schema::sandbox);
+//! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
 //! Files move only over the session, never through the Docker daemon.
 //!
@@ -436,6 +436,7 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
         image,
         sandboxd,
         ops,
+        model,
         dial,
     } = create;
     let Dial::Socket { dir } = dial;
@@ -499,6 +500,9 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
     ]);
     if *ops {
         args.push("--ops".to_owned());
+    }
+    if *model {
+        args.push("--model".to_owned());
     }
     Ok(args)
 }
