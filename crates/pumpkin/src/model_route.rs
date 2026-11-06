@@ -33,8 +33,13 @@
 //! one they read. A refusal's status is 404 if the target is not `/responses`, 405 if the method
 //! is not `POST`, and 400 for any other rule broken.
 //!
+//! [`Upstream::forward`] sends a closed request to the model provider, and streams back its
+//! response.
+//!
 //! [`ModelRequest`]: pumpkin_gateway::ModelRequest
 
 mod closure;
+mod upstream;
 
 pub use closure::{Closed, Refusal, Route};
+pub use upstream::{Key, Upstream, UpstreamUrl};

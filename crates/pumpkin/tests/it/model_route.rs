@@ -11,17 +11,19 @@
 use std::fs;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
 use pumpkin::model_route::Route;
-use pumpkin_gateway::{Arrival, Listener};
+use pumpkin_gateway::{Arrival, IncomingModelRequest, Listener};
 use pumpkin_schema::ir::Models;
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
+
+mod upstream;
 
 /// A request as its client sends it: method, path, headers and body.
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
@@ -42,17 +44,14 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
-    let sandbox = thread::spawn(move || fake_sandbox(&socket, requests));
+    let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None));
     let (sender, arrivals) = mpsc::channel();
     let accepted = listener.accept(Deadline::after(HUNG), None, true, sender, |arrival| arrival);
     let session = accepted.unwrap();
     let closed: Vec<Option<String>> = cases
         .iter()
         .map(|(_, (_, _, _, sent))| {
-            let incoming = match arrivals.recv_timeout(HUNG) {
-                Ok(Arrival::ModelRequest(incoming)) => incoming,
-                arrived => panic!("a model request was to arrive, not {arrived:?}"),
-            };
+            let incoming = next_model_request(&arrivals);
             match route.close(&incoming.request) {
                 Ok(closed) => {
                     let body = if closed.body() == sent {
@@ -83,9 +82,18 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// The next of `arrivals`, which must be a model request that arrives within [`HUNG`].
+fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
+    match arrivals.recv_timeout(HUNG) {
+        Ok(Arrival::ModelRequest(incoming)) => incoming,
+        arrived => panic!("a model request was to arrive, not {arrived:?}"),
+    }
+}
+
 /// Sends each request in turn, waiting for its response's end before the next, and returns
-/// what it heard back for each: the status, the headers and the body.
-fn fake_sandbox(socket: &Path, requests: Vec<Request>) -> Vec<String> {
+/// what it heard back for each: the status, the headers, the body, and whether it was cut short.
+/// It tells `parts`, if any, of each part of a body as it hears it.
+fn fake_sandbox(socket: &Path, requests: Vec<Request>, parts: Option<&Sender<()>>) -> Vec<String> {
     let mut connection = UnixStream::connect(socket).unwrap();
     let mut heard = Vec::new();
     for (request, (method, path, headers, body)) in (0..).zip(requests) {
@@ -112,8 +120,17 @@ fn fake_sandbox(socket: &Path, requests: Vec<Request>) -> Vec<String> {
                 ) => response = format!("{status} {headers:?} "),
                 (ToSandbox::ModelData { .. }, bytes) => {
                     response.push_str(&String::from_utf8(bytes).unwrap());
+                    if let Some(parts) = parts {
+                        // Whoever listens may have gone.
+                        let _ = parts.send(());
+                    }
                 }
-                (ToSandbox::ModelEnd { cut: false, .. }, _) => break,
+                (ToSandbox::ModelEnd { cut, .. }, _) => {
+                    if cut {
+                        response.push_str(", cut short");
+                    }
+                    break;
+                }
                 (other, _) => panic!("the sandbox heard {other:?}"),
             }
         }
