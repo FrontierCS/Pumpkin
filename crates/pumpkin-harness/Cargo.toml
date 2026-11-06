@@ -1,0 +1,18 @@
+[package]
+name = "pumpkin-harness"
+version = "0.0.0"
+description = "The harnesses Pumpkin's agents run, pinned, and the recipe that adds one to an agent's image"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+pumpkin-schema = { path = "../pumpkin-schema" }
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

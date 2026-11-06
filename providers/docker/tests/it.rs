@@ -25,7 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use pumpkin_docker::{ContextName, Engine, Report, Security};
+use pumpkin_docker::{Built, ContextName, Engine, Report, Security};
 use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, Session};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
@@ -247,7 +247,8 @@ fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
-// Repeated in `crates/pumpkin/tests/it/docker.rs`: change both.
+// Repeated in `crates/pumpkin/tests/it/docker.rs` and
+// `crates/pumpkin-frontier-cs/tests/it/build.rs`: change all three.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
@@ -721,6 +722,180 @@ fn redact(fixture: &Fixture, message: &str) -> String {
         return format!("{before}{from}…{to}{after}");
     }
     message
+}
+
+/// A build is tagged by its inputs, and found by that tag rather than built again: another
+/// file's content, another mode or another recipe gives another tag, and the same inputs give
+/// the image their tag names, even one another build made, unless the check refuses the recipe
+/// it is given. A context that can't name its inputs is refused before anything is built, and
+/// so is a repository that Docker can't tag.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn builds() {
+    check(
+        "builds",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            let dir = fixture.dir.join("context");
+            let mut lines = vec![format!("built: {}", builds.build("Dockerfile"))];
+            let [first] = <[String; 1]>::try_from(builds.tags(&builds.seen[0])).unwrap();
+            run(&["image", "rm", &first]);
+            put(&dir, "file", "two", 0o644);
+            lines.push(format!("another content: {}", builds.build("Dockerfile")));
+            let second = builds.seen[1].clone();
+            run(&["tag", &second, &first]);
+            put(&dir, "file", "one", 0o644);
+            let found = builds.build("Dockerfile");
+            lines.push(format!("the first inputs, their tag moved to B: {found}"));
+            put(&dir, "file", "one", 0o755);
+            lines.push(format!("another mode: {}", builds.build("Dockerfile")));
+            lines.push(format!(
+                "another recipe: {}",
+                builds.build("other/Dockerfile")
+            ));
+            let refuse = |text: &[u8]| Err(format!("refused {:?}", String::from_utf8_lossy(text)));
+            let refused = engine().build(&dir, "Dockerfile", &builds.repository, refuse);
+            let refused = redact(fixture, &refused.unwrap_err());
+            lines.push(format!("built before, now refused by the check: {refused}"));
+            lines.push(format!(
+                "an absent recipe: {}",
+                builds.build("absent/Dockerfile")
+            ));
+            std::os::unix::fs::symlink("file", dir.join("link")).unwrap();
+            lines.push(format!("a symbolic link: {}", builds.build("Dockerfile")));
+            fs::remove_file(dir.join("link")).unwrap();
+            for (what, name) in [("a space", "a b"), ("a tab", "a\tb")] {
+                put(&dir, name, "", 0o644);
+                lines.push(format!(
+                    "a name with {what}: {}",
+                    builds.build("Dockerfile")
+                ));
+                fs::remove_file(dir.join(name)).unwrap();
+            }
+            let repository = "pumpkin-docker-tests/Builds";
+            let uppercase = engine().build(&dir, "Dockerfile", repository, |_| Ok(()));
+            let refused = redact(fixture, &uppercase.unwrap_err());
+            lines.push(format!("an uppercase repository: {refused}"));
+            lines
+        },
+        &expect![[r#"
+            built: A, tagged :ab502e7558d2e6db5017d90239cc5dd02d1333f86dc196dd6230a67fb9dc00cf
+            another content: B, tagged :1c042791ca468b29c6683836ec3f357728cb8febc26fd3514595b6cfea292c15
+            the first inputs, their tag moved to B: B, tagged :1c042791ca468b29c6683836ec3f357728cb8febc26fd3514595b6cfea292c15 :ab502e7558d2e6db5017d90239cc5dd02d1333f86dc196dd6230a67fb9dc00cf
+            another mode: C, tagged :b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa
+            another recipe: C, tagged :1988a91be3c0b7d92b2ab70ce229c81757339de6aca4806fcfbc488337e7a56d :b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa
+            built before, now refused by the check: refused "FROM scratch\nCOPY file /file\n"
+            an absent recipe: `absent/Dockerfile` is no regular file in <dir>/context: name the build's recipe by its path there
+            a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
+            a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
+            a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
+            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:b02e57c8c1403e5838f477d570e9618d50886811381697bc5b7e9ab190451faa` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
+    );
+}
+
+/// Runs `docker` with `args`, which must succeed.
+fn run(args: &[&str]) {
+    let output = docker().args(args).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// Writes `text` to the file at `path` in `dir`, with permission bits `mode`, and makes each
+/// directory it needs with bits 0755, whatever this process's umask.
+fn put(dir: &Path, path: &str, text: &str, mode: u32) {
+    let file = dir.join(path);
+    for parent in file.ancestors().skip(1) {
+        if parent == dir.parent().unwrap() {
+            break;
+        }
+        fs::create_dir_all(parent).unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(&file, text).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// The images a test builds in `repository`, by their IDs in the order they were first built.
+/// Dropping it removes each tag they have in `repository`, and so each image no other
+/// repository tags.
+struct Builds<'f> {
+    fixture: &'f Fixture,
+    repository: String,
+    seen: Vec<String>,
+}
+
+impl<'f> Builds<'f> {
+    /// The images of a test that builds with `context`, in the fixture's directory, as its
+    /// context: a recipe that copies `file`, which holds `one`, into an empty image, at
+    /// `Dockerfile` and at `other/Dockerfile`; each in a repository of this process's own.
+    fn new(fixture: &'f Fixture) -> Self {
+        let dir = fixture.dir.join("context");
+        let recipe = "FROM scratch\nCOPY file /file\n";
+        put(&dir, "Dockerfile", recipe, 0o644);
+        put(&dir, "other/Dockerfile", recipe, 0o644);
+        put(&dir, "file", "one", 0o644);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        Self {
+            fixture,
+            repository: format!("pumpkin-docker-tests/builds-{}", std::process::id()),
+            seen: Vec::new(),
+        }
+    }
+
+    /// Builds `recipe` with the fixture's `context` as its context, and shows the image, by the
+    /// letter of its first build, and its tags in the repository, and the tag the build returned
+    /// if it is none of them; or why the build failed.
+    fn build(&mut self, recipe: &str) -> String {
+        let dir = self.fixture.dir.join("context");
+        let (image, returned) = match engine().build(&dir, recipe, &self.repository, |_| Ok(())) {
+            Ok(Built { image, tag }) => (image.as_str().to_owned(), tag),
+            Err(error) => return redact(self.fixture, &error),
+        };
+        if !self.seen.contains(&image) {
+            self.seen.push(image.clone());
+        }
+        let index = self.seen.iter().position(|seen| *seen == image).unwrap();
+        let letter = char::from(b'A' + u8::try_from(index).unwrap());
+        let prefix = format!("{}:", self.repository);
+        let tags = self.tags(&image);
+        let stray = (!tags.contains(&returned)).then(|| format!(", but returned {returned}"));
+        let tags: Vec<String> = (tags.iter()).map(|tag| tag.replace(&prefix, ":")).collect();
+        format!(
+            "{letter}, tagged {}{}",
+            tags.join(" "),
+            stray.unwrap_or_default()
+        )
+    }
+
+    /// The tags `image` has in the repository, sorted, or none if the engine has no such image.
+    fn tags(&self, image: &str) -> Vec<String> {
+        let format = "{{json .RepoTags}}";
+        let inspect = ["image", "inspect", "--format", format, image];
+        let Ok(output) = docker().args(inspect).output() else {
+            return Vec::new();
+        };
+        let tags: Vec<String> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+        let prefix = format!("{}:", self.repository);
+        let mut tags: Vec<String> = (tags.into_iter())
+            .filter(|tag| tag.starts_with(&prefix))
+            .collect();
+        tags.sort();
+        tags
+    }
+}
+
+impl Drop for Builds<'_> {
+    // Nothing here panics, for the reason the fixture's drop gives; a tag that can't be
+    // removed is printed.
+    fn drop(&mut self) {
+        for image in &self.seen {
+            for tag in self.tags(image) {
+                let removed = docker().args(["image", "rm", &tag]).output();
+                if !removed.is_ok_and(|removed| removed.status.success()) {
+                    eprintln!("the test's image tag {tag} can't be removed");
+                }
+            }
+        }
+    }
 }
 
 /// Once a sandbox's container has stopped, its console holds what its `sandboxd` printed: here a

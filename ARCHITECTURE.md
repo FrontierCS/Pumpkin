@@ -19,7 +19,8 @@ harming the host or the run.
 
 ## Entry points
 
-The binaries are `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
+The binaries are `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), the factory's
+`pumpkin-frontier-cs` (`crates/pumpkin-frontier-cs/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
 parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`, a provider a
 run has connected to; `Engine`, Docker's.
@@ -69,9 +70,10 @@ consoles.
   its tag, so runs that share a provider never reach each other's sandboxes.
 
 **`providers/docker`.** `pumpkin-docker`, a sandbox as a container that needs no root to start:
-`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), and
-is the `Provider` that makes each sandbox a container. A provider is `providers/<name>`, crate
-`pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
+`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), is
+the `Provider` that makes each sandbox a container, and builds images, each tagged by its build's
+inputs. A provider is `providers/<name>`, crate `pumpkin-<name>`, which holds its platform's
+calls and its sandboxes' confinement.
 - **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
   its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
   bounds only its own platform calls, so no provider depends on `pumpkin-gateway` outside its
@@ -81,7 +83,8 @@ is the `Provider` that makes each sandbox a container. A provider is `providers/
   session's owner find them anywhere.
 - **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
   `docker` against the named context alone, so the operator's choice of engine holds. Tests run
-  `docker` directly only to observe containers, pause them, or build images.
+  `docker` directly only to observe containers and images, pause containers, or build, tag and
+  remove images of their own.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
@@ -106,6 +109,18 @@ whose files `record` lays out, and its run log, whose records `log` does.
   the loop that drives a run reaches its provider only through `Sandboxes`; and a run's end deletes
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
+
+**`crates/pumpkin-harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
+`Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
+directory the in-sandbox contract reserves for it.
+- **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates it depends
+  only on `pumpkin-schema`, so a harness reaches an agent alike whichever factory builds its image.
+
+**`crates/pumpkin-frontier-cs`.** The FrontierCS factory, which builds the images of a task
+ported from FrontierCS as data, each in `tasks/frontier-cs/<problem id>/`, from its `Task`, read
+once from that directory, and adds Codex to its agent's.
+- **Architecture Invariant:** no crate depends on it, so nothing that runs a workflow knows
+  where a task came from.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.

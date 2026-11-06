@@ -2,6 +2,7 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 too-many-lines-threshold = 70
+doc-valid-idents = ["FrontierCS", ".."]
 
 disallowed-types = [
     { path = "std::collections::HashMap", replacement = "std::collections::BTreeMap", reason = "its iteration order follows a seed each process draws at random, so the same input could give other records, error lists or decisions" },

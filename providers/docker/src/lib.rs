@@ -32,11 +32,12 @@
 //! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
 //! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
 //! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them; it
-//! pulls no image, so its publish checks that the engine has a role's. Each container is
-//! labelled with its run's [`RunTag`], so that [`Provider::list`] finds a run's containers, and
-//! only those, even when the process that started them is gone, and with its role's name, so
-//! that `docker ps` shows which is which. The provider runs on a rootful engine or a rootless
-//! one, and its report says which ([`Security::rootless`]).
+//! pulls no image for a sandbox, so its publish checks that the engine has a role's. Each
+//! container is labelled with its run's [`RunTag`], so that [`Provider::list`] finds a run's
+//! containers, and only those, even when the process that started them is gone, and with its
+//! role's name, so that `docker ps` shows which is which. The provider runs on a rootful engine
+//! or a rootless one, and its report says which ([`Security::rootless`]). It builds and tags
+//! images on Docker 25.0 or later with its Buildx plugin ([`Engine::build`]).
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -56,6 +57,10 @@ use pumpkin_schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
 use serde::{Deserialize, Serialize};
 use stdx::Context;
 use stdx::process::Environment;
+
+mod build;
+
+pub use build::Built;
 
 /// The most seconds a sandbox's start takes, as [`Capabilities::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
@@ -277,16 +282,13 @@ impl Provider for Engine {
         let published = locals.iter().map(|local| match local {
             Local::Role { image } => {
                 let image = image.to_string();
-                let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", &image];
-                match docker(context, inspect) {
-                    Ok(_) => Ok(Published::from(image)),
-                    Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => {
-                        Err(format!(
-                            "the engine of context `{}` has no image {image}: build or load it \
-                             there first, as the provider pulls none",
-                            context.as_str()
-                        ))
-                    }
+                match image_id(context, &image) {
+                    Ok(Some(_)) => Ok(Published::from(image)),
+                    Ok(None) => Err(format!(
+                        "the engine of context `{}` has no image {image}: build or load it \
+                         there first, as the provider pulls none",
+                        context.as_str()
+                    )),
                     Err(error) => Err(fix_reported(error)),
                 }
             }
@@ -533,7 +535,7 @@ fn mountable(host: &Path, container: &str) -> Result<String, String> {
 fn remove(context: &ContextName, id: &str) -> Result<(), String> {
     match docker(context, ["rm", "--force", "--volumes", id]) {
         Ok(_) => Ok(()),
-        // Docker 29 exits 0 here, but no minimum version is pinned, and older engines fail.
+        // Docker 29 exits 0 here; older engines, down to the module doc's floor, fail.
         Err(Failure::Exited { stderr, .. }) if stderr.contains("No such container") => Ok(()),
         Err(error) => Err(error.to_string()),
     }
@@ -564,6 +566,19 @@ fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<String>, String> {
     Ok(ids.collect())
 }
 
+/// The ID of the image that `reference`, such as `<repository>:<tag>`, names on the engine of
+/// `context`, or `None` if the engine has no such image.
+fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Failure> {
+    let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", reference];
+    match docker(context, inspect) {
+        Ok(inspected) => Ok(Some(
+            String::from_utf8_lossy(&inspected.stdout).trim().to_owned(),
+        )),
+        Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
 /// its standard error, which `docker logs` writes to its own two streams.
 fn log_tail(context: &ContextName, id: &str) -> Result<String, Failure> {
@@ -582,9 +597,20 @@ fn fix_reported(error: impl fmt::Display) -> String {
     format!("{error}: fix what Docker reports")
 }
 
-/// Runs `docker` against `context` alone with `args`, and returns its output. If the command
-/// fails, the error says which it was and what Docker reported, and the caller adds what that
-/// means and what to do; if `docker` doesn't run, the error asks for it on `PATH`.
+/// Runs `docker` against `context` alone with `args`, as [`docker_to`] does, with `docker`'s
+/// standard error captured.
+fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    docker_to(context, args, Stderr::Captured)
+}
+
+/// Runs `docker` against `context` alone with `args`, with its standard error where `stderr`
+/// says, and returns its output. If the command fails, the error says which it was and what
+/// Docker reported, and the caller adds what that means and what to do; if `docker` doesn't
+/// run, the error asks for it on `PATH`.
 ///
 /// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
 /// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
@@ -593,7 +619,7 @@ fn fix_reported(error: impl fmt::Display) -> String {
 /// command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`, among
 /// others, would set the endpoint and TLS of `default`. A context reached over `ssh://` would
 /// need `SSH_AUTH_SOCK` too, which isn't passed.
-fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
+fn docker_to<I, S>(context: &ContextName, args: I, stderr: Stderr) -> Result<Output, Failure>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -605,6 +631,10 @@ where
         .arg(format!("--context={}", context.as_str()))
         .args(&args)
         .stdin(Stdio::null())
+        .stderr(match stderr {
+            Stderr::Captured => Stdio::piped(),
+            Stderr::Shown => Stdio::inherit(),
+        })
         .output()
         .map_err(Failure::Unrun)?;
     if output.status.success() {
@@ -618,10 +648,14 @@ where
             command.push(' ');
             command.push_str(&word);
         }
+        let stderr = match stderr {
+            Stderr::Captured => String::from_utf8_lossy(&output.stderr).into_owned(),
+            Stderr::Shown => "its output above says why".to_owned(),
+        };
         Err(Failure::Exited {
             command,
             status: output.status,
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr,
         })
     }
 }
@@ -631,7 +665,8 @@ enum Failure {
     /// `docker` didn't run.
     Unrun(io::Error),
     /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what
-    /// Docker reported.
+    /// Docker reported, or, where its report went to this process's standard error, that it
+    /// says why.
     Exited {
         command: String,
         status: ExitStatus,
@@ -653,4 +688,14 @@ impl fmt::Display for Failure {
             } => write!(f, "`{command}` failed with {status}: {}", stderr.trim()),
         }
     }
+}
+
+/// Where [`docker_to`] sends `docker`'s standard error.
+#[derive(Clone, Copy)]
+enum Stderr {
+    /// Into the output it returns, and the error it fails with.
+    Captured,
+    /// To this process's own standard error, as `docker` writes it, for progress that the
+    /// operator follows.
+    Shown,
 }

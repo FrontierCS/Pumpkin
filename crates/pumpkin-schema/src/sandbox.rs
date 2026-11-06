@@ -27,7 +27,8 @@
 //! sandboxes it starts: the session's owner and a role's commands rely on them in any sandbox.
 //! It holds at most [`PUMPKIN_BYTES`]. A sandbox whose role makes ops also has `sandboxctl` at
 //! [`SANDBOXCTL_PATH`], and its `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox
-//! is passive: nothing in it can make an op, and its session takes none.
+//! is passive: nothing in it can make an op, and its session takes none. An agent's image holds
+//! its harness below [`harness_dir()`].
 
 use serde::{Deserialize, Serialize};
 
@@ -173,6 +174,14 @@ pub const SANDBOXCTL_PATH: &str = "/.pumpkin/bin/sandboxctl";
 /// there, below [`pumpkin_dir()`], and `sandboxctl` connects there.
 pub const CONTROL_SOCKET: &str = "/pumpkin/sandboxctl/socket";
 
+/// The directory that holds an agent's harness, `/harness`, which a task's images leave out.
+///
+/// Pumpkin adds a harness to a task's agent image in a directory of its own below this one,
+/// named for the harness and its version, such as `codex-0.167.0`.
+pub fn harness_dir() -> AbsolutePath {
+    valid("/harness")
+}
+
 /// `value`, one of this module's constant paths or variables, or a path that holds a slot's
 /// name, as the type it is.
 fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
@@ -180,11 +189,11 @@ fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
         Ok(value) => value,
         #[expect(
             clippy::unreachable,
-            reason = "each of this module's paths is normalized: `/pumpkin` is absolute, and each \
-                      of its directories and files, and a slot's `Name`, from a-z, 0-9, `_` and \
-                      `-`, one plain component; `HOME` is a variable's name; checking them as the \
-                      crate builds would take a `const fn` copy of each check, and a constructor \
-                      that skips the checks"
+            reason = "each of this module's paths is normalized: `/pumpkin` and `/harness` are \
+                      absolute, and each of `/pumpkin`'s directories and files, and a slot's \
+                      `Name`, from a-z, 0-9, `_` and `-`, one plain component; `HOME` is a \
+                      variable's name; checking them as the crate builds would take a `const fn` \
+                      copy of each check, and a constructor that skips the checks"
         )]
         Err(error) => unreachable!("{error}"),
     }
