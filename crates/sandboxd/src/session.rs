@@ -1,10 +1,14 @@
-//! Serving a session: the gateway's requests, handled in the order they arrive by [`files`]
-//! or [`commands`](crate::commands), and the replies to [ops](crate::ops).
+//! Serving a session: reading what the gateway sends as it arrives, its requests, which
+//! [`files`] and [`commands`](crate::commands) serve, and the replies to [ops](crate::ops). A
+//! collect and a freeze, which may last, are served on threads of their own where one can start,
+//! so that the session reads on meanwhile; any other request is served before the next frame is
+//! read.
 
 use std::io::{self, BufReader, Read};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
 use stdx::{Context, unpoisoned};
@@ -42,8 +46,8 @@ pub(crate) fn serve(socket: &Path, serve_ops: bool) -> Result<(), String> {
     served.context("the session with the gateway failed")
 }
 
-/// Sends frames to the gateway, from the session, from the thread that reports exits, and from
-/// the threads that carry ops.
+/// Sends frames to the gateway, from the session, from the thread that reports exits, from the
+/// threads that collect and freeze, and from the threads that carry ops.
 #[derive(Clone)]
 pub(crate) struct Sender(Arc<Mutex<UnixStream>>);
 
@@ -91,10 +95,15 @@ impl Session {
             ToSandbox::Data { stream } => self.puts.data(&self.sender, stream, body),
             ToSandbox::End { stream } => self.puts.end(&self.sender, stream),
             ToSandbox::Start { stream, launch } => self.commands.start(stream, &launch),
-            ToSandbox::Freeze { stream } => self.sender.reply(stream, self.commands.freeze()),
-            ToSandbox::Collect { stream, dir } => {
-                files::collect(&self.sender, stream, Path::new(dir.as_str()))
+            ToSandbox::Freeze { stream } => {
+                let commands = self.commands.clone();
+                self.aside("freeze", move |sender| {
+                    sender.reply(stream, commands.freeze())
+                })
             }
+            ToSandbox::Collect { stream, dir } => self.aside("collect", move |sender| {
+                files::collect(sender, stream, Path::new(dir.as_str()))
+            }),
             ToSandbox::OpReply { op, reply } => self.ops.reply(op, reply),
             // It opens no model requests, so none is in flight.
             ToSandbox::ModelResponse { request, .. }
@@ -106,6 +115,32 @@ impl Session {
                      is not in flight"
                 ),
             )),
+        }
+    }
+
+    /// Serves a request with `serve`, which replies to it, on a thread named `name`, or on this
+    /// thread if that one can't start.
+    fn aside(
+        &self,
+        name: &str,
+        serve: impl FnOnce(&Sender) -> io::Result<()> + Clone + Send + 'static,
+    ) -> io::Result<()> {
+        let (sender, aside) = (self.sender.clone(), serve.clone());
+        // The gateway writes some frames from threads of its own, beside its requests, each by
+        // its deadline, and a frame this session doesn't read waits in the connection's buffers,
+        // then in the gateway's write: so the session reads on while a tree goes out at the
+        // link's pace, or while freezing waits for the killed processes to go, rather than make
+        // the gateway's other writers wait that long, past their deadlines.
+        let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
+            // A write that fails has failed the connection, which the session's reads then see.
+            let _ = aside(&sender);
+        });
+        match spawned {
+            Ok(_) => Ok(()),
+            // No thread starts while the sandbox's processes fill its limit, as a fork bomb's do,
+            // yet freezing is what kills them, and collecting what keeps the run's record: so the
+            // request is served here, holding the session's reads up meanwhile.
+            Err(_) => serve(&self.sender),
         }
     }
 }

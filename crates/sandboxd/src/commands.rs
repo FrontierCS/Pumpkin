@@ -36,9 +36,10 @@ const HAS_CHILDREN_FAILED: &str = "finding whether sandboxd has children failed"
 const KILL_FAILED: &str = "the sandbox's processes couldn't be killed";
 
 /// The commands started in this sandbox.
+#[derive(Clone)]
 pub(crate) struct Commands {
-    // Shared with the reaper thread, which reaps children while the session starts commands
-    // and freezes them.
+    // Shared with the reaper thread, which reaps children while the session starts commands,
+    // and with the threads that freeze them, which wait for the reaper to reap them.
     shared: Arc<Shared>,
 }
 
