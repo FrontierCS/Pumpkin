@@ -6,8 +6,10 @@
 //! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
 //! on one inbox, into which the agent's session hands what it reads, and each judge call's
 //! thread its reports. Its sandboxes start on one path, the `sandbox` module's, and the agent's
-//! is the `agent` module's. The record's files and the run log's records, and when each is
-//! written, are laid out in the `record` and `log` modules.
+//! is the `agent` module's. Each model request of the agent's is answered on a thread of its
+//! own, as the `model` module serves the agent's route, until a finalize or the work phase's
+//! end cuts the route's exchanges short. The record's files and the run log's records, and when
+//! each is written, are laid out in the `record` and `log` modules.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -16,7 +18,7 @@ use std::thread::{self, Scope};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, mem};
 
-use pumpkin_gateway::{Arrival, IncomingOp, Op, RefusedOp};
+use pumpkin_gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir;
 use pumpkin_schema::provider::{RunTag, SandboxId};
@@ -25,17 +27,22 @@ use pumpkin_schema::workflow::{JudgeCall, Main, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
-use crate::driver::core::{Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, lasts};
+use crate::driver::core::{
+    Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, Verdict, WorkEnd, lasts,
+};
+use crate::model_route::{Answer, Serving};
 
 mod agent;
 mod judge;
 mod log;
+mod model;
 mod record;
 mod sandbox;
 
 use agent::Agent;
 use judge::{Deadlines, Message, Report};
 use log::Log;
+use model::Served;
 use record::Payloads;
 use sandbox::Sandboxes;
 
@@ -43,29 +50,46 @@ use sandbox::Sandboxes;
 #[derive(Debug)]
 pub struct Run {
     workflow: Workflow,
+    /// The agent's model route, as the run serves it, if it has one.
+    served: Option<Served>,
     id: String,
     dir: PathBuf,
 }
 
 impl Run {
     /// Parses `ir` and makes the run's record in `runs`, which is created if need be:
-    /// `ir.json`. The run's id holds `now`, the time by the caller's clock. A workflow that has a
-    /// model route is refused, with `outcome.json` saying why.
+    /// `ir.json`. The run's id holds `now`, the time by the caller's clock. The agent's model
+    /// route, if it has one, is served as `serving` says, which goes unused for a workflow
+    /// without one; a workflow whose route it doesn't serve is refused, with `outcome.json`
+    /// saying why.
     ///
     /// # Errors
     ///
     /// Fails if the IR breaks a parsing rule, if `now` is before 1970, if the workflow is
     /// refused, or if the record can't be written.
-    pub fn prepare(ir: &ir::Workflow, runs: &Path, now: SystemTime) -> Result<Self, String> {
+    pub fn prepare(
+        ir: &ir::Workflow,
+        runs: &Path,
+        now: SystemTime,
+        serving: Option<Serving>,
+    ) -> Result<Self, String> {
         let workflow = Workflow::parse(ir).map_err(|errors| errors.to_string())?;
         let (id, dir) = record::create(runs, now)?;
         record::write_json(&dir, "ir.json", &json!(ir))?;
-        if let Some(reason) = model_route(&workflow) {
-            let outcome = json!({ "state": "refused", "reason": reason });
-            record::write_json(&dir, "outcome.json", &outcome)?;
-            return Err(reason);
-        }
-        Ok(Self { workflow, id, dir })
+        let served = match Served::new(&workflow, serving) {
+            Ok(served) => served,
+            Err(reason) => {
+                let outcome = json!({ "state": "refused", "reason": reason });
+                record::write_json(&dir, "outcome.json", &outcome)?;
+                return Err(reason);
+            }
+        };
+        Ok(Self {
+            workflow,
+            served,
+            id,
+            dir,
+        })
     }
 
     /// The run's id, which names its record, and is the run tag its sandboxes carry.
@@ -87,9 +111,10 @@ impl Run {
     ///
     /// Fails if what the run's sandboxes run can't be published, or the provider doesn't name
     /// each thing published; if the run's socket directory can't be made; if the run was still
-    /// going at its hard end ([`lasts`]); if the machine's clock reads before 1970; if the run's
-    /// sandboxes can't be listed at its end, or one of them can't be deleted; or if the record
-    /// can't be written.
+    /// going at its hard end ([`lasts`]); if the model provider refused the route's key, or
+    /// failed the agent's last model request as the agent exited with no submission finalized;
+    /// if the machine's clock reads before 1970; if the run's sandboxes can't be listed at its
+    /// end, or one of them can't be deleted; or if the record can't be written.
     pub fn execute(self, provider: &dyn Provider, sandboxd: &Path) -> Result<Outcome, String> {
         let outcome = self.run_on(provider, sandboxd);
         let recorded = match &outcome {
@@ -116,6 +141,7 @@ impl Run {
         let unix = record::since_epoch(clock.unix)?;
         let mut runtime = Runtime {
             workflow: &self.workflow,
+            served: self.served.as_ref(),
             startup,
             dir: &self.dir,
             sandboxes: &sandboxes,
@@ -125,12 +151,18 @@ impl Run {
             agent: None,
             unanswered: None,
             next_op: 0,
+            next_model_request: 0,
             stops: BTreeMap::new(),
             pending: VecDeque::new(),
             inbox: Inbox::new(),
         };
         let outcome = runtime.drive(unix);
-        let outcome = failed_also(outcome, runtime.sweep());
+        // What the agent did with a route whose key the provider refused, or whose provider
+        // failed its last request as it exited, is the deployment's failure, not a result of the
+        // agent's to score.
+        let exited = exited_unfinalized(&outcome);
+        let keyed = (self.served.as_ref()).map_or(Ok(()), |served| served.upstream_held(exited));
+        let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
         let noted = match &outcome {
             Ok(_) => Ok(()),
             Err(reason) => (runtime.log).note(clock.now(), &format!("the run failed: {reason}")),
@@ -178,6 +210,24 @@ impl Clock {
     /// The deadline at `at`, a time since the run started.
     fn deadline(self, at: Duration) -> Deadline {
         Deadline::after(at.saturating_sub(self.now()))
+    }
+}
+
+/// Whether `outcome` is one where the agent's exit ended the work phase, with no submission
+/// finalized.
+fn exited_unfinalized(outcome: &Result<Outcome, String>) -> bool {
+    let Ok(Outcome { work_end, verdict }) = outcome else {
+        return false;
+    };
+    let finalized = match verdict {
+        Verdict::NoSubmission => false,
+        Verdict::Judged { submission, .. } | Verdict::NoResult { submission, .. } => {
+            submission.finalized
+        }
+    };
+    match work_end {
+        WorkEnd::AgentExited(_) => !finalized,
+        WorkEnd::Deadline | WorkEnd::Finalized | WorkEnd::AgentFailed(_) => false,
     }
 }
 
@@ -252,20 +302,11 @@ fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
     (request, unanswered)
 }
 
-/// Why a workflow with a model route is refused. Parsing has refused a route on a judge.
-fn model_route(workflow: &Workflow) -> Option<String> {
-    let agent = &workflow.agent().sandbox;
-    agent.model_route.as_ref()?;
-    Some(format!(
-        "`{}` has a model route, which the driver doesn't serve: remove the role's \
-         `egress.model` to run without one",
-        agent.name
-    ))
-}
-
 /// The state of a run as it is driven.
 struct Runtime<'r> {
     workflow: &'r Workflow,
+    /// The agent's model route, which model requests' threads share, if it has one.
+    served: Option<&'r Served>,
     /// The longest the provider takes to start a sandbox.
     startup: Duration,
     /// The run's record.
@@ -281,6 +322,8 @@ struct Runtime<'r> {
     unanswered: Option<(OpId, Unanswered)>,
     /// The number the next op takes, counting from 0.
     next_op: u64,
+    /// The number the next model request takes, counting from 0.
+    next_model_request: u64,
     /// A sender into each judge call's inbox, by job, through which the core's stop reaches it.
     stops: BTreeMap<JobId, Sender<Message>>,
     /// Events that performing actions produced, to feed the core next.
@@ -292,10 +335,17 @@ struct Runtime<'r> {
 /// What reaches the loop through its inbox.
 enum Input {
     /// What the agent's session's reader handed over ([`Listener::accept`]): at most the op in
-    /// flight, as the session holds one, its command's exit, as it runs one command, and its end.
+    /// flight, as the session holds one, the model requests in flight, its command's exit, as it
+    /// runs one command, and its end.
     ///
     /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
     Agent(Arrival),
+    /// A note on a model request of the agent's, from the thread that answers it, at the time
+    /// the loop took the request.
+    Model(Duration, String),
+    /// How the route answered a model request of the agent's, by its number, from the thread
+    /// that answered it, at the time the thread observed it.
+    ModelAnswered(Duration, u64, Answer),
     /// A judge call's report, from its thread: at most its command's start and end, a note, and
     /// its last report.
     Judge(Report),
@@ -360,12 +410,21 @@ impl<'r> Runtime<'r> {
     fn drive(&mut self, unix: Duration) -> Result<Outcome, String> {
         let (mut core, actions) = Core::start(self.workflow, self.startup);
         self.log.start(self.workflow, unix, &actions)?;
+        if let Some(served) = self.served {
+            self.log.note(self.clock.now(), served.started())?;
+        }
         // Judge calls' threads borrow the run's workflow and sandboxes, and the scope ends once
         // each has, so that no sandbox starts after the run's end, and the drain takes all they
         // reported.
         let end = thread::scope(|scope| {
             let end = self.turns(scope, &mut core, actions);
             self.stop_jobs();
+            // The route ended once the core stopped allowing model requests, unless the run
+            // ended first, on a failure of the runtime's own: this ends it then. The scope's end
+            // still waits on an exchange resolving the provider's name or connecting to it,
+            // within the upstream's bounds, and on a response written to a session that takes
+            // nothing, until the response's deadline.
+            self.end_route();
             end
         })?;
         // Only the core's end drains the inbox: after a failure of the runtime's own, such as a
@@ -387,9 +446,16 @@ impl<'r> Runtime<'r> {
             if let Some(end) = self.perform(scope, core, actions)? {
                 return Ok(end);
             }
-            let (at, event) = self.next_event(core)?;
+            let (at, event) = self.next_event(scope, core)?;
             actions = core.handle(at, event.clone());
             self.log.event(self.workflow, at, &event, &actions)?;
+            // The route ends as the core stops allowing model requests, at a finalize or at the
+            // work phase's end, before the core's actions are performed: the responses it cuts
+            // short then end while the agent's teardown, if the actions hold it, still needs the
+            // agent's session.
+            if !core.model_requests_allowed(at) {
+                self.end_route();
+            }
         }
     }
 
@@ -418,8 +484,12 @@ impl<'r> Runtime<'r> {
     /// the inbox before the core's tick is due, and else the tick then. A due tick comes before
     /// what the inbox holds while the agent is held, and after it once the agent is gone. The
     /// wait ends at the tick's time, which arrivals the core doesn't wait on, handled as they
-    /// come, don't move.
-    fn next_event(&mut self, core: &Core<'_>) -> Result<(Duration, Event), String> {
+    /// come, don't move. The agent's model requests are answered on threads of `scope`.
+    fn next_event<'s>(
+        &mut self,
+        scope: &'s Scope<'s, 'r>,
+        core: &Core<'_>,
+    ) -> Result<(Duration, Event), String> {
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
@@ -452,24 +522,32 @@ impl<'r> Runtime<'r> {
             let Some(input) = input else {
                 return Ok((self.clock.now(), Event::Tick));
             };
-            if let Some(event) = self.arrived(input, due)? {
+            if let Some(event) = self.arrived(Some(scope), core, input)? {
                 return Ok(event);
             }
         }
     }
 
     /// The event that `input` brings the core, if the core waits on it: a judge call's report
-    /// at its own time ([`Runtime::report`]), and else at the time the loop took it. An op whose
-    /// payload the gateway refused is refused by `due`, the core's next tick, and goes to the run
-    /// log, since the core neither decides on it nor learns of it.
-    fn arrived(
+    /// at its own time ([`Runtime::report`]), and else at the time the loop took it. The core
+    /// learns of none of these: an op whose payload the gateway refused, which is refused by the
+    /// core's next act ([`Runtime::answers_due`]) and goes to the run log; a model request,
+    /// answered on a thread of `scope` ([`Runtime::model_request`]); and a note on one, or how
+    /// it was answered, which go to the run log.
+    fn arrived<'s>(
         &mut self,
+        scope: Option<&'s Scope<'s, 'r>>,
+        core: &Core<'_>,
         input: Input,
-        due: Duration,
     ) -> Result<Option<(Duration, Event)>, String> {
         let at = self.clock.now();
         let arrival = match input {
             Input::Agent(arrival) => arrival,
+            Input::Model(at, note) => return self.log.note(at, &note).map(|()| None),
+            Input::ModelAnswered(at, number, answer) => {
+                let answered = self.log.model_answered(self.workflow, at, number, &answer);
+                return answered.map(|()| None);
+            }
             Input::Judge(report) => return self.report(report),
         };
         // Ops are taken as usual even once the agent's session has closed: the core has ended
@@ -478,7 +556,8 @@ impl<'r> Runtime<'r> {
         let event = match arrival {
             Arrival::Op(incoming) => Some(self.op(incoming)),
             Arrival::Refused(refused) => {
-                self.refuse(at, refused, self.clock.deadline(due))?;
+                let by = self.clock.deadline(self.answers_due(core));
+                self.refuse(at, refused, by)?;
                 None
             }
             // With no agent, the core waits on neither. The loop tears the agent down in the
@@ -493,18 +572,77 @@ impl<'r> Runtime<'r> {
             Arrival::Ended { reason } => {
                 (self.agent.as_mut()).and_then(|agent| agent.ended(&reason))
             }
-            #[expect(
-                clippy::unreachable,
-                reason = "the agent's session is accepted without model requests, so one breaks \
-                          the protocol, which ends the session, and arrives as its end; no type \
-                          excludes it, since one `Arrival` serves sessions with model requests \
-                          and without"
-            )]
-            Arrival::ModelRequest(_) => {
-                unreachable!("a model request arrived on the agent's session, which takes none")
+            Arrival::ModelRequest(incoming) => {
+                self.model_request(scope, core, at, incoming)?;
+                None
             }
         };
         Ok(event.map(|event| (at, event)))
+    }
+
+    /// Takes `incoming`, a model request of the agent's, at `at`, under the next number, and
+    /// answers it on a thread of `scope` as the route serves it ([`Served::serve`]), refused
+    /// unless the core allows the agent's model requests then. One taken once the run's threads
+    /// have ended, with no `scope`, is dropped unanswered, since the agent's session has ended
+    /// by then ([`Runtime::drain`]).
+    fn model_request<'s>(
+        &mut self,
+        scope: Option<&'s Scope<'s, 'r>>,
+        core: &Core<'_>,
+        at: Duration,
+        incoming: IncomingModelRequest,
+    ) -> Result<(), String> {
+        let number = self.next_model_request;
+        self.next_model_request += 1;
+        #[expect(
+            clippy::unreachable,
+            reason = "the agent's session takes model requests only if the run serves a route \
+                      (`Agent::start`), and one breaks the protocol otherwise, which ends the \
+                      session; no type excludes it, since one `Arrival` serves sessions with \
+                      model requests and without"
+        )]
+        let Some(served) = self.served else {
+            unreachable!("a model request arrived on the agent's session, which takes none")
+        };
+        let Some(scope) = scope else {
+            drop(incoming);
+            let note = format!("model request {number} wasn't answered: the run has ended");
+            return self.log.note(at, &note);
+        };
+        let allowed = core.model_requests_allowed(at);
+        // A response still open at its deadline ends the agent's session, which the teardown
+        // needs, so it is due by the teardown's end; a finalize or the work phase's end cuts it
+        // short before that (`end_route`).
+        let by = self.clock.deadline(self.teardown_end());
+        let (reports, clock) = (self.inbox.sender(), self.clock);
+        // A request stays in flight until its thread writes its response's end, the thread's
+        // last step, so the session's bound on the requests in flight,
+        // `MAX_MODEL_REQUESTS_IN_FLIGHT`, bounds these threads too, but for those writing that
+        // end.
+        let spawned = thread::Builder::new()
+            .name(format!("model-{number}"))
+            .spawn_scoped(scope, move || {
+                // The loop's inbox outlives every request's thread, which the run's end waits
+                // for. Both reports come before the answer's end, and so before what the agent
+                // does next.
+                let noted = |note| {
+                    // At the take time, at which it was allowed, not when the thread gets to it.
+                    let _ = reports.send(Input::Model(at, note));
+                };
+                let answered = |answer| {
+                    let _ = reports.send(Input::ModelAnswered(clock.now(), number, answer));
+                };
+                served.serve(number, incoming, allowed, by, noted, answered);
+            });
+        match spawned {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let note = format!(
+                    "model request {number} wasn't answered: its thread didn't start: {error}"
+                );
+                self.log.note(at, &note)
+            }
+        }
     }
 
     /// The event that `report`, a judge call's, brings the core, if it has one, at the time the
@@ -556,7 +694,7 @@ impl<'r> Runtime<'r> {
         // over all it will by now.
         self.agent = None;
         while let Some(input) = self.inbox.take() {
-            let Some((at, event)) = self.arrived(input, self.answers_due(core))? else {
+            let Some((at, event)) = self.arrived(None, core, input)? else {
                 continue;
             };
             let actions = core.handle(at, event.clone());
@@ -603,8 +741,9 @@ impl<'r> Runtime<'r> {
                     // The agent starts at the run's start, so its startup ends long before the
                     // hard end, which counts it.
                     let by = Deadline::after(self.startup);
-                    let sender = self.inbox.sender();
-                    let (agent, event) = Agent::start(self.sandboxes, self.workflow, by, sender);
+                    let (sender, model) = (self.inbox.sender(), self.served.is_some());
+                    let (agent, event) =
+                        Agent::start(self.sandboxes, self.workflow, model, by, sender);
                     self.agent = agent;
                     self.pending.push_back((self.clock.now(), event));
                 }
@@ -795,6 +934,15 @@ impl<'r> Runtime<'r> {
                     collect: at(self.hard_end()),
                 }
             }
+        }
+    }
+
+    /// Ends the agent's model route, if it has one, since the core allows no more of its model
+    /// requests: its exchanges in flight are cut short, and any later one fails at once. Ending
+    /// it again does nothing.
+    fn end_route(&self) {
+        if let Some(served) = self.served {
+            served.end();
         }
     }
 

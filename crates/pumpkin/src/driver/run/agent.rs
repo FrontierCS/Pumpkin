@@ -28,19 +28,20 @@ pub(super) struct Agent {
 }
 
 impl Agent {
-    /// Starts the agent's sandbox, whose session takes its ops, puts its directories, files and
-    /// standard input there ([`put`]), then starts its command, all by `by`, its session's
-    /// arrivals sent on `inbox`. Returns the sandbox, if it started, and what came of it:
-    /// [`Event::AgentStarted`] or [`Event::AgentFailed`].
+    /// Starts the agent's sandbox, whose session takes its ops, and its model requests if
+    /// `model`, puts its directories, files and standard input there ([`put`]), then starts its
+    /// command, all by `by`, its session's arrivals sent on `inbox`. Returns the sandbox, if it
+    /// started, and what came of it: [`Event::AgentStarted`] or [`Event::AgentFailed`].
     pub(super) fn start(
         sandboxes: &Sandboxes<'_>,
         workflow: &Workflow,
+        model: bool,
         by: Deadline,
         inbox: Sender<Input>,
     ) -> (Option<Self>, Event) {
         let agent = workflow.agent();
-        let ops = op_payload_limit(workflow);
-        let started = sandboxes.start("agent", &agent.sandbox, Some(ops), by, inbox, Input::Agent);
+        let ops = Some(op_payload_limit(workflow));
+        let started = sandboxes.start("agent", &agent.sandbox, ops, model, by, inbox, Input::Agent);
         let mut sandbox = match started {
             Ok(sandbox) => sandbox,
             Err(error) => {

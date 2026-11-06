@@ -28,8 +28,8 @@ use pumpkin_schema::provider::{
 };
 use pumpkin_schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use pumpkin_schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, RESULT_MAX_BYTES, RelativePath, ToSandbox, frame, out_dir,
-    pumpkin_dir,
+    Entry, ExitStatus, FromSandbox, RESULT_MAX_BYTES, RelativePath, ToSandbox, frame, log_dir,
+    out_dir, pumpkin_dir,
 };
 use serde_json::json;
 
@@ -80,8 +80,11 @@ const LINGER: Duration = Duration::from_secs(10);
 /// [`COLLECTED`], from any directory, and from `out` a judge's result too. A command whose
 /// program is `exit` exits at once with the status its argument gives; `stall` starts, then
 /// stalls the sandbox; `crash` starts, then its `sandboxd` ends the session; `ops` takes the
-/// steps its arguments give ([`step`]), making each op once the one before it is answered, then
-/// exits with 0, unless it has, or its `sandboxd` ends the session as a step asks; `judge`
+/// steps its arguments give ([`step`]), making each op, or model request, once the one before
+/// it is answered, then exits with 0, once the response to its last model request has ended,
+/// unless it has, or its `sandboxd` ends the session as a step asks, and prints each response
+/// to its model requests, which it makes only in a sandbox created with the model endpoint, and
+/// whose end a freeze waits for; `judge`
 /// judges the payload put at the path its argument gives ([`judge`]); any other runs until the
 /// sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose
 /// create names [`UNDELETABLE`]; it takes [`SLOW_CREATE`] to create one that names [`SLOW`],
@@ -100,6 +103,8 @@ struct State {
     /// The permission bits of the directory that held each create's socket directory, in the
     /// order of the creates.
     modes: Vec<u32>,
+    /// Whether each create asked for the model endpoint, in the order of the creates.
+    models: Vec<bool>,
 }
 
 struct Sandbox {
@@ -148,6 +153,7 @@ impl Sim {
                 next: 1,
                 sandboxes: BTreeMap::new(),
                 modes: Vec::new(),
+                models: Vec::new(),
             }),
         }
     }
@@ -156,6 +162,11 @@ impl Sim {
     /// order of the creates.
     pub(crate) fn modes(&self) -> Vec<u32> {
         self.state().modes.clone()
+    }
+
+    /// Whether each create asked for the model endpoint, in the order of the creates.
+    pub(crate) fn models(&self) -> Vec<bool> {
+        self.state().models.clone()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -192,10 +203,10 @@ impl Provider for Sim {
         let parent = fs::metadata(dir.parent().unwrap()).unwrap();
         let mode = parent.permissions().mode() & 0o777;
         let shared = Arc::new(Mutex::default());
-        let ours = Arc::clone(&shared);
+        let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
-            .spawn(move || sandboxd(&socket, mute, &ours))
+            .spawn(move || sandboxd(&socket, mute, model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
         if names(SLOW) {
             thread::sleep(SLOW_CREATE);
@@ -204,6 +215,7 @@ impl Provider for Sim {
         let id = format!("sim-{}", state.next);
         state.next += 1;
         state.modes.push(mode);
+        state.models.push(model);
         let run = create.run.clone();
         let sandbox = Sandbox {
             run,
@@ -321,8 +333,9 @@ fn stop(sandbox: Sandbox) {
 }
 
 /// A sandbox's fake `sandboxd`: it prints why it doesn't dial if `mute`, or else dials `socket`
-/// and serves the session until the session ends, the sandbox is deleted, or it is stalled.
-fn sandboxd(socket: &Path, mute: bool, shared: &Mutex<Status>) {
+/// and serves the session until the session ends, the sandbox is deleted, or it is stalled,
+/// with the model endpoint if `model`.
+fn sandboxd(socket: &Path, mute: bool, model: bool, shared: &Mutex<Status>) {
     if mute {
         (status(shared).console).push_str("sandboxd: a simulated one, which never dials\n");
         return;
@@ -338,7 +351,7 @@ fn sandboxd(socket: &Path, mute: bool, shared: &Mutex<Status>) {
         Ok((connection, other)) => {
             status.connection = Some(other);
             drop(status);
-            serve(connection, shared);
+            serve(connection, model, shared);
         }
         Err(error) => {
             let socket = socket.display();
@@ -359,6 +372,13 @@ enum Step {
     },
     /// `status` of `job`, made until its reply gives `state`.
     Await { job: u64, state: String },
+    /// A model request that names `model`, whose input is `text`, and what of its response the
+    /// next step waits for.
+    Model {
+        model: String,
+        text: String,
+        wait: Wait,
+    },
     /// A wait, in seconds, before the next step.
     Sleep(u64),
     /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
@@ -366,6 +386,13 @@ enum Step {
     Exit,
     /// The session's end, which its `sandboxd` makes.
     Crash,
+}
+
+/// What of a model response a command waits for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    Head,
+    End,
 }
 
 /// A command that makes ops.
@@ -384,9 +411,39 @@ struct Caller {
     awaiting: Option<(u64, String)>,
     /// Whether the command has exited.
     exited: bool,
+    /// Whether its sandbox serves the model endpoint.
+    endpoint: bool,
+    /// The number of the last model request, once one has been made: the one in flight, as it
+    /// makes one at a time.
+    model: Option<u32>,
+    /// Whether the response to the last model request has yet to end.
+    open: bool,
+    /// What of that response the next step waits for, if it waits for it.
+    waits: Option<Wait>,
+    /// What it has printed: each response to its model requests.
+    stdout: String,
 }
 
 impl Caller {
+    /// A command on `stream` that takes `steps`, in a sandbox that serves the model endpoint if
+    /// `endpoint`, before it has taken any.
+    fn new(stream: u32, steps: VecDeque<Step>, endpoint: bool) -> Self {
+        Self {
+            stream,
+            steps,
+            op: 0,
+            less: None,
+            left: None,
+            awaiting: None,
+            exited: false,
+            endpoint,
+            model: None,
+            open: false,
+            waits: None,
+            stdout: String::new(),
+        }
+    }
+
     /// Takes the reply to the op in flight, `reply`: if it is an `ops` that breaks the op's
     /// bound, or that follows no `ops` reply, the command exits with 1 at once, taking no more
     /// steps; if it gives another state than the one awaited, it asks again after
@@ -426,6 +483,13 @@ impl Caller {
                     payload,
                     less,
                 }) => (call, payload, less),
+                Some(Step::Model { model, text, wait }) => {
+                    if self.request(&model, &text, replies) {
+                        self.waits = Some(wait);
+                        return false;
+                    }
+                    continue;
+                }
                 Some(Step::Await { job, state }) => {
                     self.awaiting = Some((job, state));
                     (OpCall::Status { job }, Vec::new(), None)
@@ -439,6 +503,10 @@ impl Caller {
                     continue;
                 }
                 Some(Step::Crash) => return true,
+                None if self.open => {
+                    self.waits = Some(Wait::End);
+                    return false;
+                }
                 None => {
                     self.exit(0, replies);
                     return false;
@@ -464,6 +532,92 @@ impl Caller {
         if size > 0 {
             replies.push((FromSandbox::OpData { op }, payload));
         }
+    }
+
+    /// Makes a model request that names `model`, with `text` as its input, in `replies`, and
+    /// returns whether it did: without the model endpoint, the command prints that the
+    /// connection was refused, and exits with 1, taking no more steps.
+    fn request(
+        &mut self,
+        model: &str,
+        text: &str,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    ) -> bool {
+        if !self.endpoint {
+            self.print("model request: connection refused");
+            self.steps.clear();
+            self.exit(1, replies);
+            return false;
+        }
+        let request = self.model.map_or(0, |request| request + 1);
+        (self.model, self.open) = (Some(request), true);
+        let body = json!({ "model": model, "store": false, "input": text }).to_string();
+        let (method, path) = ("POST".to_owned(), "/responses".to_owned());
+        let header = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        let headers = vec![
+            header("content-type", "application/json"),
+            header("user-agent", "sim"),
+        ];
+        let size = u64::try_from(body.len()).unwrap();
+        let head = FromSandbox::ModelRequest {
+            request,
+            method,
+            path,
+            headers,
+            size,
+        };
+        replies.push((head, Vec::new()));
+        replies.push((FromSandbox::ModelData { request }, body.into_bytes()));
+        true
+    }
+
+    /// Takes `response`, a frame of the response to a model request, with its `body`: prints
+    /// its head on a line of its own, and its body after it, each line break shown as `\n`, and
+    /// once what the next step waits for of it has come, takes the steps that follow
+    /// ([`Caller::next`]), returning what that does. Returns `None` for a frame that answers no
+    /// model request in flight.
+    fn heard(
+        &mut self,
+        response: ToSandbox,
+        body: &[u8],
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    ) -> Option<bool> {
+        let (request, part) = match response {
+            ToSandbox::ModelResponse {
+                request,
+                status,
+                headers,
+            } => {
+                self.print(&format!("model request {request}: {status} {headers:?} "));
+                (request, Some(Wait::Head))
+            }
+            ToSandbox::ModelData { request } => {
+                let text = String::from_utf8_lossy(body).replace('\n', "\\n");
+                self.stdout.push_str(&text);
+                (request, None)
+            }
+            ToSandbox::ModelEnd { request, .. } => (request, Some(Wait::End)),
+            other => panic!("{other:?} is no frame of a model response"),
+        };
+        if self.model != Some(request) {
+            return None;
+        }
+        self.open &= part != Some(Wait::End);
+        if part.is_none() || self.waits != part {
+            return Some(false);
+        }
+        self.waits = None;
+        Some(self.next(replies))
+    }
+
+    /// Prints `text` on a line of its own.
+    // Each line ends as the next begins, so that what it printed of a response is the same
+    // whether the response's end comes before its output is collected or after.
+    fn print(&mut self, text: &str) {
+        if !self.stdout.is_empty() {
+            self.stdout.push('\n');
+        }
+        self.stdout.push_str(text);
     }
 
     /// Exits with `code`, in `replies`, unless it has exited.
@@ -494,7 +648,9 @@ fn state_name(reply: &OpReply) -> &'static str {
 /// <job>`, `judge <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant>
 /// <payload>`, a final submission, where a payload that is a number is that many bytes of `x`,
 /// and any other is its own bytes; `await <job> <state>`, which makes `status <job>` until its
-/// reply's state is `state`; or `sleep <seconds>`, `exit` or `crash`.
+/// reply's state is `state`; `model <model> <text>`, a model request that names `model`, with
+/// `text` as its input, whose response's end the next step waits for, or `ask <model> <text>`,
+/// one whose response's head it waits for; or `sleep <seconds>`, `exit` or `crash`.
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
@@ -520,6 +676,15 @@ fn step(arg: &str) -> Step {
         ["await", job, state] => {
             let (job, state) = (job.parse().unwrap(), state.to_owned());
             return Step::Await { job, state };
+        }
+        [kind @ ("model" | "ask"), model, text] => {
+            let (model, text) = (model.to_owned(), text.to_owned());
+            let wait = if kind == "model" {
+                Wait::End
+            } else {
+                Wait::Head
+            };
+            return Step::Model { model, text, wait };
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["exit"] => return Step::Exit,
@@ -597,17 +762,21 @@ fn judge(
     }
 }
 
-/// Collects `dir` on `stream`, in `replies`: [`COLLECTED`], and from `out` the judge's
-/// `result` too, if it wrote one.
+/// Collects `dir` on `stream`, in `replies`: [`COLLECTED`], from `out` the judge's `result`
+/// too, if it wrote one, and from `log` what the command printed, if anything.
 fn collect(
     stream: u32,
     dir: &AbsolutePath,
     result: Option<&[u8]>,
+    stdout: &str,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
 ) {
     let mut tree = vec![(COLLECTED, COLLECTED.as_bytes())];
     if *dir == pumpkin_dir().join(&out_dir()) {
         tree.extend(result.map(|result| ("result.json", result)));
+    }
+    if *dir == pumpkin_dir().join(&log_dir()) && !stdout.is_empty() {
+        tree.push(("command.stdout", stdout.as_bytes()));
     }
     for (path, body) in tree {
         let path = RelativePath::try_from(path.to_owned()).unwrap();
@@ -622,10 +791,12 @@ fn collect(
 }
 
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
-/// reads nothing more.
-fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
+/// reads nothing more, serving the model endpoint if `model`.
+fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let (mut caller, mut files, mut result) = (None::<Caller>, Files::default(), None);
+    // The stream of a freeze that waits for a model response to end.
+    let mut freezing = None;
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, body))) = frame::read::<ToSandbox>(&mut connection) {
         if status(shared).stalled {
@@ -638,9 +809,11 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
             ToSandbox::Put { dir, .. } => files.dir = Some(dir),
             ToSandbox::Entry { entry, .. } => files.entry(entry),
             ToSandbox::Data { .. } => files.data(&body),
-            ToSandbox::End { stream } | ToSandbox::Freeze { stream } => {
-                replies.push((FromSandbox::Done { stream }, Vec::new()));
-            }
+            ToSandbox::End { stream } => replies.push((FromSandbox::Done { stream }, Vec::new())),
+            // A freeze waits for the response to the model request in flight, if any, to end, so
+            // that a run that cuts it short before the agent's teardown, as it must, sees its
+            // freeze done, and one that would cut it after waits out its freeze's deadline.
+            ToSandbox::Freeze { stream } => freezing = Some(stream),
             ToSandbox::Start { stream, launch } => {
                 replies.push((FromSandbox::Done { stream }, Vec::new()));
                 match launch.argv.program() {
@@ -653,15 +826,7 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
                     "crash" => crashed = true,
                     "ops" => {
                         let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
-                        let made = caller.insert(Caller {
-                            stream,
-                            steps,
-                            op: 0,
-                            less: None,
-                            left: None,
-                            awaiting: None,
-                            exited: false,
-                        });
+                        let made = caller.insert(Caller::new(stream, steps, model));
                         crashed = made.next(&mut replies);
                     }
                     "judge" => {
@@ -672,18 +837,31 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
                 }
             }
             ToSandbox::Collect { stream, dir } => {
-                collect(stream, &dir, result.as_deref(), &mut replies);
+                let stdout = caller.as_ref().map_or("", |caller| &caller.stdout);
+                collect(stream, &dir, result.as_deref(), stdout, &mut replies);
             }
             ToSandbox::OpReply { op, reply } => match &mut caller {
                 Some(caller) if caller.op == op => crashed = caller.answered(&reply, &mut replies),
                 // A reply to no op in flight breaks the protocol, which ends the session.
                 Some(_) | None => return,
             },
-            // It makes no model requests, so an answer to one breaks the protocol, which ends
-            // the session.
-            ToSandbox::ModelResponse { .. }
+            response @ (ToSandbox::ModelResponse { .. }
             | ToSandbox::ModelData { .. }
-            | ToSandbox::ModelEnd { .. } => return,
+            | ToSandbox::ModelEnd { .. }) => {
+                let heard = caller
+                    .as_mut()
+                    .map(|caller| caller.heard(response, &body, &mut replies));
+                // An answer to no model request in flight breaks the protocol, which ends the
+                // session.
+                let Some(Some(next)) = heard else { return };
+                crashed = next;
+            }
+        }
+        if let Some(stream) = freezing
+            && !caller.as_ref().is_some_and(|caller| caller.open)
+        {
+            replies.push((FromSandbox::Done { stream }, Vec::new()));
+            freezing = None;
         }
         for (reply, body) in replies.drain(..) {
             if frame::write(&mut connection, &reply, &body).is_err() {

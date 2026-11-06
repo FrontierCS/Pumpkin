@@ -94,7 +94,9 @@ run, with its `Outcome`, or abandons it at its hard end; its `ops` rules on ops,
 judge calls, and `result` reads a call's `result.json` (`JudgeResult`). The runtime, `driver::run`,
 prepares each `Run`, then drives the core on the run's `Provider`, keeping the run's record,
 whose files `record` lays out, and its run log, whose records `log` does. `model_route` closes
-the agent's model requests (`Route`).
+the agent's model requests (`Route`) and forwards them upstream (`Upstream`), as the runtime
+serves the agent's route until the agent finalizes, the work phase ends, or the provider refuses
+the route's key.
 - **Architecture Invariant:** the decision core does no I/O, reads no clock and uses no randomly
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
   decides when time ends the work phase or the run, the hard end included.

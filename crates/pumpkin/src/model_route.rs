@@ -30,11 +30,12 @@
 //! These rules refuse the forms they name and pass every other field: an allow-list of the
 //! fields a harness needs, which would refuse any other, is not part of the route yet. They read
 //! the body's JSON fields, never the text of its context, and the body that goes upstream is the
-//! one they read. A refusal's status is 404 if the target is not `/responses`, 405 if the method
-//! is not `POST`, and 400 for any other rule broken.
+//! one they read, its model named as the upstream takes it. A refusal's status is 404 if the
+//! target is not `/responses`, 405 if the method is not `POST`, and 400 for any other rule
+//! broken.
 //!
-//! [`Upstream::forward`] sends a closed request to the model provider, and streams back its
-//! response.
+//! [`Upstream::forward`] sends a closed request to the model provider, streams back its
+//! response, and says how it answered ([`Answer`]). A run serves its route as [`Serving`] says.
 //!
 //! [`ModelRequest`]: pumpkin_gateway::ModelRequest
 
@@ -42,4 +43,4 @@ mod closure;
 mod upstream;
 
 pub use closure::{Closed, Refusal, Route};
-pub use upstream::{Key, Upstream, UpstreamUrl};
+pub use upstream::{Answer, Key, Serving, Upstream, UpstreamUrl};

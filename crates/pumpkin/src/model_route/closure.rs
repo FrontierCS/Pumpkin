@@ -2,13 +2,16 @@
 //! [the route's docs](super) give.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io;
 
 use pumpkin_gateway::{IncomingModelRequest, ModelRequest};
-use pumpkin_schema::ir::Models;
+use pumpkin_schema::ir::ModelName;
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
+
+use super::upstream::Answer;
 
 /// The request headers that pass upstream.
 // Each is one the harness the runs use sends, and describes its client, its session, or the form
@@ -53,8 +56,8 @@ const MAX_SHOWN_BYTES: usize = 256;
 /// A role's model route, as the host serves it.
 #[derive(Debug)]
 pub struct Route {
-    /// The models that requests may name.
-    models: Models,
+    /// Each model that requests may name, with the name that its upstream takes for it.
+    models: BTreeMap<ModelName, ModelName>,
 }
 
 /// A model request that keeps the route closed, ready to go upstream. Only [`Route::close`]
@@ -63,10 +66,13 @@ pub struct Route {
 pub struct Closed {
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Vec<u8>,
+    /// The model that the request named, and the name that its upstream takes for it, which
+    /// `body` names.
+    model: (ModelName, ModelName),
 }
 
 /// Why the route answers a model request with an error, which [`Refusal::answer`] tells its
-/// client: a rule of the closure's that it breaks, or an upstream that gave it no answer.
+/// client: a rule broken, the route's end, or an upstream's answer missing or not passed on.
 #[derive(Debug)]
 pub struct Refusal {
     status: Status,
@@ -76,7 +82,8 @@ pub struct Refusal {
 /// The HTTP status of a refusal.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Status {
-    /// The request breaks a rule of the closure's.
+    /// The request breaks a rule of the closure's, the model provider refused it or the route's
+    /// key, or it comes once the route has ended.
     BadRequest,
     /// Its target is not `/responses`.
     NotFound,
@@ -89,12 +96,14 @@ pub(super) enum Status {
 }
 
 impl Route {
-    /// The route that allows `models`.
-    pub fn new(models: Models) -> Self {
+    /// The route that allows each model that `models` keys, which goes upstream under the name
+    /// that it maps the model to.
+    pub fn new(models: BTreeMap<ModelName, ModelName>) -> Self {
         Self { models }
     }
 
-    /// Parses `request` into one that keeps the route closed.
+    /// Parses `request` into one that keeps the route closed, naming its model as its upstream
+    /// takes it.
     ///
     /// # Errors
     ///
@@ -118,7 +127,7 @@ impl Route {
             return Err(refusal(Status::MethodNotAllowed, message));
         }
         let headers = passed(headers)?;
-        let body: Map<String, Value> = serde_json::from_slice(body).map_err(|error| {
+        let mut body: Map<String, Value> = serde_json::from_slice(body).map_err(|error| {
             let error = error.to_string();
             bad(format!(
                 "the body is not a JSON object ({}): send one",
@@ -126,24 +135,37 @@ impl Route {
             ))
         })?;
         stateless(&body)?;
-        self.allows(&body)?;
+        let (model, upstream_name) = self.allows(&body)?;
         picks_no_feature(&body)?;
         closed_fields(&body)?;
+        let named = Value::String(upstream_name.as_str().to_owned());
+        body.insert("model".to_owned(), named);
         // What goes upstream is the body as parsed here, not as sent, so that no other parser
         // can read it otherwise: one that keeps the first of a field sent twice, say, where this
         // keeps the last.
         let body = Value::Object(body).to_string().into_bytes();
-        Ok(Closed { headers, body })
+        let model = (model.clone(), upstream_name.clone());
+        Ok(Closed {
+            headers,
+            body,
+            model,
+        })
     }
 
-    /// Refuses a request that names no model the route allows.
-    fn allows(&self, body: &Map<String, Value>) -> Result<(), Refusal> {
-        let models = self.models.as_slice();
+    /// The model that `body` names, with the name that the upstream takes for it, refusing a
+    /// request that names no model the route allows.
+    fn allows(&self, body: &Map<String, Value>) -> Result<(&ModelName, &ModelName), Refusal> {
         let named = body.get("model").and_then(Value::as_str);
-        if named.is_some_and(|named| models.iter().any(|model| model.as_str() == named)) {
-            return Ok(());
+        let allowed =
+            named.and_then(|named| (self.models.iter()).find(|(model, _)| model.as_str() == named));
+        if let Some(allowed) = allowed {
+            return Ok(allowed);
         }
-        let allowed: Vec<String> = models.iter().map(|model| format!("`{model}`")).collect();
+        let allowed: Vec<String> = self
+            .models
+            .keys()
+            .map(|model| format!("`{model}`"))
+            .collect();
         let named = named.map_or("no model".to_owned(), |named| format!("`{}`", shown(named)));
         Err(bad(format!(
             "the request names {named}, which the route doesn't allow: name {}",
@@ -162,9 +184,66 @@ impl Closed {
     pub fn body(&self) -> &[u8] {
         &self.body
     }
+
+    /// `answered`, the model that a response says answered the request, as the request named
+    /// it, if it is the name that the upstream takes for it, and else as it is.
+    pub(super) fn named<'a>(&'a self, answered: &'a str) -> &'a str {
+        let (model, upstream_name) = &self.model;
+        // A harness compares the model that answered with the one it asked for, ASCII case
+        // aside, and would take the upstream's name for it as another model.
+        if answered.eq_ignore_ascii_case(upstream_name.as_str()) {
+            model.as_str()
+        } else {
+            answered
+        }
+    }
 }
 
 impl Refusal {
+    /// The refusal of a request taken once the agent's work phase has ended, with which its
+    /// route ends.
+    pub(crate) fn ended() -> Self {
+        // A 400, as the harness the runs use takes one as final, and ends its turn, so that it
+        // can exit within the grace; a 403, say, it tries again, as it would a failed stream,
+        // for as long as its retries last.
+        let message = "the work phase has ended, and with it the model route: make no more model \
+                       requests";
+        refusal(Status::BadRequest, message.to_owned())
+    }
+
+    /// The refusal of a request once the model provider has refused the route's key with a 401,
+    /// with which the route ends.
+    pub(crate) fn key_refused() -> Self {
+        // A 400, as for the work phase's end, so that the harness ends its turn rather than try
+        // again with the same key, which every later request would carry.
+        let message = "the model provider refused the route's key, with a 401, which ends the \
+                       model route: make no more model requests";
+        refusal(Status::BadRequest, message.to_owned())
+    }
+
+    /// The refusal of a request that the model provider refused with a 403.
+    pub(crate) fn forbidden() -> Self {
+        // A 400, so that the harness ends its turn rather than try the same request again.
+        let message = "the model provider refused the request, with a 403: send only requests \
+                       that it allows";
+        refusal(Status::BadRequest, message.to_owned())
+    }
+
+    /// How [`Refusal::answer`] answers its client, in place of the upstream's response with the
+    /// status `upstream_status`, if one came.
+    pub(crate) fn answered(
+        &self,
+        upstream_status: Option<u16>,
+        request_id: Option<String>,
+    ) -> Answer {
+        Answer::Refused {
+            upstream_status,
+            request_id,
+            status: self.status.code(),
+            message: self.message.clone(),
+        }
+    }
+
     /// Answers `request` with the refusal by `by` ([`IncomingModelRequest::respond`]): its
     /// status, with `allow: POST` for a 405, and its message in a JSON error,
     /// `{"error": {"message", "type", "param", "code"}}`, whose `type` is
@@ -180,15 +259,13 @@ impl Refusal {
         // A 4xx is a request for its client to mend, which a client takes as final rather than
         // trying again; a 5xx, the route's own failure, it may try again. HTTP requires a 405 to
         // name the methods its target allows.
-        let (code, kind) = match status {
-            Status::BadRequest => (400, "invalid_request_error"),
-            Status::NotFound => (404, "invalid_request_error"),
+        let kind = match status {
+            Status::BadRequest | Status::NotFound => "invalid_request_error",
             Status::MethodNotAllowed => {
                 headers.push(("allow".to_owned(), "POST".to_owned()));
-                (405, "invalid_request_error")
+                "invalid_request_error"
             }
-            Status::BadGateway => (502, "server_error"),
-            Status::GatewayTimeout => (504, "server_error"),
+            Status::BadGateway | Status::GatewayTimeout => "server_error",
         };
         // The model provider's API gives its own errors in this form, with these `type`s for a
         // request it won't serve as sent and for its own failure, so a client reports the
@@ -200,9 +277,21 @@ impl Refusal {
             "code": null,
         });
         let body = json!({ "error": error }).to_string();
-        let mut response = request.respond(code, headers, by)?;
+        let mut response = request.respond(status.code(), headers, by)?;
         response.send(body.as_bytes())?;
         response.end()
+    }
+}
+
+impl Status {
+    fn code(self) -> u16 {
+        match self {
+            Self::BadRequest => 400,
+            Self::NotFound => 404,
+            Self::MethodNotAllowed => 405,
+            Self::BadGateway => 502,
+            Self::GatewayTimeout => 504,
+        }
     }
 }
 

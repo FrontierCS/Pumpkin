@@ -101,13 +101,19 @@ impl<'p> Sandboxes<'p> {
     /// Starts a sandbox for `sandbox`'s role, its socket directory named `name` within the run,
     /// and accepts its session, set up, by `by`, its arrivals sent on `arrivals` as `wrap` makes
     /// them ([`Listener::accept`]). The sandbox makes ops whose payloads hold at most `ops`, or
-    /// is passive for `None`. A sandbox that doesn't start by then is deleted, with its console
+    /// is passive for `None`, and serves the model endpoint if `model`, whose requests its
+    /// session then takes. A sandbox that doesn't start by then is deleted, with its console
     /// quoted in the error, which says if deleting it failed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a setting of the one start path that every sandbox takes"
+    )]
     pub(super) fn start<T: Send + 'static>(
         &self,
         name: &str,
         sandbox: &Sandbox,
         ops: Option<OpPayloadLimit>,
+        model: bool,
         by: Deadline,
         arrivals: Sender<T>,
         wrap: fn(Arrival) -> T,
@@ -144,12 +150,12 @@ impl<'p> Sandboxes<'p> {
             image: image.clone(),
             sandboxd: self.sandboxd.clone(),
             ops: ops.is_some(),
-            model: false,
+            model,
             dial: Dial::Socket { dir },
         };
         let Created { id } = self.provider.create(&create)?;
         let session = listener
-            .accept(by, ops, false, arrivals, wrap)
+            .accept(by, ops, model, arrivals, wrap)
             .map_err(|error| error.to_string())
             .and_then(|mut session| session.set_up(by).map(|()| session));
         match session {

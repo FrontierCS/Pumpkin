@@ -13,10 +13,9 @@ use std::{fs, thread};
 use expect_test::{Expect, expect};
 use pumpkin::model_route::{Key, Route, Upstream, UpstreamUrl};
 use pumpkin_gateway::Listener;
-use pumpkin_schema::ir::Models;
 use stdx::Deadline;
 
-use super::{HUNG, fake_sandbox, next_model_request, post};
+use super::{HUNG, fake_sandbox, models, next_model_request, post};
 
 /// The key file's text, whose key goes upstream.
 const KEY: &str = "sk-test-0123\n";
@@ -56,6 +55,8 @@ enum Answer {
     Streams,
     /// With an error of its own, a 429.
     Refuses,
+    /// With a refusal, of the key or the request: a 401 or a 403.
+    RefusesKey(u16),
     /// With a redirect to itself.
     Redirects,
     /// With a body that it codes, though the request asks for it uncoded.
@@ -117,17 +118,19 @@ fn check(cases: &[Case], expect: &Expect) {
     let (sender, arrivals) = mpsc::channel();
     let accepted = listener.accept(Deadline::after(HUNG), None, true, sender, |arrival| arrival);
     let session = accepted.unwrap();
-    let models: Models = serde_json::from_value(serde_json::json!(["m-large"])).unwrap();
-    let route = Route::new(models);
+    let route = Route::new(models(["m-large"]));
     let mut outcomes = Vec::new();
     for (case, upstream) in cases.iter().zip(&made) {
         let Ok(upstream) = upstream else { continue };
         let incoming = next_model_request(&arrivals);
         let closed = route.close(&incoming.request).unwrap();
         let until = Deadline::after(case.until);
-        let forwarded = upstream.forward(&closed, incoming, until, Deadline::after(HUNG));
+        let mut told = None;
+        let answered = |answer| told = Some(answer);
+        let forwarded = upstream.forward(&closed, incoming, until, Deadline::after(HUNG), answered);
         outcomes.push((
             closed.body().to_vec(),
+            told,
             forwarded.map_err(|error| error.kind()),
         ));
     }
@@ -140,15 +143,15 @@ fn check(cases: &[Case], expect: &Expect) {
         .zip(made)
         .map(|(case, made)| {
             let Err(refused) = made else {
-                let (closed, forwarded) = outcomes.next().unwrap();
+                let (closed, told, forwarded) = outcomes.next().unwrap();
                 let got = match case.answer {
                     Some(_) => got(received.next().unwrap(), &closed, &mut first),
                     None => "nothing".to_owned(),
                 };
                 let heard = heard.next().unwrap().replace('\n', "\\n");
                 return format!(
-                    "{}: the stand-in got {got}; the sandbox heard {heard}; forwarding: \
-                     {forwarded:?}",
+                    "{}: the stand-in got {got}; the sandbox heard {heard}; told: {told:?}; \
+                     forwarding: {forwarded:?}",
                     case.name
                 );
             };
@@ -198,7 +201,8 @@ fn serve(
     let mut received = Vec::new();
     for answer in answers {
         let (mut connection, _) = listener.accept().unwrap();
-        received.push(read_request(&mut BufReader::new(&connection)));
+        let (line, headers, body) = read_request(&mut BufReader::new(&connection));
+        received.push((format!("{line} {headers:?}"), body));
         // What the sandbox heard of earlier answers.
         while heard_part.try_recv().is_ok() {}
         match answer {
@@ -233,6 +237,15 @@ fn serve(
                 );
                 connection.write_all((head + body).as_bytes()).unwrap();
             }
+            Answer::RefusesKey(status) => {
+                let body = "Authorization failed: expired token";
+                let head = format!(
+                    "HTTP/1.1 {status} Refused\r\ncontent-type: text/plain\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                connection.write_all((head + body).as_bytes()).unwrap();
+            }
             Answer::Codes => {
                 let body = "a body coded as gzip";
                 let head = format!(
@@ -258,12 +271,12 @@ fn serve(
 }
 
 /// Writes `text` as one chunk of a chunked body: the last, if it is empty.
-fn write_chunk(connection: &mut TcpStream, text: &str) {
+pub(crate) fn write_chunk(connection: &mut TcpStream, text: &str) {
     write!(connection, "{:x}\r\n{text}\r\n", text.len()).unwrap();
 }
 
-/// A request's line and headers, and its body.
-fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
+/// A request's line, its headers and its body.
+pub(crate) fn read_request(reader: &mut impl BufRead) -> (String, Vec<(String, String)>, Vec<u8>) {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let mut headers = Vec::new();
@@ -281,14 +294,15 @@ fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
-    (format!("{} {headers:?}", line.trim_end()), body)
+    (line.trim_end().to_owned(), headers, body)
 }
 
 /// The harness's request reaches the stand-in with only the headers that pass, the key and the
 /// closed body; its response streams back as it arrives, with only the headers that a harness
 /// reads, and is cut short if the stand-in breaks it off or stalls until it is given up on; and
-/// the sandbox hears a 502 or a 504 if the stand-in gives no answer, and a 502 if it codes the
-/// body. An upstream whose URL or key file is refused can't be made.
+/// the sandbox hears a 502 or a 504 if the stand-in gives no answer, a 502 if it codes the body,
+/// and a 400 if it refuses the key or the request. The forward says how it answered each. An
+/// upstream whose URL or key file is refused can't be made.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -299,6 +313,8 @@ fn forward() {
         &[
             case("a stream", Answer::Streams),
             case("the provider's refusal", Answer::Refuses),
+            case("the key refused", Answer::RefusesKey(401)),
+            case("a request forbidden", Answer::RefusesKey(403)),
             case("a redirect", Answer::Redirects),
             case("a coded body", Answer::Codes),
             case("a stream broken off", Answer::BreaksOff),
@@ -354,22 +370,24 @@ fn forward() {
             },
         ],
         &expect![[r#"
-            a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the closed body; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n; forwarding: Ok(())
-            the provider's refusal: the stand-in got the same head with the closed body; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; forwarding: Ok(())
-            a redirect: the stand-in got the same head with the closed body; the sandbox heard 307 [] ; forwarding: Ok(())
-            a coded body: the stand-in got the same head with the closed body; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; forwarding: Ok(())
-            a stream broken off: the stand-in got the same head with the closed body; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\n, cut short; forwarding: Ok(())
-            a stream stalled until it is given up on: the stand-in got the same head with the closed body; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\n, cut short; forwarding: Ok(())
-            a hang-up: the stand-in got the same head with the closed body; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}; forwarding: Ok(())
-            silence until it is given up on: the stand-in got the same head with the closed body; the sandbox heard 504 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer in time: try again","param":null,"type":"server_error"}}; forwarding: Ok(())
-            given up on before it is sent: the stand-in got nothing; the sandbox heard 504 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer in time: try again","param":null,"type":"server_error"}}; forwarding: Ok(())
+            a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the closed body; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); forwarding: Ok(())
+            the provider's refusal: the stand-in got the same head with the closed body; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); forwarding: Ok(())
+            the key refused: the stand-in got the same head with the closed body; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); forwarding: Ok(())
+            a request forbidden: the stand-in got the same head with the closed body; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(403), request_id: None, status: 400, message: "the model provider refused the request, with a 403: send only requests that it allows" }); forwarding: Ok(())
+            a redirect: the stand-in got the same head with the closed body; the sandbox heard 307 [] ; told: Some(Forwarded { status: 307, request_id: None }); forwarding: Ok(())
+            a coded body: the stand-in got the same head with the closed body; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: Some(200), request_id: None, status: 502, message: "the model provider coded its answer, though the request asked for it uncoded: try again" }); forwarding: Ok(())
+            a stream broken off: the stand-in got the same head with the closed body; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\n, cut short; told: Some(Cut { status: 200, request_id: Some("req_1") }); forwarding: Ok(())
+            a stream stalled until it is given up on: the stand-in got the same head with the closed body; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\n, cut short; told: Some(Cut { status: 200, request_id: Some("req_1") }); forwarding: Ok(())
+            a hang-up: the stand-in got the same head with the closed body; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: None, request_id: None, status: 502, message: "the model provider gave no answer: try again" }); forwarding: Ok(())
+            silence until it is given up on: the stand-in got the same head with the closed body; the sandbox heard 504 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer in time: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: None, request_id: None, status: 504, message: "the model provider gave no answer in time: try again" }); forwarding: Ok(())
+            given up on before it is sent: the stand-in got nothing; the sandbox heard 504 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer in time: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: None, request_id: None, status: 504, message: "the model provider gave no answer in time: try again" }); forwarding: Ok(())
             plain http beyond the loopback: the upstream's URL is plain http to a host beyond the loopback: name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
             a user: the upstream's URL names a user: name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
             a port beyond 65535: the upstream's URL names a port that is not a number up to 65535: name one, or none for the scheme's default
             another scheme: the upstream's URL is not an http URL: name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
             not a URL: the upstream's URL is not a URL (invalid uri character): name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
-            no key file: the key file <dir>/key-14 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
-            an empty key file: the key file <dir>/key-15 holds no API key: write the key alone, on one line
-            a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line"#]],
+            no key file: the key file <dir>/key-16 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
+            an empty key file: the key file <dir>/key-17 holds no API key: write the key alone, on one line
+            a key with a space: the key file <dir>/key-18 holds no API key: write the key alone, on one line"#]],
     );
 }
