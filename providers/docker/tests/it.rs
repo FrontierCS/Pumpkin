@@ -44,7 +44,8 @@ use stdx::process::Environment;
 use stdx::{Context, Deadline};
 
 /// A small public image, pinned by digest.
-// Repeated in `crates/pumpkin/tests/it/docker.rs`: change both.
+// Repeated in `crates/pumpkin/tests/it/docker.rs` and `crates/pumpkin-cli/tests/it.rs`: change
+// all three.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
