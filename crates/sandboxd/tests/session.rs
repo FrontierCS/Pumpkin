@@ -1,7 +1,8 @@
 //! `sandboxd` and the gateway's end of its session, together. `sandboxd` runs here as an
 //! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
 //! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
-//! `/pumpkin`: the Docker provider's tests make ops, in real sandboxes.
+//! `/pumpkin`: the Docker provider's tests make ops, in real sandboxes. A fake gateway sends
+//! what the gateway's end never would.
 
 #![expect(
     clippy::unwrap_used,
@@ -11,9 +12,10 @@
 
 use std::cell::Cell;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,7 +25,9 @@ use pumpkin_gateway::{Arrival, Listener, Process, Put, Session};
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{ExitStatus, Launch, RelativePath, dir_mode, file_mode};
+use pumpkin_schema::sandbox::{
+    ExitStatus, Launch, RelativePath, ToSandbox, dir_mode, file_mode, frame,
+};
 use stdx::Deadline;
 use stdx::process::Environment;
 
@@ -64,7 +68,7 @@ impl Sandbox {
             .spawn()
             .unwrap();
         let (sender, arrivals) = mpsc::channel();
-        let accepted = listener.accept(hung(), None, sender, |arrival| arrival);
+        let accepted = listener.accept(hung(), None, false, sender, |arrival| arrival);
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
@@ -473,4 +477,63 @@ fn ending_the_session() {
             sandboxd: exit status: 0
             left running: 0"#]],
     );
+}
+
+/// `sandboxd` opens no model requests, so it exits 1, saying why, once its gateway answers one.
+/// A fake gateway sends it, as the gateway's end never answers a request it didn't take.
+#[test]
+fn model_answers() {
+    check(
+        "models",
+        |sandbox| {
+            let socket = sandbox.root.join("fake.sock");
+            let end = ToSandbox::ModelEnd {
+                request: 0,
+                cut: false,
+            };
+            vec![format!(
+                "a model response's end: {}",
+                answered(&socket, &end)
+            )]
+        },
+        &expect![[r#"
+            a model response's end: exit status: 1: sandboxd: the session with the gateway failed: the gateway broke the protocol: it answered model request 0, which is not in flight
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// A `sandboxd` whose gateway, a fake at `socket`, sends it `message` once it connects: how it
+/// exited, and why.
+fn answered(socket: &Path, message: &ToSandbox) -> String {
+    let gateway = UnixListener::bind(socket).unwrap();
+    gateway.set_nonblocking(true).unwrap();
+    let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY)
+        .arg(socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A `sandboxd` that never connects fails the test rather than hang it.
+    let by = hung();
+    let mut connection = loop {
+        match gateway.accept() {
+            Ok((connection, _)) => break connection,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(
+                    by.remaining().is_some(),
+                    "sandboxd never connected: it should connect as it starts"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    connection.set_nonblocking(false).unwrap();
+    frame::write(&mut connection, message, &[]).unwrap();
+    let status = exited(&mut sandboxd);
+    let mut stderr = String::new();
+    let mut pipe = sandboxd.stderr.take().unwrap();
+    pipe.read_to_string(&mut stderr).unwrap();
+    format!("{status}: {}", stderr.trim_end())
 }

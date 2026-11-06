@@ -679,6 +679,11 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
                 // A reply to no op in flight breaks the protocol, which ends the session.
                 Some(_) | None => return,
             },
+            // It makes no model requests, so an answer to one breaks the protocol, which ends
+            // the session.
+            ToSandbox::ModelResponse { .. }
+            | ToSandbox::ModelData { .. }
+            | ToSandbox::ModelEnd { .. } => return,
         }
         for (reply, body) in replies.drain(..) {
             if frame::write(&mut connection, &reply, &body).is_err() {

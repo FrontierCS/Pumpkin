@@ -109,7 +109,7 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(&create)?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = listener.accept(by, ops, sender, |arrival| arrival);
+        let accepted = listener.accept(by, ops, false, sender, |arrival| arrival);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
@@ -1221,7 +1221,7 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
             session.refuse(refused, hung()).unwrap();
             return asked;
         }
-        arrival @ (Arrival::Exited { .. } | Arrival::Ended { .. }) => {
+        arrival @ (Arrival::ModelRequest(_) | Arrival::Exited { .. } | Arrival::Ended { .. }) => {
             panic!("an op was to arrive, not {arrival:?}")
         }
     };

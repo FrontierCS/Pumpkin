@@ -26,8 +26,16 @@
 //! which it answers with [`Session::reply`], or [`Session::refuse`] if the payload was over the
 //! session's limit. The gateway authorizes nothing, but bounds what ops cost the host, and ends a
 //! session whose sandbox breaks the ops' rules.
+//!
+//! # Model requests
+//!
+//! A sandbox whose session takes model requests ([`Listener::accept`]) may make them, as the
+//! protocol describes: each reaches the owner as an [`Arrival`] once its body has arrived. The
+//! gateway sends no response, so each stays in flight until the session ends. Here too it
+//! decides nothing, but bounds what model requests cost the host, and ends a session whose
+//! sandbox breaks their rules.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
@@ -44,8 +52,9 @@ use pumpkin_schema::ir::{AbsolutePath, Mode, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
 use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
-    ToSandbox, dir_mode, frame, pumpkin_dir, pumpkin_subdirs,
+    Entry, ExitStatus, FromSandbox, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
+    MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, ToSandbox, dir_mode, frame, pumpkin_dir,
+    pumpkin_subdirs,
 };
 use stdx::Deadline;
 
@@ -81,7 +90,8 @@ impl Listener {
     /// own; one may serve the next session once this one has dropped ([`Session`]).
     /// The session takes ops if `ops` gives the most bytes an op's payload may hold: it holds
     /// one payload at most, and keeps none of the bytes of a payload over the limit
-    /// ([`Arrival::Refused`]). With `None`, an op breaks the protocol.
+    /// ([`Arrival::Refused`]). With `None`, an op breaks the protocol. It takes model requests
+    /// if `models`; otherwise a model request breaks the protocol.
     ///
     /// # Errors
     ///
@@ -91,6 +101,7 @@ impl Listener {
         self,
         by: Deadline,
         ops: Option<OpPayloadLimit>,
+        models: bool,
         arrivals: Sender<T>,
         wrap: fn(Arrival) -> T,
     ) -> io::Result<Session> {
@@ -122,13 +133,16 @@ impl Listener {
         stream
             .set_nonblocking(false)
             .map_err(|error| context("the sandbox's connection can't be made blocking", &error))?;
-        // Unbounded, so the reader never waits on its owner; the protocol bounds what waits
-        // there: the op in flight, the exit of each command the owner started, and the end. An
-        // owner that has dropped its receiver hears nothing more, as it chose.
+        // Unbounded, so the reader never waits on its owner; the protocol bounds what each
+        // session leaves there: the op in flight, the model requests in flight, at most
+        // `MAX_MODEL_REQUESTS_IN_FLIGHT` of them, the exit of each command the owner started, and
+        // the end. A receiver reused for the next session still holds what a dropped one left,
+        // until its owner drains it. An owner that has dropped its receiver hears nothing more,
+        // as it chose.
         let send = move |arrival| {
             let _ = arrivals.send(wrap(arrival));
         };
-        Session::new(stream, ops, Box::new(send))
+        Session::new(stream, ops, models, Box::new(send))
     }
 }
 
@@ -149,8 +163,8 @@ pub struct Session {
     /// The session's number, from [`NEXT_SESSION`], which its ops and commands carry.
     id: u64,
     connection: UnixStream,
-    // Shared with the reader thread, which routes the sandbox's frames by them, and removes a
-    // route once its command has exited or nothing receives from it.
+    // Shared with the reader thread, which routes the sandbox's frames by them, removes a route
+    // once its command has exited or nothing receives from it, and puts model requests in flight.
     routes: Arc<Mutex<Routes>>,
     // Shared with the reader thread, which may end the session. Set under the routes' lock,
     // which `end` explains.
@@ -160,7 +174,8 @@ pub struct Session {
 }
 
 /// Where frames from the sandbox go: the requests waiting for them and the commands running, by
-/// stream, which streams have been opened, and whether the sandbox may open an op.
+/// stream, which streams have been opened, and whether the sandbox may open an op or a model
+/// request.
 #[derive(Debug)]
 struct Routes {
     open: BTreeMap<u32, Route>,
@@ -169,6 +184,8 @@ struct Routes {
     next_stream: u32,
     /// The op in flight, by number: opened, and not yet answered.
     op: Option<u32>,
+    /// The model requests in flight, by number: opened, and their responses not yet ended.
+    models: BTreeSet<u32>,
 }
 
 /// Where the frames on a stream go. Each route takes only the replies named here: any other
@@ -264,6 +281,8 @@ pub enum Arrival {
     Op(IncomingOp),
     /// An op whose payload was over the session's limit, for the owner to refuse.
     Refused(RefusedOp),
+    /// A model request that arrived whole.
+    ModelRequest(ModelRequest),
     /// The exit of the command [`Session::start`] returned `process` for.
     Exited {
         process: Process,
@@ -318,6 +337,18 @@ impl RefusedOp {
     }
 }
 
+/// An HTTP request to a sandbox's model endpoint, as its client sent it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelRequest {
+    pub method: String,
+    /// The request's target: its path and any query, such as `/responses`.
+    pub path: String,
+    /// The headers, in the order the client sent them, names in lowercase.
+    pub headers: Vec<(String, String)>,
+    /// The body, of at most [`MAX_MODEL_REQUEST_BYTES`].
+    pub body: Vec<u8>,
+}
+
 /// A command started in a sandbox, which its exit names ([`Arrival::Exited`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Process {
@@ -331,12 +362,14 @@ impl Session {
     fn new(
         stream: UnixStream,
         limit: Option<OpPayloadLimit>,
+        takes_models: bool,
         send: Box<dyn Fn(Arrival) + Send>,
     ) -> io::Result<Self> {
         let routes = Arc::new(Mutex::new(Routes {
             open: BTreeMap::new(),
             next_stream: 1,
             op: None,
+            models: BTreeSet::new(),
         }));
         let ended = Arc::new(OnceLock::new());
         let incoming = stream
@@ -348,6 +381,8 @@ impl Session {
             owner: Owner { session: id, send },
             limit,
             open: None,
+            takes_models,
+            models: BTreeMap::new(),
         };
         // Reads the sandbox's frames while the owner writes requests and waits on their replies.
         let reader = thread::Builder::new()
@@ -865,8 +900,8 @@ impl Write for Until<'_> {
 }
 
 /// Reads frames from the sandbox until the session ends: each reply goes to the request
-/// waiting on its stream, each op's frames to `ops`, and each command's exit, then the end, to
-/// the owner.
+/// waiting on its stream, the frames of each op and model request to `ops`, and each command's
+/// exit, then the end, to the owner.
 fn route(
     connection: &UnixStream,
     routes: &Mutex<Routes>,
@@ -886,6 +921,22 @@ fn route(
         let outcome = match message {
             FromSandbox::Op { op, call, size } => ops.open(routes, op, call, size),
             FromSandbox::OpData { op } => ops.data(op, &body),
+            FromSandbox::ModelRequest {
+                request,
+                method,
+                path,
+                headers,
+                size,
+            } => {
+                let head = ModelRequest {
+                    method,
+                    path,
+                    headers,
+                    body: Vec::new(),
+                };
+                ops.open_model(routes, request, head, size)
+            }
+            FromSandbox::ModelData { request } => ops.model_data(request, &body),
             FromSandbox::Done { stream } => route_reply(routes, stream, Reply::Done, &ops.owner),
             FromSandbox::Failed { stream, message } => {
                 route_reply(routes, stream, Reply::Failed(message), &ops.owner)
@@ -1027,14 +1078,18 @@ fn route_reply(
     Ok(())
 }
 
-/// Assembles the op the sandbox sends, on the reader thread, and passes it on whole.
+/// Assembles the op and the model requests the sandbox sends, on the reader thread, and passes
+/// each on whole.
 struct Assembler {
-    /// The session's owner, which takes each op.
+    /// The session's owner, which takes each op and model request.
     owner: Owner,
     /// The most bytes an op's payload may hold, if the session takes ops.
     limit: Option<OpPayloadLimit>,
     /// The op whose payload is arriving, by number.
     open: Option<(u32, Assembly)>,
+    takes_models: bool,
+    /// The model requests whose bodies are arriving, by number, each with the bytes still due.
+    models: BTreeMap<u32, (ModelRequest, u64)>,
 }
 
 /// An op whose payload is arriving.
@@ -1142,6 +1197,103 @@ impl Assembler {
                 payload_limit: limit,
             }),
         });
+    }
+
+    /// Puts model request `number`, `head` with a body of `size` bytes to follow, in flight in
+    /// `routes`, if the session takes model requests and it breaks no other rule, and passes it on
+    /// at once if it has no body.
+    fn open_model(
+        &mut self,
+        routes: &Mutex<Routes>,
+        number: u32,
+        head: ModelRequest,
+        size: u64,
+    ) -> Result<(), String> {
+        if !self.takes_models {
+            return Err(broke(&format!(
+                "it opened model request {number}, but the session takes no model requests: send \
+                 one only on a session accepted to take them"
+            )));
+        }
+        if size > MAX_MODEL_REQUEST_BYTES {
+            return Err(broke(&format!(
+                "it opened model request {number} with a body of {size} bytes, more than the \
+                 protocol's {MAX_MODEL_REQUEST_BYTES}"
+            )));
+        }
+        // The name itself stays unquoted, as it may be anything the sandbox chose.
+        if (head.headers.iter()).any(|(name, _)| name.bytes().any(|b| b.is_ascii_uppercase())) {
+            return Err(broke(&format!(
+                "it opened model request {number} with a header name that is not in lowercase"
+            )));
+        }
+        let mut flight = lock(routes);
+        if flight.models.contains(&number) {
+            return Err(broke(&format!(
+                "it opened model request {number}, which is in flight"
+            )));
+        }
+        // The session's model requests in its owner's inbox are all in flight, so this bounds
+        // how many it leaves there, as `Listener::accept` counts on.
+        if flight.models.len() >= MAX_MODEL_REQUESTS_IN_FLIGHT {
+            return Err(broke(&format!(
+                "it opened model request {number} while {MAX_MODEL_REQUESTS_IN_FLIGHT} are in \
+                 flight, the most the protocol allows"
+            )));
+        }
+        flight.models.insert(number);
+        drop(flight);
+        #[expect(
+            clippy::unreachable,
+            reason = "the size is at most `MAX_MODEL_REQUEST_BYTES`, 64 MiB, which fits the usize \
+                      of every Linux target, of 32 bits or more"
+        )]
+        let Ok(capacity) = usize::try_from(size) else {
+            unreachable!("a model request's body of {size} bytes overflows a usize")
+        };
+        let request = ModelRequest {
+            body: Vec::with_capacity(capacity),
+            ..head
+        };
+        if size == 0 {
+            self.pass_on_model(request);
+        } else {
+            self.models.insert(number, (request, size));
+        }
+        Ok(())
+    }
+
+    /// Adds bytes to model request `number`'s body, and passes the request on once the body's
+    /// last byte has arrived.
+    fn model_data(&mut self, number: u32, bytes: &[u8]) -> Result<(), String> {
+        // Bytes for a request never opened, or for one whose body has all arrived, break the
+        // protocol. Unlike a reply on a stream that its request has closed, which `route_reply`
+        // drops, they can't be the late end of an answer the gateway gave up on: a body ends at
+        // the size the sandbox itself gave.
+        let Some((mut request, due)) = self.models.remove(&number) else {
+            return Err(broke(&format!(
+                "it sent data for model request {number}, which is not open"
+            )));
+        };
+        let len = bytes.len() as u64;
+        let Some(due) = due.checked_sub(len) else {
+            return Err(broke(&format!(
+                "it sent {len} bytes of model request {number}'s body, past its size: {due} were \
+                 left"
+            )));
+        };
+        request.body.extend_from_slice(bytes);
+        if due == 0 {
+            self.pass_on_model(request);
+        } else {
+            self.models.insert(number, (request, due));
+        }
+        Ok(())
+    }
+
+    /// Passes a model request on to the session's owner, now that its body has all arrived.
+    fn pass_on_model(&self, request: ModelRequest) {
+        self.owner.arrived(Arrival::ModelRequest(request));
     }
 }
 

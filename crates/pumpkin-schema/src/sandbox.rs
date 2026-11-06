@@ -22,7 +22,8 @@
 //! with [`ToSandbox::OpReply`]. A sandbox has at most one op in flight, from its `Op` to its
 //! reply, so its callers take turns, and the owner answers each promptly: an op that starts
 //! long work, as a judge call does, with a job that later ops ask about. A session takes ops
-//! only if the gateway accepts it with an [`OpPayloadLimit`].
+//! only if the gateway accepts it with an [`OpPayloadLimit`], and model requests
+//! ([`FromSandbox::ModelRequest`]) only if it accepts it for them.
 //!
 //! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
 //! sandboxes it starts: the session's owner and a role's commands rely on them in any sandbox.
@@ -70,6 +71,14 @@ impl TryFrom<u64> for OpPayloadLimit {
         Ok(Self(bytes))
     }
 }
+
+/// The most model requests a sandbox may have in flight: one for each agent of a harness that
+/// runs a lead agent and up to six helpers at once, each waiting on one response at a time.
+pub const MAX_MODEL_REQUESTS_IN_FLIGHT: usize = 7;
+
+/// The most bytes a model request's body may hold: as many as an op's payload, since the gateway
+/// holds each whole, as it holds a payload.
+pub const MAX_MODEL_REQUEST_BYTES: u64 = MAX_OP_PAYLOAD_BYTES;
 
 /// The directory that holds Pumpkin's files in every sandbox, `/pumpkin`, and belongs to the
 /// role's user.
@@ -265,6 +274,19 @@ pub enum ToSandbox {
     Collect { stream: u32, dir: AbsolutePath },
     /// The answer to op `op`, which ends it.
     OpReply { op: u32, reply: OpReply },
+    /// The status and headers of the response to model request `request`, sent once the
+    /// request is whole. Its body follows in `ModelData` frames, then a `ModelEnd`.
+    ModelResponse {
+        request: u32,
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    /// Bytes of the body of the response to model request `request`, in the frame's body.
+    ModelData { request: u32 },
+    /// The end of the response to model request `request`, which takes the request out of
+    /// flight: whole, or `cut` short, which its client must not take as whole. With no
+    /// `ModelResponse` before it, the request ends without a response, cut short.
+    ModelEnd { request: u32, cut: bool },
 }
 
 /// What `sandboxd` sends.
@@ -292,6 +314,24 @@ pub enum FromSandbox {
     /// Bytes of op `op`'s payload, in the frame's body, which go no further than its size. An
     /// empty frame changes nothing.
     OpData { op: u32 },
+    /// Opens model request `request` for a client of the model endpoint that `sandboxd` serves
+    /// for a role with a model route: an HTTP request with the method, path and headers the
+    /// client sent, the headers' names in lowercase. Its number is none that a model request in
+    /// flight has, in a number space apart from ops', and it is in flight from here to its
+    /// response's [`ToSandbox::ModelEnd`]: at most [`MAX_MODEL_REQUESTS_IN_FLIGHT`] are. Its
+    /// body, of `size` bytes, at most [`MAX_MODEL_REQUEST_BYTES`], follows in `ModelData`
+    /// frames, as an op's payload does, and the gateway responds once all of it has arrived, at
+    /// once for 0.
+    ModelRequest {
+        request: u32,
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        size: u64,
+    },
+    /// Bytes of model request `request`'s body, in the frame's body, which go no further than
+    /// its size. An empty frame changes nothing.
+    ModelData { request: u32 },
 }
 
 /// How to start a command.
