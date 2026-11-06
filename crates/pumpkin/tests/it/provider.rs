@@ -16,6 +16,7 @@
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use expect_test::expect;
@@ -142,7 +143,9 @@ fn lifecycle(suite: &mut Suite<'_>, image: &Published, sandboxd: &Published) -> 
 /// A sandbox whose `sandboxd` never dials: its accept times out, and it is read and deleted.
 fn never_dials(suite: &mut Suite<'_>, image: &Published, mute: &Published) -> Vec<String> {
     let (id, listener) = suite.create("mute", image, mute);
-    let accepted = listener.accept(soon(), None).map(|_| ());
+    let (arrivals, _) = mpsc::channel();
+    let accepted = listener.accept(soon(), None, arrivals, |arrival, _| arrival);
+    let accepted = accepted.map(|_| ());
     vec![
         format!(
             "mute: accepted: {:?}",
@@ -277,7 +280,10 @@ impl<'a> Suite<'a> {
         let startup = self.provider.ready().capabilities.startup_seconds;
         let by = Deadline::after(Duration::from_secs(startup.get()));
         let (id, listener) = self.create(role, image, sandboxd);
-        let accepted = listener.accept(by, None).map_err(|error| error.to_string());
+        // The suite starts no commands, so nothing arrives that it needs.
+        let (arrivals, _) = mpsc::channel();
+        let accepted = listener.accept(by, None, arrivals, |arrival, _| arrival);
+        let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session
                 .set_up(by)

@@ -20,12 +20,13 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
 use pumpkin_docker::{ContextName, Engine, Report, Security};
-use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, RefusedOp, Session};
+use pumpkin_gateway::{Arrival, Listener, Op, Process, Put, Session};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use pumpkin_schema::provider::{
@@ -106,15 +107,22 @@ impl Fixture {
         let (create, listener) = self.publish(run, role, sandboxd, image, ops.is_some())?;
         let by = startup();
         let Created { id } = provider().create(&create)?;
-        let accepted = listener.accept(by, ops).map_err(|error| error.to_string());
-        let set_up = accepted.and_then(|mut session| {
-            session
-                .set_up(by)
-                .context(format_args!("sandbox {}", id.as_str()))?;
-            Ok(session)
-        });
+        let (sender, arrivals) = mpsc::channel();
+        let accepted = listener.accept(by, ops, sender, |arrival, _| arrival);
+        let set_up = accepted
+            .map_err(|error| error.to_string())
+            .and_then(|mut session| {
+                session
+                    .set_up(by)
+                    .context(format_args!("sandbox {}", id.as_str()))?;
+                Ok(session)
+            });
         match set_up {
-            Ok(session) => Ok(Started { id, session }),
+            Ok(session) => Ok(Started {
+                id,
+                session,
+                arrivals,
+            }),
             Err(error) => {
                 let console = provider().console(run, &id).unwrap();
                 assert_eq!(provider().delete(run, &[id]).unwrap(), []);
@@ -164,11 +172,13 @@ impl Fixture {
     }
 }
 
-/// A sandbox that the fixture started, and its session. The fixture's drop deletes it.
+/// A sandbox that the fixture started, its session, and what arrives on it. The fixture's drop
+/// deletes it.
 #[derive(Debug)]
 struct Started {
     id: SandboxId,
     session: Session,
+    arrivals: Receiver<Arrival>,
 }
 
 impl Started {
@@ -352,33 +362,34 @@ fn launch(n: u32, script: &str) -> Launch {
 }
 
 /// Runs `script` as the n-th command ([`launch`]), and returns how it exited, which it has 30 s
-/// to.
+/// to, with no op arriving before its exit.
 fn sh(sandbox: &mut Started, n: u32, script: &str) -> ExitStatus {
-    let session = sandbox.session();
-    let mut process = session.start(launch(n, script), hung()).unwrap();
-    process.wait(Duration::from_secs(30)).unwrap().unwrap()
+    let process = sandbox.session().start(launch(n, script), hung()).unwrap();
+    match sandbox.arrivals.recv_timeout(Duration::from_secs(30)) {
+        Ok(Arrival::Exited {
+            process: exited,
+            status,
+        }) if exited == process => status,
+        arrived => panic!("the command's exit was to arrive within 30 s, not {arrived:?}"),
+    }
 }
 
 /// Waits for `process` to exit as the session's owner does, answering each op that arrives
 /// meanwhile ([`reply`]). Returns how it exited, which it has 30 s to, and what each op asked.
-fn serve(
-    session: &mut Session,
-    process: &mut Process,
-    payload: &[u8],
-) -> (ExitStatus, Vec<String>) {
-    // How long each wait lasts before the other's turn: what arrives meanwhile waits for it.
-    let tick = Duration::from_millis(10);
-    let deadline = Instant::now() + Duration::from_secs(30);
+fn serve(sandbox: &mut Started, process: Process, payload: &[u8]) -> (ExitStatus, Vec<String>) {
+    let deadline = Deadline::after(Duration::from_secs(30));
     let mut asked = Vec::new();
-    while Instant::now() < deadline {
-        if let Some(status) = process.wait(tick).unwrap() {
-            return (status, asked);
-        }
-        if let Some(arrival) = session.next_op(tick, hung()).unwrap() {
-            asked.push(reply(session, arrival, payload));
+    loop {
+        let left = deadline.remaining();
+        match left.and_then(|left| sandbox.arrivals.recv_timeout(left).ok()) {
+            Some(Arrival::Exited {
+                process: exited,
+                status,
+            }) if exited == process => return (status, asked),
+            Some(arrival) => asked.push(reply(&mut sandbox.session, arrival, payload)),
+            None => panic!("the command ran on for 30 s, having made ops that asked {asked:?}"),
         }
     }
-    panic!("the command ran on for 30 s, having made ops that asked {asked:?}");
 }
 
 /// Collects the sandbox's `dir` into the fixture's directory and returns the files' contents.
@@ -782,8 +793,8 @@ fn ops() {
                 echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10)"
                 echo > /.pumpkin/bin/sandboxctl"#
             );
-            let mut process = session.start(launch(1, &script), hung()).unwrap();
-            let (status, arrived) = serve(session, &mut process, &payload);
+            let process = session.start(launch(1, &script), hung()).unwrap();
+            let (status, arrived) = serve(&mut sandbox, process, &payload);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(log(fixture, &mut sandbox));
             lines.extend(arrived.iter().map(|arrived| format!("owner: {arrived}")));
@@ -860,9 +871,8 @@ fn refused_calls() {
                 echo "a second sandboxd: exit $?: $second""#,
                 huge = MAX_OP_PAYLOAD_BYTES + 1,
             );
-            let session = sandbox.session();
-            let mut process = session.start(launch(1, &script), hung()).unwrap();
-            let (status, arrived) = serve(session, &mut process, &[]);
+            let process = sandbox.session().start(launch(1, &script), hung()).unwrap();
+            let (status, arrived) = serve(&mut sandbox, process, &[]);
             drop(second);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(log(fixture, &mut sandbox));
@@ -938,20 +948,20 @@ fn turns() {
                 wait $fourth; echo "judge train swapped: exit $?: $(cat swapped.out)"
                 ninth=$($ctl status 9 2>&1); echo "status 9: exit $?: $ninth""#;
             let session = sandbox.session();
-            let mut callers = session.start(launch(1, script), hung()).unwrap();
-            let first = session
-                .next_op(Duration::from_secs(30), hung())
-                .unwrap()
+            let callers = session.start(launch(1, script), hung()).unwrap();
+            let first = sandbox
+                .arrivals
+                .recv_timeout(Duration::from_secs(30))
                 .unwrap();
             let held = [Put::Dir(&relative("held"))];
-            session
+            sandbox
+                .session()
                 .put(&absolute("/pumpkin/in"), &held, hung())
                 .unwrap();
             // No op can arrive while the first is in flight.
             sh(&mut sandbox, 2, "until [ -e ready ]; do sleep 0.01; done");
-            let session = sandbox.session();
-            let mut arrived = vec![reply(session, first, &[])];
-            let (status, rest) = serve(session, &mut callers, &[]);
+            let mut arrived = vec![reply(sandbox.session(), first, &[])];
+            let (status, rest) = serve(&mut sandbox, callers, &[]);
             arrived.extend(rest);
             // The callers of status 2 and 3 may take their turns in either order.
             arrived.sort();
@@ -992,18 +1002,25 @@ fn payload() -> Vec<u8> {
         .collect()
 }
 
-/// Answers `arrival` as a stand-in for the session's owner, unless the gateway refused it: ops
-/// with no grants; a judge call with job 1; a submission as stored, or accepted if final; and
-/// the status of job 1, which passed, of job 2, which failed, or else a refusal. Returns what
-/// it asked, saying whether its payload is `payload`.
+/// Answers `arrival`, an op, as a stand-in for the session's owner: one over the limit with its
+/// refusal; ops with no grants; a judge call with job 1; a submission as stored, or accepted if
+/// final; and the status of job 1, which passed, of job 2, which failed, or else a refusal.
+/// Returns what it asked, saying whether its payload is `payload`.
 fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
         Arrival::Op(incoming) => incoming,
-        Arrival::Refused(RefusedOp {
-            call,
-            payload_limit,
-            ..
-        }) => return format!("refused {call:?}, over {} bytes", payload_limit.bytes()),
+        Arrival::Refused(refused) => {
+            let asked = format!(
+                "refused {:?}, over {} bytes",
+                refused.call(),
+                refused.payload_limit().bytes()
+            );
+            session.refuse(refused, hung()).unwrap();
+            return asked;
+        }
+        arrival @ (Arrival::Exited { .. } | Arrival::Ended { .. }) => {
+            panic!("an op was to arrive, not {arrival:?}")
+        }
     };
     let remaining = Remaining {
         calls: Some(1),
