@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{fmt, fs, mem, process};
 
 use pumpkin_schema::ir::{AbsolutePath, Name};
@@ -73,8 +73,8 @@ impl Listener {
     }
 
     /// Waits until `by` for the sandbox to connect, then removes the socket. The session's
-    /// reader thread sends each [`Arrival`] on `arrivals` as `wrap` makes it, with the instant
-    /// the reader queued it; `wrap` runs on the reader, which it holds up, so it only wraps.
+    /// reader thread sends each [`Arrival`] on `arrivals` as `wrap` makes it; `wrap` runs on the
+    /// reader, which it holds up, so it only wraps.
     /// Only [`Arrival::Exited`] names its session, so give each live session a receiver of its
     /// own; one may serve the next session once this one has dropped ([`Session`]).
     /// The session takes ops if `ops` gives the most bytes an op's payload may hold: it holds
@@ -90,7 +90,7 @@ impl Listener {
         by: Deadline,
         ops: Option<OpPayloadLimit>,
         arrivals: Sender<T>,
-        wrap: fn(Arrival, Instant) -> T,
+        wrap: fn(Arrival) -> T,
     ) -> io::Result<Session> {
         let path = self.path.display();
         self.listener
@@ -124,7 +124,7 @@ impl Listener {
         // there: the op in flight, the exit of each command the owner started, and the end. An
         // owner that has dropped its receiver hears nothing more, as it chose.
         let send = move |arrival| {
-            let _ = arrivals.send(wrap(arrival, Instant::now()));
+            let _ = arrivals.send(wrap(arrival));
         };
         Session::new(stream, ops, Box::new(send))
     }
@@ -833,7 +833,7 @@ fn route(
 struct Owner {
     /// The number of the session, which its ops and commands carry.
     session: u64,
-    /// Sends an arrival to the owner, stamped, as [`Listener::accept`] was asked to.
+    /// Sends an arrival to the owner, as [`Listener::accept`] was asked to.
     send: Box<dyn Fn(Arrival) + Send>,
 }
 

@@ -144,7 +144,7 @@ fn lifecycle(suite: &mut Suite<'_>, image: &Published, sandboxd: &Published) -> 
 fn never_dials(suite: &mut Suite<'_>, image: &Published, mute: &Published) -> Vec<String> {
     let (id, listener) = suite.create("mute", image, mute);
     let (arrivals, _) = mpsc::channel();
-    let accepted = listener.accept(soon(), None, arrivals, |arrival, _| arrival);
+    let accepted = listener.accept(soon(), None, arrivals, |arrival| arrival);
     let accepted = accepted.map(|_| ());
     vec![
         format!(
@@ -282,7 +282,7 @@ impl<'a> Suite<'a> {
         let (id, listener) = self.create(role, image, sandboxd);
         // The suite starts no commands, so nothing arrives that it needs.
         let (arrivals, _) = mpsc::channel();
-        let accepted = listener.accept(by, None, arrivals, |arrival, _| arrival);
+        let accepted = listener.accept(by, None, arrivals, |arrival| arrival);
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session

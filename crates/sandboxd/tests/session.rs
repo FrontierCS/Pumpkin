@@ -64,7 +64,7 @@ impl Sandbox {
             .spawn()
             .unwrap();
         let (sender, arrivals) = mpsc::channel();
-        let accepted = listener.accept(hung(), None, sender, |arrival, _| arrival);
+        let accepted = listener.accept(hung(), None, sender, |arrival| arrival);
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
