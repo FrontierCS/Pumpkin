@@ -609,7 +609,7 @@ fn report() {
         },
         &expect![[r#"
             endpoint, versions, kernel and OS named: true
-            ready: a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and {"startup_seconds":30}
+            ready: a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and {"startup_seconds":540}
             the Docker context's name is empty: name one that `docker context ls` lists
             the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
             the Docker context `--help` can't be read: …: name one that `docker context ls` lists"#]],
