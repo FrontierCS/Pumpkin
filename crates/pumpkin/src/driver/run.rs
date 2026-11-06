@@ -318,7 +318,7 @@ impl<T> Inbox<T> {
         match self.receiver.recv_timeout(left) {
             Ok(item) => Some(item),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => disconnected(),
+            Err(RecvTimeoutError::Disconnected) => Self::disconnected(),
         }
     }
 
@@ -327,19 +327,20 @@ impl<T> Inbox<T> {
         match self.receiver.try_recv() {
             Ok(item) => Some(item),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => disconnected(),
+            Err(TryRecvError::Disconnected) => Self::disconnected(),
         }
     }
-}
 
-#[expect(
-    clippy::unreachable,
-    reason = "an inbox holds a sender of its own, so its channel can't disconnect while the inbox \
-              is borrowed to wait on it; `std`'s channel reports a disconnection, which a channel \
-              with a sender never has, in the same errors as a timeout and an empty channel"
-)]
-fn disconnected() -> ! {
-    unreachable!("an inbox disconnected, though it holds a sender")
+    #[expect(
+        clippy::unreachable,
+        reason = "an inbox holds a sender of its own, so its channel can't disconnect while the \
+                  inbox is borrowed to wait on it; `std`'s channel reports a disconnection, which \
+                  a channel with a sender never has, in the same errors as a timeout and an empty \
+                  channel"
+    )]
+    fn disconnected() -> ! {
+        unreachable!("an inbox disconnected, though it holds a sender")
+    }
 }
 
 impl Runtime<'_> {
