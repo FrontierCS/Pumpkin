@@ -263,9 +263,9 @@ enum Phase {
         job: JobId,
         state: jobs::State,
     },
-    /// The run has finished.
-    Finished { work_end: WorkEnd },
-    /// The run has been abandoned.
+    Finished {
+        work_end: WorkEnd,
+    },
     Abandoned,
 }
 

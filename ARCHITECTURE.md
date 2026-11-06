@@ -88,7 +88,8 @@ is the `Provider` that makes each sandbox a container. A provider is `providers/
 `Event` a runtime observes and returns the `Action`s the runtime is to perform, until one ends the
 run, with its `Outcome`, or abandons it at its hard end; its `ops` rules on ops, `jobs` meters
 judge calls, and `result` reads a call's `result.json` (`JudgeResult`). The runtime, `driver::run`,
-prepares each `Run` and keeps its record, whose files `record` lays out.
+prepares each `Run`, then drives the core on the run's `Provider`, keeping the run's record,
+whose files `record` lays out, and its run log, whose records `log` does.
 - **Architecture Invariant:** the decision core does no I/O, reads no clock and uses no randomly
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
   decides when time ends the work phase or the run, the hard end included.
@@ -98,6 +99,8 @@ prepares each `Run` and keeps its record, whose files `record` lays out.
   left, and the fields its judge declares (`ResultSpec`), so the workflow decides its feedback.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
+- **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends
+  on no provider's crate, only its tests do, so a new provider changes no runtime code.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.

@@ -24,12 +24,12 @@ const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json"
 
 /// The runs directory of test `name`, empty. Dropping it removes it, unless the test failed,
 /// when it shows where the records are.
-struct Runs {
-    dir: PathBuf,
+pub(crate) struct Runs {
+    pub(crate) dir: PathBuf,
 }
 
 impl Runs {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("pk-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         Self { dir }
@@ -143,7 +143,7 @@ fn id_form(id: &str) -> String {
 }
 
 /// The files and empty directories below `dir`, sorted.
-fn files(base: &Path, dir: &Path) -> Vec<String> {
+pub(crate) fn files(base: &Path, dir: &Path) -> Vec<String> {
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -166,6 +166,6 @@ fn files(base: &Path, dir: &Path) -> Vec<String> {
 }
 
 /// Pretty-printed JSON on one line.
-fn compact(json: &str) -> String {
+pub(crate) fn compact(json: &str) -> String {
     serde_json::from_str::<Value>(json).unwrap().to_string()
 }
