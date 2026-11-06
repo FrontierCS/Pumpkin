@@ -22,9 +22,6 @@ mod record;
 
 use log::Log;
 
-/// How long the loop waits before it looks again for what it takes.
-const POLL: Duration = Duration::from_millis(50);
-
 /// A run, prepared: its workflow parsed, and its record begun.
 #[derive(Debug)]
 pub struct Run {
@@ -171,7 +168,7 @@ impl Runtime<'_> {
             if let Some(outcome) = self.perform(actions)? {
                 return Ok(outcome);
             }
-            let (at, event) = self.next_event(&core)?;
+            let (at, event) = self.next_event(&core);
             actions = core.handle(at, event.clone());
             self.log.event(self.workflow, at, &event, &actions)?;
         }
@@ -182,18 +179,24 @@ impl Runtime<'_> {
         Duration::from_secs(self.provider.ready().capabilities.startup_seconds.get())
     }
 
-    /// Waits for the next event: one that performing an action produced, or a tick that is due.
-    fn next_event(&mut self, core: &Core<'_>) -> Result<(Duration, Event), String> {
-        loop {
-            if let Some(event) = self.pending.pop_front() {
-                return Ok(event);
-            }
-            let now = self.clock.now();
-            if core.tick_due().is_some_and(|due| now >= due) {
-                return Ok((now, Event::Tick));
-            }
-            thread::sleep(POLL);
+    /// Waits for the next event: one that performing an action produced, or else the core's tick,
+    /// once it is due. Nothing outside the run produces events yet, so the wait is a sleep until
+    /// the tick's time by the run's clock, which `thread::sleep` does not cut short.
+    fn next_event(&mut self, core: &Core<'_>) -> (Duration, Event) {
+        if let Some(event) = self.pending.pop_front() {
+            return event;
         }
+        #[expect(
+            clippy::unreachable,
+            reason = "`perform` returns on `Finish` or `Abandon` before this is called, and \
+                      `tick_due` is `Some` in every phase where the run is still going, so \
+                      `None` here is a bug"
+        )]
+        let Some(due) = core.tick_due() else {
+            unreachable!("the run is still going, yet the core has no tick due")
+        };
+        thread::sleep(due.saturating_sub(self.clock.now()));
+        (self.clock.now(), Event::Tick)
     }
 
     /// Performs the core's actions, in order: the outcome once one finishes the run.
