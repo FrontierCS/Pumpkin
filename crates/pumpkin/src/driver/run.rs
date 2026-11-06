@@ -414,9 +414,10 @@ impl<'r> Runtime<'r> {
         core.tick_due().unwrap_or_else(|| self.hard_end())
     }
 
-    /// Waits for the next event: one that performing an action produced; else the core's tick, if
-    /// it is due; else what arrives in the inbox before the tick is due, and else the tick then.
-    /// The wait ends at the tick's time, which arrivals the core doesn't wait on, handled as they
+    /// Waits for the next event: one that performing an action produced; else what arrives in
+    /// the inbox before the core's tick is due, and else the tick then. A due tick comes before
+    /// what the inbox holds while the agent is held, and after it once the agent is gone. The
+    /// wait ends at the tick's time, which arrivals the core doesn't wait on, handled as they
     /// come, don't move.
     fn next_event(&mut self, core: &Core<'_>) -> Result<(Duration, Event), String> {
         if let Some(event) = self.pending.pop_front() {
@@ -433,7 +434,17 @@ impl<'r> Runtime<'r> {
         };
         let until = self.clock.deadline(due);
         loop {
-            let input = if until.remaining().is_none() {
+            // The agent's arrivals are timed as the loop takes them, after a due tick, so the
+            // tick comes first while the agent is held. Once it is gone, what the inbox holds is
+            // a judge call's report, timed as its thread observed it, or what is left of the
+            // agent's session, so it comes first: a call that ended before the tick, the final
+            // judge's at the hard end included, counts before it, and one that ended after it
+            // meets the core's checks at its own time, as the tick would. An op left of the
+            // session is timed as taken, as every op is, so one taken past the hard end abandons
+            // the run there, ahead of the reports from before it behind the op. Only a run that
+            // would finish without a submission loses by it: with one, the loop is that late
+            // only once the final judge can no longer meet its deadlines.
+            let input = if self.agent.is_some() && until.remaining().is_none() {
                 None
             } else {
                 self.inbox.wait(until)

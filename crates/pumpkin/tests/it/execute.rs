@@ -686,6 +686,82 @@ fn judge_stalls() {
     );
 }
 
+/// A run whose agent exits while its judge call runs, so that the core stops the call, whose
+/// sandbox's delete outlasts the run's hard end: the core still waits on the call when the hard
+/// end comes, so the run is abandoned there, and fails once the call's thread has ended.
+#[test]
+fn abandoned() {
+    let argv = ["ops", "judge train slow", "await 0 running", "exit"];
+    // A deadline later than the agent's ops, so that the agent's exit ends the work phase.
+    let mut ir = short_workflow(&argv, 2);
+    ir["roles"][1]["image"] = json!(sim::image(LINGERING).as_str());
+    check(
+        "abandoned",
+        &Sim::with_startup(SHORT_STARTUP),
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
+            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
+            payloads hold: ["slow"]
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":3}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":4}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
+            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"seq":7}
+            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":8}
+            its last record came once the hard end had passed
+            execute returned once the hard end had passed
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
+/// A run whose agent's judge call fails once its start runs out, since its judge never dials,
+/// and whose agent's sandbox's delete, as the agent exits, outlasts the run's hard end, so that
+/// the loop takes the call's last report only after it. The report came before the hard end,
+/// at the time it carries, so it ends the call in time, and the run finishes without a
+/// submission rather than be abandoned.
+#[test]
+fn reported_before_the_hard_end() {
+    // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
+    // bounds the judge's start.
+    let mut ir = short_workflow(&["ops", "judge train 6", "exit"], 2);
+    ir["roles"][0]["image"] = json!(sim::image(LINGERING).as_str());
+    ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
+    check(
+        "reported-before-the-hard-end",
+        &Sim::with_startup(SHORT_STARTUP),
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":3}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":5}
+            its last record came before the agent's teardown was to end
+            execute returned once the hard end had passed
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
 /// A run whose agent finalizes a submission, and whose agent's sandbox's delete, in the teardown
 /// that follows, outlasts the run's hard end: the final judge's start is due by then, so its
 /// call fails with no sandbox created, and the run is abandoned.
