@@ -47,19 +47,6 @@ use pumpkin_schema::sandbox::{
 };
 use stdx::Deadline;
 
-/// How many frames of a tree may wait for the request writing it. While that many wait, the
-/// session reads nothing more.
-// One frame of slack. Reading the socket and writing to disk overlap without any, as the reader
-// reads a frame while the request writes the one before; the slack lets the reader hand over
-// the frame it has read and go on reading before that write ends. The gateway then holds at
-// most three frames of a tree, one being written, one waiting and one being read, each with up
-// to a frame's 1 MiB body; more would hold more without speeding the transfer, which goes at
-// the pace of the slower side.
-const QUEUED_TREE_FRAMES: usize = 1;
-
-/// How many frames may wait for any other request: its reply.
-const QUEUED_REPLIES: usize = 1;
-
 /// The number of the next session the process makes, which tells it apart from every other, so
 /// that an op is answered only on the session it arrived on.
 // Shared by every session the process makes, on whatever thread makes it.
@@ -637,10 +624,14 @@ impl Session {
         self.can_send(by)?;
         let stream = self.next_stream;
         self.next_stream = stream.wrapping_add(1);
-        let (sender, replies) = mpsc::sync_channel(match queue {
-            Queue::Replies | Queue::Start => QUEUED_REPLIES,
-            Queue::Tree => QUEUED_TREE_FRAMES,
-        });
+        // One frame in every queue. A reply, or a start's reply, is the one frame its request
+        // waits for: a second that arrives before it is taken finds the queue full, which
+        // breaks the protocol (see `route_reply`). A tree's frames get one frame of slack, so
+        // the reader hands over a frame it has read and goes on reading while the request
+        // writes the one before. The gateway then holds at most three of a tree's frames, each
+        // with up to a frame's 1 MiB body; more slack would hold more memory without speeding a
+        // transfer that goes at the pace of the slower side.
+        let (sender, replies) = mpsc::sync_channel(1);
         let mut routes = lock(&self.routes);
         // Again under the lock, as the session may have ended since: `end` says why.
         if self.ended.get().is_some() {
