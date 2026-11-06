@@ -135,8 +135,12 @@ name = "pumpkin-frontier-cs"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "pumpkin-docker",
  "pumpkin-schema",
+ "serde",
+ "serde_json",
  "stdx",
+ "xflags",
 ]
 
 [[package]]

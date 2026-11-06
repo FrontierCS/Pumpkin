@@ -19,7 +19,8 @@ harming the host or the run.
 
 ## Entry points
 
-The binaries are `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
+The binaries are `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), the factory's
+`pumpkin-frontier-cs` (`crates/pumpkin-frontier-cs/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
 parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`, a provider a
 run has connected to; `Engine`, Docker's.
@@ -109,9 +110,9 @@ whose files `record` lays out, and its run log, whose records `log` does.
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
 
-**`crates/pumpkin-frontier-cs`.** The FrontierCS factory, for tasks ported from FrontierCS as
-data, each in `tasks/frontier-cs/<problem id>/`, where its `Task` is read once from that
-directory.
+**`crates/pumpkin-frontier-cs`.** The FrontierCS factory, which builds the images of a task
+ported from FrontierCS as data, each in `tasks/frontier-cs/<problem id>/`, from its `Task`, read
+once from that directory.
 - **Architecture Invariant:** no crate depends on it, so nothing that runs a workflow knows
   where a task came from.
 

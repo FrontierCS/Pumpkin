@@ -10,15 +10,10 @@ use stdx::Context;
 
 /// A task ported from FrontierCS, as its directory describes it.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "nothing in the crate reads a task's directory or problem id: `Task` is its \
-              output, which `Debug` shows"
-)]
 pub struct Task {
     /// The directory, as [`Task::load`] was given it.
-    dir: PathBuf,
-    problem_id: Name,
+    pub(crate) dir: PathBuf,
+    pub(crate) problem_id: Name,
 }
 
 impl Task {

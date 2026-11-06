@@ -247,7 +247,8 @@ fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
-// Repeated in `crates/pumpkin/tests/it/docker.rs`: change both.
+// Repeated in `crates/pumpkin/tests/it/docker.rs` and
+// `crates/pumpkin-frontier-cs/tests/it/build.rs`: change all three.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);

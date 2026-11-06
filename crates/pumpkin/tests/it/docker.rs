@@ -50,7 +50,8 @@ pub(crate) fn engine() -> &'static Engine {
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
-// Repeated in `providers/docker/tests/it.rs`: change both.
+// Repeated in `providers/docker/tests/it.rs` and
+// `crates/pumpkin-frontier-cs/tests/it/build.rs`: change all three.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
