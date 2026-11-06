@@ -29,7 +29,7 @@ use std::iter;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 
-use pumpkin_schema::ir::Image;
+use pumpkin_schema::ir::{Image, Sha256Digest};
 use sha2::{Digest, Sha256};
 use stdx::Context;
 
@@ -211,7 +211,7 @@ impl Inputs {
         // bytes a check of `text` reads, even if the file changed since it was first hashed.
         let path = dir.join(recipe);
         let text = fs::read(&path).context(path.display())?;
-        *sha256 = hex(&Sha256::digest(&text));
+        *sha256 = hex(Sha256::digest(&text).into());
         Ok(Self {
             recipe: recipe.to_owned(),
             text,
@@ -222,7 +222,7 @@ impl Inputs {
 
     /// The hexadecimal digits of the inputs' digest.
     fn digest(&self) -> String {
-        hex(&Sha256::digest(self.to_string()))
+        hex(Sha256::digest(self.to_string()).into())
     }
 }
 
@@ -287,7 +287,7 @@ fn file_sha256(path: &Path) -> io::Result<String> {
     let mut hasher = Hasher(Sha256::new());
     io::copy(&mut File::open(path)?, &mut hasher)?;
     let Hasher(sha256) = hasher;
-    Ok(hex(&sha256.finalize()))
+    Ok(hex(sha256.finalize().into()))
 }
 
 /// A writer that hashes what is written to it, so that [`io::copy`] can read a file into it.
@@ -304,13 +304,10 @@ impl io::Write for Hasher {
     }
 }
 
-/// `bytes` in lowercase hexadecimal, two digits each.
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = String::with_capacity(2 * bytes.len());
-    for byte in bytes {
-        hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        hex.push(char::from(DIGITS[usize::from(byte & 0xf)]));
-    }
-    hex
+/// The hexadecimal digits of the [`Sha256Digest`] of SHA-256's 32 bytes, `sha256`.
+fn hex(sha256: [u8; 32]) -> String {
+    Sha256Digest::from(sha256)
+        .as_str()
+        .trim_start_matches("sha256:")
+        .to_owned()
 }

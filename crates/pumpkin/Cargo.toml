@@ -14,6 +14,7 @@ pumpkin-provider = { path = "../pumpkin-provider" }
 pumpkin-schema = { path = "../pumpkin-schema" }
 stdx = { path = "../stdx" }
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 pumpkin-docker = { path = "../../providers/docker" }

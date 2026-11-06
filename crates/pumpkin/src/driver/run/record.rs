@@ -1,4 +1,5 @@
-//! A run's record on disk: its directory and name, and the files written whole.
+//! A run's record on disk: its directory and name, the payloads stored by digest, and the
+//! files written whole.
 //!
 //! Each run has a directory of its own, `<runs>/<id>/`, which [`create`] makes and names. It
 //! holds:
@@ -9,6 +10,9 @@
 //! - `provider.json`: what the run's provider declared, its
 //!   [`Ready`](pumpkin_schema::provider::Ready);
 //! - `log.jsonl`: the run log, which the `log` module lays out;
+//! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256. An op the
+//!   core refused appears in the run log by its payload's size and digest, one the gateway
+//!   refused by the size alone, and neither's bytes are kept;
 //! - `agent/`, for an agent whose sandbox started: its `out` and `log`, what the sandbox held in
 //!   its [`out_dir()`](pumpkin_schema::sandbox::out_dir) and
 //!   [`log_dir()`](pumpkin_schema::sandbox::log_dir) when the work phase ended, as far as they
@@ -22,9 +26,13 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use pumpkin_schema::ir::Sha256Digest;
 use pumpkin_schema::sandbox::{log_dir, out_dir};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use stdx::Context;
+
+use crate::driver::core::PayloadRef;
 
 /// The version of the record's form, which a record's `record.json` holds, named as the IR's
 /// version is ([`IrVersion`](pumpkin_schema::ir::IrVersion)): a reader is to check it before it
@@ -132,6 +140,51 @@ fn replace(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
         };
     }
     sync_dir(dir)
+}
+
+/// The reference to an op's payload: its size and SHA-256.
+pub(super) fn reference(bytes: &[u8]) -> PayloadRef {
+    let sha256: [u8; 32] = Sha256::digest(bytes).into();
+    PayloadRef {
+        size: bytes.len() as u64,
+        digest: Sha256Digest::from(sha256),
+    }
+}
+
+/// The payloads of the ops a run accepted, each stored once in `payloads/`, under its SHA-256
+/// in hexadecimal.
+#[derive(Debug)]
+pub(super) struct Payloads {
+    dir: PathBuf,
+}
+
+impl Payloads {
+    /// Makes `payloads/` in the record's directory `record`, and syncs `record`, so that it
+    /// lasts.
+    pub(super) fn create(record: &Path) -> Result<Self, String> {
+        let dir = record.join("payloads");
+        fs::create_dir(&dir).context(dir.display())?;
+        sync_dir(record)?;
+        Ok(Self { dir })
+    }
+
+    /// Stores `bytes`, whose reference is `payload`, by [`replace`], unless they are stored
+    /// already: a file has a digest's name only once it holds all of its bytes.
+    pub(super) fn store(&self, bytes: &[u8], payload: &PayloadRef) -> Result<(), String> {
+        let path = self.dir.join(hex(&payload.digest));
+        match fs::symlink_metadata(&path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                replace(&self.dir, hex(&payload.digest), bytes)
+            }
+            Err(error) => Err(error).context(path.display()),
+        }
+    }
+}
+
+/// `digest`'s hexadecimal digits, which name its payload's file.
+fn hex(digest: &Sha256Digest) -> &str {
+    digest.as_str().trim_start_matches("sha256:")
 }
 
 /// What `dir`, where a sandbox's [`out_dir()`] and [`log_dir()`] were collected, holds of each,

@@ -7,7 +7,12 @@
 //!   observed `t` nanoseconds after the run started, with the actions the core decided on. The
 //!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u"}`, at `u`
 //!   nanoseconds after the Unix epoch by the driving machine's clock, with the core's first
-//!   actions;
+//!   actions. Like it, an op the gateway refused, since its payload was over the agent's limit,
+//!   is no event of the core's, which neither decides on it nor learns of it, so it has no
+//!   actions: `{"kind": "op_refused", "request": r, "message": m}`, where the request's payload
+//!   is `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without a
+//!   digest, since the gateway kept none of its bytes, and the message is the refusal the agent
+//!   is sent, unless a note after it says it wasn't;
 //! - a note: `{"seq": n, "at_ns": "t", "note": s}`, something the runtime observed that the
 //!   core doesn't decide on, such as why the run failed.
 //!
@@ -15,8 +20,9 @@
 //! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
 //! by their names in the workflow, jobs and ops by their numbers, payloads by size and digest, and
 //! times and durations in nanoseconds, the core's resolution, as decimal strings, where `u64::MAX`
-//! (about 584 years) stands for anything longer. A judge call's `start_judge` names the agent's
-//! grant it was made under, or `null` for the pattern's score. A reply is the
+//! (about 584 years) stands for anything longer. A status's job, a number the agent gave, is a
+//! decimal string too. A judge call's `start_judge` names the agent's grant it was made under,
+//! or `null` for the pattern's score. A reply is the
 //! [`OpReply`](pumpkin_schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
@@ -24,6 +30,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use pumpkin_gateway::RefusedOp;
 use pumpkin_schema::workflow::{JudgeCall, Workflow};
 use serde_json::{Value, json};
 use stdx::Context;
@@ -76,6 +83,26 @@ impl Log {
         actions: &[Action],
     ) -> Result<(), String> {
         self.record(workflow, at, event_json(event), actions)
+    }
+
+    /// Appends the record of `refused`, an op of the agent's whose payload the gateway refused,
+    /// observed at `at`: an `op_refused`, which has no actions, since the core doesn't decide on
+    /// it.
+    pub(super) fn refused(
+        &mut self,
+        workflow: &Workflow,
+        at: Duration,
+        refused: &RefusedOp,
+    ) -> Result<(), String> {
+        let mut request = json!(refused.call());
+        let (size, over) = (refused.size(), refused.payload_limit().bytes());
+        request["payload"] = json!({ "size": size, "over": over });
+        let event = json!({
+            "kind": "op_refused",
+            "request": request,
+            "message": refused.message(),
+        });
+        self.record(workflow, at, event, &[])
     }
 
     fn record(
@@ -170,7 +197,8 @@ fn request_json(request: &Request) -> Value {
             "finalize": finalize,
             "payload": payload_json(payload),
         }),
-        Request::Status { job } => json!({ "kind": "status", "job": job }),
+        // A decimal string, as a time is, since the agent may give any number, past 2^53 too.
+        Request::Status { job } => json!({ "kind": "status", "job": job.to_string() }),
     }
 }
 

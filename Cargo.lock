@@ -113,6 +113,7 @@ dependencies = [
  "pumpkin-provider",
  "pumpkin-schema",
  "serde_json",
+ "sha2",
  "stdx",
 ]
 
