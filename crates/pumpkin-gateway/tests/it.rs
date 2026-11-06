@@ -10,6 +10,7 @@
 )]
 
 use std::fs;
+use std::io::Write;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
@@ -34,7 +35,8 @@ use stdx::Deadline;
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
 /// The frames the fake sandbox sends in answer to the request on `stream`, with
-/// [`await_reply`], [`pause`] and [`until_hang_up`] where it waits, before it ends the session.
+/// [`await_reply`], [`pause`], [`until_hang_up`] and [`stall`] where it waits, before it ends the
+/// session.
 type Answer = fn(stream: u32) -> Vec<(Value, Vec<u8>)>;
 
 /// How long the session's owner waits for an op or for the session's end before the test
@@ -135,6 +137,9 @@ fn connect(
             } else if message == "pause" {
                 thread::sleep(PAUSE);
                 true
+            } else if message == "stall" {
+                send_unended(&mut connection);
+                false
             } else if let Some(message) = message.get("until_hang_up") {
                 await_hang_up(&mut connection, message, &body);
                 false
@@ -221,6 +226,31 @@ fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
     }
 }
 
+/// Sends a frame a byte at a time, a millisecond apart, and reads nothing, until the gateway
+/// hangs up, which a write then shows by failing. The frame's body is a full one, whose last byte
+/// is never sent, so the gateway reads no whole frame to act on.
+///
+/// # Panics
+///
+/// Panics if the gateway is still there after [`HUNG`].
+fn send_unended(connection: &mut UnixStream) {
+    let mut unended = Vec::new();
+    let (message, _) = done(0);
+    frame::write(&mut unended, &message, &vec![0; frame::MAX_BODY_BYTES]).unwrap();
+    unended.pop();
+    let hung = hung();
+    for byte in unended {
+        if connection.write_all(&[byte]).is_err() {
+            return;
+        }
+        assert!(
+            hung.remaining().is_some(),
+            "the gateway was still there after {HUNG:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// The stream a request names: `None` for an op's reply.
 fn stream_of(request: &ToSandbox) -> Option<u32> {
     match *request {
@@ -296,10 +326,22 @@ fn ops(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String 
 }
 
 /// Starts a command, whose stream carries what the fake sandbox answers, then takes what
-/// arrives ([`take`]).
+/// arrives ([`take`]), whether it started or not.
 fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    let process = session.start(launch(), hung()).unwrap();
-    format!("started; {}", take(session, arrivals, Some(process)))
+    match session.start(launch(), hung()) {
+        Ok(process) => format!("started; {}", take(session, arrivals, Some(process))),
+        Err(error) => format!(
+            "start: {}; {}",
+            outcome(Err(error)),
+            take(session, arrivals, None)
+        ),
+    }
+}
+
+/// Collects `/out` as [`collect`] does, then takes what arrives ([`take`]).
+fn collect_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+    let collected = collect(session, arrivals, dir);
+    format!("{collected}; {}", take(session, arrivals, None))
 }
 
 /// Answers each op that arrives, refuses each whose payload was over the limit, and notes each
@@ -577,11 +619,10 @@ fn until_hang_up((message, body): (Value, Vec<u8>)) -> (Value, Vec<u8>) {
     (json!({ "until_hang_up": message }), body)
 }
 
-/// Where the fake sandbox reads and answers nothing until the gateway hangs up, as a stuck
-/// sandbox does, sending only replies on stream 0, which no request uses, so the gateway drops
-/// them.
+/// Not a frame: where the fake sandbox reads and answers nothing until the gateway hangs up, as a
+/// stuck sandbox does ([`send_unended`]).
 fn stall() -> (Value, Vec<u8>) {
-    until_hang_up(done(0))
+    (Value::from("stall"), Vec::new())
 }
 
 fn done(stream: u32) -> (Value, Vec<u8>) {
@@ -612,17 +653,30 @@ fn sandbox_answers() {
             (collect, |s| {
                 vec![entry(s, json!({ "kind": "link", "path": "a" }))]
             }),
-            (collect, |s| vec![dir(s, "a/a/a")]),
-            (collect, |s| vec![file(s, "a/b", 0)]),
+            // A malformed tree ends the session, which the sandbox leaves open, stalling, so that
+            // the gateway's end comes first; a tree that passes a limit fails only its collect.
+            (collect, |s| vec![dir(s, "a/a/a"), stall()]),
+            (collect, |s| vec![file(s, "a/b", 0), stall()]),
+            (collect, |s| vec![file(s, "a", 0), dir(s, "a/b"), stall()]),
+            (collect, |s| vec![file(s, "a", 0), dir(s, "a"), stall()]),
+            (collect, |s| vec![data(s, b"x"), stall()]),
             (collect, |s| vec![file(s, "big", 9)]),
             (collect, |s| {
                 ["a", "b", "c", "d"].map(|path| dir(s, path)).to_vec()
             }),
-            (collect, |s| vec![file(s, "f", 1), data(s, b"too long")]),
             (collect, |s| {
-                vec![file(s, "f", 1), data(s, b""), data(s, b"x"), end(s)]
+                vec![file(s, "f", 1), data(s, b"too long"), stall()]
             }),
-            (collect, |s| vec![file(s, "f", 2), end(s)]),
+            (collect, |s| {
+                vec![
+                    file(s, "f", 1),
+                    data(s, b""),
+                    data(s, b"x"),
+                    end(s),
+                    stall(),
+                ]
+            }),
+            (collect, |s| vec![file(s, "f", 2), end(s), stall()]),
             (collect, |s| vec![reply("failed", s)]),
             // A started command's stream carries only its exit, so a second `done` breaks the
             // protocol.
@@ -639,16 +693,56 @@ fn sandbox_answers() {
             ConnectionAborted: the session failed: `../escape` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte; arrived []
             ConnectionAborted: the session failed: `/etc/x` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte; arrived []
             ConnectionAborted: the session failed: unknown variant `link`, expected `dir` or `file`; arrived []
-            NotFound: a/a/a: No such file or directory (os error 2); arrived []
-            NotFound: a/b: No such file or directory (os error 2); arrived []
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/a/a: No such file or directory (os error 2); arrived []
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: No such file or directory (os error 2); arrived []
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: Not a directory (os error 20); arrived ["a="]
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a: File exists (os error 17); arrived ["a="]
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: file data arrived outside a file: send it after a file entry; arrived []
             FileTooLarge: the tree's files hold more than 8 bytes; arrived []
             FileTooLarge: the tree has more than 3 entries; arrived ["a/", "b/", "c/"]
-            InvalidData: file data runs past the file's size: send exactly the size given; arrived ["f="]
-            InvalidData: file data is empty: send at least one byte in each frame; arrived ["f="]
-            InvalidData: a file ended 2 bytes short: send all of its bytes before the next part; arrived ["f="]
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: file data runs past the file's size: send exactly the size given; arrived ["f="]
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: file data is empty: send at least one byte in each frame; arrived ["f="]
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a file ended 2 bytes short: send all of its bytes before the next part; arrived ["f="]
             Other: no; arrived []
             start: ok; freeze: ConnectionAborted: the sandbox broke the protocol: it sent more on stream 1 than a request takes
             start: ok; freeze: ConnectionAborted: the sandbox ended the session"#]],
+    );
+}
+
+/// A reply that no request takes ends the session, whose end the owner hears last: a tree's end
+/// for a freeze, an exit before its command's start is done, a `done` within a tree, and a
+/// `done` on a stream that no request has opened, past the last one opened, or 0. So does a
+/// malformed tree. The rest of a tree whose collect gave up at a limit is dropped, and the
+/// session goes on until the sandbox ends it.
+#[test]
+fn protocol_breaks() {
+    check(
+        "breaks",
+        None,
+        &[
+            (ops, |s| vec![end(s), done(s)]),
+            (start_and_take, |s| vec![reply("exited", s), done(s)]),
+            (collect_and_take, |s| vec![dir(s, "a"), done(s), end(s)]),
+            (ops, |s| vec![done(s + 1), done(s)]),
+            (ops, |s| vec![done(0), done(s)]),
+            (collect_and_take, |s| vec![dir(s, "a/b"), stall()]),
+            (collect_and_take, |s| {
+                vec![
+                    file(s, "big", 9),
+                    data(s, b"12345"),
+                    data(s, b"6789"),
+                    end(s),
+                ]
+            }),
+        ],
+        &expect![[r#"
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent `end` on stream 1 out of turn: expected `done` or `failed`; ended: the sandbox broke the protocol: it sent `end` on stream 1 out of turn: expected `done` or `failed`
+            start: ConnectionAborted: the sandbox broke the protocol: it sent `exited` on stream 1 out of turn: expected `done` or `failed`; ended: the sandbox broke the protocol: it sent `exited` on stream 1 out of turn: expected `done` or `failed`
+            ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 1 out of turn: expected `entry`, `data`, `end` or `failed`; arrived ["a/"]; ended: the sandbox broke the protocol: it sent `done` on stream 1 out of turn: expected `entry`, `data`, `end` or `failed`
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 2 out of turn: expected nothing on a stream no request has opened; ended: the sandbox broke the protocol: it sent `done` on stream 2 out of turn: expected nothing on a stream no request has opened
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 0 out of turn: expected nothing on a stream no request has opened; ended: the sandbox broke the protocol: it sent `done` on stream 0 out of turn: expected nothing on a stream no request has opened
+            ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: No such file or directory (os error 2); arrived []; ended: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: No such file or directory (os error 2)
+            FileTooLarge: the tree's files hold more than 8 bytes; arrived []; ended: the sandbox ended the session"#]],
     );
 }
 
