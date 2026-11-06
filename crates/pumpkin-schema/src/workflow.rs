@@ -10,7 +10,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use crate::ir::{
-    Command, Image, ModelRoute, Name, Resources, ResultSpec, Slot, User, WorkflowName,
+    Command, Dir, File, Image, ModelRoute, Name, Resources, ResultSpec, Slot, User, WorkflowName,
 };
 
 mod parse;
@@ -139,12 +139,16 @@ pub struct Sandbox {
     pub model_route: Option<ModelRoute>,
 }
 
-/// The agent role; see [`ir::Runtime::Agent`](crate::ir::Runtime::Agent).
+/// The agent role; see [`ir::AgentRuntime`](crate::ir::AgentRuntime), whose rules its `dirs`
+/// and `files` keep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub sandbox: Sandbox,
-    /// See [`ir::AgentRuntime::command`](crate::ir::AgentRuntime::command).
     pub command: Command,
+    /// In order of their paths.
+    pub dirs: Vec<Dir>,
+    pub files: Vec<File>,
+    pub stdin: Option<String>,
 }
 
 /// A judge role.

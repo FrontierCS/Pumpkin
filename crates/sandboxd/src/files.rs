@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use pumpkin_schema::ir::AbsolutePath;
+use pumpkin_schema::ir::{AbsolutePath, Mode};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{Entry, FromSandbox, RelativePath};
@@ -52,9 +52,15 @@ impl Puts {
         }
     }
 
-    /// Writes an entry of the tree being put on `stream` ([`tree::Writer::entry`]).
-    pub(crate) fn entry(&mut self, sender: &Sender, stream: u32, entry: &Entry) -> io::Result<()> {
-        self.write(sender, stream, |tree| tree.entry(entry))
+    /// Writes an entry of the tree being put on `stream`, with `mode` ([`tree::Writer::entry`]).
+    pub(crate) fn entry(
+        &mut self,
+        sender: &Sender,
+        stream: u32,
+        entry: &Entry,
+        mode: Mode,
+    ) -> io::Result<()> {
+        self.write(sender, stream, |tree| tree.entry(entry, Some(mode)))
     }
 
     /// Writes bytes of the current file of the tree being put on `stream`

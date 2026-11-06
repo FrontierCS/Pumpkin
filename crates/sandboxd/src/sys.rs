@@ -138,7 +138,7 @@ pub(crate) fn make_non_dumpable() -> io::Result<()> {
 ///   become `sandboxd`'s controlling one.
 ///
 /// The file stays non-blocking, which Linux ignores for a regular file's reads and writes, so
-/// a command may be handed it as its standard output or error.
+/// a command may be handed it as its standard input, output or error.
 pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, String> {
     let file = options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)

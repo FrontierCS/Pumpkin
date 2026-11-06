@@ -84,6 +84,14 @@ checked_string!(
 );
 
 checked_string!(
+    /// A path in a sandbox that a workflow may put a directory or a file at: an
+    /// [`AbsolutePath`] other than `/`, outside the directories that hold Pumpkin's own files
+    /// ([`sandbox`](crate::sandbox)).
+    RolePath,
+    check_role_path
+);
+
+checked_string!(
     /// The name of a model the model provider serves.
     ModelName,
     check_model_name
@@ -203,12 +211,49 @@ fn has_normal_components(path: &str) -> bool {
 }
 
 impl AbsolutePath {
+    /// `/`.
+    pub fn root() -> Self {
+        Self("/".to_owned())
+    }
+
     /// `path` below this one.
     #[must_use]
     pub fn join(&self, path: &RelativePath) -> Self {
         // Both are normalized, so `path`'s components follow this path's, a `/` between them;
         // only `/` itself ends with one.
         Self(format!("{}/{}", self.0.trim_end_matches('/'), path.0))
+    }
+
+    /// Whether `path` is this path or below it.
+    pub(crate) fn holds(&self, path: &str) -> bool {
+        let below = path.strip_prefix(self.0.trim_end_matches('/'));
+        below.is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
+}
+
+impl RolePath {
+    /// The path below `/`, which [`AbsolutePath::root`] joins back to this one.
+    pub fn relative(&self) -> RelativePath {
+        // Normalized and not `/`, so one `/` comes before its components.
+        RelativePath(self.0[1..].to_owned())
+    }
+
+    /// Whether this path is below `other`.
+    pub(crate) fn is_below(&self, other: &Self) -> bool {
+        (self.0.strip_prefix(&other.0)).is_some_and(|rest| rest.starts_with('/'))
+    }
+}
+
+fn check_role_path(path: &str) -> Result<(), String> {
+    check_absolute_path(path)?;
+    if path == "/" {
+        return Err("`/` holds the whole sandbox: name a path below it".to_owned());
+    }
+    match (crate::sandbox::pumpkin_dirs().iter()).find(|dir| dir.holds(path)) {
+        Some(dir) => Err(format!(
+            "`{path}` is in `{dir}`, which holds Pumpkin's own files: name a path outside it"
+        )),
+        None => Ok(()),
     }
 }
 
@@ -261,6 +306,49 @@ fn check_model_name(name: &str) -> Result<(), String> {
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Permission bits, from `0000` to `0777`: read, write and execute, for a file's owner, its
+/// group and others. Written as four octal digits, as `chmod` takes them, such as `0644`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Mode(u16);
+
+impl Mode {
+    pub fn bits(self) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+impl TryFrom<String> for Mode {
+    type Error = String;
+
+    fn try_from(mode: String) -> Result<Self, Self::Error> {
+        let digits = mode.strip_prefix('0').filter(|digits| {
+            digits.len() == 3 && digits.bytes().all(|digit| (b'0'..=b'7').contains(&digit))
+        });
+        let bits = digits.map(|digits| {
+            (digits.bytes()).fold(0, |bits, digit| bits << 3 | u16::from(digit - b'0'))
+        });
+        bits.map(Self).ok_or_else(|| {
+            format!(
+                "`{}` is not a mode: write `0` and three octal digits, such as `0644`",
+                mode.escape_debug()
+            )
+        })
+    }
+}
+
+impl From<Mode> for String {
+    fn from(mode: Mode) -> Self {
+        mode.to_string()
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04o}", self.0)
     }
 }
 

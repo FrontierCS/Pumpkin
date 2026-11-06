@@ -6,11 +6,13 @@
 //! match their data, and the tree stays within its [`Limits`]. Since no entry creates a missing
 //! parent, each creates at most one directory or file.
 
-use std::fs::{self, File};
+use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use super::{Entry, RelativePath};
+use crate::ir::Mode;
 
 /// The most a tree may hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,13 +55,14 @@ impl Writer {
     }
 
     /// Creates an entry below its parent, which must exist: a directory, unless it exists,
-    /// or a new file, whose bytes [`Writer::data`] then writes.
+    /// or a new file, whose bytes [`Writer::data`] then writes. What it creates gets `mode`
+    /// exactly, or the umask's default without one, as a tree collected from a sandbox does.
     ///
     /// # Errors
     ///
     /// Fails if the previous file is incomplete, if a limit is passed, if the parent is
-    /// missing, if a file already exists, or if creating the entry fails.
-    pub fn entry(&mut self, entry: &Entry) -> io::Result<()> {
+    /// missing, if a file already exists, or if creating the entry, or giving it its mode, fails.
+    pub fn entry(&mut self, entry: &Entry, mode: Option<Mode>) -> io::Result<()> {
         self.check_file_complete()?;
         self.entries += 1;
         if self.entries > self.limits.entries {
@@ -68,9 +71,15 @@ impl Writer {
                 self.limits.entries
             )));
         }
+        let mode = mode.map(|mode| Permissions::from_mode(mode.bits()));
         match entry {
             Entry::Dir { path } => {
-                create_dir(&self.root.join(path.as_str())).map_err(|error| at(path, &error))
+                let target = self.root.join(path.as_str());
+                let created = create_dir(&target).map_err(|error| at(path, &error))?;
+                if let Some(mode) = mode.filter(|_| created) {
+                    fs::set_permissions(&target, mode).map_err(|error| at(path, &error))?;
+                }
+                Ok(())
             }
             Entry::File { path, size } => {
                 self.bytes = self.bytes.saturating_add(*size);
@@ -82,6 +91,10 @@ impl Writer {
                 }
                 let target = self.root.join(path.as_str());
                 let file = File::create_new(&target).map_err(|error| at(path, &error))?;
+                if let Some(mode) = mode {
+                    file.set_permissions(mode)
+                        .map_err(|error| at(path, &error))?;
+                }
                 if *size > 0 {
                     self.file = Some((file, path.clone(), *size));
                 }
@@ -141,15 +154,16 @@ impl Writer {
 }
 
 /// Creates the directory at `path`, whose parent exists, unless a directory is already there.
-fn create_dir(path: &std::path::Path) -> io::Result<()> {
+/// Returns whether it created one.
+fn create_dir(path: &Path) -> io::Result<bool> {
     match fs::create_dir(path) {
         Err(error)
             if error.kind() == io::ErrorKind::AlreadyExists
                 && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) =>
         {
-            Ok(())
+            Ok(false)
         }
-        created => created,
+        created => created.map(|()| true),
     }
 }
 

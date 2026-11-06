@@ -12,7 +12,8 @@
 //! Files move as trees: [`Entry`]s, each a directory or a regular file whose bytes follow in
 //! `Data` frames, every entry after its parent's, then an `End`. A tree holds nothing else, so
 //! no link or special file crosses a session, and every path in it is a [`RelativePath`],
-//! which can't leave the directory the tree is written to; [`tree::Writer`] writes one there.
+//! which can't leave the directory the tree is written to; [`tree::Writer`] writes one there. A
+//! tree the gateway puts gives each entry its [`Mode`].
 //!
 //! Ops go the other way: a caller in the sandbox asks the session's owner for something, such
 //! as judging a payload ([`op`]). An op opens with [`FromSandbox::Op`], numbered apart from the
@@ -28,12 +29,13 @@
 //! It holds at most [`PUMPKIN_BYTES`]. A sandbox whose role makes ops also has `sandboxctl` at
 //! [`SANDBOXCTL_PATH`], and its `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox
 //! is passive: nothing in it can make an op, and its session takes none. An agent's image holds
-//! its harness below [`harness_dir()`].
+//! its harness below [`harness_dir()`]. A workflow puts nothing in these directories
+//! ([`RolePath`](crate::ir::RolePath)).
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::ir::values::RelativePath;
-use crate::ir::{AbsolutePath, Argv, Env, EnvVar, Name};
+use crate::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
 use op::{OpCall, OpReply};
 
 pub mod frame;
@@ -82,16 +84,27 @@ pub fn pumpkin_dir() -> AbsolutePath {
 /// in-sandbox contract that a task's images are written against, the same for every workflow.
 ///
 /// - `in` holds what the session's owner puts in, as a judge call's payload
-///   ([`slot_payload()`]);
+///   ([`slot_payload()`]) or the agent's standard input ([`command_stdin()`]);
 /// - [`out_dir()`] what it collects, as a judge's result ([`result_file()`]) and evidence
 ///   ([`evidence_dir()`]);
 /// - `home` the commands' home ([`command_env()`]);
 /// - [`log_dir()`] their output ([`command_stdout()`], [`command_stderr()`]).
 ///
 /// The paths these functions give are relative to [`pumpkin_dir()`], which
-/// [`AbsolutePath::join`] joins them to.
+/// [`AbsolutePath::join`] joins them to. What the session's owner puts there has [`dir_mode()`]
+/// or [`file_mode()`].
 pub fn pumpkin_subdirs() -> [RelativePath; 4] {
     [in_dir(), out_dir(), home_dir(), log_dir()]
+}
+
+/// `0755`, the mode of each directory the session's owner puts below [`pumpkin_dir()`].
+pub fn dir_mode() -> Mode {
+    valid("0755")
+}
+
+/// `0644`, the mode of each file the session's owner puts below [`pumpkin_dir()`].
+pub fn file_mode() -> Mode {
+    valid("0644")
 }
 
 /// `in`, which the session's owner puts a role's inputs in.
@@ -164,6 +177,12 @@ pub fn command_stderr() -> RelativePath {
     valid(&format!("{}/command.stderr", log_dir()))
 }
 
+/// `in/command.stdin`, which the agent's command reads its standard input from, if its runtime
+/// gives one ([`AgentRuntime::stdin`](crate::ir::AgentRuntime::stdin)).
+pub fn command_stdin() -> RelativePath {
+    valid(&format!("{}/command.stdin", in_dir()))
+}
+
 /// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the session's owner collects
 /// from below it fits in this many.
 ///
@@ -192,18 +211,26 @@ pub fn harness_dir() -> AbsolutePath {
     valid("/harness")
 }
 
-/// `value`, one of this module's constant paths or variables, or a path that holds a slot's
-/// name, as the type it is.
+/// The directories of a sandbox that hold Pumpkin's own files: [`pumpkin_dir()`]; `/.pumpkin`,
+/// where providers present `sandboxd`, and `sandboxctl` at [`SANDBOXCTL_PATH`]; and
+/// [`harness_dir()`].
+pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 3] {
+    [pumpkin_dir(), valid("/.pumpkin"), harness_dir()]
+}
+
+/// `value`, one of this module's constant paths, variables or modes, or a path that holds a
+/// slot's name, as the type it is.
 fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
     match T::try_from(value.to_owned()) {
         Ok(value) => value,
         #[expect(
             clippy::unreachable,
-            reason = "each of this module's paths is normalized: `/pumpkin` and `/harness` are \
-                      absolute, and each of `/pumpkin`'s directories and files, and a slot's \
-                      `Name`, from a-z, 0-9, `_` and `-`, one plain component; `HOME` is a \
-                      variable's name; checking them as the crate builds would take a `const fn` \
-                      copy of each check, and a constructor that skips the checks"
+            reason = "each of this module's paths is normalized: `/pumpkin`, `/.pumpkin` and \
+                      `/harness` are absolute, and each of `/pumpkin`'s directories and files, \
+                      and a slot's `Name`, from a-z, 0-9, `_` and `-`, one plain component; \
+                      `HOME` is a variable's name; each mode is `0` and three octal digits; \
+                      checking them as the crate builds would take a `const fn` copy of each \
+                      check, and a constructor that skips the checks"
         )]
         Err(error) => unreachable!("{error}"),
     }
@@ -217,8 +244,13 @@ pub enum ToSandbox {
     /// follow on the same stream, and `sandboxd` replies once: when the tree has been written,
     /// or at the first failure.
     Put { stream: u32, dir: AbsolutePath },
-    /// An entry of the tree being put.
-    Entry { stream: u32, entry: Entry },
+    /// An entry of the tree being put, made with `mode` exactly, whatever `sandboxd`'s umask: a
+    /// directory that exists already is kept as it is.
+    Entry {
+        stream: u32,
+        entry: Entry,
+        mode: Mode,
+    },
     /// Bytes of the file being put, in the frame's body.
     Data { stream: u32 },
     /// The end of the tree being put.
@@ -270,8 +302,10 @@ pub struct Launch {
     /// Variables set over the environment `sandboxd` itself was given.
     pub env: Env,
     pub cwd: AbsolutePath,
-    /// The file the command's standard output goes to, created or truncated. Its standard
+    /// The regular file the command's standard input reads from; without one, its standard
     /// input is empty.
+    pub stdin: Option<AbsolutePath>,
+    /// The file the command's standard output goes to, created or truncated.
     pub stdout: AbsolutePath,
     /// The file the command's standard error goes to, created or truncated.
     pub stderr: AbsolutePath,

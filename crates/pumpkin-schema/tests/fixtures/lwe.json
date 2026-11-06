@@ -15,7 +15,19 @@
           "command": {
             "argv": ["/usr/local/bin/pumpkin-fake-agent"],
             "cwd": "/workspace"
-          }
+          },
+          "dirs": [
+            { "path": "/workspace/.codex", "mode": "0700" },
+            { "path": "/workspace/.tmp", "mode": "0700" }
+          ],
+          "files": [
+            {
+              "path": "/workspace/.codex/config.toml",
+              "mode": "0600",
+              "content": "model = \"gpt-6-astra\"\n"
+            }
+          ],
+          "stdin": "Solve the task in /task/README.md.\n"
         }
       },
       "egress": {

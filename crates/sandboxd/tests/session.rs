@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
 use pumpkin_gateway::{Arrival, Listener, Process, Put, Session};
-use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar};
+use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{ExitStatus, Launch, RelativePath};
+use pumpkin_schema::sandbox::{ExitStatus, Launch, RelativePath, dir_mode, file_mode};
 use stdx::Deadline;
 use stdx::process::Environment;
 
@@ -68,7 +68,11 @@ impl Sandbox {
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
-            .put(&absolute(&root), &dirs.each_ref().map(Put::Dir), hung())
+            .put(
+                &absolute(&root),
+                &dirs.each_ref().map(|dir| Put::Dir(dir, dir_mode())),
+                hung(),
+            )
             .unwrap();
         Self {
             root,
@@ -107,6 +111,7 @@ impl Sandbox {
             argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
             env: Env::try_from(env.collect::<Vec<_>>()).unwrap(),
             cwd: self.at("home"),
+            stdin: None,
             stdout: self.at(&format!("log/{n}.stdout")),
             stderr: self.at(&format!("log/{n}.stderr")),
         }
@@ -258,7 +263,10 @@ fn judge() {
                 .map(|n| u8::try_from(n % 251).unwrap())
                 .collect();
             let root = absolute(&sandbox.root);
-            let put = [Put::Dir(&slot), Put::File(&payload, &raw)];
+            let put = [
+                Put::Dir(&slot, dir_mode()),
+                Put::File(&payload, file_mode(), &raw),
+            ];
             sandbox.session.put(&root, &put, hung()).unwrap();
             let script = r#"
                 printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
@@ -286,6 +294,55 @@ fn judge() {
             payload collected intact: true
             log/1.stderr: warning
             log/1.stdout: home=/pumpkin/home mode=train in $ROOT/home
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// A tree put gives what it makes its mode exactly, whatever the umask, and keeps a directory
+/// that exists as it is; a command reads its standard input from the regular file its launch
+/// names, which must exist.
+#[test]
+fn modes_and_stdin() {
+    check(
+        "modes-and-stdin",
+        |sandbox| {
+            let mode = |mode: &str| Mode::try_from(mode.to_owned()).unwrap();
+            let paths = ["home", "in/tools", "in/tools/tool", "in/prompt"].map(relative);
+            let put = [
+                Put::Dir(&paths[0], mode("0700")),
+                Put::Dir(&paths[1], mode("0777")),
+                Put::File(&paths[2], mode("0750"), b"#!/bin/sh\nwc --lines\n"),
+                Put::File(&paths[3], mode("0666"), b"line one\nline two\n"),
+            ];
+            sandbox
+                .session
+                .put(&absolute(&sandbox.root), &put, hung())
+                .unwrap();
+            let script = "cd .. && stat --format='%a %n' home in/tools in/tools/tool in/prompt; \
+                          in/tools/tool";
+            let mut launch = sandbox.sh(script, &[]);
+            launch.stdin = Some(sandbox.at("in/prompt"));
+            let command = sandbox.session.start(launch, hung()).unwrap();
+            let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
+            let mut lines = vec![format!("exited: {exited:?}")];
+            let mut missing = sandbox.sh("true", &[]);
+            missing.stdin = Some(sandbox.at("in/missing"));
+            let started = sandbox.session.start(missing, hung()).map(|_| ());
+            lines.push(format!("missing stdin: {}", show_error(sandbox, started)));
+            lines.extend(sandbox.collect("log").unwrap());
+            lines
+        },
+        &expect![[r#"
+            exited: Code(0)
+            missing stdin: $ROOT/in/missing: No such file or directory (os error 2)
+            log/1.stderr: 
+            log/1.stdout: 755 home
+            777 in/tools
+            750 in/tools/tool
+            666 in/prompt
+            2
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -364,7 +421,10 @@ fn refusals() {
             failures.dedup();
             lines.push(format!("missing program by name, 1000 times: {failures:?}"));
             let file = relative("in/file");
-            let twice = [Put::File(&file, b"first"), Put::File(&file, b"second")];
+            let twice = [
+                Put::File(&file, file_mode(), b"first"),
+                Put::File(&file, file_mode(), b"second"),
+            ];
             let put = sandbox
                 .session
                 .put(&absolute(&sandbox.root), &twice, hung());

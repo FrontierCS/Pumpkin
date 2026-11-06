@@ -26,7 +26,7 @@ use pumpkin_schema::ir::{AbsolutePath, Image, Name, Resources, User};
 use pumpkin_schema::provider::{
     Console, Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::RelativePath;
+use pumpkin_schema::sandbox::{RelativePath, file_mode};
 use stdx::{Context, Deadline};
 
 use crate::docker;
@@ -206,7 +206,7 @@ fn put(mut session: Session) -> String {
         vec![0; 4 << 20],
     );
     let home = AbsolutePath::try_from("/pumpkin/home".to_owned()).unwrap();
-    match session.put(&home, &[Put::File(&path, &bytes)], soon()) {
+    match session.put(&home, &[Put::File(&path, file_mode(), &bytes)], soon()) {
         Ok(()) => "put".to_owned(),
         Err(error) => format!("{:?}: {error}", error.kind()),
     }

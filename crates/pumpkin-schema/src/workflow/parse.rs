@@ -5,7 +5,7 @@ use super::{
     Agent, Judge, JudgeGrant, JudgeId, Main, RoleId, Sandbox, Score, SlotId, SoloThenJudge,
     SubmitGrant, Workflow,
 };
-use crate::ir::{self, Name};
+use crate::ir::{self, Name, RolePath};
 use crate::sandbox::MAX_OP_PAYLOAD_BYTES;
 
 mod errors;
@@ -116,13 +116,53 @@ impl<'ir> Parser<'ir> {
     }
 
     fn agent(&mut self, path: String, sandbox: Sandbox, agent: &ir::AgentRuntime) -> RoleId {
-        let ir::AgentRuntime { command } = agent;
+        let ir::AgentRuntime {
+            command,
+            dirs,
+            files,
+            stdin,
+        } = agent;
+        self.agent_paths(&format!("{path}.runtime.agent"), dirs, files);
+        let mut dirs = dirs.clone();
+        dirs.sort_by(|a, b| a.path.cmp(&b.path));
         let agent = Agent {
             sandbox,
             command: command.clone(),
+            dirs,
+            files: files.clone(),
+            stdin: stdin.clone(),
         };
         self.agents.push((path, agent));
         RoleId::Agent
+    }
+
+    /// Reports each path of the agent's `dirs` and `files`, at `path`, that comes again, or is
+    /// below a file.
+    fn agent_paths(&mut self, path: &str, dirs: &[ir::Dir], files: &[ir::File]) {
+        let label = |kind, n| format!("{kind}[{n}]");
+        let dir_paths = dirs
+            .iter()
+            .enumerate()
+            .map(|(n, dir)| (label("dirs", n), &dir.path));
+        let file_paths =
+            (files.iter().enumerate()).map(|(n, file)| (label("files", n), &file.path));
+        let all: Vec<(String, &RolePath)> = dir_paths.chain(file_paths).collect();
+        let files = &all[dirs.len()..];
+        for (index, (at_label, at)) in all.iter().enumerate() {
+            let earlier = all[..index].iter().find(|(_, earlier)| earlier == at);
+            let file = files.iter().find(|(_, file)| at.is_below(file));
+            let message = match (earlier, file) {
+                (Some((earlier, _)), _) => {
+                    format!("`{at}` is {earlier}'s path too: put each path once")
+                }
+                (None, Some((file, _))) => {
+                    format!("`{at}` is below {file}, a file: put it in a directory")
+                }
+                (None, None) => continue,
+            };
+            self.errors
+                .report(format!("{path}.{at_label}.path"), message);
+        }
     }
 
     /// The workflow's one agent. Reports a workflow with none, and each agent after the first.

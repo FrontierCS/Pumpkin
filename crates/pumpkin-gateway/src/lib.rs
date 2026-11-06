@@ -40,12 +40,12 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs, mem, process};
 
-use pumpkin_schema::ir::{AbsolutePath, Name};
+use pumpkin_schema::ir::{AbsolutePath, Mode, Name};
 use pumpkin_schema::sandbox::op::{OpCall, OpReply};
 use pumpkin_schema::sandbox::tree::{self, Limits};
 use pumpkin_schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
-    ToSandbox, frame, pumpkin_dir, pumpkin_subdirs,
+    ToSandbox, dir_mode, frame, pumpkin_dir, pumpkin_subdirs,
 };
 use stdx::Deadline;
 
@@ -216,11 +216,11 @@ impl Reply {
     }
 }
 
-/// What to put in a sandbox: a directory, or a file with its bytes.
+/// What to put in a sandbox: a directory, or a file with its bytes, each with its mode.
 #[derive(Clone, Copy, Debug)]
 pub enum Put<'a> {
-    Dir(&'a RelativePath),
-    File(&'a RelativePath, &'a [u8]),
+    Dir(&'a RelativePath, Mode),
+    File(&'a RelativePath, Mode, &'a [u8]),
 }
 
 /// An op a caller in the sandbox made, whole, and in flight until [`Session::reply`] answers
@@ -363,8 +363,8 @@ impl Session {
         })
     }
 
-    /// Puts [`pumpkin_subdirs()`] under [`pumpkin_dir()`], which every sandbox needs before its
-    /// first command, by `by` ([deadlines](crate#deadlines)).
+    /// Puts [`pumpkin_subdirs()`] under [`pumpkin_dir()`], with [`dir_mode()`], which every
+    /// sandbox needs before its first command, by `by` ([deadlines](crate#deadlines)).
     ///
     /// # Errors
     ///
@@ -372,7 +372,10 @@ impl Session {
     /// ends.
     pub fn set_up(&mut self, by: Deadline) -> Result<(), String> {
         let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
-        let puts: Vec<Put<'_>> = subdirs.iter().map(Put::Dir).collect();
+        let puts: Vec<Put<'_>> = subdirs
+            .iter()
+            .map(|dir| Put::Dir(dir, dir_mode()))
+            .collect();
         self.put(&root, &puts, by).map_err(|error| {
             let failed =
                 format!("the directories under `{root}` can't be put in the sandbox: {error}");
@@ -389,7 +392,8 @@ impl Session {
     }
 
     /// Writes `entries` below `dir` in the sandbox, creating `dir` and its missing parents.
-    /// Each entry's parent is `dir` or comes earlier in `entries`, unless it exists already.
+    /// Each entry's parent is `dir` or comes earlier in `entries`, unless it exists already, and
+    /// each gets its mode as it is made ([`ToSandbox::Entry`]).
     ///
     /// # Errors
     ///
@@ -588,17 +592,27 @@ impl Session {
         )?;
         for entry in entries {
             match *entry {
-                Put::Dir(path) => {
+                Put::Dir(path, mode) => {
                     let entry = Entry::Dir { path: path.clone() };
-                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
+                    let message = ToSandbox::Entry {
+                        stream,
+                        entry,
+                        mode,
+                    };
+                    self.send(&message, &[], by)?;
                 }
-                Put::File(path, bytes) => {
+                Put::File(path, mode, bytes) => {
                     let size = bytes.len() as u64;
                     let entry = Entry::File {
                         path: path.clone(),
                         size,
                     };
-                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
+                    let message = ToSandbox::Entry {
+                        stream,
+                        entry,
+                        mode,
+                    };
+                    self.send(&message, &[], by)?;
                     for chunk in bytes.chunks(frame::MAX_BODY_BYTES) {
                         self.send(&ToSandbox::Data { stream }, chunk, by)?;
                     }
@@ -618,7 +632,7 @@ impl Session {
     ) -> io::Result<()> {
         loop {
             match self.receive(parts, by)? {
-                Ok(Part::Entry(entry)) => self.created(stream, tree.entry(&entry))?,
+                Ok(Part::Entry(entry)) => self.created(stream, tree.entry(&entry, None))?,
                 Ok(Part::Data(bytes)) => self.written(stream, tree.data(&bytes))?,
                 Ok(Part::End) => return self.written(stream, tree.finish()),
                 Err(message) => return Err(io::Error::other(message)),
