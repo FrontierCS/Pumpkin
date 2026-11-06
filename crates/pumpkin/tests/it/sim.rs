@@ -1,6 +1,6 @@
 //! A simulated provider, [`Sim`], which stands in for a platform: each sandbox is a thread of
 //! this process, running a fake `sandboxd` that dials its create's [`Dial`] at once and answers
-//! the session's puts.
+//! the session's requests, running each command by its program ([`Sim`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -8,8 +8,10 @@
 )]
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -21,18 +23,33 @@ use pumpkin_schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag,
     SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
+use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, ToSandbox, frame};
 use serde_json::json;
 
 use crate::provider::{Locals, Subject};
 
 /// The path of a `sandboxd` that never dials: a create that names it, as published, makes a
 /// sandbox whose `sandboxd` prints so, and ends.
-const MUTE: &str = "/sim/mute";
+pub(crate) const MUTE: &str = "/sim/mute";
+
+/// The path of a `sandboxd` whose create fails, leaving behind a sandbox, as [`MUTE`]'s, that
+/// the run's list still finds.
+pub(crate) const LOST: &str = "/sim/lost";
+
+/// The path of a `sandboxd` that the simulated provider refuses to publish.
+pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
+
+/// The path of a `sandboxd` that dials, but whose sandbox the simulated provider refuses to
+/// delete.
+pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
 /// A provider whose sandboxes are threads, each running a fake `sandboxd`: it dials, unless its
-/// create names [`MUTE`], and then answers each put, fails every other request, and stops
-/// reading once [stalled](Subject::stall).
+/// create names [`MUTE`] or [`LOST`], and then answers each put and start, fails every other
+/// request, and stops reading once [stalled](Subject::stall). It puts nothing. A command whose
+/// program is `exit` exits at once with the status its argument gives; one whose program is
+/// `crash` starts, then its `sandboxd` ends the session; any other runs until the session ends.
+/// It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose create names
+/// [`UNDELETABLE`].
 pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
@@ -44,10 +61,14 @@ struct State {
     next: u64,
     /// The sandboxes made and not yet deleted, by id.
     sandboxes: BTreeMap<String, Sandbox>,
+    /// The permission bits of the directory that held each create's socket directory, in the
+    /// order of the creates.
+    modes: Vec<u32>,
 }
 
 struct Sandbox {
     run: RunTag,
+    undeletable: bool,
     // Shared with the sandbox's thread, which prints to its console and hands over its
     // connection.
     shared: Arc<Mutex<Status>>,
@@ -72,20 +93,32 @@ struct Status {
 
 impl Sim {
     pub(crate) fn new() -> Self {
+        // Far longer than a thread takes to start and dial, so that a busy machine makes a start
+        // wait longer, never fail.
+        Self::with_startup(30)
+    }
+
+    /// A simulated provider that declares `seconds` as its startup.
+    pub(crate) fn with_startup(seconds: u64) -> Self {
         Self {
             ready: Ready {
                 report: json!({ "provider": "sim" }),
                 capabilities: Capabilities {
-                    // Far longer than a thread takes to start and dial, so that a busy machine
-                    // makes a start wait longer, never fail.
-                    startup_seconds: NonZeroU64::new(30).unwrap(),
+                    startup_seconds: NonZeroU64::new(seconds).unwrap(),
                 },
             },
             state: Mutex::new(State {
                 next: 1,
                 sandboxes: BTreeMap::new(),
+                modes: Vec::new(),
             }),
         }
+    }
+
+    /// The permission bits of the directory that held each create's socket directory, in the
+    /// order of the creates.
+    pub(crate) fn modes(&self) -> Vec<u32> {
+        self.state().modes.clone()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -100,15 +133,22 @@ impl Provider for Sim {
 
     fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
         let published = locals.iter().map(|local| match local {
-            Local::Role { image } => Published::from(image.to_string()),
-            Local::Sandboxd { path } => Published::from(path.display().to_string()),
+            Local::Role { image } => Ok(Published::from(image.to_string())),
+            Local::Sandboxd { path } if path.as_os_str() == UNPUBLISHED => Err(format!(
+                "{UNPUBLISHED} can't be published by the simulated provider: name another path"
+            )),
+            Local::Sandboxd { path } => Ok(Published::from(path.display().to_string())),
         });
-        Ok(published.collect())
+        published.collect()
     }
 
     fn create(&self, create: &Create) -> Result<Created, String> {
         let Dial::Socket { dir } = &create.dial;
-        let (socket, mute) = (dir.join(SOCKET_NAME), create.sandboxd.as_str() == MUTE);
+        let (socket, lost) = (dir.join(SOCKET_NAME), create.sandboxd.as_str() == LOST);
+        let mute = lost || create.sandboxd.as_str() == MUTE;
+        let undeletable = create.sandboxd.as_str() == UNDELETABLE;
+        let parent = fs::metadata(dir.parent().unwrap()).unwrap();
+        let mode = parent.permissions().mode() & 0o777;
         let shared = Arc::new(Mutex::default());
         let ours = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -118,32 +158,47 @@ impl Provider for Sim {
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
         state.next += 1;
+        state.modes.push(mode);
         let run = create.run.clone();
         let sandbox = Sandbox {
             run,
+            undeletable,
             shared,
             thread,
         };
         state.sandboxes.insert(id.clone(), sandbox);
+        if lost {
+            return Err(
+                "the simulated create failed, and can't name what it made: expected the run's \
+                 list to find it"
+                    .to_owned(),
+            );
+        }
         Ok(Created {
             id: SandboxId::from(id),
         })
     }
 
     fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
-        let (mut deleted, mut unknown) = (Vec::new(), Vec::new());
+        let (mut deleted, mut kept, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
         let mut state = self.state();
         for id in ids {
-            let ours = (state.sandboxes.get(id.as_str())).is_some_and(|sandbox| sandbox.of(run));
-            if ours {
-                deleted.extend(state.sandboxes.remove(id.as_str()));
-            } else {
-                unknown.push(id.clone());
+            let ours = (state.sandboxes.get(id.as_str())).filter(|sandbox| sandbox.of(run));
+            match ours.map(|sandbox| sandbox.undeletable) {
+                Some(true) => kept.push(id.as_str()),
+                Some(false) => deleted.extend(state.sandboxes.remove(id.as_str())),
+                None => unknown.push(id.clone()),
             }
         }
         // Each thread ends once told, and joining it waits for nothing the lock holds.
         drop(state);
         deleted.into_iter().for_each(stop);
+        if !kept.is_empty() {
+            return Err(format!(
+                "{} can't be deleted by the simulated provider: create one with another `sandboxd`",
+                kept.join(", ")
+            ));
+        }
         Ok(unknown)
     }
 
@@ -195,6 +250,7 @@ fn status(shared: &Mutex<Status>) -> MutexGuard<'_, Status> {
 fn stop(sandbox: Sandbox) {
     let Sandbox {
         run: _,
+        undeletable: _,
         shared,
         thread,
     } = sandbox;
@@ -240,6 +296,7 @@ fn sandboxd(socket: &Path, mute: bool, shared: &Mutex<Status>) {
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more.
 fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
+    let (mut replies, mut crashed) = (Vec::new(), false);
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, _))) = frame::read::<ToSandbox>(&mut connection) {
         if status(shared).stalled {
@@ -248,19 +305,39 @@ fn serve(mut connection: UnixStream, shared: &Mutex<Status>) {
             // session's writes fill the connection's buffers.
             return;
         }
-        let reply = match request {
-            ToSandbox::Put { .. } | ToSandbox::Entry { .. } | ToSandbox::Data { .. } => continue,
-            ToSandbox::End { stream } => FromSandbox::Done { stream },
-            ToSandbox::Start { stream, .. }
-            | ToSandbox::Freeze { stream }
-            | ToSandbox::Collect { stream, .. } => FromSandbox::Failed {
-                stream,
-                message: "the simulated sandboxd only puts: ask it for puts alone".to_owned(),
-            },
+        match request {
+            ToSandbox::Put { .. } | ToSandbox::Entry { .. } | ToSandbox::Data { .. } => {}
+            ToSandbox::End { stream } => replies.push(FromSandbox::Done { stream }),
+            ToSandbox::Start { stream, launch } => {
+                replies.push(FromSandbox::Done { stream });
+                match launch.argv.program() {
+                    "exit" => {
+                        let code = launch.argv.args()[0].parse().unwrap();
+                        let status = ExitStatus::Code(code);
+                        replies.push(FromSandbox::Exited { stream, status });
+                    }
+                    "crash" => crashed = true,
+                    _ => {}
+                }
+            }
+            ToSandbox::Freeze { stream } | ToSandbox::Collect { stream, .. } => {
+                replies.push(FromSandbox::Failed {
+                    stream,
+                    message: "the simulated sandboxd only puts and starts: ask it for those alone"
+                        .to_owned(),
+                });
+            }
             // It makes no ops, so a reply to one breaks the protocol, which ends the session.
             ToSandbox::OpReply { .. } => return,
-        };
-        if frame::write(&mut connection, &reply, &[]).is_err() {
+        }
+        for reply in replies.drain(..) {
+            if frame::write(&mut connection, &reply, &[]).is_err() {
+                return;
+            }
+        }
+        if crashed {
+            // A shutdown closes the connection for the clone its status keeps too.
+            let _ = connection.shutdown(Shutdown::Both);
             return;
         }
     }

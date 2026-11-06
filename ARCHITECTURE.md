@@ -102,6 +102,10 @@ whose files `record` lays out, and its run log, whose records `log` does.
   are gone, so nothing the agent started runs while its submission is judged.
 - **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends
   on no provider's crate, only its tests do, so a new provider changes no runtime code.
+- **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
+  the loop that drives a run reaches its provider only through `Sandboxes`; and a run's end deletes
+  whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
+  fails.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.
