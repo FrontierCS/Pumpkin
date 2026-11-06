@@ -69,9 +69,10 @@ consoles.
   its tag, so runs that share a provider never reach each other's sandboxes.
 
 **`providers/docker`.** `pumpkin-docker`, a sandbox as a container that needs no root to start:
-`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), and
-is the `Provider` that makes each sandbox a container. A provider is `providers/<name>`, crate
-`pumpkin-<name>`, which holds its platform's calls and its sandboxes' confinement.
+`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), is
+the `Provider` that makes each sandbox a container, and builds images, each tagged by its build's
+inputs. A provider is `providers/<name>`, crate `pumpkin-<name>`, which holds its platform's
+calls and its sandboxes' confinement.
 - **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
   its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
   bounds only its own platform calls, so no provider depends on `pumpkin-gateway` outside its
@@ -81,7 +82,8 @@ is the `Provider` that makes each sandbox a container. A provider is `providers/
   session's owner find them anywhere.
 - **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
   `docker` against the named context alone, so the operator's choice of engine holds. Tests run
-  `docker` directly only to observe containers, pause them, or build images.
+  `docker` directly only to observe containers and images, pause containers, or build, tag and
+  remove images of their own.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
