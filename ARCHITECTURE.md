@@ -107,6 +107,12 @@ whose files `record` lays out, and its run log, whose records `log` does.
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
 
+**`crates/pumpkin-frontier-cs`.** The FrontierCS factory, for tasks ported from FrontierCS as
+data, each in `tasks/frontier-cs/<problem id>/`, where its `Task` is read once from that
+directory.
+- **Architecture Invariant:** no crate depends on it, so nothing that runs a workflow knows
+  where a task came from.
+
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.
 

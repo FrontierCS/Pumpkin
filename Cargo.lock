@@ -78,6 +78,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pumpkin-frontier-cs"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "pumpkin-schema",
+ "stdx",
+]
+
+[[package]]
 name = "pumpkin-gateway"
 version = "0.0.0"
 dependencies = [

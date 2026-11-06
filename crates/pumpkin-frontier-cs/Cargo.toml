@@ -1,0 +1,19 @@
+[package]
+name = "pumpkin-frontier-cs"
+version = "0.0.0"
+description = "The FrontierCS factory, for tasks ported from FrontierCS to Pumpkin"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+pumpkin-schema = { path = "../pumpkin-schema" }
+stdx = { path = "../stdx" }
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true
