@@ -87,7 +87,13 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
     let stand_in = route.map(|_| StandIn::start());
     let serving =
         (route.zip(stand_in.as_ref())).map(|(route, stand_in)| stand_in.serving(&runs.dir, route));
-    let run = Run::prepare(&ir, &runs.dir, SystemTime::now(), serving).unwrap();
+    let run = Run::prepare(
+        Workflow::parse(&ir).unwrap(),
+        &runs.dir,
+        SystemTime::now(),
+        serving,
+    )
+    .unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = std::env::temp_dir().join(format!("pumpkin-{}", run.id()));
     let before = unix_ns();

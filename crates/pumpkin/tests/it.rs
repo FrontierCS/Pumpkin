@@ -440,7 +440,7 @@ fn waits() {
     ended("20261107-120100-2c9b0001", finished(json!(null)));
     ended(
         "20261107-120200-2c9b0002",
-        json!({ "state": "refused", "reason": "r" }),
+        json!({ "state": "failed", "reason": "r" }),
     );
     ended(
         "20261107-120300-3d0c0003",
@@ -485,8 +485,8 @@ fn waits() {
             printed outcome.json: {"score":null,"state":"finished"}
             $ pumpkin wait runs/20261107-120200-2c9b0002
             exit status: Some(1)
-            pumpkin: run 20261107-120200-2c9b0002 was refused: r
-            printed outcome.json: {"reason":"r","state":"refused"}
+            pumpkin: run 20261107-120200-2c9b0002 failed: r
+            printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait 2c9b --runs runs
             exit status: Some(1)
             pumpkin: `2c9b` matches 2 runs: name one by more of its id
@@ -739,7 +739,7 @@ fn states() {
             pumpkin: runs/<unknown state, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `refused` or `failed`
+            pumpkin: runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished` or `failed`
             $ pumpkin wait <unknown state, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -748,7 +748,7 @@ fn states() {
             pumpkin: runs/<unknown state, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `refused` or `failed`
+            pumpkin: runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished` or `failed`
             $ pumpkin wait <unknown state, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -783,6 +783,53 @@ fn states() {
             exit status: Some(1)
             pumpkin: runs/<not JSON, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made"#]],
     );
+}
+
+/// A workflow that is refused, for breaking parsing rules or for a route no upstream serves,
+/// exits with 1, makes no record, and ends its standard error with one `pumpkin:` line, after a
+/// line for each rule broken.
+#[test]
+fn refusals() {
+    let scratch = Scratch::new("refusals");
+    let mut ir: Value = serde_json::from_str(LWE).unwrap();
+    scratch.write("lwe.json", &ir);
+    ir["roles"][1]["name"] = json!("agent");
+    ir["roles"][1]["egress"] = json!({ "model": { "models": ["gpt-6-astra"] } });
+    scratch.write("broken.json", &ir);
+    write_configurations(&scratch);
+    let run = |ir, config: &str| {
+        let mut command = scratch.pumpkin(&["run", ir, "--docker-context", "nowhere"]);
+        command.args([
+            "--sandboxd",
+            "sandboxd",
+            "--runs",
+            "runs",
+            "--config",
+            config,
+        ]);
+        command
+    };
+    let commands = [
+        run("broken.json", "conf/served.toml"),
+        run("lwe.json", "unserved.toml"),
+    ];
+    check(
+        &scratch,
+        commands,
+        false,
+        &[],
+        &expect![[r#"
+        $ pumpkin run broken.json --docker-context nowhere --sandboxd sandboxd --runs runs --config conf/served.toml
+        exit status: Some(1)
+        pumpkin: broken.json: roles[1].name: `agent` also names roles[0]: give each a unique name
+        pumpkin: broken.json: roles[1].egress.model: `agent` is a judge, and only the agent has a model route: remove it
+        pumpkin: broken.json: main.solo_then_judge.grants[train].judge.role: no role is named `train_judge`: name one listed in `roles`
+        pumpkin: broken.json: the workflow has 3 problems: fix them and run again
+        $ pumpkin run lwe.json --docker-context nowhere --sandboxd sandboxd --runs runs --config unserved.toml
+        exit status: Some(1)
+        pumpkin: unserved.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: list them all under one"#]],
+    );
+    assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
 
 /// What `run` finds wrong in the deployment's configuration, which it reads for a workflow with

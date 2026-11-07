@@ -67,6 +67,7 @@ impl<'ir> Parser<'ir> {
             main,
         } = pattern;
         Ok(Workflow {
+            ir: ir.clone(),
             name: name.clone(),
             agent,
             judges,
