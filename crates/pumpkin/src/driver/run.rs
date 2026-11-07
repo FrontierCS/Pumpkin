@@ -1,5 +1,5 @@
-//! The runtime: runs a workflow on a [`Provider`], as the [core](super::core) decides, and keeps
-//! the run's record.
+//! The runtime: runs a workflow on a [`Provider`], as the [core](pumpkin_decision) decides, and
+//! keeps the run's record.
 //!
 //! [`Run::prepare`] parses a workflow and begins its record, and [`Run::execute`] runs it to
 //! its outcome, one thread driving the core as [`Core`] says, while each judge call runs on a
@@ -18,6 +18,9 @@ use std::thread::{self, Scope};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, mem};
 
+use pumpkin_decision::{
+    Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, Verdict, WorkEnd, lasts,
+};
 use pumpkin_gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir;
@@ -27,9 +30,6 @@ use pumpkin_schema::workflow::{JudgeCall, Main, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
-use crate::driver::core::{
-    Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, Verdict, WorkEnd, lasts,
-};
 use crate::model_route::{Answer, Serving};
 
 mod agent;

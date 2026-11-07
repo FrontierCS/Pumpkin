@@ -175,6 +175,7 @@ name = "pumpkin"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "pumpkin-decision",
  "pumpkin-docker",
  "pumpkin-gateway",
  "pumpkin-provider",
@@ -198,6 +199,15 @@ dependencies = [
  "stdx",
  "toml",
  "xflags",
+]
+
+[[package]]
+name = "pumpkin-decision"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "pumpkin-schema",
+ "serde_json",
 ]
 
 [[package]]

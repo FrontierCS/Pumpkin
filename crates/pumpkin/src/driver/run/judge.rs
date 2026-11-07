@@ -14,6 +14,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use std::{fs, io, iter};
 
+use pumpkin_decision::{Event, JobId, JudgeResult};
 use pumpkin_gateway::{Arrival, Put, Session};
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::{
@@ -25,7 +26,6 @@ use stdx::{Context, Deadline};
 
 use super::sandbox::{PUMPKIN, Sandboxes, collect, launch};
 use super::{Clock, Inbox, Input};
-use crate::driver::core::{Event, JobId, JudgeResult};
 
 /// A judge call, as its thread sees it.
 pub(super) struct Call<'r> {

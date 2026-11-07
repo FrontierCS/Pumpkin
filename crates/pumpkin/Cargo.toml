@@ -9,6 +9,7 @@ publish.workspace = true
 test = false
 
 [dependencies]
+pumpkin-decision = { path = "../pumpkin-decision" }
 pumpkin-gateway = { path = "../pumpkin-gateway" }
 pumpkin-provider = { path = "../pumpkin-provider" }
 pumpkin-schema = { path = "../pumpkin-schema" }

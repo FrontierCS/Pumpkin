@@ -29,13 +29,12 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use pumpkin_decision::PayloadRef;
 use pumpkin_schema::ir::Sha256Digest;
 use pumpkin_schema::sandbox::{log_dir, out_dir};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use stdx::Context;
-
-use crate::driver::core::PayloadRef;
 
 /// The version of the record's form, which a record's `record.json` holds, named as the IR's
 /// version is ([`IrVersion`](pumpkin_schema::ir::IrVersion)): a reader is to check it before it

@@ -20,8 +20,12 @@
 //! included ([`OpsReply::remaining_seconds`], [`SubmitReply::remaining_seconds`]). `ops` lists
 //! the agent's judge grants first, then its submit grant.
 
-use std::num::NonZeroU64;
-use std::time::Duration;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::num::NonZeroU64;
+use core::time::Duration;
 
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::op::{
