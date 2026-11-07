@@ -10,10 +10,9 @@
     reason = "a failed run shows where its record is"
 )]
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
+use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::run::Run;

@@ -14,10 +14,9 @@
     reason = "a failed test shows where its scratch directory is"
 )]
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, iter, thread};
+use std::{env, fs, iter, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin_docker::{ContextName, Engine};

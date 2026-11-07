@@ -8,12 +8,11 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::fs;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
 use std::time::Duration;
+use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin::model_route::Route;

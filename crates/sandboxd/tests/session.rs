@@ -12,14 +12,13 @@
 )]
 
 use std::cell::Cell;
-use std::fs;
 use std::io::{self, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin_gateway::{Arrival, Listener, Process, Put, Session};

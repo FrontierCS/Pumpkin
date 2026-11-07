@@ -2,12 +2,11 @@
 //! command, as `pumpkin --help` prints it. `run` runs a workflow with
 //! [`pumpkin::driver::run`], on the Docker provider.
 
-use std::fmt;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
-use std::{env, fs};
+use std::{env, fmt, fs};
 
 use pumpkin::driver::run::Run;
 use pumpkin_docker::{ContextName, Engine};

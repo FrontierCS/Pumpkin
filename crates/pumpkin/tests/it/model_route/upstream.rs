@@ -3,13 +3,12 @@
 //! closes the harness's request from the fake sandbox and forwards it, and shows what the
 //! stand-in received and what the sandbox heard.
 
-use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
 use std::time::Duration;
+use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin::model_route::{Key, Route, Upstream, UpstreamUrl};
