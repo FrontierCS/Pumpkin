@@ -1,8 +1,8 @@
 //! Serving a session: reading what the gateway sends as it arrives, its requests, which
-//! [`files`] and [`commands`](crate::commands) serve, and the replies to [ops](crate::ops). A
-//! collect and a freeze, which may last, are served on threads of their own where one can start,
-//! so that the session reads on meanwhile; any other request is served before the next frame is
-//! read.
+//! [`files`] and [`commands`](crate::commands) serve, the replies to [ops](crate::ops), and the
+//! responses to [model requests](crate::model). A collect and a freeze, which may last, are
+//! served on threads of their own where one can start, so that the session reads on meanwhile;
+//! any other request is served before the next frame is read.
 
 use std::io::{self, BufReader, Read};
 use std::os::unix::net::UnixStream;
@@ -15,11 +15,13 @@ use stdx::{Context, unpoisoned};
 
 use crate::commands::Commands;
 use crate::files::{self, Puts};
+use crate::model::{Model, Part};
 use crate::ops::Ops;
 
 /// Connects to the gateway at `socket` and serves the session until the gateway ends it. With
-/// `serve_ops`, it also serves ops, from before the first request.
-pub(crate) fn serve(socket: &Path, serve_ops: bool) -> Result<(), String> {
+/// `serve_ops`, it also serves ops, and with `serve_model`, the model endpoint, both from before
+/// the first request.
+pub(crate) fn serve(socket: &Path, serve_ops: bool, serve_model: bool) -> Result<(), String> {
     let stream = UnixStream::connect(socket).context(format_args!(
         "connecting to the gateway at {} failed",
         socket.display()
@@ -32,22 +34,28 @@ pub(crate) fn serve(socket: &Path, serve_ops: bool) -> Result<(), String> {
     if serve_ops {
         ops.serve(sender.clone()).context("serving ops failed")?;
     }
+    let model = Model::default();
+    if serve_model {
+        let served = model.serve(sender.clone());
+        served.context("serving the model endpoint failed")?;
+    }
     let commands = Commands::start_reaping(sender.clone()).context("starting the reaper failed")?;
     let mut session = Session {
         sender,
         commands,
         ops,
+        model,
         puts: Puts::default(),
     };
     let served = session.serve(&mut BufReader::new(stream));
     session.commands.kill_all();
-    // The op in flight, and the callers waiting their turns, end as `sandboxd` exits, which
-    // closes their connections.
+    // The op in flight, the callers waiting their turns and the model requests in flight end as
+    // `sandboxd` exits, which closes their connections.
     served.context("the session with the gateway failed")
 }
 
 /// Sends frames to the gateway, from the session, from the thread that reports exits, from the
-/// threads that collect and freeze, and from the threads that carry ops.
+/// threads that collect and freeze, and from the threads that carry ops and model requests.
 #[derive(Clone)]
 pub(crate) struct Sender(Arc<Mutex<UnixStream>>);
 
@@ -71,6 +79,7 @@ struct Session {
     sender: Sender,
     commands: Commands,
     ops: Ops,
+    model: Model,
     puts: Puts,
 }
 
@@ -105,16 +114,13 @@ impl Session {
                 files::collect(sender, stream, Path::new(dir.as_str()))
             }),
             ToSandbox::OpReply { op, reply } => self.ops.reply(op, reply),
-            // It opens no model requests, so none is in flight.
-            ToSandbox::ModelResponse { request, .. }
-            | ToSandbox::ModelData { request }
-            | ToSandbox::ModelEnd { request, .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "the gateway broke the protocol: it answered model request {request}, which \
-                     is not in flight"
-                ),
-            )),
+            ToSandbox::ModelResponse {
+                request,
+                status,
+                headers,
+            } => self.model.part(request, Part::Head { status, headers }),
+            ToSandbox::ModelData { request } => self.model.part(request, Part::Data(body.to_vec())),
+            ToSandbox::ModelEnd { request, cut } => self.model.part(request, Part::End { cut }),
         }
     }
 

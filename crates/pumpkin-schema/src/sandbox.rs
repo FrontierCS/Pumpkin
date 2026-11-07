@@ -29,8 +29,9 @@
 //! sandboxes it starts: the session's owner and a role's commands rely on them in any sandbox.
 //! It holds at most [`PUMPKIN_BYTES`]. A sandbox whose role makes ops also has `sandboxctl` at
 //! [`SANDBOXCTL_PATH`], and its `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox
-//! is passive: nothing in it can make an op, and its session takes none. An agent's image holds
-//! its harness below [`harness_dir()`]. A workflow puts nothing in these directories
+//! is passive: nothing in it can make an op, and its session takes none. A sandbox whose role
+//! has a model route has its `sandboxd` serve the model endpoint at [`MODEL_PORT`]. An agent's
+//! image holds its harness below [`harness_dir()`]. A workflow puts nothing in these directories
 //! ([`RolePath`](crate::ir::RolePath)).
 
 use serde::{Deserialize, Serialize};
@@ -226,6 +227,15 @@ pub fn harness_dir() -> AbsolutePath {
 pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 3] {
     [pumpkin_dir(), valid("/.pumpkin"), harness_dir()]
 }
+
+/// The port of the model endpoint, on `127.0.0.1` in a sandbox whose role has a model route.
+///
+/// Its harness makes model requests ([`FromSandbox::ModelRequest`]) at
+/// `http://127.0.0.1:<MODEL_PORT>`: by that address, not `localhost`, which may also name the
+/// IPv6 loopback, where nothing listens. Every provider starts that sandbox's `sandboxd` with
+/// `--model`, which makes it serve the endpoint there, and the session's owner accepts the
+/// session to take model requests.
+pub const MODEL_PORT: u16 = 11235;
 
 /// `value`, one of this module's constant paths, variables or modes, or a path that holds a
 /// slot's name, as the type it is.

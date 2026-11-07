@@ -55,8 +55,8 @@ op, each model request, each command's exit and the session's end as an `Arrival
   have the same sessions: of Pumpkin's crates, it depends only on `pumpkin-schema` and `stdx`.
 
 **`crates/sandboxd`.** The supervisor in every sandbox, built static by `cargo xtask sandboxd`:
-`session` serves the gateway (`files`, `commands`), `ops` carries callers' ops, `ctl` is
-`sandboxctl`, and `sys` holds the system calls `std` lacks.
+`session` serves the gateway (`files`, `commands`), `ops` carries callers' ops, `model` serves
+the model endpoint, `ctl` is `sandboxctl`, and `sys` holds the system calls `std` lacks.
 - **Architecture Invariant:** the protocol's two ends share no Pumpkin crate but `pumpkin-schema`
   and `stdx`, so the protocol is all they agree on: `sandboxd` uses the gateway only in tests.
 - **Architecture Invariant:** it has only its role's privileges, so it is no boundary within its

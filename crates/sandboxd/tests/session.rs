@@ -1,7 +1,8 @@
 //! `sandboxd` and the gateway's end of its session, together. `sandboxd` runs here as an
 //! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
 //! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
-//! `/pumpkin`: the Docker provider's tests make ops, in real sandboxes. A fake gateway sends
+//! `/pumpkin`, nor the model endpoint, at a port of the sandbox's own loopback: the Docker
+//! provider's tests make ops and model requests, in real sandboxes. A fake gateway sends
 //! what the gateway's end never would, or holds up what only a slow link would.
 
 #![expect(
@@ -525,8 +526,9 @@ fn ending_the_session() {
     );
 }
 
-/// `sandboxd` opens no model requests, so it exits 1, saying why, once its gateway answers one.
-/// A fake gateway sends it, as the gateway's end never answers a request it didn't take.
+/// A `sandboxd` that serves no model endpoint opens no model requests, so it exits 1, saying
+/// why, once its gateway answers one. A fake gateway sends it, as the gateway's end never answers
+/// a request it didn't take.
 #[test]
 fn model_answers() {
     check(

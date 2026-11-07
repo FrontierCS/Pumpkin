@@ -9,7 +9,8 @@
 //! stops a sandbox whose first process it is.
 //!
 //! With `--ops`, it also serves [ops], which it carries to the session's owner; without it,
-//! nothing in its sandbox can make one.
+//! nothing in its sandbox can make one. With `--model`, it also serves the [model] endpoint, whose
+//! requests it carries to the session's owner likewise.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
 //! kills every other process in the sandbox. Run as any other process, as in tests, it kills
@@ -30,6 +31,7 @@ use std::process::ExitCode;
 mod commands;
 mod ctl;
 mod files;
+mod model;
 mod ops;
 mod session;
 mod sys;
@@ -62,6 +64,10 @@ mod flags {
             /// yet, closed to all but its own user. Without it, nothing in the sandbox can make
             /// an op.
             optional --ops
+            /// Serves the model endpoint, through which a harness in the sandbox makes model
+            /// requests, at http://127.0.0.1:11235. The gateway must accept the session to take
+            /// them, or the first ends it. Without it, nothing in the sandbox can make one.
+            optional --model
         }
     }
     // generated start
@@ -72,6 +78,7 @@ mod flags {
         pub gateway: PathBuf,
 
         pub ops: bool,
+        pub model: bool,
     }
 
     impl Sandboxd {
@@ -109,7 +116,11 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
-    let flags::Sandboxd { gateway, ops } = match flags::Sandboxd::from_vec(args) {
+    let flags::Sandboxd {
+        gateway,
+        ops,
+        model,
+    } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {
             print_line(io::stdout(), error);
@@ -122,7 +133,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match session::serve(&gateway, ops) {
+    match session::serve(&gateway, ops, model) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sandboxd: {error}");
