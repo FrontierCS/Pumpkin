@@ -14,7 +14,7 @@ fn check(actual: &str, expect: &Expect) {
 /// Codex's recipe, on a base named as the factory's build tags one.
 #[test]
 fn codex() {
-    let base = "pumpkin-frontier-cs/task/agent-base:0123";
+    let base = "example/task/agent-base:0123";
     check(
         &CODEX_0_167_0.recipe(base),
         &expect![[r#"
@@ -24,7 +24,7 @@ fn codex() {
             FROM busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e AS codex-0.167.0-tree
             COPY --from=codex-0.167.0 /package/vendor/x86_64-unknown-linux-musl/ /out/harness/codex-0.167.0/
             RUN chmod 0444 /out/harness/codex-0.167.0/codex-package.json && chmod 0555 /out/harness /out/harness/codex-0.167.0 /out/harness/codex-0.167.0/bin /out/harness/codex-0.167.0/bin/codex /out/harness/codex-0.167.0/bin/codex-code-mode-host /out/harness/codex-0.167.0/codex-path /out/harness/codex-0.167.0/codex-path/rg
-            FROM pumpkin-frontier-cs/task/agent-base:0123
+            FROM example/task/agent-base:0123
             COPY --from=codex-0.167.0-tree --chown=0:0 /out/ /
         "#]],
     );

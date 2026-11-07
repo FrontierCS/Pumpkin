@@ -213,20 +213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pumpkin-frontier-cs"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "pumpkin-docker",
- "pumpkin-harness",
- "pumpkin-schema",
- "serde",
- "serde_json",
- "stdx",
- "xflags",
-]
-
-[[package]]
 name = "pumpkin-gateway"
 version = "0.0.0"
 dependencies = [

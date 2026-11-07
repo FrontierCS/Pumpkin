@@ -51,7 +51,7 @@ checked_string!(
 );
 
 checked_string!(
-    /// A workflow's name, such as `frontier-cs/lwe_structured_recovery`: 1 to 128 characters
+    /// A workflow's name, such as `vendor/task`: 1 to 128 characters
     /// from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`.
     WorkflowName,
     check_workflow_name
