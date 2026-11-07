@@ -96,22 +96,29 @@ calls and its sandboxes' confinement.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
-**`crates/pumpkin`.** The host side: the driver. Its decision core, `driver::core`, takes each
-`Event` a runtime observes and returns the `Action`s the runtime is to perform, until one ends the
-run, with its `Outcome`, or abandons it at its hard end; its `ops` rules on ops, `jobs` meters
-judge calls, and `result` reads a call's `result.json` (`JudgeResult`). The runtime, `driver::run`,
-prepares each `Run`, then drives the core on the run's `Provider`, keeping the run's record,
-whose files `record` lays out, and its run log, whose records `log` does. `model_route` closes
-the agent's model requests (`Route`) and forwards them upstream (`Upstream`), as the runtime
-serves the agent's route until the agent finalizes, the work phase ends, or the provider refuses
-the route's key.
+**`crates/pumpkin-decision`.** The driver's decision core: `Core` takes each `Event` a runtime
+observes and returns the `Action`s the runtime is to perform, until one ends the run, with its
+`Outcome`, or abandons it at its hard end; its `ops` rules on ops, `jobs` meters judge calls, and
+`result` reads a call's `result.json` (`JudgeResult`).
 - **Architecture Invariant:** the decision core does no I/O, reads no clock and uses no randomly
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
-  decides when time ends the work phase or the run, the hard end included.
+  decides when time ends the work phase or the run, the hard end included. The
+  crate is `#![no_std]`, so it can name none of `std`'s files, network, processes, environment,
+  threads, clock or hashed collections, and it forbids `unsafe`, which `core::arch`'s clock
+  needs. It depends on `pumpkin-schema` alone of Pumpkin's crates; the schema's I/O items
+  (`tree::Writer`, `frame` over `std::io`, and `PathBuf` paths) stay reachable through it until the
+  planned purification moves them out of `pumpkin-schema`.
 - **Architecture Invariant:** only the decision core authorizes ops: `sandboxd` carries any op any
   code in the sandbox makes, and the gateway bounds only what ops cost the host.
 - **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
   left, and the fields its judge declares (`ResultSpec`), so the workflow decides its feedback.
+
+**`crates/pumpkin`.** The host side: the driver's runtime, `driver::run`, which prepares each
+`Run`, then drives the decision core on the run's `Provider`, keeping the run's record, whose
+files `record` lays out, and its run log, whose records `log` does. `model_route` closes the
+agent's model requests (`Route`) and forwards them upstream (`Upstream`), as the runtime serves
+the agent's route until the agent finalizes, the work phase ends, or the provider refuses the
+route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
 - **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends

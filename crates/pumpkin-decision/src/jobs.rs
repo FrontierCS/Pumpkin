@@ -16,7 +16,10 @@
 //! The quota ledger is not kept apart: what each grant has used is counted from its jobs
 //! ([`Jobs::usage`]), so the two can't disagree.
 
-use std::time::Duration;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::time::Duration;
 
 use pumpkin_schema::sandbox::op::{self, FailureCode};
 use pumpkin_schema::workflow::JudgeGrantId;

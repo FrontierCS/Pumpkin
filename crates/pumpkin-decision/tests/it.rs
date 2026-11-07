@@ -24,7 +24,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use pumpkin::driver::core::{
+use pumpkin_decision::{
     Action, Core, Event, JobId, JudgeResult, OpId, Outcome, PayloadRef, Request, Submission,
     Verdict, WorkEnd,
 };
@@ -34,7 +34,7 @@ use pumpkin_schema::sandbox::op::OpReply;
 use pumpkin_schema::workflow::{JudgeCall, Workflow};
 use serde_json::{Value, json};
 
-const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json");
+const LWE: &str = include_str!("../../pumpkin-schema/tests/fixtures/lwe.json");
 
 /// How long each run's provider may take to start a sandbox.
 const STARTUP: Duration = Duration::from_secs(10);

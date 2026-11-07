@@ -42,15 +42,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use pumpkin_decision::{
+    Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
+};
 use pumpkin_gateway::RefusedOp;
 use pumpkin_schema::workflow::{JudgeCall, Workflow};
 use serde_json::{Value, json};
 use stdx::Context;
 
 use super::record;
-use crate::driver::core::{
-    Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
-};
 use crate::model_route::Answer;
 
 /// The run log, open for appending.

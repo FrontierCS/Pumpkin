@@ -19,9 +19,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, iter};
 
 use expect_test::{Expect, expect};
-use pumpkin::driver::core::lasts;
 use pumpkin::driver::run::Run;
 use pumpkin::model_route::Serving;
+use pumpkin_decision::lasts;
 use pumpkin_docker::Engine;
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{self, ModelName};

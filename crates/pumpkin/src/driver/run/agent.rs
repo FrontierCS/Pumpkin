@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
+use pumpkin_decision::Event;
 use pumpkin_gateway::{IncomingOp, Process, Put, RefusedOp, Session};
 use pumpkin_schema::ir::{AbsolutePath, Dir, File, Mode};
 use pumpkin_schema::sandbox::op::OpReply;
@@ -17,7 +18,6 @@ use stdx::{Context, Deadline};
 
 use super::Input;
 use super::sandbox::{PUMPKIN, Sandboxes, Started, collect, launch};
-use crate::driver::core::Event;
 
 /// The agent's sandbox, from when it starts until it is deleted.
 pub(super) struct Agent {

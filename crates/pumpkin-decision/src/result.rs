@@ -1,9 +1,12 @@
 //! A judge call's result, parsed from its `result.json`.
 
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+
 use pumpkin_schema::ir::ResultSpec;
 use pumpkin_schema::sandbox::op::{Failed, JobState, Returned};
 use serde_json::{Number, Value};
-use stdx::Context;
 
 /// A judge call's result, parsed from its `result.json` per its judge's [`ResultSpec`]: a
 /// status, a score when it passed, and the fields its caller's reply returns.
@@ -32,7 +35,8 @@ impl JudgeResult {
             score,
             returns,
         } = spec;
-        let document: Value = serde_json::from_slice(json).context("result.json is not JSON")?;
+        let document: Value = serde_json::from_slice(json)
+            .map_err(|error| format!("result.json is not JSON: {error}"))?;
         let passed = match status.resolve(&document).and_then(Value::as_str) {
             Some("passed") => true,
             Some("failed") => false,

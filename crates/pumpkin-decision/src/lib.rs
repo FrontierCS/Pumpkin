@@ -12,7 +12,21 @@
 //! The rules by which the core authorizes ops and fills in their replies are in its `ops`
 //! module, and how it meters judge calls in its `jobs` module.
 
-use std::time::Duration;
+// Without `std`, the core can name none of its files, network, processes, environment, threads
+// or clock; `alloc` gives it what else it uses, such as `Vec` and `String`. It still reaches the
+// schema's I/O items (`tree::Writer`, `frame` over `std::io`, `PathBuf` paths) until the planned
+// purification moves them out of `pumpkin-schema`.
+#![no_std]
+// Forbidden, not only warned of as the workspace does, so that no `#[expect(unsafe_code)]` can
+// admit `core::arch`'s clock and random-number intrinsics, which need `unsafe`.
+#![forbid(unsafe_code)]
+
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::time::Duration;
 
 use pumpkin_schema::ir::{Name, Sha256Digest};
 use pumpkin_schema::sandbox::ExitStatus;
