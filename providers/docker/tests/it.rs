@@ -20,7 +20,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -91,14 +91,15 @@ impl Fixture {
 
     /// Starts a passive sandbox for role `role`, which runs as 4242:4243.
     fn start(&self, run: &RunTag, role: &str) -> Started {
-        self.try_start(run, role, &self.sandboxd, image(), None)
+        self.try_start(run, role, &self.sandboxd, image(), None, false)
             .unwrap()
     }
 
     /// Starts a sandbox for role `role` as the runtime does: creates what
     /// [`publish`](Self::publish) gives, and accepts its session where it dials, set up by the
-    /// startup the provider declares, taking ops within `ops` if it gives a limit. A sandbox
-    /// whose session fails is deleted, and the error quotes its console.
+    /// startup the provider declares, taking ops within `ops` if it gives a limit, and model
+    /// requests if `model`, which has the sandbox serve the model endpoint. A sandbox whose
+    /// session fails is deleted, and the error quotes its console.
     fn try_start(
         &self,
         run: &RunTag,
@@ -106,12 +107,13 @@ impl Fixture {
         sandboxd: &Path,
         image: Image,
         ops: Option<OpPayloadLimit>,
+        model: bool,
     ) -> Result<Started, String> {
-        let (create, listener) = self.publish(run, role, sandboxd, image, ops.is_some())?;
+        let (create, listener) = self.publish(run, role, sandboxd, image, ops.is_some(), model)?;
         let by = startup();
         let Created { id } = provider().create(&create)?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = listener.accept(by, ops, false, sender, |arrival| arrival);
+        let accepted = listener.accept(by, ops, model, sender, |arrival| arrival);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
@@ -138,8 +140,8 @@ impl Fixture {
     }
 
     /// Publishes `image` and `sandboxd` through the provider, and returns the create of a
-    /// sandbox of run `run` for role `role`, which runs them as 4242:4243, and the listener
-    /// where it dials.
+    /// sandbox of run `run` for role `role`, which runs them as 4242:4243, makes ops if `ops`
+    /// and serves the model endpoint if `model`, and the listener where it dials.
     fn publish(
         &self,
         run: &RunTag,
@@ -147,6 +149,7 @@ impl Fixture {
         sandboxd: &Path,
         image: Image,
         ops: bool,
+        model: bool,
     ) -> Result<(Create, Listener), String> {
         let dir = self.dir.join(role);
         fs::create_dir_all(&dir).unwrap();
@@ -169,6 +172,7 @@ impl Fixture {
             image,
             sandboxd,
             ops,
+            model,
             dial: Dial::Socket { dir },
         };
         Ok((create, listener))
@@ -506,10 +510,10 @@ fn judge() {
     );
 }
 
-/// What the role's code can reach, seen from inside the container, whether the container's
-/// users map to the host's as the engine's report says, and, seen from the host, the container's
-/// log, which `sandboxd` alone writes, and what `docker create` pinned that the daemon or the
-/// image would otherwise decide.
+/// What the role's code can reach, seen from inside the container, which was created to serve
+/// neither ops nor the model endpoint, whether the container's users map to the host's as the
+/// engine's report says, and, seen from the host, the container's log, which `sandboxd` alone
+/// writes, and what `docker create` pinned that the daemon or the image would otherwise decide.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn confinement() {
@@ -521,6 +525,7 @@ fn confinement() {
                 echo "interfaces: $(ls /sys/class/net)"
                 nc -w 2 1.1.1.1 80 </dev/null >/dev/null 2>&1
                 echo "outbound connect: exit $?"
+                echo "TCP listeners: $(awk '$4 == "0A"' /proc/net/tcp /proc/net/tcp6 | wc -l)"
                 grep -E '^(Cap|NoNewPrivs)' /proc/self/status
                 echo "uid=$(id -u) gid=$(id -g)"
                 echo "/.pumpkin holds:" $(ls /.pumpkin)
@@ -575,7 +580,7 @@ fn confinement() {
         &expect![[r#"
             Code(0)
             1.stderr: sh: can't create /tmp/x: Read-only file system; sh: can't create /.pumpkin/sandboxd: Read-only file system; sh: can't create /.pumpkin/gateway/x: Read-only file system; sh: can't create /etc/hosts: Permission denied; sh: can't create /proc/1/fd/1: Permission denied
-            1.stdout: interfaces: lo; outbound connect: exit 1; CapInh:	0000000000000000; CapPrm:	0000000000000000; CapEff:	0000000000000000; CapBnd:	0000000000000000; CapAmb:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; /.pumpkin holds: gateway sandboxd; /pumpkin holds: home in log out; sandboxctl ops: sandboxctl: sandboxd at /pumpkin/sandboxctl/socket can't be reached: No such file or directory (os error 2): run sandboxctl in a sandbox that serves ops; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; mqueue at /dev/mqueue; tmpfs at /dev/shm; tmpfs at /pumpkin; tmpfs at /tmp; /pumpkin: 4242:4243 755, 1048576 KiB; a program in /pumpkin: ran; /tmp/x: refused; /.pumpkin/sandboxd: refused; /.pumpkin/gateway/x: refused; /etc/hosts: refused; /workspace/x: writable; /volume/x: writable; /pumpkin/home/x: writable; /dev/shm/x: writable; /proc/1/fd/1: refused; /dev/mqueue/x: made
+            1.stdout: interfaces: lo; outbound connect: exit 1; TCP listeners: 0; CapInh:	0000000000000000; CapPrm:	0000000000000000; CapEff:	0000000000000000; CapBnd:	0000000000000000; CapAmb:	0000000000000000; NoNewPrivs:	1; uid=4242 gid=4243; /.pumpkin holds: gateway sandboxd; /pumpkin holds: home in log out; sandboxctl ops: sandboxctl: sandboxd at /pumpkin/sandboxctl/socket can't be reached: No such file or directory (os error 2): run sandboxctl in a sandbox that serves ops; cpu.max: 50000 100000; memory.max: 268435456; memory.swap.max: 0; pids.max: 4096; core file size: 0; mqueue at /dev/mqueue; tmpfs at /dev/shm; tmpfs at /pumpkin; tmpfs at /tmp; /pumpkin: 4242:4243 755, 1048576 KiB; a program in /pumpkin: ran; /tmp/x: refused; /.pumpkin/sandboxd: refused; /.pumpkin/gateway/x: refused; /etc/hosts: refused; /workspace/x: writable; /volume/x: writable; /pumpkin/home/x: writable; /dev/shm/x: writable; /proc/1/fd/1: refused; /dev/mqueue/x: made
             rootless or userns, exactly when the uid map isn't the identity: true
             log config: {"Type":"json-file","Config":{"max-file":"1","max-size":"1048576"}}
             init: false
@@ -698,7 +703,7 @@ fn failed_start() {
             ];
             let mut lines = Vec::new();
             for (role, sandboxd, image) in attempts {
-                let failed = fixture.try_start(&fixture.run, role, sandboxd, image, None);
+                let failed = fixture.try_start(&fixture.run, role, sandboxd, image, None, false);
                 lines.push(format!("{role}: {}", redact(fixture, &failed.unwrap_err())));
             }
             let left = containers(&fixture.run, "{{.ID}}").unwrap();
@@ -942,7 +947,8 @@ fn console() {
                 "#!/bin/sh\necho 'sandboxd: a stand-in, which exits without dialing' >&2\n";
             fs::write(&stand_in, script).unwrap();
             fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
-            let published = fixture.publish(&fixture.run, "stand-in", &stand_in, image(), false);
+            let published =
+                fixture.publish(&fixture.run, "stand-in", &stand_in, image(), false, false);
             let (create, _) = published.unwrap();
             let Created { id } = provider().create(&create).unwrap();
             // Docker finishes writing a container's log before it marks the container stopped,
@@ -966,6 +972,7 @@ const CTL: &str = r#"
 /// the session's owner answers ([`reply`]), and the gateway refuses a payload over the limit
 /// the sandbox was started with. `sandboxd` made the control socket's directory closed to all
 /// but the role's user, and `sandboxctl` is read-only, so writing it fails the last command.
+/// The sandbox, created to serve ops but not the model endpoint, has no TCP listener.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn ops() {
@@ -975,7 +982,7 @@ fn ops() {
             let payload = payload();
             let limit = OpPayloadLimit::try_from(u64::try_from(payload.len()).unwrap()).unwrap();
             let (sandboxd, ops) = (&fixture.sandboxd, Some(limit));
-            let sandbox = fixture.try_start(&fixture.run, "ops", sandboxd, image(), ops);
+            let sandbox = fixture.try_start(&fixture.run, "ops", sandboxd, image(), ops, false);
             let mut sandbox = sandbox.unwrap();
             let session = sandbox.session();
             let put = [Put::File(&relative("payload"), file_mode(), &payload)];
@@ -995,7 +1002,7 @@ fn ops() {
                 ctl status 2
                 ctl status 3
                 ctl judge train big
-                echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10)"
+                echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10); TCP listeners: $(awk '$4 == "0A"' /proc/net/tcp /proc/net/tcp6 | wc -l)"
                 echo > /.pumpkin/bin/sandboxctl"#
             );
             let process = session.start(launch(1, &script), hung()).unwrap();
@@ -1026,7 +1033,7 @@ fn ops() {
               {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
             $ sandboxctl judge train big: exit 1
               {"kind":"refused","message":"the payload is 2621441 bytes, more than the limit of 2621440: send at most 2621440"}
-            control socket's directory: drwx------
+            control socket's directory: drwx------; TCP listeners: 0
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
             owner: ops
@@ -1054,7 +1061,7 @@ fn refused_calls() {
         |fixture| {
             let ops = Some(OpPayloadLimit::try_from(64).unwrap());
             let sandboxd = &fixture.sandboxd;
-            let sandbox = fixture.try_start(&fixture.run, "refused", sandboxd, image(), ops);
+            let sandbox = fixture.try_start(&fixture.run, "refused", sandboxd, image(), ops, false);
             let mut sandbox = sandbox.unwrap();
             // A session for the second `sandboxd`, which it connects to and never serves.
             let second = Listener::bind(fixture.dir.join("refused/second")).unwrap();
@@ -1124,7 +1131,7 @@ fn turns() {
         |fixture| {
             let ops = Some(OpPayloadLimit::try_from(64).unwrap());
             let sandboxd = &fixture.sandboxd;
-            let sandbox = fixture.try_start(&fixture.run, "turns", sandboxd, image(), ops);
+            let sandbox = fixture.try_start(&fixture.run, "turns", sandboxd, image(), ops, false);
             let mut sandbox = sandbox.unwrap();
             // The owner holds the first op, and puts `in/held`, while the other callers arrive.
             // `sent` waits until a caller's `sandboxctl` sleeps, which it does only as it waits
@@ -1190,31 +1197,30 @@ fn turns() {
     );
 }
 
-/// A harness's requests to the model endpoint, from inside a sandbox, which has no network but
-/// loopback, and the test, as the session's owner, responding ([`respond`]). The endpoint listens
-/// on the loopback alone. Of eight requests at once, a full flight is held while the one past it is
-/// refused (503); then the flight is answered. A body far larger than its client's buffers arrives
-/// whole, though the client sends a byte past its request and reads only once `sandboxd` has
-/// stopped writing. Then a request is streamed whole, one cut short, one refused by the owner, and
-/// one ended without a head; one of HTTP/1.9 answered 204, then cut short, and one answered 103, an
-/// interim status, get nothing, and one of `HEAD` a head alone, though the owner sends data for
-/// each; and a chunked body, two lengths that differ, a length with a sign, a chunked body with a
-/// length, one over the protocol's bound, HTTP/1.0, of `HEAD` with a head alone and of `POST` with
-/// a body, and a head over the endpoint's bound are refused before they reach the session. A second
-/// `sandboxd`, which a command starts with `--model`, serves the endpoint, on a session of its own
-/// that takes model requests, since the provider starts none with it.
+/// A harness's requests to the model endpoint of a sandbox created to serve both it and ops, from
+/// inside the sandbox, which has no network but loopback, and the test, as the session's owner,
+/// responding ([`respond`]). The endpoint listens on the loopback alone. Of eight requests at once,
+/// a full flight is held while the one past it is refused (503); then the flight is answered. A
+/// body far larger than its client's buffers arrives whole, though the client sends a byte past its
+/// request and reads only once `sandboxd` has stopped writing. Then a request is streamed whole,
+/// one cut short, one refused by the owner, and one ended without a head; one of HTTP/1.9 answered
+/// 204, then cut short, and one answered 103, an interim status, get nothing, and one of `HEAD` a
+/// head alone, though the owner sends data for each; and a chunked body, two lengths that differ, a
+/// length with a sign, a chunked body with a length, one over the protocol's bound, HTTP/1.0, of
+/// `HEAD` with a head alone and of `POST` with a body, and a head over the endpoint's bound are
+/// refused before they reach the session.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn model_endpoint() {
     check(
         "model",
         |fixture| {
-            let mut sandbox = fixture.start(&fixture.run, "model");
-            let listener = Listener::bind(fixture.dir.join("model/second")).unwrap();
+            let ops = Some(OpPayloadLimit::try_from(64).unwrap());
+            let sandboxd = &fixture.sandboxd;
+            let sandbox = fixture.try_start(&fixture.run, "model", sandboxd, image(), ops, true);
+            let mut sandbox = sandbox.unwrap();
             let script = format!(
                 r#"
-                /.pumpkin/sandboxd /.pumpkin/gateway/second --model &
-                until [ -e ../in/up ]; do sleep 0.01; done
                 awk '$2 ~ /:{MODEL_PORT:04X}$/ && $4 == "0A" {{ print "listening on", $2 }}' /proc/net/tcp
                 post() {{ printf "$1" | nc -w 30 127.0.0.1 {MODEL_PORT} | tr -d '\r' | tr '\n' '|'; echo; }}
                 for n in 1 2 3 4 5 6 7 8; do post 'POST /held HTTP/1.1\r\n\r\n' > flight-$n & held="$held $!"; done
@@ -1245,15 +1251,9 @@ fn model_endpoint() {
             );
             let session = sandbox.session();
             let process = session.start(launch(1, &script), hung()).unwrap();
-            let (sender, models) = mpsc::channel();
-            let accepted = listener.accept(hung(), None, true, sender, |arrival| arrival);
-            let mut second = accepted.unwrap();
-            // Served once the second `sandboxd` serves the endpoint, which the clients wait for.
-            let up = [Put::Dir(&relative("up"), dir_mode())];
-            second.put(&absolute("/pumpkin/in"), &up, hung()).unwrap();
-            let mut asked = hold_flight(&mut sandbox, &models);
-            asked.push(respond_late(&mut sandbox, &mut second, &models));
-            let (status, rest) = serve_models(&mut sandbox, process, &models);
+            let mut asked = hold_flight(&mut sandbox);
+            asked.push(respond_late(&mut sandbox));
+            let (status, rest) = serve_models(&mut sandbox, process);
             asked.extend(rest);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(log(fixture, &mut sandbox));
@@ -1292,12 +1292,11 @@ fn model_endpoint() {
     );
 }
 
-/// Takes a full flight of model requests from `models`, then answers them once a command in the
-/// sandbox finds that the client past the flight was refused. Returns what they asked, each
-/// once.
-fn hold_flight(sandbox: &mut Started, models: &Receiver<Arrival>) -> Vec<String> {
+/// Takes a full flight of model requests, then answers them once a command in the sandbox finds
+/// that the client past the flight was refused. Returns what they asked, each once.
+fn hold_flight(sandbox: &mut Started) -> Vec<String> {
     let held: Vec<IncomingModelRequest> = (0..MAX_MODEL_REQUESTS_IN_FLIGHT)
-        .map(|_| next_model_request(models))
+        .map(|_| next_model_request(&sandbox.arrivals))
         .collect();
     let refused = "until grep -qs ' 503 ' flight-*; do sleep 0.01; done";
     assert_eq!(sh(sandbox, 2, refused), ExitStatus::Code(0));
@@ -1306,15 +1305,17 @@ fn hold_flight(sandbox: &mut Started, models: &Receiver<Arrival>) -> Vec<String>
     asked.iter().map(|line| format!("{line}, held")).collect()
 }
 
-/// Answers the request for `/late` from `models`, which arrive on `second` ([`respond`]), once
-/// its client has sent a byte past it, which `sandboxd` leaves unread, as a command in the
-/// sandbox finds. Returns what it asked.
-fn respond_late(sandbox: &mut Started, second: &mut Session, models: &Receiver<Arrival>) -> String {
-    let incoming = next_model_request(models);
+/// Answers the request for `/late` ([`respond`]) once its client has sent a byte past it, which
+/// `sandboxd` leaves unread, as a command in the sandbox finds. Returns what it asked.
+fn respond_late(sandbox: &mut Started) -> String {
+    let incoming = next_model_request(&sandbox.arrivals);
     // `sandboxd` has read the request, and reads no further, so the byte the client sends once
     // told to waits unread in `sandboxd`'s queue, where the command finds it.
     let late = [Put::Dir(&relative("late"), dir_mode())];
-    second.put(&absolute("/pumpkin/in"), &late, hung()).unwrap();
+    sandbox
+        .session()
+        .put(&absolute("/pumpkin/in"), &late, hung())
+        .unwrap();
     let unread = format!(
         "until awk '$2 ~ /:{MODEL_PORT:04X}$/ && $4 != \"0A\" && $5 !~ /:0+$/ {{ found = 1 }} \
          END {{ exit !found }}' /proc/net/tcp; do sleep 0.01; done"
@@ -1323,41 +1324,34 @@ fn respond_late(sandbox: &mut Started, second: &mut Session, models: &Receiver<A
     respond(incoming)
 }
 
-/// The next of `models`, which must be a model request that arrives within 30 s.
-fn next_model_request(models: &Receiver<Arrival>) -> IncomingModelRequest {
-    match models.recv_timeout(Duration::from_secs(30)) {
+/// The next of `arrivals`, which must be a model request that arrives within 30 s.
+fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
+    match arrivals.recv_timeout(Duration::from_secs(30)) {
         Ok(Arrival::ModelRequest(incoming)) => incoming,
         arrived => panic!("a model request was to arrive within 30 s, not {arrived:?}"),
     }
 }
 
 /// Waits for `process` to exit as the session's owner does, answering each model request that
-/// arrives on `models`, another session's, meanwhile ([`respond`]). Returns how it exited, which
-/// it has 30 s to, and what each request asked.
-fn serve_models(
-    sandbox: &mut Started,
-    process: Process,
-    models: &Receiver<Arrival>,
-) -> (ExitStatus, Vec<String>) {
-    let tick = Duration::from_millis(10);
-    let deadline = Instant::now() + Duration::from_secs(30);
+/// arrives meanwhile ([`respond`]). Returns how it exited, which it has 30 s to, and what each
+/// request asked.
+fn serve_models(sandbox: &mut Started, process: Process) -> (ExitStatus, Vec<String>) {
+    let deadline = Deadline::after(Duration::from_secs(30));
     let mut asked = Vec::new();
-    while Instant::now() < deadline {
-        match sandbox.arrivals.recv_timeout(tick) {
-            Ok(Arrival::Exited {
+    loop {
+        let left = deadline.remaining();
+        match left.and_then(|left| sandbox.arrivals.recv_timeout(left).ok()) {
+            Some(Arrival::Exited {
                 process: exited,
                 status,
             }) if exited == process => return (status, asked),
-            Err(RecvTimeoutError::Timeout) => {}
-            arrived => panic!("the command's exit was to arrive, not {arrived:?}"),
-        }
-        match models.recv_timeout(tick) {
-            Ok(Arrival::ModelRequest(incoming)) => asked.push(respond(incoming)),
-            Err(RecvTimeoutError::Timeout) => {}
-            arrived => panic!("a model request was to arrive, not {arrived:?}"),
+            Some(Arrival::ModelRequest(incoming)) => asked.push(respond(incoming)),
+            Some(arrival) => {
+                panic!("a model request or the command's exit was to arrive, not {arrival:?}")
+            }
+            None => panic!("the clients ran on for 30 s, having asked {asked:?}"),
         }
     }
-    panic!("the clients ran on for 30 s, having asked {asked:?}");
 }
 
 /// Responds to a model request as the session's owner: to `/headless` with a head too long for a

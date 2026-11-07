@@ -262,6 +262,7 @@ impl<'a> Suite<'a> {
             image: image.clone(),
             sandboxd: sandboxd.clone(),
             ops: false,
+            model: false,
             dial: Dial::Socket { dir },
         };
         let Created { id } = self.provider.create(&create).unwrap();
