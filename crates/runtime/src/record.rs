@@ -4,6 +4,8 @@
 //! Each run has a directory of its own, `<runs>/<id>/`, which [`create`] makes and names. It
 //! holds:
 //!
+//! - `driver.pid`: the pid of the process that drives the run, locked by it until the run's last
+//!   write: see [`Lock`] for the rule that makes the record's state readable;
 //! - `record.json`: `{"record_version": "pumpkin.record/v0"}`, the version of the record's
 //!   form ([`RECORD_VERSION`]), written first;
 //! - `ir.json`: the workflow's IR;
@@ -24,7 +26,7 @@
 //!   the run log's JSON form of an outcome (`log::outcome_json`); or
 //!   `{"state": "refused" | "failed", "reason": r}`.
 
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,12 +44,28 @@ use stdx::Context;
 /// new version.
 const RECORD_VERSION: &str = "pumpkin.record/v0";
 
+/// The lock on a record's `driver.pid`, an exclusive `flock` held until it is dropped, by the
+/// process that drives the run.
+///
+/// Only the holder writes the record, and drops the lock after the record's last write,
+/// `outcome.json`. So a record that has an `outcome.json` has ended, one whose lock is held is
+/// live, and one whose lock is free and has no `outcome.json` is lost: its driver ended without
+/// one. The lock goes when the process does, however it ends, and `docker` children don't
+/// inherit it, as [`File`]s are close-on-exec.
+#[derive(Debug)]
+pub(super) struct Lock {
+    _file: File,
+}
+
 /// Makes a new record directory in `runs`, creating `runs` if need be, and returns the run's
 /// id, which names the directory: `now` as a UTC time, and 8 random hexadecimal digits, as
-/// `20261028-131811-1a2b3c4d`, which sorts by time, and writes its `record.json`. Syncs each
-/// directory that gains an entry, so that the record's directory lasts. Fails, before it makes
-/// anything, if `now` is before the Unix epoch.
-pub(super) fn create(runs: &Path, now: SystemTime) -> Result<(String, PathBuf), String> {
+/// `20261028-131811-1a2b3c4d`, which sorts by time, with its `record.json` and its locked
+/// `driver.pid`. Syncs each directory that gains an entry, so that the record's directory lasts.
+/// Fails, before it makes anything, if `now` is before the Unix epoch.
+///
+/// The record is made as `.<id>.partial` and renamed to `<id>` once it is locked, so that
+/// nothing that reads `runs` sees a record before its lock.
+pub(super) fn create(runs: &Path, now: SystemTime) -> Result<(String, PathBuf, Lock), String> {
     let seconds = since_epoch(now)?.as_secs();
     create_dirs(runs)?;
     let mut random = [0; 4];
@@ -55,15 +73,282 @@ pub(super) fn create(runs: &Path, now: SystemTime) -> Result<(String, PathBuf), 
         .and_then(|mut urandom| urandom.read_exact(&mut random))
         .context("reading /dev/urandom for the run's id failed")?;
     let id = format!("{}-{:08x}", utc_stamp(seconds), u32::from_be_bytes(random));
+    let partial = runs.join(format!(".{id}.partial"));
+    fs::create_dir(&partial).context(partial.display())?;
     let dir = runs.join(&id);
-    fs::create_dir(&dir).context(dir.display())?;
-    sync_dir(runs)?;
+    match fill(&partial, &dir, runs) {
+        Ok(lock) => Ok((id, dir, lock)),
+        // What was made in `partial` is no record, and nothing else would remove it.
+        Err(error) => match fs::remove_dir_all(&partial) {
+            Ok(()) => Err(error),
+            Err(removing) if removing.kind() == io::ErrorKind::NotFound => Err(error),
+            Err(removing) => Err(format!(
+                "{error}; {} is left: {removing}",
+                partial.display()
+            )),
+        },
+    }
+}
+
+/// Writes the files of a new record into `partial`, which is empty, locks its `driver.pid`, and
+/// renames `partial` to `dir`, in `runs`.
+fn fill(partial: &Path, dir: &Path, runs: &Path) -> Result<Lock, String> {
     write_json(
-        &dir,
+        partial,
         "record.json",
         &json!({ "record_version": RECORD_VERSION }),
     )?;
-    Ok((id, dir))
+    let pid_path = partial.join("driver.pid");
+    let mut pid = File::create(&pid_path).context(pid_path.display())?;
+    pid.lock().context(pid_path.display())?;
+    writeln!(pid, "{}", std::process::id())
+        .and_then(|()| pid.sync_all())
+        .context(pid_path.display())?;
+    sync_dir(partial)?;
+    // A record directory is never empty, so the rename fails rather than replace one that an id
+    // collision names.
+    fs::rename(partial, dir).context(dir.display())?;
+    sync_dir(runs)?;
+    Ok(Lock { _file: pid })
+}
+
+/// A run's record on disk, found to be read: [`wait`](Self::wait) follows it to its end.
+#[derive(Debug)]
+pub struct Record {
+    id: String,
+    dir: PathBuf,
+}
+
+/// How a run ended, as its `outcome.json` says. A run that ended without a score has a
+/// sentence that follows its id and says why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// The run finished with a score.
+    Scored,
+    /// The run finished without a score: `finished without a score: <why>`.
+    Unscored(String),
+    /// The workflow was refused, or the run failed: `was refused: <reason>` or
+    /// `failed: <reason>`.
+    Failed(String),
+}
+
+impl Record {
+    /// The record in the directory `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `dir` is no directory, has no `record.json`, or has one that is not a record of
+    /// this version of Pumpkin.
+    pub fn open(dir: &Path) -> Result<Self, String> {
+        let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
+            return Err(format!(
+                "`{}` names no directory: expected the directory of a run's record",
+                dir.display()
+            ));
+        };
+        let path = dir.join("record.json");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !dir.is_dir() => {
+                return Err(format!(
+                    "{} is not a directory: expected the directory of a run's record",
+                    dir.display()
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "{} has no record.json, so it is no run's record: expected the directory \
+                     of one that `pumpkin run` made",
+                    dir.display()
+                ));
+            }
+            Err(error) => return Err(error).context(path.display()),
+        };
+        let record: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
+        if record["record_version"] != RECORD_VERSION {
+            return Err(format!(
+                "{} holds record_version {}: expected \"{RECORD_VERSION}\", which this \
+                 `pumpkin` reads",
+                path.display(),
+                record["record_version"]
+            ));
+        }
+        Ok(Self {
+            id: id.to_owned(),
+            dir: dir.to_owned(),
+        })
+    }
+
+    /// The record that `run`, a record's directory name, a prefix of it or of its 8 random
+    /// digits that no other record's name shares, names in `runs`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `run` is empty, if it names no record or several, which the error lists, if
+    /// `runs` can't be read, or as [`open`](Self::open) does.
+    pub fn find(runs: &Path, run: &str) -> Result<Self, String> {
+        if run.is_empty() {
+            return Err("the run is empty: name an id, a prefix of one, or a record's path".into());
+        }
+        let entries = fs::read_dir(runs).map_err(|error| {
+            format!(
+                "{}: {error}: expected the directory that runs are recorded in, as `--runs` \
+                 names it",
+                runs.display()
+            )
+        })?;
+        let mut found = Vec::new();
+        for entry in entries {
+            let entry = entry.context(runs.display())?;
+            let is_dir = entry.file_type().context(runs.display())?.is_dir();
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            // A name that starts with `.` is a record in the making, which isn't there yet.
+            if name.starts_with('.') || !is_dir {
+                continue;
+            }
+            let random = name
+                .rsplit_once('-')
+                .map_or(name.as_str(), |(_, random)| random);
+            if name.starts_with(run) || random.starts_with(run) {
+                found.push(name);
+            }
+        }
+        found.sort();
+        let [id] = found.as_slice() else {
+            return Err(if found.is_empty() {
+                format!(
+                    "no run in {} matches `{run}`: name an id, a unique prefix of an id or of \
+                     its random digits, or a record's path",
+                    runs.display()
+                )
+            } else {
+                let count = found.len();
+                let listed = found.join("\n  ");
+                format!("`{run}` matches {count} runs: name one by more of its id\n  {listed}")
+            });
+        };
+        Self::open(&runs.join(id))
+    }
+
+    /// The run's id, which is the name of its directory.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The record's directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Waits until the run has ended, and returns how: at once if its `outcome.json` is there.
+    /// Calls `following` first if the run is live, which is to say that the wait is a long one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the record has no `driver.pid`, as a record made before records were locked; if
+    /// the run is lost, its driver having ended without an `outcome.json`; if `outcome.json` is
+    /// not one this build knows; or if it or the lock can't be read.
+    pub fn wait(&self, following: impl FnOnce()) -> Result<Ending, String> {
+        let pid_path = self.dir.join("driver.pid");
+        let pid = match File::open(&pid_path) {
+            Ok(pid) => pid,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "{} has no driver.pid: it was made before records were locked, which \
+                     `wait` needs: name a record that this version of `pumpkin run` made",
+                    self.dir.display()
+                ));
+            }
+            Err(error) => return Err(error).context(pid_path.display()),
+        };
+        // An `outcome.json` is the record's last write, so it decides before the lock does.
+        if let Some(ending) = self.ended()? {
+            return Ok(ending);
+        }
+        match pid.try_lock_shared() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                following();
+                pid.lock_shared().context(pid_path.display())?;
+            }
+            Err(TryLockError::Error(error)) => return Err(error).context(pid_path.display()),
+        }
+        // The lock is free: the driver wrote its `outcome.json`, if it did, before it let go.
+        self.ended()?.ok_or_else(|| {
+            format!(
+                "run {id} is lost: its driver ended without writing outcome.json, so nothing says \
+                 how it ended: remove what it left, which is its containers, labelled \
+                 `pumpkin.run={id}`, and its socket directory, `pumpkin-{id}` in the temporary \
+                 directory",
+                id = self.id
+            )
+        })
+    }
+
+    /// How the run ended, if it has an `outcome.json`.
+    fn ended(&self) -> Result<Option<Ending>, String> {
+        let path = self.dir.join("outcome.json");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context(path.display()),
+        };
+        let outcome: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
+        let reason = outcome["reason"]
+            .as_str()
+            .unwrap_or("no reason is recorded");
+        match outcome["state"].as_str() {
+            Some("finished") if outcome["score"].is_null() => {
+                let why = unscored(&outcome);
+                Ok(Some(Ending::Unscored(format!(
+                    "finished without a score: {why}"
+                ))))
+            }
+            Some("finished") => Ok(Some(Ending::Scored)),
+            Some("refused") => Ok(Some(Ending::Failed(format!("was refused: {reason}")))),
+            Some("failed") => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
+            Some(_) | None => Err(format!(
+                "{}'s state is not one pumpkin knows: expected `finished`, `refused` or `failed`",
+                path.display()
+            )),
+        }
+    }
+}
+
+/// Why `outcome`, a finished run's `outcome.json`, has no score, from its verdict and how its
+/// work phase ended.
+fn unscored(outcome: &serde_json::Value) -> String {
+    let work_end = &outcome["work_end"];
+    let ended = match work_end["kind"].as_str() {
+        Some("deadline") => "at its deadline".to_owned(),
+        Some("finalized") => "when the agent finalized".to_owned(),
+        Some("agent_exited") => "when the agent exited".to_owned(),
+        Some("agent_failed") => {
+            let reason = work_end["reason"]
+                .as_str()
+                .unwrap_or("no reason is recorded");
+            format!("when the agent failed: {reason}")
+        }
+        Some(_) | None => "in a way this pumpkin doesn't know".to_owned(),
+    };
+    match outcome["verdict"]["kind"].as_str() {
+        Some("no_submission") => {
+            format!("the agent submitted nothing, and the work phase ended {ended}")
+        }
+        Some("no_result") => {
+            let failure = &outcome["verdict"]["failure"];
+            let kind = failure["kind"].as_str().unwrap_or("of an unknown kind");
+            let detail = failure["reason"]
+                .as_str()
+                .map_or_else(String::new, |r| format!(": {r}"));
+            format!(
+                "the final judge returned no result ({kind}{detail}), after the work phase ended {ended}"
+            )
+        }
+        Some(_) | None => format!("the verdict has no score, after the work phase ended {ended}"),
+    }
 }
 
 /// Makes `dir` and those of its ancestors that are missing, as [`fs::create_dir_all`] does,

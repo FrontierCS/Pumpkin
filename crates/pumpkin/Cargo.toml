@@ -22,6 +22,7 @@ toml.workspace = true
 xflags.workspace = true
 
 [dev-dependencies]
+provider = { path = "../provider" }
 expect-test.workspace = true
 
 [lints]

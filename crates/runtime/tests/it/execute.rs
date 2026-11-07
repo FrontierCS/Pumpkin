@@ -407,7 +407,7 @@ fn exits() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
@@ -438,7 +438,7 @@ fn crashes() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
@@ -474,7 +474,7 @@ fn stalls() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
@@ -508,7 +508,7 @@ fn unstarted() {
         MUTE,
         &expect![[r#"
             finished, with score None
-            record: ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
@@ -534,7 +534,7 @@ fn lost() {
         LOST,
         &expect![[r#"
             finished, with score None
-            record: ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}
@@ -561,7 +561,7 @@ fn undeletable() {
         UNDELETABLE,
         &expect![[r#"
             failed: deleting sandbox sim-1 failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/log/collected, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"reason":"deleting sandbox sim-1 failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"}
@@ -589,7 +589,7 @@ fn unpublished() {
         UNPUBLISHED,
         &expect![[r#"
             failed: publishing what the run's sandboxes run failed: /sim/unpublished can't be published by the simulated provider: name another path
-            record: ir.json, outcome.json, provider.json, record.json
+            record: driver.pid, ir.json, outcome.json, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"reason":"publishing what the run's sandboxes run failed: /sim/unpublished can't be published by the simulated provider: name another path","state":"failed"}
@@ -632,7 +632,7 @@ fn ops() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/1/log/collected, jobs/1/out/collected, jobs/2/log/collected, jobs/2/out/collected, jobs/2/out/result.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/1/log/collected, jobs/1/out/collected, jobs/2/log/collected, jobs/2/out/collected, jobs/2/out/result.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["slow", "xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -678,7 +678,7 @@ fn result_over_the_limit() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
             payloads hold: ["large"]
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -717,7 +717,7 @@ fn crashes_with_an_op_in_flight() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81, provider.json, record.json
+            record: agent/, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81, provider.json, record.json
             payloads hold: ["xxxxxxxxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
@@ -756,7 +756,7 @@ fn judge_starts_past_the_deadline() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -801,7 +801,7 @@ fn judge_stalls() {
         SANDBOXD,
         &expect![[r#"
             failed: deleting sandbox sim-3 failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, jobs/0/, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97, provider.json, record.json
             payloads hold: ["stall", "xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"reason":"deleting sandbox sim-3 failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"}
@@ -839,7 +839,7 @@ fn abandoned() {
         SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
-            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
             payloads hold: ["slow"]
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
@@ -880,7 +880,7 @@ fn reported_before_the_hard_end() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/out/collected, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -911,7 +911,7 @@ fn torn_down_past_the_hard_end() {
         LINGERING,
         &expect![[r#"
             failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
-            record: agent/log/collected, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
@@ -953,7 +953,7 @@ fn late_ops() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -997,7 +997,7 @@ fn model_requests() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -1049,7 +1049,7 @@ fn model_upstream_refusals() {
         SANDBOXD,
         &expect![[r#"
             failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","state":"failed"}
@@ -1103,7 +1103,7 @@ fn model_provider_down() {
         SANDBOXD,
         &expect![[r#"
             failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","state":"failed"}
@@ -1151,7 +1151,7 @@ fn model_barred_is_no_failure() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -1187,7 +1187,7 @@ fn model_provider_recovers() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -1230,7 +1230,7 @@ fn model_provider_down_at_the_deadline() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
@@ -1276,7 +1276,7 @@ fn model_stream_cut() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
             payloads hold: ["slow"]
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
@@ -1317,7 +1317,7 @@ fn model_finalize_cut() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -1426,7 +1426,7 @@ fn ops_on_docker() {
         sandboxd.to_str().unwrap(),
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/evidence.txt, jobs/0/out/result.json, jobs/1/log/command.stderr, jobs/1/log/command.stdout, jobs/1/out/evidence/, jobs/2/log/command.stderr, jobs/2/log/command.stdout, jobs/2/out/evidence/evidence.txt, jobs/2/out/result.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, driver.pid, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/evidence.txt, jobs/0/out/result.json, jobs/1/log/command.stderr, jobs/1/log/command.stdout, jobs/1/out/evidence/, jobs/2/log/command.stderr, jobs/2/log/command.stdout, jobs/2/out/evidence/evidence.txt, jobs/2/out/result.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["slow", "xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}

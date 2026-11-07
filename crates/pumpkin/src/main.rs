@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use std::{env, fmt, fs};
 
 use docker::{ContextName, Engine};
-use runtime::Run;
+use runtime::{Ending, Record, Run};
 use schema::ir;
 use stdx::Context;
 
@@ -37,14 +37,16 @@ mod flags {
         /// The operator's command line, which runs workflows.
         cmd pumpkin {
             /// Runs a workflow on the Docker engine that a context reaches, with its record in
-            /// `<runs>/<id>/`, and prints the record's `outcome.json`. Says so first if the
-            /// engine runs as root. Exits with 0 if the run finished with a score, 3 if it
+            /// `<runs>/<id>/`, and prints the record's `outcome.json`, a failed run's too. Says so
+            /// first if the engine runs as root. Exits with 0 if the run finished with a score, 3 if it
             /// finished without one, 2 on a usage error, and 1 on any other error, a workflow
-            /// it refuses and a run that failed included. A signal that ends it may leave the
+            /// it refuses and a run that failed included; every non-zero exit ends with a
+            /// `pumpkin:` line on the standard error that says why. A signal that ends it may leave the
             /// run's containers stopped but not removed (the engine lists them by the label
             /// `pumpkin.run=<id>`), its socket directory in the temporary directory, and its
             /// record without an `outcome.json`. To outlive a logout, run it under `tmux` or
-            /// `nohup`.
+            /// `nohup`. Its record is locked while it runs, so `pumpkin wait` follows it from
+            /// another shell.
             cmd run {
                 /// The workflow's IR, as JSON.
                 required ir: PathBuf
@@ -67,6 +69,23 @@ mod flags {
                 /// allows. `$HOME/.config/pumpkin/pumpkin.toml` by default.
                 optional --config file: PathBuf
             }
+
+            /// Waits until a run has ended, then prints its `outcome.json`, and exits as `run`
+            /// does: with 0 if the run finished with a score, 3 if it finished without one, 2 on
+            /// a usage error, and 1 on any other error, a run that was refused, failed or was
+            /// lost, because its driver ended without an `outcome.json`, included. Says why on
+            /// the standard error when the exit is not 0. It follows a run that `pumpkin run`
+            /// is still driving, and ending it does not stop the run. A record made before
+            /// records were locked has no `driver.pid`, and is refused.
+            cmd wait {
+                /// The run: its id, a prefix of its id or of the 8 random digits that end it,
+                /// that no other run in `--runs` shares, or the path of its record, which has a
+                /// `/`.
+                required run: String
+                /// The directory runs are recorded in: `$HOME/.local/share/pumpkin/runs` by
+                /// default.
+                optional --runs dir: PathBuf
+            }
         }
     }
     // generated start
@@ -80,6 +99,7 @@ mod flags {
     #[derive(Debug)]
     pub enum PumpkinCmd {
         Run(Run),
+        Wait(Wait),
     }
 
     #[derive(Debug)]
@@ -90,6 +110,13 @@ mod flags {
         pub sandboxd: PathBuf,
         pub runs: Option<PathBuf>,
         pub config: Option<PathBuf>,
+    }
+
+    #[derive(Debug)]
+    pub struct Wait {
+        pub run: String,
+
+        pub runs: Option<PathBuf>,
     }
 
     impl Pumpkin {
@@ -122,6 +149,7 @@ fn main() -> ExitCode {
             runs,
             config,
         })) => run(&ir, docker_context, &sandboxd, runs, config),
+        Ok(flags::PumpkinCmd::Wait(flags::Wait { run, runs })) => wait(&run, runs),
         Err(error) if error.is_help() => error.exit(),
         // A usage error exits with 2, as xflags exits, apart from the command's errors.
         Err(error) => {
@@ -180,12 +208,59 @@ fn run(
         run.id(),
         dir.display()
     ));
-    let exit = match run.execute(&engine, sandboxd)?.score() {
-        Some(_) => ExitCode::SUCCESS,
-        None => ExitCode::from(3),
+    match run.execute(&engine, sandboxd) {
+        // The run's lock is released, so its record says how it ended at once.
+        Ok(_) => {
+            let record = Record::open(&dir)?;
+            let ending = record.wait(|| {})?;
+            end(&record, &ending)
+        }
+        // `execute` wrote the failed run's `outcome.json` before it returned.
+        Err(reason) => match print_outcome(&dir) {
+            Ok(()) => Err(reason),
+            Err(printing) => Err(format!("{reason}; {printing}")),
+        },
+    }
+}
+
+/// Waits until the run that `run` names in `runs`, or [`default_runs`], has ended, and prints its
+/// outcome; returns the exit status that `wait`'s help gives.
+fn wait(run: &str, runs: Option<PathBuf>) -> Result<ExitCode, String> {
+    // A path needs no runs directory, and so no `HOME`.
+    let record = if run.contains('/') {
+        Record::open(Path::new(run))?
+    } else {
+        let runs = match runs {
+            Some(runs) => runs,
+            None => default_runs()?,
+        };
+        Record::find(&runs, run)?
     };
-    print_outcome(&dir)?;
-    Ok(exit)
+    let ending = record.wait(|| {
+        say(format_args!(
+            "following run {}: ending `pumpkin wait` does not stop it",
+            record.id()
+        ));
+    })?;
+    end(&record, &ending)
+}
+
+/// Prints the outcome of `record`, a run that has `ended`, and returns the exit status that
+/// `run`'s and `wait`'s help give; a run without a score says why on the standard error.
+fn end(record: &Record, ending: &Ending) -> Result<ExitCode, String> {
+    print_outcome(record.dir())?;
+    let id = record.id();
+    Ok(match ending {
+        Ending::Scored => ExitCode::SUCCESS,
+        Ending::Unscored(why) => {
+            say(format_args!("run {id} {why}"));
+            ExitCode::from(3)
+        }
+        Ending::Failed(why) => {
+            say(format_args!("run {id} {why}"));
+            ExitCode::FAILURE
+        }
+    })
 }
 
 /// `$HOME/.local/share/pumpkin/runs`.

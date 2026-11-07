@@ -133,6 +133,9 @@ provider's answers, until the agent finalizes, the work phase ends, or the provi
 route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
+- **Architecture Invariant:** a record appears in the runs directory only once its `driver.pid`
+  is locked (`Lock`), and the lock is held until the run's last write, so a record is ended, live
+  or lost, by `outcome.json` and then the lock, and a record without `driver.pid` is not one.
 - **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends
   on no provider's crate, only its tests do, so a new provider changes no runtime code.
 - **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
@@ -142,9 +145,9 @@ route's key.
 
 **`crates/pumpkin`.** `pumpkin`, the operator's command line: `run` reaches the engine of a
 named Docker context and runs a workflow on it with `Run`: it reaches a run's provider and hands
-it to `Run` as a `Provider`. It reads the deployment's configuration (`config`, TOML): the model
-upstreams that a workflow's model route may reach, of which it hands `Run` the one that serves
-the route (`Serving`).
+it to `Run` as a `Provider`. `wait` follows a run's record (`Record`) to its end. It reads the
+deployment's configuration (`config`, TOML): the model upstreams that a workflow's model route
+may reach, of which it hands `Run` the one that serves the route (`Serving`).
 
 **`crates/harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
