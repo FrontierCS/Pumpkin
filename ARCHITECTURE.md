@@ -77,10 +77,10 @@ consoles.
 - **Architecture Invariant:** every call on sandboxes names its run and keeps to that run's, by
   its tag, so runs that share a provider never reach each other's sandboxes.
 
-**`providers/docker`.** `pumpkin-docker`, a sandbox as a container that needs no root to start:
+**`providers/docker`.** `docker`, a sandbox as a container that needs no root to start:
 `Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), is
 the `Provider` that makes each sandbox a container, and builds images, each tagged by its build's
-inputs. A provider is `providers/<name>`, crate `pumpkin-<name>`, which holds its platform's
+inputs. A provider is `providers/<name>`, crate `<name>`, which holds its platform's
 calls and its sandboxes' confinement.
 - **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
   its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider

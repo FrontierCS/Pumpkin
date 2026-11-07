@@ -1,5 +1,5 @@
 [package]
-name = "pumpkin-docker"
+name = "docker"
 version = "0.0.0"
 description = "Pumpkin's Docker provider: a sandbox for a role as a container that needs no root to start"
 edition.workspace = true

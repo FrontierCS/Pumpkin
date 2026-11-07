@@ -83,6 +83,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aeda16ab4059c5fd2a83f2b9c9e9c981327b18aa8e3b313f7e6563799d4f093e"
 
 [[package]]
+name = "docker"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "gateway",
+ "provider",
+ "schema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stdx",
+]
+
+[[package]]
 name = "expect-test"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,8 +224,8 @@ dependencies = [
 name = "pumpkin"
 version = "0.0.0"
 dependencies = [
+ "docker",
  "expect-test",
- "pumpkin-docker",
  "route",
  "runtime",
  "schema",
@@ -220,20 +234,6 @@ dependencies = [
  "stdx",
  "toml",
  "xflags",
-]
-
-[[package]]
-name = "pumpkin-docker"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "gateway",
- "provider",
- "schema",
- "serde",
- "serde_json",
- "sha2",
- "stdx",
 ]
 
 [[package]]
@@ -276,10 +276,10 @@ name = "runtime"
 version = "0.0.0"
 dependencies = [
  "decision",
+ "docker",
  "expect-test",
  "gateway",
  "provider",
- "pumpkin-docker",
  "route",
  "schema",
  "serde_json",

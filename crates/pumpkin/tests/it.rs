@@ -23,8 +23,8 @@ use std::process::Command;
 use std::thread::JoinHandle;
 use std::{env, fs, iter, thread};
 
+use docker::{ContextName, Engine};
 use expect_test::{Expect, expect};
-use pumpkin_docker::{ContextName, Engine};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
 use stdx::process::Environment;

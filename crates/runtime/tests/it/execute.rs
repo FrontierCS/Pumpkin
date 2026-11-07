@@ -18,10 +18,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, iter};
 
+use ::docker::Engine;
 use decision::lasts;
 use expect_test::{Expect, expect};
 use provider::Provider;
-use pumpkin_docker::Engine;
 use route::Serving;
 use runtime::Run;
 use schema::ir::{self, ModelName};
