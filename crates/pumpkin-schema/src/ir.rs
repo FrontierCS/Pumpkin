@@ -211,8 +211,6 @@ impl Egress {
 pub struct ModelRoute {
     /// The models that requests may name.
     pub models: Models,
-    /// The cap on the role's model spending over a run, in millionths of a US dollar.
-    pub budget_microusd: NonZeroU64,
 }
 
 /// The pattern that drives a run.

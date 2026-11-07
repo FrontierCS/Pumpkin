@@ -377,7 +377,7 @@ fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
 
 /// `ir`, with a model route for its agent that allows `m-large`.
 fn routed(mut ir: Value) -> Value {
-    let route = json!({ "models": ["m-large"], "budget_microusd": 1 });
+    let route = json!({ "models": ["m-large"] });
     ir["roles"][0]["egress"] = json!({ "model": route });
     ir
 }

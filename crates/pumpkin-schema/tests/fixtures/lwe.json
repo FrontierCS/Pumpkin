@@ -31,7 +31,7 @@
         }
       },
       "egress": {
-        "model": { "models": ["gpt-6-astra"], "budget_microusd": 100000000 }
+        "model": { "models": ["gpt-6-astra"] }
       }
     },
     {
