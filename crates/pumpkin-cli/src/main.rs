@@ -1,6 +1,7 @@
 //! `pumpkin`, the operator's command line. [`flags`] holds its grammar and describes each
 //! command, as `pumpkin --help` prints it. `run` runs a workflow with
-//! [`pumpkin::driver::run`], on the Docker provider.
+//! [`pumpkin::driver::run`], on the Docker provider, and [`config`] reads the deployment's
+//! configuration.
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,8 @@ use pumpkin::driver::run::Run;
 use pumpkin_docker::{ContextName, Engine};
 use pumpkin_schema::ir;
 use stdx::Context;
+
+mod config;
 
 /// The grammar of `pumpkin`'s command line, from which xflags generates its parser, the types
 /// below and `--help`.
@@ -54,6 +57,14 @@ mod flags {
                 /// The directory runs are recorded in: `$HOME/.local/share/pumpkin/runs` by
                 /// default.
                 optional --runs dir: PathBuf
+                /// The deployment's configuration, read only for a workflow with a model
+                /// route: a TOML file whose `[upstreams.<name>]` tables each give an upstream
+                /// the route may reach, with the base `url` of its API, the `key_file` that
+                /// holds its key, below the configuration's directory unless absolute, and the
+                /// `models` it serves, each with the `name` a route allows and the
+                /// `upstream_name` the upstream takes for it. No model is listed twice.
+                /// `$HOME/.config/pumpkin/pumpkin.toml` by default.
+                optional --config file: PathBuf
             }
         }
     }
@@ -77,6 +88,7 @@ mod flags {
         pub docker_context: String,
         pub sandboxd: PathBuf,
         pub runs: Option<PathBuf>,
+        pub config: Option<PathBuf>,
     }
 
     impl Pumpkin {
@@ -107,7 +119,8 @@ fn main() -> ExitCode {
             docker_context,
             sandboxd,
             runs,
-        })) => run(&ir, docker_context, &sandboxd, runs),
+            config,
+        })) => run(&ir, docker_context, &sandboxd, runs, config),
         Err(error) if error.is_help() => error.exit(),
         // A usage error exits with 2, as xflags exits, apart from the command's errors.
         Err(error) => {
@@ -126,22 +139,32 @@ fn main() -> ExitCode {
 
 /// Runs the workflow whose IR is at `path` on the engine that the context named `context`
 /// reaches, with `sandboxd` in every sandbox, records it in `runs`, or [`default_runs`], and
-/// prints its outcome; returns the exit status that `run`'s help gives.
+/// prints its outcome; returns the exit status that `run`'s help gives. A workflow with a model
+/// route has its deployment's configuration read from `config`, or [`default_config`].
 fn run(
     path: &Path,
     context: String,
     sandboxd: &Path,
     runs: Option<PathBuf>,
+    config: Option<PathBuf>,
 ) -> Result<ExitCode, String> {
-    // The IR, the context's name and the runs directory are checked before the engine is reached,
-    // so a mistake in them needs no engine. A wrong `sandboxd` is not: it is first used when the
-    // run publishes it, which is after the engine is reached and the record is begun.
+    // The IR, the context's name, the runs directory and the configuration are checked before
+    // the engine is reached, so a mistake in them needs no engine. A wrong `sandboxd` is not: it
+    // is first used when the run publishes it, which is after the engine is reached and the
+    // record is begun.
     let context = ContextName::try_from(context)?;
     let runs = match runs {
         Some(runs) => runs,
         None => default_runs()?,
     };
     let ir = read_ir(path)?;
+    if ir.roles.iter().any(|role| role.egress.model.is_some()) {
+        let config = match config {
+            Some(config) => config,
+            None => default_config()?,
+        };
+        config::read(&config)?;
+    }
     let engine = engine(context)?;
     let run = Run::prepare(&ir, &runs, SystemTime::now())?;
     let dir = run.dir().to_owned();
@@ -160,12 +183,22 @@ fn run(
 
 /// `$HOME/.local/share/pumpkin/runs`.
 fn default_runs() -> Result<PathBuf, String> {
-    // From `HOME` alone, not `XDG_DATA_HOME`: a run already reads `HOME`, for `docker`, so
-    // where its record goes takes no variable of its own.
-    let home = env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .ok_or("HOME is unset or empty: set it, or name a directory with `--runs`")?;
-    Ok(PathBuf::from(home).join(".local/share/pumpkin/runs"))
+    Ok(home("name a directory with `--runs`")?.join(".local/share/pumpkin/runs"))
+}
+
+/// `$HOME/.config/pumpkin/pumpkin.toml`.
+fn default_config() -> Result<PathBuf, String> {
+    Ok(home("name the configuration with `--config`")?.join(".config/pumpkin/pumpkin.toml"))
+}
+
+/// The home directory, `HOME`; failing without one, the error says what the operator can do
+/// `instead`.
+fn home(instead: &str) -> Result<PathBuf, String> {
+    // From `HOME` alone, not `XDG_DATA_HOME` or `XDG_CONFIG_HOME`: a run already reads `HOME`,
+    // for `docker`, so where its files are takes no variable of its own.
+    let home = env::var_os("HOME").filter(|home| !home.is_empty());
+    home.map(PathBuf::from)
+        .ok_or_else(|| format!("HOME is unset or empty: set it, or {instead}"))
 }
 
 /// The workflow IR in the file at `path`.
