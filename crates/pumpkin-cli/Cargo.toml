@@ -15,6 +15,7 @@ doc = false
 [dependencies]
 pumpkin = { path = "../pumpkin" }
 pumpkin-docker = { path = "../../providers/docker" }
+pumpkin-model-route = { path = "../pumpkin-model-route" }
 pumpkin-schema = { path = "../pumpkin-schema" }
 stdx = { path = "../stdx" }
 serde.workspace = true

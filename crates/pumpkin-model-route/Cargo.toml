@@ -1,0 +1,22 @@
+[package]
+name = "pumpkin-model-route"
+version = "0.0.0"
+description = "The model route: what the host admits of an agent's model requests, and how it forwards them upstream"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+pumpkin-gateway = { path = "../pumpkin-gateway" }
+pumpkin-schema = { path = "../pumpkin-schema" }
+stdx = { path = "../stdx" }
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

@@ -9,7 +9,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -20,9 +20,9 @@ use std::{fs, iter};
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::run::Run;
-use pumpkin::model_route::Serving;
 use pumpkin_decision::lasts;
 use pumpkin_docker::Engine;
+use pumpkin_model_route::Serving;
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{self, ModelName};
 use pumpkin_schema::provider::{Listed, RunTag};
@@ -31,7 +31,6 @@ use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::{Value, json};
 
 use crate::docker;
-use crate::model_route::upstream::{read_request, write_chunk};
 use crate::run::{Runs, compact, files, serving};
 use crate::sim::{self, LINGERING, LOST, MUTE, SLOW, Sim, UNDELETABLE, UNPUBLISHED};
 
@@ -1008,9 +1007,9 @@ fn model_requests() {
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the work phase has ended, and with it the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":null},"seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the work phase has ended, and with it the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":null},"seq":7}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":8}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 673 bytes","seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":10}
@@ -1064,7 +1063,7 @@ fn model_upstream_refusals() {
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":10}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 966 bytes","seq":11}
             {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":12}
@@ -1118,7 +1117,7 @@ fn model_provider_down() {
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
             {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 750 bytes","seq":12}
@@ -1136,6 +1135,43 @@ fn model_provider_down() {
             the model endpoint at each create: [true]
             listed once it ended: []
             a stalled stream's client hung up before the agent's teardown was to end"#]],
+    );
+}
+
+/// A run whose agent exits after a request that the route barred, which the model provider never
+/// saw: the barred request is no failure of the provider, so the run is scored as usual, where
+/// a 502 as the last answer would fail it ([`model_provider_down`]).
+#[test]
+fn model_barred_is_no_failure() {
+    let argv = ["ops", "model m-large stream", "model m-huge stream", "exit"];
+    check(
+        "model-barred",
+        &Sim::new(),
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":6}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 450 bytes","seq":7}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            the model endpoint at each create: [true]
+            listed once it ended: []"#]],
     );
 }
 
@@ -1457,4 +1493,31 @@ fn unix_ns() -> u64 {
 /// A time or duration of the log's, a decimal string of nanoseconds, as a number.
 fn nanos(value: &Value) -> Option<u64> {
     value.as_str()?.parse().ok()
+}
+
+/// Writes `text` as one chunk of a chunked body: the last, if it is empty.
+fn write_chunk(connection: &mut TcpStream, text: &str) {
+    write!(connection, "{:x}\r\n{text}\r\n", text.len()).unwrap();
+}
+
+/// A request's line, its headers and its body.
+fn read_request(reader: &mut impl BufRead) -> (String, Vec<(String, String)>, Vec<u8>) {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let mut headers = Vec::new();
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).unwrap();
+        let Some((name, value)) = header.trim_end().split_once(": ") else {
+            break;
+        };
+        if name == "content-length" {
+            length = value.parse().unwrap();
+        }
+        headers.push((name.to_owned(), value.to_owned()));
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    (line.trim_end().to_owned(), headers, body)
 }

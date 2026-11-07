@@ -11,12 +11,12 @@ test = false
 [dependencies]
 pumpkin-decision = { path = "../pumpkin-decision" }
 pumpkin-gateway = { path = "../pumpkin-gateway" }
+pumpkin-model-route = { path = "../pumpkin-model-route" }
 pumpkin-provider = { path = "../pumpkin-provider" }
 pumpkin-schema = { path = "../pumpkin-schema" }
 stdx = { path = "../stdx" }
 serde_json.workspace = true
 sha2.workspace = true
-ureq.workspace = true
 
 [dev-dependencies]
 pumpkin-docker = { path = "../../providers/docker" }

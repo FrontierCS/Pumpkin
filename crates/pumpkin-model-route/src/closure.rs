@@ -63,7 +63,7 @@ pub struct Route {
 /// A model request that keeps the route closed, ready to go upstream. Only [`Route::close`]
 /// makes one.
 #[derive(Debug)]
-pub struct Closed {
+pub(crate) struct Closed {
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Vec<u8>,
     /// The model that the request named, and the name that its upstream takes for it, which
@@ -74,7 +74,7 @@ pub struct Closed {
 /// Why the route answers a model request with an error, which [`Refusal::answer`] tells its
 /// client: a rule broken, the route's end, or an upstream's answer missing or not passed on.
 #[derive(Debug)]
-pub struct Refusal {
+pub(crate) struct Refusal {
     status: Status,
     message: String,
 }
@@ -107,8 +107,8 @@ impl Route {
     ///
     /// # Errors
     ///
-    /// Refuses a request that breaks a rule that [the route's docs](crate::model_route) give.
-    pub fn close(&self, request: &ModelRequest) -> Result<Closed, Refusal> {
+    /// Refuses a request that breaks a rule that [the route's docs](crate) give.
+    pub(crate) fn close(&self, request: &ModelRequest) -> Result<Closed, Refusal> {
         let ModelRequest {
             method,
             path,
@@ -176,12 +176,12 @@ impl Route {
 
 impl Closed {
     /// The request's headers that pass upstream.
-    pub fn headers(&self) -> &[(HeaderName, HeaderValue)] {
+    pub(crate) fn headers(&self) -> &[(HeaderName, HeaderValue)] {
         &self.headers
     }
 
     /// The request's body, as [`Route::close`] parsed it.
-    pub fn body(&self) -> &[u8] {
+    pub(crate) fn body(&self) -> &[u8] {
         &self.body
     }
 
@@ -244,6 +244,15 @@ impl Refusal {
         }
     }
 
+    /// How [`Upstream::serve`](super::Upstream::serve) answers its client with the refusal of a
+    /// request that never reached the upstream.
+    pub(crate) fn barred(&self) -> Answer {
+        Answer::Barred {
+            status: self.status.code(),
+            message: self.message.clone(),
+        }
+    }
+
     /// Answers `request` with the refusal by `by` ([`IncomingModelRequest::respond`]): its
     /// status, with `allow: POST` for a 405, and its message in a JSON error,
     /// `{"error": {"message", "type", "param", "code"}}`, whose `type` is
@@ -253,7 +262,7 @@ impl Refusal {
     /// # Errors
     ///
     /// Fails if `by` passes first, or if the session has ended.
-    pub fn answer(self, request: IncomingModelRequest, by: Deadline) -> io::Result<()> {
+    pub(crate) fn answer(self, request: IncomingModelRequest, by: Deadline) -> io::Result<()> {
         let Self { status, message } = self;
         let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
         // A 4xx is a request for its client to mend, which a client takes as final rather than

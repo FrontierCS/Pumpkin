@@ -1,5 +1,4 @@
-//! Pumpkin's host side: the [`driver`], and the [`model_route`] through which an agent reaches
-//! its model.
+//! Pumpkin's host side: the [`driver`]. An agent reaches its model through
+//! [`pumpkin_model_route`], which the driver's runtime serves.
 
 pub mod driver;
-pub mod model_route;

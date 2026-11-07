@@ -1,16 +1,15 @@
 //! The agent's model route, as a run serves it ([`Served`]), by the rules of
-//! [`model_route`](crate::model_route).
+//! [`pumpkin_model_route`].
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
 use pumpkin_gateway::IncomingModelRequest;
+use pumpkin_model_route::{Answer, Route, Serving, Upstream};
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::workflow::Workflow;
 use stdx::{Deadline, unpoisoned};
-
-use crate::model_route::{Answer, Refusal, Route, Serving, Upstream};
 
 /// The agent's model route, as the run serves it: the route that closes its requests, and the
 /// upstream that they reach.
@@ -114,10 +113,10 @@ impl Served {
     }
 
     /// Answers `incoming`, the agent's model request numbered `number`, by `by`: refuses it
-    /// unless `allowed`, or once the model provider has refused the key, and else closes it and
-    /// forwards it upstream, which is given up on at `by` too. It gives `note` a note on a
-    /// request that it forwards, before it does, and tells `answered` how it answered the
-    /// request, before the answer's end is written.
+    /// unless `allowed`, or once the model provider has refused the key, and else forwards it
+    /// upstream ([`Upstream::serve`]). It gives `note` a note on a request that it forwards,
+    /// before it does, and tells `answered` how it answered the request, before the answer's end
+    /// is written.
     pub(super) fn serve(
         &self,
         number: u64,
@@ -127,30 +126,13 @@ impl Served {
         note: impl FnOnce(String),
         answered: impl FnOnce(Answer),
     ) {
-        let taken = if !allowed {
-            Err(Refusal::ended())
-        } else if let Some(refused) = self.upstream.key_refused() {
-            Err(refused)
-        } else {
-            self.route.close(&incoming.request)
+        let forwarding = || note(format!("model request {number} goes upstream"));
+        let answered = |answer| {
+            self.bear(number, &answer);
+            answered(answer);
         };
-        // Whether the answer reached the agent isn't told: writing it fails only for a
-        // response's head too long for a frame, or as the agent's session ends, which the run
-        // log shows.
-        let _ = match taken {
-            Ok(closed) => {
-                note(format!("model request {number} goes upstream"));
-                let answered = |answer| {
-                    self.bear(number, &answer);
-                    answered(answer);
-                };
-                self.upstream.forward(&closed, incoming, by, by, answered)
-            }
-            Err(refusal) => {
-                answered(refusal.answered(None, None));
-                refusal.answer(incoming, by)
-            }
-        };
+        self.upstream
+            .serve(&self.route, incoming, allowed, by, forwarding, answered);
     }
 
     /// Notes how the route answered request `number`, if the route is open, in what the
@@ -158,6 +140,9 @@ impl Served {
     fn bear(&self, number: u64, answer: &Answer) {
         let mut health = unpoisoned(self.health.lock());
         if health.ended {
+            return;
+        }
+        if matches!(answer, Answer::Barred { .. }) {
             return;
         }
         health.failing = match failure(answer) {
@@ -184,7 +169,7 @@ impl Served {
     ///
     /// Fails, naming the upstream or the fault, if the provider failed the agent so.
     pub(super) fn upstream_held(&self, exited_unfinalized: bool) -> Result<(), String> {
-        if self.upstream.key_refused().is_some() {
+        if self.upstream.key_was_refused() {
             return Err(format!(
                 "the upstream `{}` refused its key, with a 401, which ended the agent's model \
                  route: give it a key that it takes, and run again",
@@ -228,6 +213,7 @@ fn failure(answer: &Answer) -> Option<String> {
             300..=399 | 401..=404 | 408 | 429 | 500..=u16::MAX => Some(status.to_string()),
         },
         Answer::Cut { status, .. } => Some(format!("{status}, cut short")),
+        Answer::Barred { .. } => None,
         Answer::Refused {
             upstream_status: Some(status @ (401 | 403)),
             ..

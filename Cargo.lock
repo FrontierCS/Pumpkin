@@ -178,12 +178,12 @@ dependencies = [
  "pumpkin-decision",
  "pumpkin-docker",
  "pumpkin-gateway",
+ "pumpkin-model-route",
  "pumpkin-provider",
  "pumpkin-schema",
  "serde_json",
  "sha2",
  "stdx",
- "ureq",
 ]
 
 [[package]]
@@ -193,6 +193,7 @@ dependencies = [
  "expect-test",
  "pumpkin",
  "pumpkin-docker",
+ "pumpkin-model-route",
  "pumpkin-schema",
  "serde",
  "serde_json",
@@ -242,6 +243,18 @@ dependencies = [
  "pumpkin-schema",
  "serde_json",
  "stdx",
+]
+
+[[package]]
+name = "pumpkin-model-route"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "pumpkin-gateway",
+ "pumpkin-schema",
+ "serde_json",
+ "stdx",
+ "ureq",
 ]
 
 [[package]]

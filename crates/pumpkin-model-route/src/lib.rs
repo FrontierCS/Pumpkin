@@ -7,8 +7,8 @@
 //! provider's, neither the state it keeps nor the tools it runs nor the URLs it fetches, so that
 //! a response carries nothing but what its own request sent.
 //!
-//! [`Route::close`] admits a request as a [`Closed`] one, and [`Refusal::answer`] tells the
-//! client why it refuses one. It admits a request that:
+//! [`Upstream::serve`] answers each request: the [`Route`] admits a request, or the client hears
+//! why it is refused. The route admits a request that:
 //!
 //! - is `POST /responses`, the one endpoint through which a harness samples its model;
 //! - passes on only the headers that the harness that runs use sends, each with a value that
@@ -34,7 +34,7 @@
 //! target is not `/responses`, 405 if the method is not `POST`, and 400 for any other rule
 //! broken.
 //!
-//! [`Upstream::forward`] sends a closed request to the model provider, streams back its
+//! [`Upstream::serve`] sends an admitted request to the model provider, streams back its
 //! response, and says how it answered ([`Answer`]). A run serves its route as [`Serving`] says.
 //!
 //! [`ModelRequest`]: pumpkin_gateway::ModelRequest
@@ -42,5 +42,5 @@
 mod closure;
 mod upstream;
 
-pub use closure::{Closed, Refusal, Route};
+pub use closure::Route;
 pub use upstream::{Answer, Key, Serving, Upstream, UpstreamUrl};
