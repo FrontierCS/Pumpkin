@@ -16,7 +16,8 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::run::Run;
-use pumpkin_schema::ir;
+use pumpkin::model_route::{Key, Serving, Upstream, UpstreamUrl};
+use pumpkin_schema::ir::{self, ModelName, Name};
 use serde_json::Value;
 
 const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json");
@@ -46,12 +47,16 @@ impl Drop for Runs {
 }
 
 /// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its
-/// own, and checks what becomes of each: whether the run is prepared, named by its id, or how
-/// it is refused; and its record, if it has one: its name, its files, and what they hold.
-fn check(cases: impl IntoIterator<Item = (i64, Value)>, expect: &Expect) {
+/// own, with an upstream that serves each model it names, if it names any, and checks what
+/// becomes of each: whether the run is prepared, named by its id, or how it is refused; and its
+/// record, if it has one: its name, its files, and what they hold.
+fn check(
+    cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
+    expect: &Expect,
+) {
     let runs = Runs::new("prepare");
     let mut lines = Vec::new();
-    for (index, (seconds, value)) in cases.into_iter().enumerate() {
+    for (index, (seconds, value, served)) in cases.into_iter().enumerate() {
         let ir: ir::Workflow = serde_json::from_value(value.clone()).unwrap();
         let dir = runs.dir.join(index.to_string());
         let from_epoch = Duration::from_secs(seconds.unsigned_abs());
@@ -60,7 +65,9 @@ fn check(cases: impl IntoIterator<Item = (i64, Value)>, expect: &Expect) {
         } else {
             UNIX_EPOCH + from_epoch
         };
-        let prepared = Run::prepare(&ir, &dir, now);
+        let url = "http://127.0.0.1:9/responses";
+        let serving = served.map(|models| serving(&runs.dir, url, models));
+        let prepared = Run::prepare(&ir, &dir, now, serving);
         let record = fs::read_dir(&dir)
             .ok()
             .and_then(|mut entries| entries.next());
@@ -96,11 +103,30 @@ fn check(cases: impl IntoIterator<Item = (i64, Value)>, expect: &Expect) {
     expect.assert_eq(&lines.join("\n"));
 }
 
+/// The upstream `stand-in` at `url`, whose key is in a file in `dir`, which serves each of
+/// `models` under the name `vendor/<model>`.
+pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("key"), "sk-test\n").unwrap();
+    let url = UpstreamUrl::try_from(url.to_owned()).unwrap();
+    let upstream = Upstream::new(url, Key::read(&dir.join("key")).unwrap());
+    let model = |name: String| ModelName::try_from(name).unwrap();
+    let models = models
+        .iter()
+        .map(|name| (model((*name).to_owned()), model(format!("vendor/{name}"))));
+    Serving {
+        name: Name::try_from("stand-in".to_owned()).unwrap(),
+        upstream,
+        models: models.collect(),
+    }
+}
+
 /// A workflow is prepared, its record named by its run's id, from the UTC time it is prepared
-/// at, and holding its IR; one that has a model route is refused before anything starts, with
-/// its record saying why. The times are a leap day's first second, a year's last, and the
-/// first of March 2100, which follows the 28th of February in a year that isn't a leap year. A
-/// clock that reads before 1970 is refused before anything is made.
+/// at, and holding its IR; one that has a model route is prepared with an upstream that serves
+/// every model the route allows, and else refused before anything starts, with its record
+/// saying why. The times are a leap day's first second, a year's last, and the first of March
+/// 2100, which follows the 28th of February in a year that isn't a leap year. A clock that
+/// reads before 1970 is refused before anything is made.
 #[test]
 fn prepare() {
     let lwe: Value = serde_json::from_str(LWE).unwrap();
@@ -111,21 +137,32 @@ fn prepare() {
         .remove("egress");
     check(
         [
-            (1_709_164_800, no_route.clone()),
-            (1_767_225_599, lwe),
-            (4_107_542_400, no_route.clone()),
-            (-1, no_route),
+            (1_709_164_800, no_route.clone(), None),
+            (1_767_225_599, lwe.clone(), None),
+            (1_767_225_599, lwe.clone(), Some(&["gpt-6-sol"][..])),
+            (1_767_225_599, lwe, Some(&["gpt-6-sol", "gpt-6-astra"][..])),
+            (4_107_542_400, no_route.clone(), None),
+            (-1, no_route, None),
         ],
         &expect![[r#"
             prepared, named by its id: true
             20240229-000000-hhhhhhhh: ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
-            refused: `agent` has a model route, which the driver doesn't serve: remove the role's `egress.model` to run without one
+            refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one
             20251231-235959-hhhhhhhh: ir.json, outcome.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
-            outcome.json: {"reason":"`agent` has a model route, which the driver doesn't serve: remove the role's `egress.model` to run without one","state":"refused"}
+            outcome.json: {"reason":"`agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one","state":"refused"}
+            refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows
+            20251231-235959-hhhhhhhh: ir.json, outcome.json, record.json
+            ir.json is the IR: true
+            record.json: {"record_version":"pumpkin.record/v0"}
+            outcome.json: {"reason":"`agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows","state":"refused"}
+            prepared, named by its id: true
+            20251231-235959-hhhhhhhh: ir.json, record.json
+            ir.json is the IR: true
+            record.json: {"record_version":"pumpkin.record/v0"}
             prepared, named by its id: true
             21000301-000000-hhhhhhhh: ir.json, record.json
             ir.json is the IR: true

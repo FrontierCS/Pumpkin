@@ -1,12 +1,15 @@
 //! Sending a closed model request to the model provider, and streaming its response back.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use pumpkin_gateway::IncomingModelRequest;
+use pumpkin_gateway::{IncomingModelRequest, ModelResponse};
+use pumpkin_schema::ir::{ModelName, Name};
 use pumpkin_schema::sandbox::frame;
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
@@ -89,7 +92,51 @@ pub struct Key(HeaderValue);
 pub struct Upstream {
     url: Uri,
     authorization: HeaderValue,
+    // One for the upstream's every exchange, so that `shutdown` ends them all at once.
     agent: ureq::Agent,
+    // Set once the provider refuses the key with a 401, which no later request can mend: each
+    // carries the same key, read once for the run. Exchanges run on threads of their own, which
+    // share the upstream, so the first to hear the refusal sets it for the others to see.
+    refused: OnceLock<()>,
+}
+
+/// How the route answered a model request: never with what the request or the response held.
+///
+/// An upstream's response comes with the provider's id for the request, from its `x-request-id`
+/// or else `x-oai-request-id`, if it gave one, which an operator names to ask the provider about
+/// the request.
+#[derive(Debug)]
+pub enum Answer {
+    /// With the upstream's response, whole, which had `status`.
+    Forwarded {
+        status: u16,
+        request_id: Option<String>,
+    },
+    /// With the upstream's response, which had `status`, cut short: it broke off, was given up
+    /// on, or the session stopped taking it.
+    Cut {
+        status: u16,
+        request_id: Option<String>,
+    },
+    /// With a refusal of the route's own, with `status` and `message`, in place of the
+    /// upstream's response with the status `upstream_status`, if one came.
+    Refused {
+        upstream_status: Option<u16>,
+        request_id: Option<String>,
+        status: u16,
+        message: String,
+    },
+}
+
+/// How a run serves its workflow's model route.
+pub struct Serving {
+    /// The name that the deployment gives the upstream, which the run log shows.
+    pub name: Name,
+    /// The upstream that the route's requests reach.
+    pub upstream: Upstream,
+    /// The name that the upstream takes for each model it serves, by the name that a route
+    /// allows.
+    pub models: BTreeMap<ModelName, ModelName>,
 }
 
 impl TryFrom<String> for UpstreamUrl {
@@ -194,29 +241,32 @@ impl Upstream {
             url,
             authorization,
             agent,
+            refused: OnceLock::new(),
         }
     }
 
     /// Sends `closed`, the closed form of `request`, to the model provider with the key, and
     /// streams the response back to `request`'s client as it arrives, by `by`
     /// ([`IncomingModelRequest::respond`]): its status and body as they are, with only the
-    /// headers that a harness reads from a response. The upstream is given up on at `until`,
-    /// or once it stalls (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`, `IDLE_TIMEOUT`). Its client gets
-    /// a 504 if the upstream is given up on before the response's head, a 502 if it gives no
-    /// answer otherwise or codes the body, and a response cut short if it breaks off, or is
-    /// given up on, within the body.
+    /// headers that a harness reads. The upstream is given up on at `until`, or once it stalls
+    /// (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`, `IDLE_TIMEOUT`). The client gets a 504 if the
+    /// upstream is given up on before the response's head, a 502 if it gives no answer
+    /// otherwise or codes the body, a 400 if it refuses the key with a 401, which the upstream
+    /// keeps, or the request with a 403, and a response cut short if it breaks off, or is given
+    /// up on, within the body. `answered` is told which ([`Answer`]) before the answer's end is
+    /// written.
     ///
     /// # Errors
     ///
     /// Fails if the response's head is too long for a frame, which cuts the request short
-    /// without a response, if `by` passes first, or if the session has ended, which ends the
-    /// exchange.
+    /// without a response, if `by` passes first, or if the session has ended.
     pub fn forward(
         &self,
         closed: &Closed,
         request: IncomingModelRequest,
         until: Deadline,
         by: Deadline,
+        answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
         let call = self.agent.post(self.url.clone()).config();
         let call = call.timeout_global(bound(until)).build();
@@ -227,30 +277,69 @@ impl Upstream {
         let call = call.header(AUTHORIZATION, &self.authorization);
         let response = match call.send(closed.body()) {
             Ok(response) => response,
-            Err(error) => return unanswered(&error).answer(request, by),
+            Err(error) => return refuse(unanswered(&error), None, None, request, by, answered),
         };
+        let status = response.status().as_u16();
+        let request_id = request_id(response.headers());
+        // Passed on, either would be a status that a harness tries again until its deadline. A
+        // 401 refuses the deployment's key, which every later request carries; a 403 may turn on
+        // what the request asked for, which the agent chose, so it ends no route.
+        if status == 401 {
+            let _ = self.refused.set(());
+            let refusal = Refusal::key_refused();
+            return refuse(refusal, Some(status), request_id, request, by, answered);
+        }
+        if status == 403 {
+            let refusal = Refusal::forbidden();
+            return refuse(refusal, Some(status), request_id, request, by, answered);
+        }
         if coded(response.headers()) {
             // The request accepts no coding, and the harness decodes none: a coded body would
             // reach it as bytes it can't read, whether `content-encoding` stayed behind or not.
             let message = "the model provider coded its answer, though the request asked for it \
                            uncoded: try again";
-            return refusal(Status::BadGateway, message.to_owned()).answer(request, by);
+            let coded = refusal(Status::BadGateway, message.to_owned());
+            return refuse(coded, Some(status), request_id, request, by, answered);
         }
-        let status = response.status().as_u16();
-        let headers = returned(response.headers());
-        let mut client = request.respond(status, headers, by)?;
+        let headers = returned(response.headers(), closed);
+        let mut client = match request.respond(status, headers, by) {
+            Ok(client) => client,
+            Err(error) => {
+                answered(Answer::Cut { status, request_id });
+                return Err(error);
+            }
+        };
         let mut body = response.into_body().into_reader();
-        // A read fills at most one frame of the session.
-        let mut buffer = vec![0; frame::MAX_BODY_BYTES];
-        loop {
-            match body.read(&mut buffer) {
-                Ok(0) => return client.end(),
-                Ok(read) => client.send(&buffer[..read])?,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                // A body that broke off, or was given up on, isn't whole.
-                Err(_) => return client.cut(),
+        match relay(&mut body, &mut client) {
+            Ok(true) => {
+                answered(Answer::Forwarded { status, request_id });
+                client.end()
+            }
+            Ok(false) => {
+                answered(Answer::Cut { status, request_id });
+                client.cut()
+            }
+            Err(error) => {
+                answered(Answer::Cut { status, request_id });
+                Err(error)
             }
         }
+    }
+
+    /// The refusal of a request once the model provider has refused the key with a 401
+    /// ([`Upstream::forward`]), if it has.
+    pub(crate) fn key_refused(&self) -> Option<Refusal> {
+        self.refused.get().map(|()| Refusal::key_refused())
+    }
+
+    /// Gives up on every exchange in flight and every later one ([`Upstream::forward`]): its
+    /// client gets a 502 before the response's head, and the response cut short within its
+    /// body. One still resolving the provider's name, or connecting to it, is given up on once
+    /// that ends (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`).
+    pub fn shutdown(&self) {
+        // The agent's clones share its pool, whose shutdown closes every connection that any of
+        // them reads or writes.
+        self.agent.clone().shutdown();
     }
 }
 
@@ -262,6 +351,45 @@ fn bound(until: Deadline) -> Option<Duration> {
         Some(Duration::MAX) => None,
         left @ Some(_) => left,
     }
+}
+
+/// Answers `request` with `refusal` by `by`, in place of the upstream's response with the status
+/// `upstream_status` and the request id `request_id`, if one came, once `answered` is told so.
+fn refuse(
+    refusal: Refusal,
+    upstream_status: Option<u16>,
+    request_id: Option<String>,
+    request: IncomingModelRequest,
+    by: Deadline,
+    answered: impl FnOnce(Answer),
+) -> io::Result<()> {
+    answered(refusal.answered(upstream_status, request_id));
+    refusal.answer(request, by)
+}
+
+/// Streams `body` to `client` as it arrives, until it ends, and returns whether it arrived
+/// whole, without writing its end.
+fn relay(body: &mut impl Read, client: &mut ModelResponse) -> io::Result<bool> {
+    // A read fills at most one frame of the session.
+    let mut buffer = vec![0; frame::MAX_BODY_BYTES];
+    loop {
+        match body.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(read) => client.send(&buffer[..read])?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            // A body that broke off, or was given up on, isn't whole.
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
+/// The provider's id for the request that `headers` answer, if it gave one: `x-request-id`, or
+/// else `x-oai-request-id`, as Codex keeps them for an error and Inspect for a model call.
+fn request_id(headers: &HeaderMap) -> Option<String> {
+    ["x-request-id", "x-oai-request-id"]
+        .into_iter()
+        .find_map(|name| headers.get(name)?.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// The refusal of a request that the upstream gave no answer to, for `error`.
@@ -287,13 +415,20 @@ fn coded(headers: &HeaderMap) -> bool {
     })
 }
 
-/// The response headers that reach the client, those that it reads whose values are text.
-fn returned(headers: &HeaderMap) -> Vec<(String, String)> {
+/// The response headers that reach the client, those that it reads whose values are text, with
+/// the model that answered named as `closed`'s client named it ([`Closed::named`]).
+fn returned(headers: &HeaderMap, closed: &Closed) -> Vec<(String, String)> {
     headers
         .iter()
         .filter(|(name, _)| reaches_client(name.as_str()))
         .filter_map(|(name, value)| {
-            Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+            let value = value.to_str().ok()?;
+            let value = if name == "openai-model" {
+                closed.named(value)
+            } else {
+                value
+            };
+            Some((name.as_str().to_owned(), value.to_owned()))
         })
         .collect()
 }

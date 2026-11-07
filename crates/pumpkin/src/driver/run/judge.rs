@@ -95,7 +95,7 @@ pub(super) fn run(call: &Call<'_>) {
     let name = format!("job-{}", job.0);
     let (sandbox, by) = (&call.judge.sandbox, call.deadlines.startup);
     let inbox = call.inbox.sender();
-    let started = (call.sandboxes).start(&name, sandbox, None, by, inbox, Message::Session);
+    let started = (call.sandboxes).start(&name, sandbox, None, false, by, inbox, Message::Session);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(error) => {

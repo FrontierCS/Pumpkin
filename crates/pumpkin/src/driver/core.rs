@@ -348,6 +348,22 @@ impl<'w> Core<'w> {
         }
     }
 
+    /// Whether the agent's model requests are allowed at `at`, a time since the run started:
+    /// before the deadline, until the agent finalizes a submission. Once they aren't, the
+    /// runtime refuses each that it takes, and cuts short those in flight.
+    pub fn model_requests_allowed(&self, at: Duration) -> bool {
+        // The grace after a finalize is for the agent's exit alone: no answer read then can
+        // change the selection, which the finalize has locked.
+        match self.phase {
+            Phase::Work { .. } => at < self.pattern.deadline,
+            Phase::Finalized { .. }
+            | Phase::Teardown { .. }
+            | Phase::Final { .. }
+            | Phase::Finished { .. }
+            | Phase::Abandoned => false,
+        }
+    }
+
     /// Abandons the run, still going at its hard end, unless it has ended.
     fn abandon(&mut self, actions: &mut Vec<Action>) {
         match self.phase {

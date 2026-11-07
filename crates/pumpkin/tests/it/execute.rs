@@ -1,6 +1,7 @@
 //! Executing a prepared run through the library's entry point, [`Run::execute`], on the
 //! simulated provider, and on Docker where its sandbox makes ops through `sandboxctl`: what it
-//! returns, its record, its run log, and what it leaves behind. The test on Docker is ignored,
+//! returns, its record, its run log, and what it leaves behind. The agent's model route, where
+//! it has one, reaches a stand-in model provider ([`StandIn`]). The test on Docker is ignored,
 //! as the Docker provider's are ([`docker`](crate::docker)).
 
 #![expect(
@@ -8,24 +9,30 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::io::{self, BufReader, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::path::Path;
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, iter};
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::core::lasts;
 use pumpkin::driver::run::Run;
+use pumpkin::model_route::Serving;
 use pumpkin_docker::Engine;
 use pumpkin_provider::Provider;
-use pumpkin_schema::ir;
+use pumpkin_schema::ir::{self, ModelName};
 use pumpkin_schema::provider::{Listed, RunTag};
 use pumpkin_schema::sandbox::{SANDBOXCTL_PATH, command_stdout};
 use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::{Value, json};
 
 use crate::docker;
-use crate::run::{Runs, compact, files};
+use crate::model_route::upstream::{read_request, write_chunk};
+use crate::run::{Runs, compact, files, serving};
 use crate::sim::{self, LINGERING, LOST, MUTE, SLOW, Sim, UNDELETABLE, UNPUBLISHED};
 
 const LWE: &str = include_str!("../../../pumpkin-schema/tests/fixtures/lwe.json");
@@ -45,11 +52,17 @@ trait Platform: Provider {
 }
 
 impl Platform for Sim {
-    /// The mode of the directory that held each create's socket directory.
+    /// The mode of the directory that held each create's socket directory, and whether each
+    /// create asked for the model endpoint, if one did.
     fn shown(&self) -> Vec<String> {
         let modes = self.modes().into_iter().map(|mode| format!("{mode:o}"));
         let modes: Vec<String> = modes.collect();
-        vec![format!("their directory's mode at each create: {modes:?}")]
+        let mut lines = vec![format!("their directory's mode at each create: {modes:?}")];
+        let endpoints = self.models();
+        if endpoints.contains(&true) {
+            lines.push(format!("the model endpoint at each create: {endpoints:?}"));
+        }
+        lines
     }
 }
 
@@ -59,18 +72,23 @@ impl Platform for Engine {
     }
 }
 
-/// Prepares `ir` as test `name` and executes it on `provider`, with `sandboxd`, and checks
-/// what becomes of it: what `execute` returns, the record's files, the payloads it holds,
-/// whether its `provider.json` is what the provider declared, its `outcome.json`, its log
-/// ([`logged`]), when its last record came ([`when`]), whether `execute` returned once the hard
-/// end had passed, if it did, the standard output of the agent and of each judge call, if
-/// collected, whether the run's socket directories are left, what the platform shows
-/// ([`Platform`]), and what the run's list finds once it has ended. The socket directories show
-/// as `<sockets>`.
+/// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one,
+/// and executes it on `provider`, with `sandboxd`, and checks what becomes of it: what
+/// `execute` returns, the record's files, the payloads it holds, whether its `provider.json` is
+/// what the provider declared, its `outcome.json`, its log ([`logged`]), when its last record
+/// came ([`when`]), whether `execute` returned once the hard end had passed, if it did, the
+/// standard output of the agent and of each judge call, if collected, whether the run's socket
+/// directories are left, what the platform shows ([`Platform`]), what the run's list finds once
+/// it has ended, and when the client of each stream that the stand-in stalled hung up. The
+/// socket directories show as `<sockets>`, and the stand-in's address as `<stand-in>`.
 fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect: &Expect) {
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
-    let run = Run::prepare(&ir, &runs.dir, SystemTime::now()).unwrap();
+    let route = ir.roles.iter().find_map(|role| role.egress.model.as_ref());
+    let stand_in = route.map(|_| StandIn::start());
+    let serving =
+        (route.zip(stand_in.as_ref())).map(|(route, stand_in)| stand_in.serving(&runs.dir, route));
+    let run = Run::prepare(&ir, &runs.dir, SystemTime::now(), serving).unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = std::env::temp_dir().join(format!("pumpkin-{}", run.id()));
     let before = unix_ns();
@@ -113,8 +131,121 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
         .map(|Listed { id }| id.as_str().to_owned())
         .collect();
     lines.push(format!("listed once it ended: {listed:?}"));
-    let sockets = sockets.display().to_string();
-    expect.assert_eq(&lines.join("\n").replace(&sockets, "<sockets>"));
+    let address = stand_in.as_ref().map(|stand_in| stand_in.address.clone());
+    for hung_up in stand_in.into_iter().flat_map(StandIn::stop) {
+        // By the whole call's time, which the run's clock starts within, so later than by the
+        // run's clock, if anything.
+        let hung_up = Duration::from_nanos(hung_up - started.start());
+        // Its place among the run's records isn't shown: a `model_answered` may come after the
+        // run's last record, and so may a hang-up that its answer follows.
+        let at = when(&ir, provider, hung_up);
+        lines.push(format!("a stalled stream's client hung up {at}"));
+    }
+    let mut shown = lines.join("\n");
+    shown = shown.replace(&sockets.display().to_string(), "<sockets>");
+    if let Some(address) = address {
+        shown = shown.replace(&address, "<stand-in>");
+    }
+    expect.assert_eq(&shown);
+}
+
+/// A stand-in for a model provider, on the loopback, which answers a request whose input is
+/// `stream` with a whole stream that echoes the request's line, its `authorization` and its
+/// body, one whose input is `stall` with a stream's head and first part, then nothing, until
+/// its client hangs up, one whose input is `expired` with a 401, as a provider refuses an
+/// expired key, one whose input is `forbidden` with a 403, and one whose input is `down` with a
+/// 502 that names its id for the request. Each stream's head names in
+/// `openai-model` the model that the request's body named, as a provider does that answers with
+/// the model asked for.
+struct StandIn {
+    address: String,
+    stops: Sender<()>,
+    /// Returns when the client of each stream it stalled hung up, in nanoseconds since the Unix
+    /// epoch.
+    thread: JoinHandle<Vec<u64>>,
+}
+
+impl StandIn {
+    fn start() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (stops, stopped) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let mut hung_up = Vec::new();
+            for connection in listener.incoming() {
+                if stopped.try_recv().is_ok() {
+                    break;
+                }
+                hung_up.extend(answer(connection.unwrap()));
+            }
+            hung_up
+        });
+        Self {
+            address,
+            stops,
+            thread,
+        }
+    }
+
+    /// How a run serves `route` through it, with its key in a file in `dir`.
+    fn serving(&self, dir: &Path, route: &ir::ModelRoute) -> Serving {
+        let models = route.models.as_slice().iter().map(ModelName::as_str);
+        let models: Vec<&str> = models.collect();
+        serving(
+            dir,
+            &format!("http://{}/v1/responses", self.address),
+            &models,
+        )
+    }
+
+    /// Stops it, and returns when the client of each stream it stalled hung up, as its thread
+    /// does.
+    fn stop(self) -> Vec<u64> {
+        self.stops.send(()).unwrap();
+        drop(TcpStream::connect(&self.address).unwrap());
+        self.thread.join().unwrap()
+    }
+}
+
+/// Answers the request on `connection` as [`StandIn`] says, and returns when its client hung
+/// up, if the stand-in stalled its stream.
+fn answer(mut connection: TcpStream) -> Option<u64> {
+    let (line, headers, body) = read_request(&mut BufReader::new(&connection));
+    let key = headers.iter().find(|(name, _)| name == "authorization");
+    let input: Value = serde_json::from_slice(&body).unwrap();
+    let refused = match input["input"].as_str() {
+        Some("expired") => Some(("401 Unauthorized", "")),
+        Some("forbidden") => Some(("403 Forbidden", "")),
+        Some("down") => Some(("502 Bad Gateway", "x-request-id: req-502\r\n")),
+        _ => None,
+    };
+    if let Some((status, id)) = refused {
+        let refused = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\n{id}content-length: 7\r\n\
+             connection: close\r\n\r\nrefused"
+        );
+        connection.write_all(refused.as_bytes()).unwrap();
+        return None;
+    }
+    let streams = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nopenai-model: {}\r\n\
+         transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+        input["model"].as_str().unwrap()
+    );
+    connection.write_all(streams.as_bytes()).unwrap();
+    let echo = format!(
+        "data: {line} {key:?} {}\n\n",
+        String::from_utf8(body).unwrap()
+    );
+    if input["input"] == "stream" {
+        write_chunk(&mut connection, &echo);
+        write_chunk(&mut connection, "");
+        return None;
+    }
+    write_chunk(&mut connection, "event: response.created\n\n");
+    // What the client sends is read until it hangs up, as its end shows that it has.
+    let _ = io::copy(&mut connection, &mut io::sink());
+    Some(unix_ns())
 }
 
 /// The records of the run log in `record`, a run's, one per line, and the time of its last
@@ -213,7 +344,7 @@ fn hard_end(ir: &ir::Workflow, provider: &dyn Provider) -> Duration {
     lasts(&Workflow::parse(ir).unwrap(), Duration::from_secs(startup))
 }
 
-/// The fixture's workflow, without the agent's model route, which the driver refuses, and with
+/// The fixture's workflow, without the agent's model route ([`routed`] gives one), and with
 /// `argv` as the agent's command.
 fn workflow(argv: &[&str]) -> Value {
     let mut lwe: Value = serde_json::from_str(LWE).unwrap();
@@ -242,6 +373,13 @@ fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
     ir["roles"][1]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(8);
     ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(16);
     ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(deadline);
+    ir
+}
+
+/// `ir`, with a model route for its agent that allows `m-large`.
+fn routed(mut ir: Value) -> Value {
+    let route = json!({ "models": ["m-large"], "budget_microusd": 1 });
+    ir["roles"][0]["egress"] = json!({ "model": route });
     ir
 }
 
@@ -833,6 +971,340 @@ fn late_ops() {
             socket directories left: false
             their directory's mode at each create: ["700"]
             listed once it ended: []"#]],
+    );
+}
+
+/// A run whose agent makes model requests through its route, each once the one before it is
+/// answered, which the run log says goes to the stand-in, each model under the name it takes:
+/// one goes upstream, its model named as the upstream takes it, with the upstream's key, and its
+/// stream reaches the agent, naming the model that answered as the agent named it; one that
+/// names a model the route doesn't allow is refused; and once the agent has finalized a
+/// submission, one is refused, as the work phase has ended, while the grace after the finalize
+/// lasts for the agent's exit. The run log records how each was answered, before the agent goes
+/// on.
+#[test]
+fn model_requests() {
+    let argv = [
+        "ops",
+        "model m-large stream",
+        "model m-huge stream",
+        "finalize submit 6",
+        "model m-large stream",
+    ];
+    check(
+        "model-requests",
+        &Sim::new(),
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the work phase has ended, and with it the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":null},"seq":7}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":8}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 673 bytes","seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":11}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"passed":true,"returned":{"raw_score":6},"score":6}},"seq":12}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+            model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the work phase has ended, and with it the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            the model endpoint at each create: [true, false]
+            listed once it ended: []"#]],
+    );
+}
+
+/// A run whose route's upstream refuses a request with a 403, and then its key with a 401: the
+/// agent hears the route's 400 for each, rather than a status that a harness tries again; the
+/// route goes on after the 403, as a request that follows it streams its answer, but ends at the
+/// 401, as a later request is refused without reaching the upstream, which would have streamed
+/// its answer. The agent, which goes on, then exits, and the run fails, as the provider refused
+/// the deployment's key.
+#[test]
+fn model_upstream_refusals() {
+    let argv = [
+        "ops",
+        "model m-large forbidden",
+        "model m-large stream",
+        "model m-large expired",
+        "model m-large stream",
+    ];
+    check(
+        "model-upstream-refusals",
+        &Sim::new(),
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &expect![[r#"
+            failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"kind":"model_answered","request":0,"upstream_status":403},"seq":4}
+            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":10}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 966 bytes","seq":11}
+            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":12}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}
+            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+            model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            the model endpoint at each create: [true]
+            listed once it ended: []"#]],
+    );
+}
+
+/// A run whose agent exits after the model provider answered its last two requests with a 502,
+/// then a request that the route refused, and with another still in flight: the agent's own
+/// result is unknown, since it never had a model, so the run fails as a deployment fault, though
+/// the agent exited by itself. The route's refusal doesn't clear the failure, nor does the cut
+/// of the request in flight, made as the route ends.
+#[test]
+fn model_provider_down() {
+    let argv = [
+        "ops",
+        "model m-large stream",
+        "model m-large down",
+        "model m-large down",
+        "model m-huge stream",
+        "ask m-large stall",
+        "exit",
+    ];
+    check(
+        "model-provider-down",
+        &Sim::new(),
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &expect![[r#"
+            failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
+            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+            {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 750 bytes","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":4,"upstream_status":200},"seq":13}
+            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","seq":14}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 1: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+            model request 2: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+            model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+            model request 4: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            the model endpoint at each create: [true]
+            listed once it ended: []
+            a stalled stream's client hung up before the agent's teardown was to end"#]],
+    );
+}
+
+/// A run whose agent exits after the provider answered with a 502 and then streamed: the stream
+/// clears the failure, so the run is scored as usual.
+#[test]
+fn model_provider_recovers() {
+    let argv = ["ops", "model m-large down", "model m-large stream"];
+    check(
+        "model-provider-recovers",
+        &Sim::new(),
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
+            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":7}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 327 bytes","seq":8}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            the model endpoint at each create: [true]
+            listed once it ended: []"#]],
+    );
+}
+
+/// A run whose agent is still working at the deadline while the model provider answers with a
+/// 502 is scored as usual: harnesses that limit an agent's time score it, as the agent did what it
+/// could in the time.
+#[test]
+fn model_provider_down_at_the_deadline() {
+    let argv = [
+        "ops",
+        "submit submit 6",
+        "model m-large down",
+        "model m-large stall",
+    ];
+    check(
+        "model-provider-down-at-the-deadline",
+        &Sim::new(),
+        &routed(short_workflow(&argv, 2)),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":3}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
+            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":6}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":7}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 217 bytes","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":1,"upstream_status":200},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":11}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"passed":true,"returned":{"raw_score":6},"score":6}},"seq":12}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            the model endpoint at each create: [true, false]
+            listed once it ended: []
+            a stalled stream's client hung up before the agent's teardown was to end"#]],
+    );
+}
+
+/// A run whose agent's model request is still streaming at the deadline: the work phase's end
+/// cuts the stream short, so the upstream's connection closes then, rather than once the
+/// response's deadline, the agent's teardown's end, has passed, or once the run has ended,
+/// after its final judge has run to its timeout on the agent's submission. The stream's cut end
+/// reaches the agent's sandbox while the teardown still holds its session, as the sandbox's
+/// freeze, which waits for it, is done.
+#[test]
+fn model_stream_cut() {
+    let argv = ["ops", "submit submit slow", "model m-large stall"];
+    check(
+        "model-stream-cut",
+        &Sim::new(),
+        &routed(short_workflow(&argv, 2)),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
+            payloads hold: ["slow"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"seq":3}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":5}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"seq":9}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"seq":10}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            the model endpoint at each create: [true, false]
+            listed once it ended: []
+            a stalled stream's client hung up before the agent's teardown was to end"#]],
+    );
+}
+
+/// A run whose agent finalizes a submission while its model request is still streaming: the
+/// finalize ends the route, which cuts the stream short then, so the agent, which exits once
+/// the response has ended, exits within the grace after the finalize, rather than being torn
+/// down at the deadline.
+#[test]
+fn model_finalize_cut() {
+    let argv = ["ops", "ask m-large stall", "finalize submit 6"];
+    check(
+        "model-finalize-cut",
+        &Sim::new(),
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":5}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":6}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":9}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"passed":true,"returned":{"raw_score":6},"score":6}},"seq":10}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            the model endpoint at each create: [true, false]
+            listed once it ended: []
+            a stalled stream's client hung up before the agent's teardown was to end"#]],
     );
 }
 

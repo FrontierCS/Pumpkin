@@ -1,7 +1,9 @@
 //! The run log, `log.jsonl`, and the JSON forms of events, actions and outcomes.
 //!
 //! `log.jsonl` holds one JSON record per line, each written and synced before what it records
-//! is acted on. A record is one of:
+//! is acted on, but for a `model_answered`: the loop writes it once it takes it, which may be
+//! after the answer it records was sent, though before what the agent does next. A record is
+//! one of:
 //!
 //! - an event: `{"seq": n, "at_ns": "t", "event": e, "actions": [a, ...]}`, which the runtime
 //!   observed `t` nanoseconds after the run started, with the actions the core decided on. A
@@ -14,7 +16,15 @@
 //!   actions: `{"kind": "op_refused", "request": r, "message": m}`, where the request's payload
 //!   is `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without a
 //!   digest, since the gateway kept none of its bytes, and the message is the refusal the agent
-//!   is sent, unless a note after it says it wasn't;
+//!   is sent, unless a note after it says it wasn't. So is how the route answered a model
+//!   request of the agent's, at the time the request's thread observed it, as a judge call's
+//!   events are: `{"kind": "model_answered", "request": n, "upstream_status": u, "answer": a}`,
+//!   with `"request_id": i` besides if the upstream's response named its id for the request, in
+//!   `x-request-id` or `x-oai-request-id`,
+//!   where `u` is the status of the upstream's response, or `null` if none came, and `a` is
+//!   `{"kind": "forwarded"}` for that response whole, `{"kind": "cut"}` for it cut short, or
+//!   `{"kind": "refused", "status": s, "message": m}` for the route's refusal sent in its place,
+//!   without either's body;
 //! - a note: `{"seq": n, "at_ns": "t", "note": s}`, something the runtime observed that the
 //!   core doesn't decide on, such as why the run failed.
 //!
@@ -41,6 +51,7 @@ use super::record;
 use crate::driver::core::{
     Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
 };
+use crate::model_route::Answer;
 
 /// The run log, open for appending.
 #[derive(Debug)]
@@ -104,6 +115,45 @@ impl Log {
             "request": request,
             "message": refused.message(),
         });
+        self.record(workflow, at, event, &[])
+    }
+
+    /// Appends the record of `answer`, how the route answered the agent's model request
+    /// numbered `request`, observed at `at`: a `model_answered`, which has no actions, since the
+    /// core doesn't decide on it.
+    pub(super) fn model_answered(
+        &mut self,
+        workflow: &Workflow,
+        at: Duration,
+        request: u64,
+        answer: &Answer,
+    ) -> Result<(), String> {
+        let (upstream_status, request_id, answer) = match answer {
+            Answer::Forwarded { status, request_id } => {
+                (Some(*status), request_id, json!({ "kind": "forwarded" }))
+            }
+            Answer::Cut { status, request_id } => {
+                (Some(*status), request_id, json!({ "kind": "cut" }))
+            }
+            Answer::Refused {
+                upstream_status,
+                request_id,
+                status,
+                message,
+            } => {
+                let refused = json!({ "kind": "refused", "status": status, "message": message });
+                (*upstream_status, request_id, refused)
+            }
+        };
+        let mut event = json!({
+            "kind": "model_answered",
+            "request": request,
+            "upstream_status": upstream_status,
+            "answer": answer,
+        });
+        if let Some(request_id) = request_id {
+            event["request_id"] = json!(request_id);
+        }
         self.record(workflow, at, event, &[])
     }
 

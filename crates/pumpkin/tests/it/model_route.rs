@@ -8,6 +8,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -17,12 +18,12 @@ use std::{fs, thread};
 use expect_test::{Expect, expect};
 use pumpkin::model_route::Route;
 use pumpkin_gateway::{Arrival, IncomingModelRequest, Listener};
-use pumpkin_schema::ir::Models;
+use pumpkin_schema::ir::ModelName;
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
 
-mod upstream;
+pub(crate) mod upstream;
 
 /// A request as its client sends it: method, path, headers and body.
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
@@ -31,6 +32,12 @@ type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
 /// test that hangs waits this long, so no outcome rests on it.
 const HUNG: Duration = Duration::from_secs(60);
 
+/// Each of `names`, which goes upstream under its own name.
+fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
+    let model = |name: &str| ModelName::try_from(name.to_owned()).unwrap();
+    names.map(|name| (model(name), model(name))).into()
+}
+
 /// Sends each case's request over a session, as a sandbox of a role whose route allows `m-large`
 /// and `m-small`, closes it as the session's owner, and checks what came of each against
 /// `expect`.
@@ -38,8 +45,7 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     let dir = std::env::temp_dir().join(format!("pumpkin-route-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let models: Models = serde_json::from_value(json!(["m-large", "m-small"])).unwrap();
-    let route = Route::new(models);
+    let route = Route::new(models(["m-large", "m-small"]));
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();

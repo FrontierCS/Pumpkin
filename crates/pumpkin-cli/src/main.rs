@@ -166,7 +166,7 @@ fn run(
         config::read(&config)?;
     }
     let engine = engine(context)?;
-    let run = Run::prepare(&ir, &runs, SystemTime::now())?;
+    let run = Run::prepare(&ir, &runs, SystemTime::now(), None)?;
     let dir = run.dir().to_owned();
     say(format_args!(
         "run {} records into {}",

@@ -528,7 +528,7 @@ models = [{ name = "gpt-6-astra", upstream_name = "gpt-6-astra" }]
         &expect![[r#"
         $ pumpkin run lwe.json --docker-context <context> --sandboxd <sandboxd> --runs runs --config pumpkin.toml
         exit status: Some(1)
-        pumpkin: `agent` has a model route, which the driver doesn't serve: remove the role's `egress.model` to run without one
+        pumpkin: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one
         $ DOCKER_CONFIG=<docker config> HOME=<scratch>/home XDG_DATA_HOME=<scratch>/xdg pumpkin run exits.json --docker-context <context> --sandboxd <sandboxd>
         exit status: Some(3)
         pumpkin: run <id> records into <scratch>/home/.local/share/pumpkin/runs/<id>
