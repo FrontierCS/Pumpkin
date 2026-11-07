@@ -18,8 +18,8 @@
 - PREFER interfaces (flags, configuration, protocol messages, `pub` APIs) that express exactly
   what real runs need: a value fixed in every real run is a constant, not a parameter, and each
   setting has one way to set it
-- PREFER command-line flags for configuration, and the environment only for secrets that must
-  stay out of `argv`
+- PREFER flags for per-run choices, `pumpkin.toml` for per-machine facts, and the environment
+  only for secrets that must stay out of `argv`
 - NEVER add a concurrency primitive (`Mutex`, `Arc`, an atomic, a channel, a thread) without
   the sharing that needs it; express single ownership in the types (`&mut`, an owned handle)
 - PREFER moving branches up to the caller and loops down into functions that take a batch
