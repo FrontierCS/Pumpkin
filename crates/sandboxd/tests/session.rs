@@ -2,7 +2,7 @@
 //! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
 //! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
 //! `/pumpkin`: the Docker provider's tests make ops, in real sandboxes. A fake gateway sends
-//! what the gateway's end never would.
+//! what the gateway's end never would, or holds up what only a slow link would.
 
 #![expect(
     clippy::unwrap_used,
@@ -13,7 +13,7 @@
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -26,7 +26,7 @@ use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode};
 use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{
-    ExitStatus, Launch, RelativePath, ToSandbox, dir_mode, file_mode, frame,
+    Entry, ExitStatus, FromSandbox, Launch, RelativePath, ToSandbox, dir_mode, file_mode, frame,
 };
 use stdx::Deadline;
 use stdx::process::Environment;
@@ -261,11 +261,7 @@ fn judge() {
         "judge",
         |sandbox| {
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
-            // Bytes that repeat out of step with the frames, so that a frame lost, repeated or
-            // out of order shows.
-            let raw: Vec<u8> = (0..2 * MAX_BODY_BYTES + 12345)
-                .map(|n| u8::try_from(n % 251).unwrap())
-                .collect();
+            let raw = pattern(2 * MAX_BODY_BYTES + 12345);
             let root = absolute(&sandbox.root);
             let put = [
                 Put::Dir(&slot, dir_mode()),
@@ -353,6 +349,12 @@ fn modes_and_stdin() {
     );
 }
 
+/// `len` bytes that repeat out of step with the frames, so that a frame lost, repeated or out of
+/// order shows.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|n| u8::try_from(n % 251).unwrap()).collect()
+}
+
 /// Freezing kills every process in each command's group, not only the command's own, returns
 /// once the commands have exited, and refuses new commands.
 #[test]
@@ -379,6 +381,50 @@ fn freezing() {
             running before freezing: 3
             exited when frozen: Some(Signal(9))
             start after freezing: the sandbox is frozen: start commands before freezing it
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// A sandbox whose processes fill its limit, as a fork bomb's do, so that `sandboxd` can start
+/// neither a command nor a thread, still freezes, and its trees are still collected, as the
+/// run's record. `sandboxd`'s own limit on its user's processes, lowered to 1 once it runs,
+/// stands in for the sandbox's: either fails a new process or thread alike.
+#[test]
+fn full_sandbox() {
+    check(
+        "full",
+        |sandbox| {
+            let launch = sandbox.sh("exec sleep 60", &[]);
+            let sleep = sandbox.session.start(launch, hung()).unwrap();
+            fs::write(sandbox.root.join("out/kept"), "kept").unwrap();
+            let pid = sandbox.sandboxd.id().to_string();
+            let limited = stdx::process::command("prlimit", PATH_ONLY)
+                .args(["--pid", &pid, "--nproc=1"])
+                .status()
+                .unwrap_or_else(|error| {
+                    panic!("`prlimit` didn't run: {error}: install util-linux, which has it")
+                });
+            assert!(limited.success(), "`prlimit` failed: {limited}");
+            let started = sandbox.session.start(sandbox.sh("true", &[]), hung());
+            let started = started.map(|_| ());
+            assert!(
+                started.is_err(),
+                "a command started past a limit of 1 process: run the test as a user the kernel \
+                 holds to it, not root, and without `CAP_SYS_RESOURCE` or `CAP_SYS_ADMIN`"
+            );
+            let mut lines = vec![format!("start: {}", show_error(sandbox, started))];
+            sandbox.session.freeze(hung()).unwrap();
+            let exited = sandbox.exit(sleep, Duration::ZERO);
+            lines.push(format!("exited when frozen: {exited:?}"));
+            lines.extend(sandbox.collect("out").unwrap());
+            lines
+        },
+        &expect![[r#"
+            start: `sh` didn't start in $ROOT/home: Resource temporarily unavailable (os error 11)
+            exited when frozen: Some(Signal(9))
+            out/kept: kept
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -507,16 +553,126 @@ fn model_answers() {
 /// A `sandboxd` whose gateway, a fake at `socket`, sends it `message` once it connects: how it
 /// exited, and why.
 fn answered(socket: &Path, message: &ToSandbox) -> String {
+    let (mut connection, sandboxd) = fake_gateway(socket);
+    frame::write(&mut connection, message, &[]).unwrap();
+    ended(sandboxd)
+}
+
+/// A tree put while a collect is held up, as a slow link holds one, is written meanwhile, and
+/// the collected tree then arrives whole: `sandboxd` reads on while it sends a tree, as the
+/// gateway's writers beside its requests need. A fake gateway holds the collect up by reading
+/// nothing until it has sent the put. Each tree is several frames, far more than a connection
+/// buffers, so a `sandboxd` that read nothing while it collected would hold the put's write up
+/// until its deadline.
+#[test]
+fn reading_while_collecting() {
+    check(
+        "collecting",
+        |sandbox| {
+            let tree = pattern(4 * MAX_BODY_BYTES);
+            fs::write(sandbox.root.join("out/tree"), &tree).unwrap();
+            let (mut gateway, sandboxd) = fake_gateway(&sandbox.root.join("fake.sock"));
+            let frames = collect_and_put(&sandbox.root, &tree);
+            let sent = (frames.iter())
+                .try_for_each(|(message, body)| frame::write(&mut gateway, message, body));
+            let mut lines = match sent {
+                Ok(()) => {
+                    let mut lines = vec!["the put, while the collect is held: sent".to_owned()];
+                    lines.extend(hear_both(&mut gateway, &tree));
+                    let put = fs::read(sandbox.root.join("in/put")).unwrap();
+                    lines.push(format!("the put's file: intact: {}", put == tree));
+                    lines
+                }
+                Err(error) => vec![format!("the put, while the collect is held: {error}")],
+            };
+            drop(gateway);
+            lines.push(format!("the fake gateway's sandboxd: {}", ended(sandboxd)));
+            lines
+        },
+        &expect![[r#"
+            the put, while the collect is held: sent
+            the collect: File { path: RelativePath("tree"), size: 4194304 }, intact: true
+            the put: done
+            the put's file: intact: true
+            the fake gateway's sandboxd: exit status: 0
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// The frames of a collect of the sandbox's `out` on stream 1, then of a put of `bytes` as
+/// `in/put` on stream 2.
+fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8])> {
+    let collect = ToSandbox::Collect {
+        stream: 1,
+        dir: absolute(&root.join("out")),
+    };
+    let put = ToSandbox::Put {
+        stream: 2,
+        dir: absolute(&root.join("in")),
+    };
+    let entry = Entry::File {
+        path: relative("put"),
+        size: bytes.len() as u64,
+    };
+    let mut frames = vec![
+        (collect, &[][..]),
+        (put, &[]),
+        (
+            ToSandbox::Entry {
+                stream: 2,
+                entry,
+                mode: file_mode(),
+            },
+            &[],
+        ),
+    ];
+    let data = bytes.chunks(MAX_BODY_BYTES);
+    frames.extend(data.map(|chunk| (ToSandbox::Data { stream: 2 }, chunk)));
+    frames.push((ToSandbox::End { stream: 2 }, &[]));
+    frames
+}
+
+/// What `gateway` hears in answer to a collect of `tree` on stream 1 and a put on stream 2, in
+/// that order, whichever ends first.
+fn hear_both(gateway: &mut UnixStream, tree: &[u8]) -> Vec<String> {
+    let (mut entries, mut collected) = (Vec::new(), Vec::new());
+    let (mut collect, mut put) = (None, None);
+    while collect.is_none() || put.is_none() {
+        let (message, body) = match frame::read::<FromSandbox>(gateway) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return vec!["sandboxd ended the session".to_owned()],
+            Err(error) => return vec![format!("reading the session failed: {error}")],
+        };
+        match message {
+            FromSandbox::Entry { stream: 1, entry } => entries.push(format!("{entry:?}")),
+            FromSandbox::Data { stream: 1 } => collected.extend_from_slice(&body),
+            FromSandbox::End { stream: 1 } => {
+                let intact = collected == tree;
+                let entries = entries.join(", ");
+                collect = Some(format!("the collect: {entries}, intact: {intact}"));
+            }
+            FromSandbox::Done { stream: 2 } => put = Some("the put: done".to_owned()),
+            other => return vec![format!("sandboxd sent {other:?} out of turn")],
+        }
+    }
+    [collect, put].into_iter().flatten().collect()
+}
+
+/// A `sandboxd` whose gateway is a fake at `socket`, and the fake's end of its session once it
+/// connects, which waits on each read and write as long as a request does ([`hung`]).
+fn fake_gateway(socket: &Path) -> (UnixStream, Child) {
     let gateway = UnixListener::bind(socket).unwrap();
     gateway.set_nonblocking(true).unwrap();
-    let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY)
+    let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY)
         .arg(socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     // A `sandboxd` that never connects fails the test rather than hang it.
     let by = hung();
-    let mut connection = loop {
+    let connection = loop {
         match gateway.accept() {
             Ok((connection, _)) => break connection,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -530,10 +686,20 @@ fn answered(socket: &Path, message: &ToSandbox) -> String {
         }
     };
     connection.set_nonblocking(false).unwrap();
-    frame::write(&mut connection, message, &[]).unwrap();
+    connection.set_read_timeout(hung().remaining()).unwrap();
+    connection.set_write_timeout(hung().remaining()).unwrap();
+    (connection, sandboxd)
+}
+
+/// How `sandboxd`, whose standard error is piped, exited after its session ended, and why, if it
+/// said.
+fn ended(mut sandboxd: Child) -> String {
     let status = exited(&mut sandboxd);
     let mut stderr = String::new();
     let mut pipe = sandboxd.stderr.take().unwrap();
     pipe.read_to_string(&mut stderr).unwrap();
-    format!("{status}: {}", stderr.trim_end())
+    match stderr.trim_end() {
+        "" => status.to_string(),
+        why => format!("{status}: {why}"),
+    }
 }
