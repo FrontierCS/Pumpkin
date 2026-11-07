@@ -48,7 +48,7 @@ exchange. Another program's format, such as `docker info`'s, stays with the code
 
 **`crates/pumpkin-gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
 `Session`, whose one owner moves trees, runs commands (`Process`) and answers ops, hearing of each
-op, each command's exit and the session's end as an `Arrival` sent to it.
+op, each model request, each command's exit and the session's end as an `Arrival` sent to it.
 - **Architecture Invariant:** a sandbox can't harm the host through its session: anything out of
   protocol ends the session, and a session costs the host only bounded memory and bounded waits.
 - **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes

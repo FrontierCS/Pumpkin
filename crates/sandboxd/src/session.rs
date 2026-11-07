@@ -96,6 +96,16 @@ impl Session {
                 files::collect(&self.sender, stream, Path::new(dir.as_str()))
             }
             ToSandbox::OpReply { op, reply } => self.ops.reply(op, reply),
+            // It opens no model requests, so none is in flight.
+            ToSandbox::ModelResponse { request, .. }
+            | ToSandbox::ModelData { request }
+            | ToSandbox::ModelEnd { request, .. } => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the gateway broke the protocol: it answered model request {request}, which \
+                     is not in flight"
+                ),
+            )),
         }
     }
 }

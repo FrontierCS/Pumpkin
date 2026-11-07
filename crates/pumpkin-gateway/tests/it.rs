@@ -1,7 +1,7 @@
 //! The gateway's end of a session, against a fake sandbox that answers the gateway's first
-//! request with frames of its choosing, ops among them, waiting where it chooses for an op's
-//! reply, for a while or for the gateway to hang up, and then ends the session: it sends what
-//! a buggy `sandboxd` might.
+//! request with frames of its choosing, ops and model requests among them, waiting where it
+//! chooses for an op's reply, for a while or for the gateway to hang up, and then ends the
+//! session: it sends what a buggy `sandboxd` might.
 
 #![expect(
     clippy::unwrap_used,
@@ -13,6 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
+use std::ops::Range;
 use std::os::unix::net::UnixStream;
 use std::panic;
 use std::path::Path;
@@ -26,7 +27,8 @@ use pumpkin_schema::ir::{AbsolutePath, Argv, Env, Resources};
 use pumpkin_schema::sandbox::op::{OpReply, OpsReply};
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{
-    Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, ToSandbox, file_mode, frame,
+    Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES,
+    OpPayloadLimit, RelativePath, ToSandbox, file_mode, frame,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -60,9 +62,15 @@ fn short() -> Deadline {
 }
 
 /// Runs each case against a fake sandbox of its own, whose session takes ops within `ops`, if
-/// it gives a limit, in a directory named after `name`, and checks what came of them against
-/// `expect`.
-fn check(name: &str, ops: Option<OpPayloadLimit>, cases: &[(Action, Answer)], expect: &Expect) {
+/// it gives a limit, and model requests if `models`, in a directory named after `name`, and
+/// checks what came of them against `expect`.
+fn check(
+    name: &str,
+    ops: Option<OpPayloadLimit>,
+    models: bool,
+    cases: &[(Action, Answer)],
+    expect: &Expect,
+) {
     let id = std::process::id();
     let dir = std::env::temp_dir().join(format!("pumpkin-gateway-{id}-{name}"));
     if dir.exists() {
@@ -72,7 +80,7 @@ fn check(name: &str, ops: Option<OpPayloadLimit>, cases: &[(Action, Answer)], ex
     let outcomes: Vec<String> = cases
         .iter()
         .enumerate()
-        .map(|(n, (action, answer))| run(&dir.join(n.to_string()), ops, *action, *answer))
+        .map(|(n, (action, answer))| run(&dir.join(n.to_string()), ops, models, *action, *answer))
         .collect();
     expect.assert_eq(&outcomes.join("\n"));
     fs::remove_dir_all(dir).unwrap();
@@ -83,8 +91,14 @@ fn check(name: &str, ops: Option<OpPayloadLimit>, cases: &[(Action, Answer)], ex
 /// # Panics
 ///
 /// Panics unless `action` returns within [`HUNG`], which only an action that hangs takes.
-fn run(dir: &Path, ops: Option<OpPayloadLimit>, action: Action, answer: Answer) -> String {
-    let (mut session, arrivals, sandbox) = connect(dir, ops, answer);
+fn run(
+    dir: &Path,
+    ops: Option<OpPayloadLimit>,
+    models: bool,
+    action: Action,
+    answer: Answer,
+) -> String {
+    let (mut session, arrivals, sandbox) = connect(dir, ops, models, answer);
     let dir = dir.to_owned();
     let (outcome, session, arrivals) = bounded("the action", move || {
         let outcome = action(&mut session, &arrivals, &dir);
@@ -112,12 +126,13 @@ fn bounded<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static
     }
 }
 
-/// A session, accepted with `ops`, with a fake sandbox in the new directory `dir` that answers
-/// the session's first request with `answer`'s frames, what arrives for the session's owner,
-/// and the sandbox's thread, which returns the op replies it heard.
+/// A session, accepted with `ops` and `models`, with a fake sandbox in the new directory `dir`
+/// that answers the session's first request with `answer`'s frames, what arrives for the
+/// session's owner, and the sandbox's thread, which returns the op replies it heard.
 fn connect(
     dir: &Path,
     ops: Option<OpPayloadLimit>,
+    models: bool,
     answer: Answer,
 ) -> (Session, Receiver<Arrival>, JoinHandle<Vec<String>>) {
     fs::create_dir(dir).unwrap();
@@ -160,7 +175,7 @@ fn connect(
     });
     let (sender, arrivals) = mpsc::channel();
     let session = listener
-        .accept(hung(), ops, sender, |arrival| arrival)
+        .accept(hung(), ops, models, sender, |arrival| arrival)
         .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
@@ -251,7 +266,7 @@ fn send_unended(connection: &mut UnixStream) {
     }
 }
 
-/// The stream a request names: `None` for an op's reply.
+/// The stream a request names: `None` for an op's reply or a part of a model response.
 fn stream_of(request: &ToSandbox) -> Option<u32> {
     match *request {
         ToSandbox::Put { stream, .. }
@@ -261,7 +276,10 @@ fn stream_of(request: &ToSandbox) -> Option<u32> {
         | ToSandbox::Start { stream, .. }
         | ToSandbox::Freeze { stream }
         | ToSandbox::Collect { stream, .. } => Some(stream),
-        ToSandbox::OpReply { .. } => None,
+        ToSandbox::OpReply { .. }
+        | ToSandbox::ModelResponse { .. }
+        | ToSandbox::ModelData { .. }
+        | ToSandbox::ModelEnd { .. } => None,
     }
 }
 
@@ -311,17 +329,18 @@ fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> S
 }
 
 /// Asks for an op payload limit over the protocol's, which is refused, then answers ops as
-/// [`ops`] does.
+/// [`freeze_and_take`] does.
 fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let refused = OpPayloadLimit::try_from(MAX_OP_PAYLOAD_BYTES + 1).unwrap_err();
     format!(
         "op payload limit: {refused}; {}",
-        ops(session, arrivals, dir)
+        freeze_and_take(session, arrivals, dir)
     )
 }
 
-/// Freezes the sandbox, whose answer may carry ops, then takes what arrives ([`take`]).
-fn ops(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+/// Freezes the sandbox, whose answer may carry ops and model requests, then takes what arrives
+/// ([`take`]).
+fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     let frozen = outcome(session.freeze(hung()));
     format!("freeze: {frozen}; {}", take(session, arrivals, None))
 }
@@ -346,8 +365,8 @@ fn collect_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &P
 }
 
 /// Answers each op that arrives, refuses each whose payload was over the limit, and notes each
-/// command's exit, saying whether it is `started`'s, until the session's end, and then anything
-/// that arrives after it.
+/// model request and each command's exit, saying whether it is `started`'s, until the session's
+/// end, and then anything that arrives after it.
 fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Process>) -> String {
     let mut lines = Vec::new();
     loop {
@@ -373,6 +392,13 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
                     lines.push(format!("refuse: {:?}: {error}", error.kind()));
                 }
             }
+            Arrival::ModelRequest(request) => lines.push(format!(
+                "{} {} {:?} {:?}",
+                request.method,
+                request.path,
+                request.headers,
+                String::from_utf8_lossy(&request.body)
+            )),
             Arrival::Exited { process, status } => {
                 let whose = if started == Some(process) {
                     "the"
@@ -433,7 +459,7 @@ fn no_grants() -> OpReply {
 /// on the first session.
 fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let ops = Some(OpPayloadLimit::try_from(0).unwrap());
-    let (mut other, others, sandbox) = connect(&dir.join("other"), ops, |s| {
+    let (mut other, others, sandbox) = connect(&dir.join("other"), ops, false, |s| {
         vec![
             done(s),
             op(0, json!({ "kind": "ops" }), 0),
@@ -602,6 +628,29 @@ fn op_data(number: u32, bytes: &[u8]) -> (Value, Vec<u8>) {
     (json!({ "type": "op_data", "op": number }), bytes.to_vec())
 }
 
+/// Opens model request `number`, a `POST` to `path` whose body is `size` bytes.
+fn model_request(number: u32, path: &str, size: u64) -> (Value, Vec<u8>) {
+    let message = json!({
+        "type": "model_request",
+        "request": number,
+        "method": "POST",
+        "path": path,
+        "headers": [["content-type", "application/json"]],
+        "size": size,
+    });
+    (message, Vec::new())
+}
+
+fn model_data(number: u32, bytes: &[u8]) -> (Value, Vec<u8>) {
+    let message = json!({ "type": "model_data", "request": number });
+    (message, bytes.to_vec())
+}
+
+/// The numbers of as many model requests as may be in flight at once, from 0.
+fn flight() -> Range<u32> {
+    0..u32::try_from(MAX_MODEL_REQUESTS_IN_FLIGHT).unwrap()
+}
+
 /// Not a frame: where the fake sandbox waits for the reply to the op in flight, as `sandboxd`
 /// does before it opens another.
 fn await_reply() -> (Value, Vec<u8>) {
@@ -643,6 +692,7 @@ fn sandbox_answers() {
     check(
         "answers",
         None,
+        false,
         &[
             (collect, |s| {
                 vec![dir(s, "a"), file(s, "a/b", 2), data(s, b"hi"), end(s)]
@@ -720,12 +770,13 @@ fn protocol_breaks() {
     check(
         "breaks",
         None,
+        false,
         &[
-            (ops, |s| vec![end(s), done(s)]),
+            (freeze_and_take, |s| vec![end(s), done(s)]),
             (start_and_take, |s| vec![reply("exited", s), done(s)]),
             (collect_and_take, |s| vec![dir(s, "a"), done(s), end(s)]),
-            (ops, |s| vec![done(s + 1), done(s)]),
-            (ops, |s| vec![done(0), done(s)]),
+            (freeze_and_take, |s| vec![done(s + 1), done(s)]),
+            (freeze_and_take, |s| vec![done(0), done(s)]),
             (collect_and_take, |s| vec![dir(s, "a/b"), stall()]),
             (collect_and_take, |s| {
                 vec![
@@ -748,16 +799,17 @@ fn protocol_breaks() {
 }
 
 /// Ops the sandbox makes, which the gateway passes on whole, refuses, or ends the session for,
-/// in a session that takes ops whose payloads hold at most 4 bytes, and in one that takes none.
+/// in a session that takes ops whose payloads hold at most 4 bytes.
 #[test]
 fn sandbox_ops() {
     check(
         "ops",
         Some(OpPayloadLimit::try_from(4).unwrap()),
+        false,
         &[
             // A payload over the limit is refused once all of its bytes have arrived, and the
             // next op follows; an op without a payload is whole at once.
-            (ops, |s| {
+            (freeze_and_take, |s| {
                 vec![
                     done(s),
                     train(7, 5),
@@ -772,31 +824,35 @@ fn sandbox_ops() {
                     await_reply(),
                 ]
             }),
-            (ops, |s| vec![done(s), op_data(7, b"x")]),
-            (ops, |s| vec![done(s), train(7, MAX_OP_PAYLOAD_BYTES + 1)]),
-            (ops, |s| {
+            (freeze_and_take, |s| vec![done(s), op_data(7, b"x")]),
+            (freeze_and_take, |s| {
+                vec![done(s), train(7, MAX_OP_PAYLOAD_BYTES + 1)]
+            }),
+            (freeze_and_take, |s| {
                 vec![done(s), op(9, json!({ "kind": "status", "job": 3 }), 3)]
             }),
-            (ops, |s| vec![done(s), train(7, 2), op_data(7, b"abc")]),
+            (freeze_and_take, |s| {
+                vec![done(s), train(7, 2), op_data(7, b"abc")]
+            }),
             // An op over the limit is in flight from its `Op`, while its bytes arrive and before
             // its refusal, which goes only after its last byte: so opening another breaks the
             // protocol, and nothing is handed out.
-            (ops, |s| {
+            (freeze_and_take, |s| {
                 let ops = json!({ "kind": "ops" });
                 vec![done(s), train(7, 5), op_data(7, b"abcd"), op(8, ops, 0)]
             }),
             // Data for an op whose payload has all arrived.
-            (ops, |_| {
+            (freeze_and_take, |_| {
                 vec![train(7, 1), op_data(7, b"a"), op_data(7, b"x")]
             }),
             // An op is in flight until answered, and the session ends before the freeze is
             // answered, with the op queued.
-            (ops, |_| {
+            (freeze_and_take, |_| {
                 vec![train(7, 0), op(8, json!({ "kind": "ops" }), 0)]
             }),
             // An op over the limit is handed out refused though the session ended before the
             // refusal could be sent.
-            (ops, |_| {
+            (freeze_and_take, |_| {
                 vec![train(7, 5), op_data(7, b"abcde"), op_data(99, b"x")]
             }),
             (too_long_reply, |s| {
@@ -822,13 +878,84 @@ fn sandbox_ops() {
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; refuse: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; ended: the sandbox broke the protocol: it sent data for op 99, which is not open
             freeze: ok; InvalidInput: the message is 65602 bytes: a frame's message holds at most 65536; ok; the sandbox heard op 7: {"kind":"refused","message":"the reply was too long to send: the message is 65602 bytes: a frame's message holds at most 65536"}, op 8: {"kind":"refused","message":"no"}"#]],
     );
+}
+
+/// Model requests the sandbox makes, which the gateway passes on whole, or ends the session for:
+/// a request is in flight from its opening, and no more than the protocol allows are in flight at
+/// once.
+#[test]
+fn sandbox_model_requests() {
+    check(
+        "models",
+        None,
+        true,
+        &[
+            // A body in two parts, and none.
+            (freeze_and_take, |s| {
+                let body = [br#"{"a""#.as_slice(), b":1}"].map(|part| model_data(3, part));
+                let mut frames = vec![done(s), model_request(3, "/", 7)];
+                frames.extend(body);
+                frames.push(model_request(4, "/", 0));
+                frames
+            }),
+            // One past a full flight, each of whose requests is whole and stays in flight once
+            // the owner has taken it.
+            (freeze_and_take, |s| {
+                let mut frames: Vec<_> = flight().map(|n| model_request(n, "/", 0)).collect();
+                frames.extend([done(s), model_request(99, "/", 0)]);
+                frames
+            }),
+            (freeze_and_take, |s| {
+                vec![done(s), model_request(3, "/", 1), model_request(3, "/", 1)]
+            }),
+            // Data for a model request never opened, and for one whose body has all arrived.
+            (freeze_and_take, |s| vec![done(s), model_data(3, b"x")]),
+            (freeze_and_take, |_| {
+                vec![
+                    model_request(3, "/", 1),
+                    model_data(3, b"a"),
+                    model_data(3, b"x"),
+                ]
+            }),
+            (freeze_and_take, |s| {
+                let (mut open, body) = model_request(3, "/", 0);
+                open["headers"] = json!([["content-type", "x"], ["X-Key", "y"]]);
+                vec![done(s), (open, body)]
+            }),
+            (freeze_and_take, |s| {
+                vec![done(s), model_request(3, "/", MAX_MODEL_REQUEST_BYTES + 1)]
+            }),
+            (freeze_and_take, |s| {
+                vec![done(s), model_request(3, "/", 2), model_data(3, b"abc")]
+            }),
+        ],
+        &expect![[r#"
+            freeze: ok; POST / [("content-type", "application/json")] "{\"a\":1}"; POST / [("content-type", "application/json")] ""; ended: the sandbox ended the session
+            freeze: ok; POST / [("content-type", "application/json")] ""; POST / [("content-type", "application/json")] ""; POST / [("content-type", "application/json")] ""; POST / [("content-type", "application/json")] ""; POST / [("content-type", "application/json")] ""; POST / [("content-type", "application/json")] ""; POST / [("content-type", "application/json")] ""; ended: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows
+            freeze: ok; ended: the sandbox broke the protocol: it opened model request 3, which is in flight
+            freeze: ok; ended: the sandbox broke the protocol: it sent data for model request 3, which is not open
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for model request 3, which is not open; POST / [("content-type", "application/json")] "a"; ended: the sandbox broke the protocol: it sent data for model request 3, which is not open
+            freeze: ok; ended: the sandbox broke the protocol: it opened model request 3 with a header name that is not in lowercase
+            freeze: ok; ended: the sandbox broke the protocol: it opened model request 3 with a body of 67108865 bytes, more than the protocol's 67108864
+            freeze: ok; ended: the sandbox broke the protocol: it sent 3 bytes of model request 3's body, past its size: 2 were left"#]],
+    );
+}
+
+/// A passive session, which takes neither ops nor model requests, so that the first the sandbox
+/// makes breaks the protocol.
+#[test]
+fn passive_session() {
     check(
         "passive",
         None,
-        &[(over_the_cap, |s| vec![done(s), train(7, 0)])],
-        &expect![
-            "op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ended: the sandbox broke the protocol: it opened op 7, but the session takes no ops"
+        false,
+        &[
+            (over_the_cap, |s| vec![done(s), train(7, 0)]),
+            (freeze_and_take, |s| vec![done(s), model_request(3, "/", 0)]),
         ],
+        &expect![[r#"
+            op payload limit: the op payload limit is 67108865 bytes, over the protocol's 67108864: give at most that; freeze: ok; ended: the sandbox broke the protocol: it opened op 7, but the session takes no ops
+            freeze: ok; ended: the sandbox broke the protocol: it opened model request 3, but the session takes no model requests: send one only on a session accepted to take them"#]],
     );
 }
 
@@ -841,6 +968,7 @@ fn another_sessions_op() {
     check(
         "elsewhere",
         Some(OpPayloadLimit::try_from(0).unwrap()),
+        false,
         &[(answer_elsewhere, |s| {
             vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
         })],
@@ -858,6 +986,7 @@ fn deadlines() {
     check(
         "deadlines",
         Some(OpPayloadLimit::try_from(0).unwrap()),
+        false,
         &[
             // The sandbox answers after a pause, or stops reading a large put for one, and then
             // reads on: the requests wait, as their deadlines haven't passed. It answers the put
@@ -923,6 +1052,7 @@ fn arrivals() {
     check(
         "arrivals",
         Some(OpPayloadLimit::try_from(0).unwrap()),
+        true,
         &[
             // An op the command made before it exited, its exit, and an op one of its children
             // made after.
@@ -936,6 +1066,18 @@ fn arrivals() {
                     await_reply(),
                 ]
             }),
+            // Model requests, each arriving once whole, around an op, and the command's exit.
+            (start_and_take, |s| {
+                vec![
+                    done(s),
+                    model_request(3, "/a", 0),
+                    model_request(4, "/b", 2),
+                    op(7, json!({ "kind": "ops" }), 0),
+                    model_data(4, b"hi"),
+                    reply("exited", s),
+                    await_reply(),
+                ]
+            }),
             // The sandbox goes on sending, reading nothing, until the gateway hangs up.
             (
                 |session, _, _| outcome(session.freeze(hung())),
@@ -944,6 +1086,7 @@ fn arrivals() {
         ],
         &expect![[r#"
             started; Ops; the command exited: Code(0); Status { job: 3 }; ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 8: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+            started; POST /a [("content-type", "application/json")] ""; Ops; POST /b [("content-type", "application/json")] "hi"; the command exited: Code(0); ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
             ok"#]],
     );
 }

@@ -493,6 +493,16 @@ impl<'r> Runtime<'r> {
             Arrival::Ended { reason } => {
                 (self.agent.as_mut()).and_then(|agent| agent.ended(&reason))
             }
+            #[expect(
+                clippy::unreachable,
+                reason = "the agent's session is accepted without model requests, so one breaks \
+                          the protocol, which ends the session, and arrives as its end; no type \
+                          excludes it, since one `Arrival` serves sessions with model requests \
+                          and without"
+            )]
+            Arrival::ModelRequest(_) => {
+                unreachable!("a model request arrived on the agent's session, which takes none")
+            }
         };
         Ok(event.map(|event| (at, event)))
     }

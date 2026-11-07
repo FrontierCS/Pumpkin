@@ -61,7 +61,8 @@ pub(super) struct Deadlines {
 /// What reaches a judge call's thread through its inbox.
 pub(super) enum Message {
     /// What its session's reader handed over ([`Listener::accept`]): at most its command's
-    /// exit, as it runs one command, and its end, since a passive session hands out no op.
+    /// exit, as it runs one command, and its end, since a passive session hands out no op, and
+    /// the session takes no model requests.
     ///
     /// [`Listener::accept`]: pumpkin_gateway::Listener::accept
     Session(Arrival),
@@ -185,6 +186,15 @@ fn wait(call: &Call<'_>, timeout: Deadline) -> Result<Ended, String> {
         )]
         Some(Message::Session(Arrival::Op(_) | Arrival::Refused(_))) => {
             unreachable!("job {}'s passive session handed out an op", job.0)
+        }
+        #[expect(
+            clippy::unreachable,
+            reason = "the judge's session is accepted without model requests, so one breaks the \
+                      protocol, which ends the session, and arrives as its end; no type excludes \
+                      it, since one `Arrival` serves sessions with model requests and without"
+        )]
+        Some(Message::Session(Arrival::ModelRequest(_))) => {
+            unreachable!("job {}'s session handed out a model request", job.0)
         }
     }
 }
