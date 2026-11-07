@@ -8,6 +8,7 @@ use pumpkin_gateway::{IncomingModelRequest, ModelRequest};
 use pumpkin_schema::ir::Models;
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
+use ureq::http::{HeaderName, HeaderValue};
 
 /// The request headers that pass upstream.
 // Each is one the harness the runs use sends, and describes its client, its session, or the form
@@ -60,11 +61,12 @@ pub struct Route {
 /// makes one.
 #[derive(Debug)]
 pub struct Closed {
-    headers: Vec<(String, String)>,
+    headers: Vec<(HeaderName, HeaderValue)>,
     body: Vec<u8>,
 }
 
-/// Why the route refuses a model request, which [`Refusal::answer`] tells its client.
+/// Why the route answers a model request with an error, which [`Refusal::answer`] tells its
+/// client: a rule of the closure's that it breaks, or an upstream that gave it no answer.
 #[derive(Debug)]
 pub struct Refusal {
     status: Status,
@@ -73,13 +75,17 @@ pub struct Refusal {
 
 /// The HTTP status of a refusal.
 #[derive(Clone, Copy, Debug)]
-enum Status {
+pub(super) enum Status {
     /// The request breaks a rule of the closure's.
     BadRequest,
     /// Its target is not `/responses`.
     NotFound,
     /// Its target is, but its method is not `POST`.
     MethodNotAllowed,
+    /// The upstream gave no answer.
+    BadGateway,
+    /// The upstream gave no answer in time.
+    GatewayTimeout,
 }
 
 impl Route {
@@ -148,7 +154,7 @@ impl Route {
 
 impl Closed {
     /// The request's headers that pass upstream.
-    pub fn headers(&self) -> &[(String, String)] {
+    pub fn headers(&self) -> &[(HeaderName, HeaderValue)] {
         &self.headers
     }
 
@@ -162,7 +168,8 @@ impl Refusal {
     /// Answers `request` with the refusal by `by` ([`IncomingModelRequest::respond`]): its
     /// status, with `allow: POST` for a 405, and its message in a JSON error,
     /// `{"error": {"message", "type", "param", "code"}}`, whose `type` is
-    /// `invalid_request_error` and whose `param` and `code` are `null`.
+    /// `invalid_request_error` for a 4xx and `server_error` for a 5xx, and whose `param` and
+    /// `code` are `null`.
     ///
     /// # Errors
     ///
@@ -170,21 +177,25 @@ impl Refusal {
     pub fn answer(self, request: IncomingModelRequest, by: Deadline) -> io::Result<()> {
         let Self { status, message } = self;
         let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
-        // Each is a 4xx, a request for its client to mend, which a client takes as final rather
-        // than trying again. HTTP requires a 405 to name the methods its target allows.
-        let code = match status {
-            Status::BadRequest => 400,
-            Status::NotFound => 404,
+        // A 4xx is a request for its client to mend, which a client takes as final rather than
+        // trying again; a 5xx, the route's own failure, it may try again. HTTP requires a 405 to
+        // name the methods its target allows.
+        let (code, kind) = match status {
+            Status::BadRequest => (400, "invalid_request_error"),
+            Status::NotFound => (404, "invalid_request_error"),
             Status::MethodNotAllowed => {
                 headers.push(("allow".to_owned(), "POST".to_owned()));
-                405
+                (405, "invalid_request_error")
             }
+            Status::BadGateway => (502, "server_error"),
+            Status::GatewayTimeout => (504, "server_error"),
         };
-        // The model provider's API gives its own errors in this form, with this `type` for a
-        // request it won't serve as sent, so a client reports the message.
+        // The model provider's API gives its own errors in this form, with these `type`s for a
+        // request it won't serve as sent and for its own failure, so a client reports the
+        // message.
         let error = json!({
             "message": message,
-            "type": "invalid_request_error",
+            "type": kind,
             "param": null,
             "code": null,
         });
@@ -195,7 +206,7 @@ impl Refusal {
     }
 }
 
-fn refusal(status: Status, message: String) -> Refusal {
+pub(super) fn refusal(status: Status, message: String) -> Refusal {
     Refusal { status, message }
 }
 
@@ -223,21 +234,18 @@ fn shown(text: &str) -> Cow<'_, str> {
 /// unless its value is a valid HTTP field value.
 // HTTP's grammar lets a value hold no control character but tab. A line break in a value would
 // end the header early, and could slip upstream a header that the list keeps behind.
-fn passed(headers: &[(String, String)]) -> Result<Vec<(String, String)>, Refusal> {
+fn passed(headers: &[(String, String)]) -> Result<Vec<(HeaderName, HeaderValue)>, Refusal> {
     headers
         .iter()
-        .filter(|(name, _)| PASSED_HEADERS.contains(&name.as_str()))
-        .map(|(name, value)| {
-            if value
-                .chars()
-                .any(|char| char.is_ascii_control() && char != '\t')
-            {
-                return Err(bad(format!(
+        .filter_map(|(name, value)| {
+            let listed = PASSED_HEADERS.into_iter().find(|listed| listed == name)?;
+            let value = HeaderValue::from_str(value).map_err(|_| {
+                bad(format!(
                     "the header `{name}` holds a control character: send values without any but \
                      tab"
-                )));
-            }
-            Ok((name.clone(), value.clone()))
+                ))
+            });
+            Some(value.map(|value| (HeaderName::from_static(listed), value)))
         })
         .collect()
 }
