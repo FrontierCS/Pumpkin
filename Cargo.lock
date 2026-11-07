@@ -118,6 +118,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pumpkin-cli"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "pumpkin",
+ "pumpkin-docker",
+ "pumpkin-schema",
+ "serde_json",
+ "stdx",
+ "xflags",
+]
+
+[[package]]
 name = "pumpkin-docker"
 version = "0.0.0"
 dependencies = [

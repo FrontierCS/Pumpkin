@@ -19,7 +19,8 @@ harming the host or the run.
 
 ## Entry points
 
-The binaries are `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), the factory's
+The binaries are `pumpkin` (`crates/pumpkin-cli/src/main.rs`), which runs a workflow,
+`sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), the factory's
 `pumpkin-frontier-cs` (`crates/pumpkin-frontier-cs/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
 parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`, a provider a
@@ -109,6 +110,10 @@ whose files `record` lays out, and its run log, whose records `log` does.
   the runtime reaches a run's provider only through `Sandboxes`; and a run's end deletes
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
+
+**`crates/pumpkin-cli`.** `pumpkin`, the operator's command line: `run` reaches the engine of a
+named Docker context and runs a workflow on it with `Run`: it reaches a run's provider and hands
+it to `Run` as a `Provider`.
 
 **`crates/pumpkin-harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
