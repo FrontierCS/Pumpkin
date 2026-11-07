@@ -24,7 +24,7 @@
 //!   [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES), which is removed;
 //! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields, in
 //!   the run log's JSON form of an outcome (`log::outcome_json`); or
-//!   `{"state": "refused" | "failed", "reason": r}`.
+//!   `{"state": "failed", "reason": r}`.
 
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Read, Write};
@@ -127,8 +127,7 @@ pub enum Ending {
     Scored,
     /// The run finished without a score: `finished without a score: <why>`.
     Unscored(String),
-    /// The workflow was refused, or the run failed: `was refused: <reason>` or
-    /// `failed: <reason>`.
+    /// The run failed: `failed: <reason>`.
     Failed(String),
 }
 
@@ -307,10 +306,9 @@ impl Record {
                 ))))
             }
             Some("finished") => Ok(Some(Ending::Scored)),
-            Some("refused") => Ok(Some(Ending::Failed(format!("was refused: {reason}")))),
             Some("failed") => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
             Some(_) | None => Err(format!(
-                "{}'s state is not one pumpkin knows: expected `finished`, `refused` or `failed`",
+                "{}'s state is not one pumpkin knows: expected `finished` or `failed`",
                 path.display()
             )),
         }

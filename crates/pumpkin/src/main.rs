@@ -12,6 +12,7 @@ use std::{env, fmt, fs};
 use docker::{ContextName, Engine};
 use runtime::{Ending, Record, Run};
 use schema::ir;
+use schema::workflow::Workflow;
 use stdx::Context;
 
 mod config;
@@ -72,8 +73,7 @@ mod flags {
 
             /// Waits until a run has ended, then prints its `outcome.json`, and exits as `run`
             /// does: with 0 if the run finished with a score, 3 if it finished without one, 2 on
-            /// a usage error, and 1 on any other error, a run that was refused, failed or was
-            /// lost, because its driver ended without an `outcome.json`, included. Says why on
+            /// a usage error, and 1 on any other error, a run that failed or was lost, because its driver ended without an `outcome.json`, included. Says why on
             /// the standard error when the exit is not 0. It follows a run that `pumpkin run`
             /// is still driving, and ending it does not stop the run. A record made before
             /// records were locked has no `driver.pid`, and is refused.
@@ -186,10 +186,8 @@ fn run(
         Some(runs) => runs,
         None => default_runs()?,
     };
-    let ir = read_ir(path)?;
-    // A route on any role but the agent's is refused once `Run::prepare` parses the IR, after
-    // the configuration is read, so the route found here is taken as the agent's.
-    let serving = match ir.roles.iter().find_map(|role| role.egress.model.as_ref()) {
+    let workflow = read_workflow(path)?;
+    let serving = match &workflow.agent().sandbox.model_route {
         Some(route) => {
             let config = match config {
                 Some(config) => config,
@@ -201,7 +199,7 @@ fn run(
         None => None,
     };
     let engine = engine(context)?;
-    let run = Run::prepare(&ir, &runs, SystemTime::now(), serving)?;
+    let run = Run::prepare(workflow, &runs, SystemTime::now(), serving)?;
     let dir = run.dir().to_owned();
     say(format_args!(
         "run {} records into {}",
@@ -283,10 +281,24 @@ fn home(instead: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("HOME is unset or empty: set it, or {instead}"))
 }
 
-/// The workflow IR in the file at `path`.
-fn read_ir(path: &Path) -> Result<ir::Workflow, String> {
+/// The workflow whose IR is in the file at `path`.
+fn read_workflow(path: &Path) -> Result<Workflow, String> {
     let json = fs::read(path).context(path.display())?;
-    serde_json::from_slice(&json).context(path.display())
+    let ir: ir::Workflow = serde_json::from_slice(&json).context(path.display())?;
+    Workflow::parse(&ir).map_err(|errors| {
+        // Each problem is said on a line of its own, as cargo does, so that the error the
+        // caller says last is still one line.
+        let problems = errors.as_slice();
+        for problem in problems {
+            say(format_args!("{}: {problem}", path.display()));
+        }
+        let (count, s) = (problems.len(), if problems.len() == 1 { "" } else { "s" });
+        format!(
+            "{}: the workflow has {count} problem{s}: fix {} and run again",
+            path.display(),
+            if count == 1 { "it" } else { "them" }
+        )
+    })
 }
 
 /// The Docker engine that `context` reaches, reported. A rootful engine is announced, since its

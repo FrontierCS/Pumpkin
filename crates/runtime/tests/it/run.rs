@@ -19,6 +19,7 @@ use expect_test::{Expect, expect};
 use route::{Key, Serving, Upstream, UpstreamUrl};
 use runtime::Run;
 use schema::ir::{self, ModelName, Name};
+use schema::workflow::Workflow;
 use serde_json::Value;
 
 const LWE: &str = include_str!("../../../schema/tests/fixtures/lwe.json");
@@ -68,7 +69,9 @@ fn check(
         };
         let url = "http://127.0.0.1:9/responses";
         let serving = served.map(|models| serving(&runs.dir, url, models));
-        let prepared = Run::prepare(&ir, &dir, now, serving);
+        let prepared = Workflow::parse(&ir)
+            .map_err(|errors| errors.to_string())
+            .and_then(|workflow| Run::prepare(workflow, &dir, now, serving));
         let record = fs::read_dir(&dir)
             .ok()
             .and_then(|mut entries| entries.next());
@@ -158,16 +161,8 @@ fn prepare() {
             20240229-000000-hhhhhhhh: driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
-            refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one
-            20251231-235959-hhhhhhhh: driver.pid, ir.json, outcome.json, record.json
-            ir.json is the IR: true
-            record.json: {"record_version":"pumpkin.record/v0"}
-            outcome.json: {"reason":"`agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one","state":"refused"}
-            refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows
-            20251231-235959-hhhhhhhh: driver.pid, ir.json, outcome.json, record.json
-            ir.json is the IR: true
-            record.json: {"record_version":"pumpkin.record/v0"}
-            outcome.json: {"reason":"`agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows","state":"refused"}
+            refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one; runs directory made: false
+            refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows; runs directory made: false
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true

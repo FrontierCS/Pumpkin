@@ -20,6 +20,7 @@ pub use parse::{ParseError, ParseErrors};
 /// A parsed workflow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workflow {
+    ir: crate::ir::Workflow,
     name: WorkflowName,
     agent: Agent,
     judges: Vec<Judge>,
@@ -29,6 +30,11 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// The IR that this workflow was parsed from.
+    pub fn ir(&self) -> &crate::ir::Workflow {
+        &self.ir
+    }
+
     pub fn name(&self) -> &WorkflowName {
         &self.name
     }

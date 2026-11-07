@@ -2,7 +2,7 @@
 //! decides, and keeps the run's record. An agent reaches its model through [`route`], which the
 //! runtime serves.
 //!
-//! [`Run::prepare`] parses a workflow and begins its record, and [`Run::execute`] runs it to
+//! [`Run::prepare`] begins the record of a parsed workflow, and [`Run::execute`] runs it to
 //! its outcome, one thread driving the core as [`Core`] says, while each judge call runs on a
 //! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
 //! on one inbox, into which the agent's session hands what it reads, and each judge call's
@@ -25,7 +25,6 @@ use decision::{
 use gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
 use provider::Provider;
 use route::{Answer, Serving};
-use schema::ir;
 use schema::provider::{RunTag, SandboxId};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{JudgeCall, Main, Workflow};
@@ -60,33 +59,24 @@ pub struct Run {
 }
 
 impl Run {
-    /// Parses `ir` and makes the run's record in `runs`, which is created if need be:
-    /// `ir.json`. The run's id holds `now`, the time by the caller's clock. The agent's model
+    /// Makes the record of `workflow`'s run in `runs`, which is created if need be, with its IR
+    /// in `ir.json`. The run's id holds `now`, the time by the caller's clock. The agent's model
     /// route, if it has one, is served as `serving` says, which goes unused for a workflow
-    /// without one; a workflow whose route it doesn't serve is refused, with `outcome.json`
-    /// saying why.
+    /// without one. A workflow whose route is not served is refused before any record is made.
     ///
     /// # Errors
     ///
-    /// Fails if the IR breaks a parsing rule, if `now` is before 1970, if the workflow is
-    /// refused, or if the record can't be written.
+    /// Fails if the workflow is refused, if `now` is before 1970, or if the record can't be
+    /// written.
     pub fn prepare(
-        ir: &ir::Workflow,
+        workflow: Workflow,
         runs: &Path,
         now: SystemTime,
         serving: Option<Serving>,
     ) -> Result<Self, String> {
-        let workflow = Workflow::parse(ir).map_err(|errors| errors.to_string())?;
+        let served = Served::new(&workflow, serving)?;
         let (id, dir, lock) = record::create(runs, now)?;
-        record::write_json(&dir, "ir.json", &json!(ir))?;
-        let served = match Served::new(&workflow, serving) {
-            Ok(served) => served,
-            Err(reason) => {
-                let outcome = json!({ "state": "refused", "reason": reason });
-                record::write_json(&dir, "outcome.json", &outcome)?;
-                return Err(reason);
-            }
-        };
+        record::write_json(&dir, "ir.json", &json!(workflow.ir()))?;
         Ok(Self {
             workflow,
             served,
