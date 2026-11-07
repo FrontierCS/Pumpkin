@@ -34,11 +34,11 @@
 //! image holds its harness below [`harness_dir()`]. A workflow puts nothing in these directories
 //! ([`RolePath`](crate::ir::RolePath)).
 
+use op::{OpCall, OpReply};
 use serde::{Deserialize, Serialize};
 
 pub use crate::ir::values::RelativePath;
 use crate::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
-use op::{OpCall, OpReply};
 
 pub mod frame;
 pub mod op;

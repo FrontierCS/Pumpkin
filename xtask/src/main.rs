@@ -24,6 +24,8 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// The target the static `sandboxd` is built for.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
+const RUSTFMT_TOOLCHAIN: &str = "nightly-2026-11-07";
+
 mod flags {
     #![expect(
         unreachable_pub,
@@ -40,6 +42,12 @@ mod flags {
 
         /// Contributor tasks.
         cmd xtask {
+            /// Formats the workspace with the pinned nightly rustfmt.
+            cmd fmt {
+                /// Checks formatting without changing files.
+                optional --check
+            }
+
             /// Runs the checks every change must pass, in order, and stops at the first that
             /// fails.
             cmd ci {
@@ -63,8 +71,14 @@ mod flags {
 
     #[derive(Debug)]
     pub enum XtaskCmd {
+        Fmt(Fmt),
         Ci(Ci),
         Sandboxd(Sandboxd),
+    }
+
+    #[derive(Debug)]
+    pub struct Fmt {
+        pub check: bool,
     }
 
     #[derive(Debug)]
@@ -110,6 +124,12 @@ fn try_main() -> Result<()> {
     let flags = flags::Xtask::from_env_or_exit();
     let cargo = Cargo::new()?;
     match flags.subcommand {
+        flags::XtaskCmd::Fmt(flags::Fmt { check }) => {
+            let fmt = cargo.fmt();
+            let fmt = if check { fmt.arg("--check") } else { fmt };
+            fmt.run()?;
+            Ok(())
+        }
         flags::XtaskCmd::Ci(flags::Ci { docker }) => ci(&cargo, docker),
         flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
             println!("{}", sandboxd(&cargo)?.display());
@@ -152,6 +172,14 @@ impl Cargo {
         let cmd = self.sh.cmd("cargo").args(args);
         self.package_vars.iter().fold(cmd, Cmd::env_remove)
     }
+
+    /// The pinned formatter, without implicit installation or an inherited binary override.
+    fn fmt(&self) -> Cmd<'_> {
+        let toolchain = format!("+{RUSTFMT_TOOLCHAIN}");
+        self.cmd(&[&toolchain, "fmt", "--all"])
+            .env("RUSTUP_AUTO_INSTALL", "0")
+            .env_remove("RUSTFMT")
+    }
 }
 
 /// The workspace's root, which holds `xtask/`.
@@ -174,7 +202,7 @@ fn root() -> &'static Path {
 /// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
 /// Docker's own variables set to reach no engine.
 fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
-    cargo.cmd(&["fmt", "--check"]).run()?;
+    cargo.fmt().arg("--check").run()?;
     docs::check(&cargo.sh)?;
     let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
     clippy.args(["--", "--deny", "warnings"]).run()?;

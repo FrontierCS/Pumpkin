@@ -9,17 +9,16 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::fs;
 use std::io::Write;
 use std::net::Shutdown;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::os::unix::net::UnixStream;
-use std::panic;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::{fs, panic};
 
 use expect_test::{Expect, expect};
 use pumpkin_gateway::{Arrival, IncomingModelRequest, IncomingOp, Listener, Process, Put, Session};

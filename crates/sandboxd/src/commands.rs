@@ -15,12 +15,11 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs::OpenOptions;
-use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{self, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread;
+use std::{io, thread};
 
 use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
 use stdx::process::Environment;

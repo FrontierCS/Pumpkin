@@ -7,12 +7,11 @@
 //! one op over it, as [`crate::ops`] describes.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
+use std::{fs, io};
 
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};

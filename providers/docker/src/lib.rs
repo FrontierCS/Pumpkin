@@ -41,11 +41,10 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fmt;
-use std::io;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
+use std::{fmt, io};
 
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir::{Resources, User};

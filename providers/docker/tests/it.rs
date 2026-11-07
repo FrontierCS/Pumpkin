@@ -13,7 +13,6 @@
     reason = "a failed test shows its containers' logs"
 )]
 
-use std::fs;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -21,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin_docker::{Built, ContextName, Engine, Report, Security};

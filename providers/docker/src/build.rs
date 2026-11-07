@@ -20,14 +20,11 @@
 //! whitespace or a control character, which would make its line ambiguous.
 
 use std::collections::BTreeMap;
-use std::env;
 use std::ffi::OsStr;
-use std::fmt;
 use std::fs::{self, DirBuilder, File};
-use std::io;
-use std::iter;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
+use std::{env, fmt, io, iter};
 
 use pumpkin_schema::ir::{Image, Sha256Digest};
 use sha2::{Digest, Sha256};
