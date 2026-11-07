@@ -15,7 +15,7 @@ use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderValue, Uri};
 
-use super::closure::{Closed, Refusal, Status, refusal};
+use super::closure::{Closed, Refusal, Route, Status, refusal};
 
 /// The response headers that reach the client, besides the rate-limit headers that
 /// [`RATE_LIMIT_SUFFIXES`] gives.
@@ -118,6 +118,9 @@ pub enum Answer {
         status: u16,
         request_id: Option<String>,
     },
+    /// With a refusal of the route's own, with `status` and `message`, before the request
+    /// reached the upstream: the route's rules refused it, or the route had ended.
+    Barred { status: u16, message: String },
     /// With a refusal of the route's own, with `status` and `message`, in place of the
     /// upstream's response with the status `upstream_status`, if one came.
     Refused {
@@ -260,7 +263,7 @@ impl Upstream {
     ///
     /// Fails if the response's head is too long for a frame, which cuts the request short
     /// without a response, if `by` passes first, or if the session has ended.
-    pub fn forward(
+    pub(crate) fn forward(
         &self,
         closed: &Closed,
         request: IncomingModelRequest,
@@ -326,13 +329,49 @@ impl Upstream {
         }
     }
 
-    /// The refusal of a request once the model provider has refused the key with a 401
-    /// ([`Upstream::forward`]), if it has.
-    pub(crate) fn key_refused(&self) -> Option<Refusal> {
-        self.refused.get().map(|()| Refusal::key_refused())
+    /// Answers `request` for the agent, by `by`: refuses it unless `allowed`, or once the model
+    /// provider has refused the key, and else has `route` close it and forwards it
+    /// upstream, which is given up on at `by` too. It calls `forwarding` before it
+    /// forwards a request, and tells `answered` how it answered ([`Answer`]), before the answer's
+    /// end is written.
+    ///
+    /// Whether the answer reached the agent isn't told: writing it fails only for a response's
+    /// head too long for a frame, or as the agent's session ends, which the run log shows.
+    pub fn serve(
+        &self,
+        route: &Route,
+        request: IncomingModelRequest,
+        allowed: bool,
+        by: Deadline,
+        forwarding: impl FnOnce(),
+        answered: impl FnOnce(Answer),
+    ) {
+        let taken = if !allowed {
+            Err(Refusal::ended())
+        } else if self.refused.get().is_some() {
+            Err(Refusal::key_refused())
+        } else {
+            route.close(&request.request)
+        };
+        let _ = match taken {
+            Ok(closed) => {
+                forwarding();
+                self.forward(&closed, request, by, by, answered)
+            }
+            Err(refusal) => {
+                answered(refusal.barred());
+                refusal.answer(request, by)
+            }
+        };
     }
 
-    /// Gives up on every exchange in flight and every later one ([`Upstream::forward`]): its
+    /// Whether the model provider has refused the key with a 401 ([`Upstream::serve`]), which
+    /// ends the route.
+    pub fn key_was_refused(&self) -> bool {
+        self.refused.get().is_some()
+    }
+
+    /// Gives up on every exchange in flight and every later one ([`Upstream::serve`]): its
     /// client gets a 502 before the response's head, and the response cut short within its
     /// body. One still resolving the provider's name, or connecting to it, is given up on once
     /// that ends (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`).

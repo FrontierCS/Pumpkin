@@ -16,7 +16,7 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use pumpkin::driver::run::Run;
-use pumpkin::model_route::{Key, Serving, Upstream, UpstreamUrl};
+use pumpkin_model_route::{Key, Serving, Upstream, UpstreamUrl};
 use pumpkin_schema::ir::{self, ModelName, Name};
 use serde_json::Value;
 

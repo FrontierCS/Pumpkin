@@ -22,6 +22,7 @@ use pumpkin_decision::{
     Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, Verdict, WorkEnd, lasts,
 };
 use pumpkin_gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
+use pumpkin_model_route::{Answer, Serving};
 use pumpkin_provider::Provider;
 use pumpkin_schema::ir;
 use pumpkin_schema::provider::{RunTag, SandboxId};
@@ -29,8 +30,6 @@ use pumpkin_schema::sandbox::op::OpReply;
 use pumpkin_schema::workflow::{JudgeCall, Main, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
-
-use crate::model_route::{Answer, Serving};
 
 mod agent;
 mod judge;

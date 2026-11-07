@@ -113,11 +113,23 @@ observes and returns the `Action`s the runtime is to perform, until one ends the
 - **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
   left, and the fields its judge declares (`ResultSpec`), so the workflow decides its feedback.
 
+**`crates/pumpkin-model-route`.** The model route: `Route` closes the model requests that an
+agent's sandbox makes over its session, and `Upstream` forwards a closed one to the model provider
+and says how it answered (`Answer`); `Serving` is the upstream that serves a run's route, with the
+model names it takes. The crate holds the route's rules and all that reaches the model provider,
+so the TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
+- **Architecture Invariant:** the route stays closed: a request reaches the models its workflow
+  allows and nothing else of the model provider's, so a response carries nothing but what its own
+  request sent. The rules are in the crate's docs.
+- **Architecture Invariant:** the route knows no run: of Pumpkin's crates it depends on
+  `pumpkin-gateway`, `pumpkin-schema` and `stdx` only, and the runtime depends on it, never the
+  reverse; what the run does with an answer, its health and fault rule, is the runtime's.
+
 **`crates/pumpkin`.** The host side: the driver's runtime, `driver::run`, which prepares each
 `Run`, then drives the decision core on the run's `Provider`, keeping the run's record, whose
-files `record` lays out, and its run log, whose records `log` does. `model_route` closes the
-agent's model requests (`Route`) and forwards them upstream (`Upstream`), as the runtime serves
-the agent's route until the agent finalizes, the work phase ends, or the provider refuses the
+files `record` lays out, and its run log, whose records `log` does. `model` serves the agent's
+model requests through `pumpkin-model-route`'s `Route` and `Upstream`, and judges the model
+provider's answers, until the agent finalizes, the work phase ends, or the provider refuses the
 route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.

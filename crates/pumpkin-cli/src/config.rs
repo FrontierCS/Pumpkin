@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pumpkin::model_route::{self, Key, Serving, UpstreamUrl};
+use pumpkin_model_route::{self, Key, Serving, UpstreamUrl};
 use pumpkin_schema::ir::{ModelName, Models, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
@@ -80,7 +80,7 @@ impl Config {
             key_file,
             models,
         } = upstream;
-        let upstream = model_route::Upstream::new(url, Key::read(&key_file)?);
+        let upstream = pumpkin_model_route::Upstream::new(url, Key::read(&key_file)?);
         let models = models
             .into_iter()
             .map(|model| (model.name, model.upstream_name));

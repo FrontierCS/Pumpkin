@@ -9,6 +9,8 @@
 )]
 
 use std::collections::BTreeMap;
+use std::io::{BufReader, Write};
+use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,14 +18,14 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use pumpkin::model_route::Route;
 use pumpkin_gateway::{Arrival, IncomingModelRequest, Listener};
+use pumpkin_model_route::{Key, Route, Upstream, UpstreamUrl};
 use pumpkin_schema::ir::ModelName;
 use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
 
-pub(crate) mod upstream;
+mod upstream;
 
 /// A request as its client sends it: method, path, headers and body.
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
@@ -39,13 +41,35 @@ fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
 }
 
 /// Sends each case's request over a session, as a sandbox of a role whose route allows `m-large`
-/// and `m-small`, closes it as the session's owner, and checks what came of each against
-/// `expect`.
+/// and `m-small`, and serves it as the session's owner: it shows what the stand-in model
+/// provider received of each that the route admitted, or the refusal that the sandbox heard,
+/// and checks them against `expect`.
 fn check(cases: &[(&str, Request)], expect: &Expect) {
-    let dir = std::env::temp_dir().join(format!("pumpkin-route-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "pumpkin-route-{}-{}",
+        std::process::id(),
+        thread::current().name().unwrap()
+    ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let route = Route::new(models(["m-large", "m-small"]));
+    let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = stand_in.local_addr().unwrap().to_string();
+    let (receipts, received) = mpsc::channel();
+    thread::spawn(move || {
+        for connection in stand_in.incoming() {
+            let mut connection = connection.unwrap();
+            let (line, headers, body) = upstream::read_request(&mut BufReader::new(&connection));
+            let answer = "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
+            connection.write_all(answer.as_bytes()).unwrap();
+            // The owner may have finished.
+            let _ = receipts.send((line, headers, body));
+        }
+    });
+    let key = dir.join("key");
+    fs::write(&key, "sk-test-0123\n").unwrap();
+    let url = UpstreamUrl::try_from(format!("http://{address}/v1/responses")).unwrap();
+    let upstream = Upstream::new(url, Key::read(&key).unwrap());
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
@@ -53,36 +77,31 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     let (sender, arrivals) = mpsc::channel();
     let accepted = listener.accept(Deadline::after(HUNG), None, true, sender, |arrival| arrival);
     let session = accepted.unwrap();
-    let closed: Vec<Option<String>> = cases
+    let sent: Vec<Option<String>> = cases
         .iter()
         .map(|(_, (_, _, _, sent))| {
             let incoming = next_model_request(&arrivals);
-            match route.close(&incoming.request) {
-                Ok(closed) => {
-                    let body = if closed.body() == sent {
-                        "the body as sent".to_owned()
-                    } else {
-                        format!("the body {}", String::from_utf8_lossy(closed.body()))
-                    };
-                    // This stands in for the upstream, which a closed request goes to.
-                    let response = incoming.respond(204, Vec::new(), Deadline::after(HUNG));
-                    response.unwrap().end().unwrap();
-                    Some(format!("closed, with {:?} and {body}", closed.headers()))
-                }
-                Err(refusal) => {
-                    refusal.answer(incoming, Deadline::after(HUNG)).unwrap();
-                    None
-                }
-            }
+            let mut forwarded = false;
+            let by = Deadline::after(HUNG);
+            upstream.serve(&route, incoming, true, by, || forwarded = true, drop);
+            forwarded.then(|| {
+                let (line, headers, body) = received.recv_timeout(HUNG).unwrap();
+                let body = if &body == sent {
+                    "the body as sent".to_owned()
+                } else {
+                    format!("the body {}", String::from_utf8_lossy(&body))
+                };
+                format!("went upstream, as {line} with {headers:?} and {body}")
+            })
         })
         .collect();
     let heard = sandbox.join().unwrap();
     let lines: Vec<String> = cases
         .iter()
-        .zip(closed.into_iter().zip(heard))
-        .map(|((name, _), (closed, heard))| format!("{name}: {}", closed.unwrap_or(heard)))
+        .zip(sent.into_iter().zip(heard))
+        .map(|((name, _), (sent, heard))| format!("{name}: {}", sent.unwrap_or(heard)))
         .collect();
-    expect.assert_eq(&lines.join("\n"));
+    expect.assert_eq(&lines.join("\n").replace(&address, "<stand-in>"));
     drop(session);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -402,8 +421,8 @@ fn closure() {
             ("another method", at("GET", "/responses")),
         ],
         &expect![[r#"
-            the harness's: closed, with [("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true")] and the body as sent
-            stored, then not: closed, with [] and the body {"input":[],"model":"m-small","store":false}
+            the harness's: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] and the body as sent
+            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/3.5.1"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}
             not JSON: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the body is not a JSON object (EOF while parsing an object at line 1 column 1): send one","param":null,"type":"invalid_request_error"}}
             no store: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
             stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}

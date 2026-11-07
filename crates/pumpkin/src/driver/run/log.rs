@@ -46,12 +46,12 @@ use pumpkin_decision::{
     Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
 };
 use pumpkin_gateway::RefusedOp;
+use pumpkin_model_route::Answer;
 use pumpkin_schema::workflow::{JudgeCall, Workflow};
 use serde_json::{Value, json};
 use stdx::Context;
 
 use super::record;
-use crate::model_route::Answer;
 
 /// The run log, open for appending.
 #[derive(Debug)]
@@ -134,6 +134,10 @@ impl Log {
             }
             Answer::Cut { status, request_id } => {
                 (Some(*status), request_id, json!({ "kind": "cut" }))
+            }
+            Answer::Barred { status, message } => {
+                let barred = json!({ "kind": "barred", "status": status, "message": message });
+                (None, &None, barred)
             }
             Answer::Refused {
                 upstream_status,
