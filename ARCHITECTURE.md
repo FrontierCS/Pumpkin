@@ -116,7 +116,8 @@ the route's key.
 **`crates/pumpkin-cli`.** `pumpkin`, the operator's command line: `run` reaches the engine of a
 named Docker context and runs a workflow on it with `Run`: it reaches a run's provider and hands
 it to `Run` as a `Provider`. It reads the deployment's configuration (`config`, TOML): the model
-upstreams that a workflow's model route may reach.
+upstreams that a workflow's model route may reach, of which it hands `Run` the one that serves
+the route (`Serving`).
 
 **`crates/pumpkin-harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the

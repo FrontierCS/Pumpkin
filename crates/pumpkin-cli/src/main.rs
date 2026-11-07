@@ -62,8 +62,9 @@ mod flags {
                 /// the route may reach, with the base `url` of its API, the `key_file` that
                 /// holds its key, below the configuration's directory unless absolute, and the
                 /// `models` it serves, each with the `name` a route allows and the
-                /// `upstream_name` the upstream takes for it. No model is listed twice.
-                /// `$HOME/.config/pumpkin/pumpkin.toml` by default.
+                /// `upstream_name` the upstream takes for it. No model is listed twice. The
+                /// route reaches `/responses` below the upstream that serves every model it
+                /// allows. `$HOME/.config/pumpkin/pumpkin.toml` by default.
                 optional --config file: PathBuf
             }
         }
@@ -148,25 +149,31 @@ fn run(
     runs: Option<PathBuf>,
     config: Option<PathBuf>,
 ) -> Result<ExitCode, String> {
-    // The IR, the context's name, the runs directory and the configuration are checked before
-    // the engine is reached, so a mistake in them needs no engine. A wrong `sandboxd` is not: it
-    // is first used when the run publishes it, which is after the engine is reached and the
-    // record is begun.
+    // The IR, the context's name, the runs directory, the configuration and its upstream's key
+    // are checked before the engine is reached, so a mistake in them needs no engine. A wrong
+    // `sandboxd` is not: it is first used when the run publishes it, which is after the engine
+    // is reached and the record is begun.
     let context = ContextName::try_from(context)?;
     let runs = match runs {
         Some(runs) => runs,
         None => default_runs()?,
     };
     let ir = read_ir(path)?;
-    if ir.roles.iter().any(|role| role.egress.model.is_some()) {
-        let config = match config {
-            Some(config) => config,
-            None => default_config()?,
-        };
-        config::read(&config)?;
-    }
+    // A route on any role but the agent's is refused once `Run::prepare` parses the IR, after
+    // the configuration is read, so the route found here is taken as the agent's.
+    let serving = match ir.roles.iter().find_map(|role| role.egress.model.as_ref()) {
+        Some(route) => {
+            let config = match config {
+                Some(config) => config,
+                None => default_config()?,
+            };
+            let serving = config::read(&config)?.serving(&route.models);
+            Some(serving.context(config.display())?)
+        }
+        None => None,
+    };
     let engine = engine(context)?;
-    let run = Run::prepare(&ir, &runs, SystemTime::now(), None)?;
+    let run = Run::prepare(&ir, &runs, SystemTime::now(), serving)?;
     let dir = run.dir().to_owned();
     say(format_args!(
         "run {} records into {}",
