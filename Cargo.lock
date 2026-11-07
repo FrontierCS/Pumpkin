@@ -228,6 +228,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "pumpkin-schema",
+ "serde_json",
 ]
 
 [[package]]
