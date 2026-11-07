@@ -43,7 +43,8 @@ use agent::Agent;
 use judge::{Deadlines, Message, Report};
 use log::Log;
 use model::Served;
-use record::Payloads;
+pub use record::{Ending, Record};
+use record::{Lock, Payloads};
 use sandbox::Sandboxes;
 
 /// A run, prepared: its workflow parsed, and its record begun.
@@ -54,6 +55,8 @@ pub struct Run {
     served: Option<Served>,
     id: String,
     dir: PathBuf,
+    /// Held until `outcome.json` is written: see [`Lock`].
+    lock: Lock,
 }
 
 impl Run {
@@ -74,7 +77,7 @@ impl Run {
         serving: Option<Serving>,
     ) -> Result<Self, String> {
         let workflow = Workflow::parse(ir).map_err(|errors| errors.to_string())?;
-        let (id, dir) = record::create(runs, now)?;
+        let (id, dir, lock) = record::create(runs, now)?;
         record::write_json(&dir, "ir.json", &json!(ir))?;
         let served = match Served::new(&workflow, serving) {
             Ok(served) => served,
@@ -89,6 +92,7 @@ impl Run {
             served,
             id,
             dir,
+            lock,
         })
     }
 
@@ -126,6 +130,7 @@ impl Run {
             Err(reason) => json!({ "state": "failed", "reason": reason }),
         };
         let written = record::write_json(&self.dir, "outcome.json", &recorded);
+        drop(self.lock);
         failed_also(outcome, written)
     }
 

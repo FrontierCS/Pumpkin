@@ -10,9 +10,10 @@
     reason = "a failed run shows where its record is"
 )]
 
+use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
-use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use route::{Key, Serving, Upstream, UpstreamUrl};
@@ -84,6 +85,12 @@ fn check(
             Ok(run) => {
                 let named = run.id() == name && run.dir() == record;
                 lines.push(format!("prepared, named by its id: {named}"));
+                let pid = File::open(record.join("driver.pid")).unwrap();
+                let held = matches!(pid.try_lock_shared(), Err(TryLockError::WouldBlock));
+                lines.push(format!("driver.pid is locked: {held}"));
+                let pid = fs::read_to_string(record.join("driver.pid")).unwrap();
+                let ours = pid == format!("{}\n", std::process::id());
+                lines.push(format!("driver.pid holds this process's id: {ours}"));
             }
             Err(reason) => lines.push(format!("refused: {reason}")),
         }
@@ -146,25 +153,31 @@ fn prepare() {
         ],
         &expect![[r#"
             prepared, named by its id: true
-            20240229-000000-hhhhhhhh: ir.json, record.json
+            driver.pid is locked: true
+            driver.pid holds this process's id: true
+            20240229-000000-hhhhhhhh: driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one
-            20251231-235959-hhhhhhhh: ir.json, outcome.json, record.json
+            20251231-235959-hhhhhhhh: driver.pid, ir.json, outcome.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             outcome.json: {"reason":"`agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one","state":"refused"}
             refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows
-            20251231-235959-hhhhhhhh: ir.json, outcome.json, record.json
+            20251231-235959-hhhhhhhh: driver.pid, ir.json, outcome.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             outcome.json: {"reason":"`agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows","state":"refused"}
             prepared, named by its id: true
-            20251231-235959-hhhhhhhh: ir.json, record.json
+            driver.pid is locked: true
+            driver.pid holds this process's id: true
+            20251231-235959-hhhhhhhh: driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             prepared, named by its id: true
-            21000301-000000-hhhhhhhh: ir.json, record.json
+            driver.pid is locked: true
+            driver.pid holds this process's id: true
+            21000301-000000-hhhhhhhh: driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false"#]],
