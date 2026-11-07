@@ -1,5 +1,5 @@
 //! Ops: calls that callers in the sandbox make through `sandboxctl`, and that `sandboxd`
-//! carries over the session to its owner, by [the protocol's rules](pumpkin_schema::sandbox).
+//! carries over the session to its owner, by [the protocol's rules](schema::sandbox).
 //!
 //! `sandboxd` serves them on the [control socket](CONTROL_SOCKET), in a directory it makes,
 //! which only the sandbox's user may enter. A caller connects and sends one frame: its message
@@ -28,9 +28,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use pumpkin_schema::sandbox::frame::{self, MAX_BODY_BYTES};
-use pumpkin_schema::sandbox::op::{OpCall, OpReply};
-use pumpkin_schema::sandbox::{CONTROL_SOCKET, FromSandbox, MAX_OP_PAYLOAD_BYTES};
+use schema::sandbox::frame::{self, MAX_BODY_BYTES};
+use schema::sandbox::op::{OpCall, OpReply};
+use schema::sandbox::{CONTROL_SOCKET, FromSandbox, MAX_OP_PAYLOAD_BYTES};
 use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;

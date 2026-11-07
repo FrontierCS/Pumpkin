@@ -58,6 +58,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "decision"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "schema",
+ "serde_json",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -90,6 +99,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
+name = "gateway"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "schema",
+ "serde_json",
+ "stdx",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -98,6 +117,16 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "harness"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "schema",
+ "serde_json",
+ "stdx",
 ]
 
 [[package]]
@@ -171,30 +200,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "provider"
+version = "0.0.0"
+dependencies = [
+ "schema",
+]
+
+[[package]]
 name = "pumpkin"
 version = "0.0.0"
 dependencies = [
  "expect-test",
- "pumpkin-decision",
  "pumpkin-docker",
- "pumpkin-gateway",
- "pumpkin-model-route",
- "pumpkin-provider",
- "pumpkin-schema",
- "serde_json",
- "sha2",
- "stdx",
-]
-
-[[package]]
-name = "pumpkin-cli"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "pumpkin",
- "pumpkin-docker",
- "pumpkin-model-route",
- "pumpkin-schema",
+ "route",
+ "runtime",
+ "schema",
  "serde",
  "serde_json",
  "stdx",
@@ -203,87 +223,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "pumpkin-decision"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "pumpkin-schema",
- "serde_json",
-]
-
-[[package]]
 name = "pumpkin-docker"
 version = "0.0.0"
 dependencies = [
  "expect-test",
- "pumpkin-gateway",
- "pumpkin-provider",
- "pumpkin-schema",
+ "gateway",
+ "provider",
+ "schema",
  "serde",
  "serde_json",
  "sha2",
  "stdx",
-]
-
-[[package]]
-name = "pumpkin-gateway"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "pumpkin-schema",
- "serde_json",
- "stdx",
-]
-
-[[package]]
-name = "pumpkin-harness"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "pumpkin-schema",
- "serde_json",
- "stdx",
-]
-
-[[package]]
-name = "pumpkin-model-route"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "pumpkin-gateway",
- "pumpkin-schema",
- "serde_json",
- "stdx",
- "ureq",
-]
-
-[[package]]
-name = "pumpkin-provider"
-version = "0.0.0"
-dependencies = [
- "pumpkin-schema",
-]
-
-[[package]]
-name = "pumpkin-sandboxd"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "libc",
- "pumpkin-gateway",
- "pumpkin-schema",
- "serde_json",
- "stdx",
- "xflags",
-]
-
-[[package]]
-name = "pumpkin-schema"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -307,6 +257,34 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys",
+]
+
+[[package]]
+name = "route"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "gateway",
+ "schema",
+ "serde_json",
+ "stdx",
+ "ureq",
+]
+
+[[package]]
+name = "runtime"
+version = "0.0.0"
+dependencies = [
+ "decision",
+ "expect-test",
+ "gateway",
+ "provider",
+ "pumpkin-docker",
+ "route",
+ "schema",
+ "serde_json",
+ "sha2",
+ "stdx",
 ]
 
 [[package]]
@@ -342,6 +320,28 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "untrusted",
+]
+
+[[package]]
+name = "sandboxd"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "gateway",
+ "libc",
+ "schema",
+ "serde_json",
+ "stdx",
+ "xflags",
+]
+
+[[package]]
+name = "schema"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

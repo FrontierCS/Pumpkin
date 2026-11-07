@@ -10,7 +10,7 @@
 //! - `sandboxd`, mounted read-only, as its first process, dialing the [`Dial`] its create
 //!   gives, and whose output alone is the container's log, which holds at most 1 MiB;
 //! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, for the session's owner to
-//!   put [directories](pumpkin_schema::sandbox::pumpkin_subdirs) in. It holds at most
+//!   put [directories](schema::sandbox::pumpkin_subdirs) in. It holds at most
 //!   [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's memory limit,
 //!   so a role can keep there no more than that limit, less what its processes use;
 //! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
@@ -20,7 +20,7 @@
 //!   `/dev/shm` and `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so
 //!   what they hold counts against the memory limit;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
-//!   read-only, and `sandboxd` serving ops; other sandboxes are [passive](pumpkin_schema::sandbox);
+//!   read-only, and `sandboxd` serving ops; other sandboxes are [passive](schema::sandbox);
 //! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
 //! Files move only over the session, never through the Docker daemon.
@@ -46,13 +46,13 @@ use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
 use std::{fmt, io};
 
-use pumpkin_provider::Provider;
-use pumpkin_schema::ir::{Resources, User};
-use pumpkin_schema::provider::{
+use provider::Provider;
+use schema::ir::{Resources, User};
+use schema::provider::{
     Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
     SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
+use schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
 use serde::{Deserialize, Serialize};
 use stdx::Context;
 use stdx::process::Environment;

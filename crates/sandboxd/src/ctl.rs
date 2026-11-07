@@ -1,7 +1,7 @@
 //! `sandboxctl`, the shim through which callers in a sandbox make ops: the same binary as
 //! `sandboxd`, run under the name `sandboxctl`. [`flags`] holds its grammar and describes each
 //! command, its output and its exit codes, as `sandboxctl --help` prints it. The output is a
-//! reply's JSON form, which [`pumpkin_schema::sandbox::op`] describes.
+//! reply's JSON form, which [`schema::sandbox::op`] describes.
 //!
 //! It connects to `sandboxd` at the sandbox's [control socket](CONTROL_SOCKET), and carries
 //! one op over it, as [`crate::ops`] describes.
@@ -13,9 +13,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::{fs, io};
 
-use pumpkin_schema::ir::Name;
-use pumpkin_schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
-use pumpkin_schema::sandbox::{CONTROL_SOCKET, frame};
+use schema::ir::Name;
+use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
+use schema::sandbox::{CONTROL_SOCKET, frame};
 use stdx::Context;
 
 use crate::print_line;

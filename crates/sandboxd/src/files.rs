@@ -12,10 +12,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use pumpkin_schema::ir::{AbsolutePath, Mode};
-use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
-use pumpkin_schema::sandbox::tree::{self, Limits};
-use pumpkin_schema::sandbox::{Entry, FromSandbox, RelativePath};
+use schema::ir::{AbsolutePath, Mode};
+use schema::sandbox::frame::MAX_BODY_BYTES;
+use schema::sandbox::tree::{self, Limits};
+use schema::sandbox::{Entry, FromSandbox, RelativePath};
 use stdx::Context;
 
 use crate::session::Sender;

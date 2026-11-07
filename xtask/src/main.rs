@@ -230,7 +230,7 @@ fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
 /// for it, so that the path is right wherever cargo's configuration puts the target directory.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
     let build = cargo.cmd(&["build", "--release", "--locked"]);
-    let build = build.args(["--package", "pumpkin-sandboxd", "--target", MUSL]);
+    let build = build.args(["--package", "sandboxd", "--target", MUSL]);
     let build = build.args(["--message-format", "json-render-diagnostics"]);
     // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {

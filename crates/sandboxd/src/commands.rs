@@ -21,7 +21,7 @@ use std::process::{self, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::{io, thread};
 
-use pumpkin_schema::sandbox::{ExitStatus, FromSandbox, Launch};
+use schema::sandbox::{ExitStatus, FromSandbox, Launch};
 use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
 

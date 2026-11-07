@@ -26,7 +26,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::{env, fmt, io, iter};
 
-use pumpkin_schema::ir::{Image, Sha256Digest};
+use schema::ir::{Image, Sha256Digest};
 use sha2::{Digest, Sha256};
 use stdx::Context;
 

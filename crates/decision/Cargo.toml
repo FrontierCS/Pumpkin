@@ -1,0 +1,19 @@
+[package]
+name = "decision"
+version = "0.0.0"
+description = "The driver's decision core: what a run does next, decided from what has happened"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+schema = { path = "../schema" }
+serde_json.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

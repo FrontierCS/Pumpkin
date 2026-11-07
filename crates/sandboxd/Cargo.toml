@@ -1,5 +1,5 @@
 [package]
-name = "pumpkin-sandboxd"
+name = "sandboxd"
 version = "0.0.0"
 description = "sandboxd, the supervisor in every Pumpkin sandbox"
 edition.workspace = true
@@ -11,14 +11,14 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-pumpkin-schema = { path = "../pumpkin-schema" }
+schema = { path = "../schema" }
 stdx = { path = "../stdx" }
 libc.workspace = true
 serde_json.workspace = true
 xflags.workspace = true
 
 [dev-dependencies]
-pumpkin-gateway = { path = "../pumpkin-gateway" }
+gateway = { path = "../gateway" }
 expect-test.workspace = true
 
 [lints]
