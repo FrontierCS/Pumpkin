@@ -26,7 +26,7 @@ use pumpkin_schema::ir::{AbsolutePath, Argv, Env, Resources};
 use pumpkin_schema::sandbox::op::{OpReply, OpsReply};
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{
-    Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, ToSandbox, frame,
+    Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, ToSandbox, file_mode, frame,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -293,6 +293,7 @@ fn launch() -> Launch {
         argv: Argv::try_from(vec!["true".to_owned()]).unwrap(),
         env: Env::default(),
         cwd: path("/"),
+        stdin: None,
         stdout: path("/stdout"),
         stderr: path("/stderr"),
     }
@@ -516,7 +517,7 @@ fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
     let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
     let file = RelativePath::try_from("big".to_owned()).unwrap();
     let bytes = vec![0; 8 << 20];
-    session.put(&dir, &[Put::File(&file, &bytes)], by)
+    session.put(&dir, &[Put::File(&file, file_mode(), &bytes)], by)
 }
 
 /// Freezes the sandbox, whose answer carries an op, answers the op by a deadline that has

@@ -17,8 +17,8 @@ use std::{fs, io, iter};
 use pumpkin_gateway::{Arrival, Put, Session};
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::{
-    RESULT_MAX_BYTES, evidence_dir, log_dir, out_dir, pumpkin_dir, result_file, slot_dir,
-    slot_payload,
+    RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir, pumpkin_dir,
+    result_file, slot_dir, slot_payload,
 };
 use pumpkin_schema::workflow::Judge;
 use stdx::{Context, Deadline};
@@ -144,9 +144,9 @@ fn start(call: &Call<'_>, session: &mut Session) -> Result<Deadline, String> {
     let payload = fs::read(&call.payload).context(call.payload.display())?;
     let (slot, raw, evidence) = (slot_dir(call.slot), slot_payload(call.slot), evidence_dir());
     let puts = [
-        Put::Dir(&slot),
-        Put::File(&raw, &payload),
-        Put::Dir(&evidence),
+        Put::Dir(&slot, dir_mode()),
+        Put::File(&raw, file_mode(), &payload),
+        Put::Dir(&evidence, dir_mode()),
     ];
     let by = call.deadlines.start;
     (session.put(&pumpkin_dir(), &puts, by)).context("putting the payload failed")?;

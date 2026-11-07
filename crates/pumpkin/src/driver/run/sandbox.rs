@@ -206,13 +206,14 @@ impl Drop for Sandboxes<'_> {
 }
 
 /// How to start `command` in a sandbox: as the IR says, in [`command_env()`]'s environment, with
-/// its output at [`command_stdout()`] and [`command_stderr()`].
+/// an empty standard input, and its output at [`command_stdout()`] and [`command_stderr()`].
 pub(super) fn launch(command: &Command) -> Launch {
     let Command { argv, env, cwd } = command;
     Launch {
         argv: argv.clone(),
         env: command_env(env),
         cwd: cwd.clone(),
+        stdin: None,
         stdout: pumpkin_dir().join(&command_stdout()),
         stderr: pumpkin_dir().join(&command_stderr()),
     }

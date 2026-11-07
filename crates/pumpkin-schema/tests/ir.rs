@@ -1,6 +1,7 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a
 //! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
-//! policy. Its image digests, the agent's command and the judges' environment are placeholders.
+//! policy. Its image digests, the agent's command, files and standard input, and the judges'
+//! environment are placeholders.
 //! Also the JSON of ops' replies, which `sandboxctl` prints, the in-sandbox contract, and the run
 //! tags that providers find a run's sandboxes by.
 //!
@@ -17,8 +18,8 @@ use pumpkin_schema::ir;
 use pumpkin_schema::provider::RunTag;
 use pumpkin_schema::sandbox::op::OpReply;
 use pumpkin_schema::sandbox::{
-    MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdout, evidence_dir,
-    pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
+    MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdin, command_stdout,
+    evidence_dir, pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
 };
 use pumpkin_schema::workflow::{Main, Workflow};
 use serde_json::{Value, json};
@@ -207,6 +208,7 @@ fn in_sandbox_contract() {
         evidence_dir(),
         command_stdout(),
         command_stderr(),
+        command_stdin(),
     ]);
     let root = ir::AbsolutePath::try_from("/".to_owned()).unwrap();
     let paths = paths.map(|path| Joined(pumpkin_dir(), path));
@@ -223,6 +225,7 @@ fn in_sandbox_contract() {
             /pumpkin/out/evidence
             /pumpkin/log/command.stdout
             /pumpkin/log/command.stderr
+            /pumpkin/in/command.stdin
             /out/result.json"#]],
     );
     let envs = [
@@ -312,6 +315,51 @@ fn checked_values() {
             `/metrics/` would return the empty key: point to a field with a name
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             roles[final_judge].runtime.judge.slots[payload].max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
+    );
+}
+
+/// The agent's directories and files: each at a path outside Pumpkin's directories, put once,
+/// and below no file, with a mode from `0000` to `0777`.
+#[test]
+fn agent_files() {
+    let agent = "/roles/0/runtime/agent";
+    let dir = |path: &str| json!({ "path": path, "mode": "0755" });
+    let file = |path: &str| json!({ "path": path, "mode": "0644", "content": "" });
+    let mut broken = lwe_json();
+    let runtime = &mut broken["roles"][0]["runtime"]["agent"];
+    runtime["dirs"] = json!([
+        dir("/workspace/a"),
+        dir("/workspace/a"),
+        dir("/workspace/b/d")
+    ]);
+    runtime["files"] = json!([file("/workspace/a"), file("/workspace/b")]);
+    let path = format!("{agent}/files/0/path");
+    check(
+        [
+            lwe_with(&format!("{agent}/dirs/0/mode"), json!("0777")),
+            lwe_with(&format!("{agent}/dirs/0/mode"), json!("0800")),
+            lwe_with(&format!("{agent}/dirs/0/mode"), json!("4755")),
+            lwe_with(&format!("{agent}/dirs/0/mode"), json!("755")),
+            lwe_with(&path, json!("/pumpkinx/config.toml")),
+            lwe_with(&path, json!("/")),
+            lwe_with(&path, json!("/pumpkin/in/command.stdin")),
+            lwe_with(&path, json!("/.pumpkin/bin/sandboxctl")),
+            lwe_with(&path, json!("/harness")),
+            broken,
+        ],
+        &expect![[r#"
+            parsed
+            `0800` is not a mode: write `0` and three octal digits, such as `0644`
+            `4755` is not a mode: write `0` and three octal digits, such as `0644`
+            `755` is not a mode: write `0` and three octal digits, such as `0644`
+            parsed
+            `/` holds the whole sandbox: name a path below it
+            `/pumpkin/in/command.stdin` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+            `/.pumpkin/bin/sandboxctl` is in `/.pumpkin`, which holds Pumpkin's own files: name a path outside it
+            `/harness` is in `/harness`, which holds Pumpkin's own files: name a path outside it
+            roles[agent].runtime.agent.dirs[1].path: `/workspace/a` is dirs[0]'s path too: put each path once
+            roles[agent].runtime.agent.dirs[2].path: `/workspace/b/d` is below files[1], a file: put it in a directory
+            roles[agent].runtime.agent.files[0].path: `/workspace/a` is dirs[0]'s path too: put each path once"#]],
     );
 }
 

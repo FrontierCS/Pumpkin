@@ -1,13 +1,18 @@
-//! The agent's sandbox, which runs the agent's IR command, and whose session takes its ops.
+//! The agent's sandbox, which runs the agent's IR command, once its directories, files and
+//! standard input are in place, and whose session takes its ops.
 
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
-use pumpkin_gateway::{IncomingOp, Process, RefusedOp};
+use pumpkin_gateway::{IncomingOp, Process, Put, RefusedOp, Session};
+use pumpkin_schema::ir::{AbsolutePath, Dir, File, Mode};
 use pumpkin_schema::sandbox::op::OpReply;
-use pumpkin_schema::sandbox::{ExitStatus, OpPayloadLimit, log_dir, out_dir};
-use pumpkin_schema::workflow::{Main, Workflow};
+use pumpkin_schema::sandbox::{
+    ExitStatus, Launch, OpPayloadLimit, RelativePath, command_stdin, file_mode, log_dir, out_dir,
+    pumpkin_dir,
+};
+use pumpkin_schema::workflow::{self, Main, Workflow};
 use stdx::{Context, Deadline};
 
 use super::Input;
@@ -23,9 +28,10 @@ pub(super) struct Agent {
 }
 
 impl Agent {
-    /// Starts the agent's sandbox, whose session takes its ops, then its command, both by `by`,
-    /// its session's arrivals sent on `inbox`. Returns the sandbox, if it started, and what came
-    /// of it: [`Event::AgentStarted`] or [`Event::AgentFailed`].
+    /// Starts the agent's sandbox, whose session takes its ops, puts its directories, files and
+    /// standard input there ([`put`]), then starts its command, all by `by`, its session's
+    /// arrivals sent on `inbox`. Returns the sandbox, if it started, and what came of it:
+    /// [`Event::AgentStarted`] or [`Event::AgentFailed`].
     pub(super) fn start(
         sandboxes: &Sandboxes<'_>,
         workflow: &Workflow,
@@ -42,8 +48,13 @@ impl Agent {
                 return (None, Event::AgentFailed { reason });
             }
         };
-        let started = (sandbox.session.start(launch(&agent.command), by))
-            .context("the agent's command didn't start");
+        let started = put(&mut sandbox.session, agent, by).and_then(|stdin| {
+            let launch = Launch {
+                stdin,
+                ..launch(&agent.command)
+            };
+            (sandbox.session.start(launch, by)).context("the agent's command didn't start")
+        });
         let (process, event) = match started {
             Ok(process) => (Some(process), Event::AgentStarted),
             Err(reason) => (None, Event::AgentFailed { reason }),
@@ -103,6 +114,40 @@ impl Agent {
     pub(super) fn delete(self, sandboxes: &Sandboxes<'_>) -> Result<(), String> {
         sandboxes.delete(self.sandbox)
     }
+}
+
+/// Puts `agent`'s directories and files in its sandbox, at `/`, then its standard input's text,
+/// if it has one, at [`command_stdin()`], by `by`. Returns where the standard input is.
+fn put(
+    session: &mut Session,
+    agent: &workflow::Agent,
+    by: Deadline,
+) -> Result<Option<AbsolutePath>, String> {
+    let dirs: Vec<(RelativePath, Mode)> = (agent.dirs.iter())
+        .map(|Dir { path, mode }| (path.relative(), *mode))
+        .collect();
+    let files: Vec<(RelativePath, Mode, &[u8])> = (agent.files.iter())
+        .map(|file| {
+            let File {
+                path,
+                mode,
+                content,
+            } = file;
+            (path.relative(), *mode, content.as_bytes())
+        })
+        .collect();
+    let dirs = dirs.iter().map(|(path, mode)| Put::Dir(path, *mode));
+    let files = (files.iter()).map(|(path, mode, content)| Put::File(path, *mode, content));
+    let puts: Vec<Put<'_>> = dirs.chain(files).collect();
+    (session.put(&AbsolutePath::root(), &puts, by))
+        .context("the agent's files can't be put below `/`")?;
+    let Some(text) = &agent.stdin else {
+        return Ok(None);
+    };
+    let stdin = command_stdin();
+    let put = [Put::File(&stdin, file_mode(), text.as_bytes())];
+    (session.put(&pumpkin_dir(), &put, by)).context("the agent's standard input can't be put")?;
+    Ok(Some(pumpkin_dir().join(&stdin)))
 }
 
 /// The largest payload the agent may send: the largest `max_bytes` of its judge grants' slots

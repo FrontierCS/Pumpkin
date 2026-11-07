@@ -848,10 +848,13 @@ const JUDGE: &str = r#"
     echo kept > /pumpkin/out/evidence/evidence.txt
     echo "judged $bytes bytes as $(id -u), with HOME=$HOME, in $(pwd)""#;
 
-/// What the agent of the run on Docker does: [`ops`]'s agent's ops, through `sandboxctl`, whose
-/// path stands as `SANDBOXCTL`, printing the reply each got; `sandboxctl` exits with 1 for a
-/// refusal and 2 for a job that failed.
-const AGENT: &str = r#"
+/// What the agent of the run on Docker does: shows the modes of the directories and files the
+/// run put in its sandbox, and its standard input; then makes [`ops`]'s agent's ops, through
+/// `sandboxctl`, whose path stands as `SANDBOXCTL`, printing the reply each got; `sandboxctl`
+/// exits with 1 for a refusal and 2 for a job that failed.
+const AGENT: &str = r#"#!/bin/sh
+    cd /workspace && stat -c '%a %n' .codex .codex/skills .codex/config.toml .tmp agent
+    echo "standard input: $(cat)"
     x() { head -c "$1" /dev/zero | tr '\0' x > "$2"; }
     x 6 six && x 9 nine && x 17 seventeen && printf slow > slow
     ctl() {
@@ -876,16 +879,20 @@ const AGENT: &str = r#"
     await 1
     ctl submit submit six --finalize"#;
 
-/// The ops of [`ops`]'s agent made on Docker, as [`AGENT`] says, and its judges' calls, as
-/// [`JUDGE`] says.
-#[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn ops_on_docker() {
+/// The workflow of the run on Docker: [`ops_workflow`]'s, with every role in the tests' image;
+/// a deadline far later than the agent's last op, so that a slow engine makes the run wait
+/// longer, never end differently; the judges' command [`JUDGE`]; and the agent's [`AGENT`],
+/// which the run puts in its sandbox with the fixture's directories, files and standard input,
+/// and a directory listed before the one that holds it.
+fn docker_workflow() -> Value {
     // Spliced in, since `format!` would need each of the shell's braces doubled.
     let script = AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
-    // A deadline far later than the agent's last op, so that a slow engine makes the run wait
-    // longer, never end differently.
-    let mut ir = ops_workflow(&["sh", "-c", &script], 300);
+    let mut ir = ops_workflow(&["/workspace/agent"], 300);
+    let agent = &mut ir["roles"][0]["runtime"]["agent"];
+    let skills = json!({ "path": "/workspace/.codex/skills", "mode": "0750" });
+    agent["dirs"].as_array_mut().unwrap().insert(0, skills);
+    let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": script });
+    agent["files"].as_array_mut().unwrap().push(launcher);
     let image = docker::image();
     for role in ir["roles"].as_array_mut().unwrap() {
         role["image"] = json!(image.as_str());
@@ -895,11 +902,19 @@ fn ops_on_docker() {
         let command = &mut ir["roles"][role]["runtime"]["judge"]["command"];
         command["argv"] = json!(["sh", "-c", JUDGE]);
     }
+    ir
+}
+
+/// The ops of [`ops`]'s agent made on Docker, as [`AGENT`] says, and its judges' calls, as
+/// [`JUDGE`] says, in the run of [`docker_workflow`].
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn ops_on_docker() {
     let sandboxd = docker::sandboxd();
     check(
         "ops-on-docker",
         docker::engine(),
-        &ir,
+        &docker_workflow(),
         sandboxd.to_str().unwrap(),
         &expect![[r#"
             finished, with score Some(Number(6))
@@ -929,12 +944,18 @@ fn ops_on_docker() {
             {"actions":[{"kind":"reply","op":9,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"failed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":9,"request":{"job":"1","kind":"status"}},"seq":18}
             {"actions":[{"kind":"reply","op":10,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":10,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":19}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":2,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":20}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 1464 bytes","seq":21}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 1586 bytes","seq":21}
             {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_started"},"seq":22}
             {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"seq":23}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"passed":true,"returned":{"raw_score":6},"score":6}},"seq":24}
             its last record came before the agent's teardown was to end
             the agent's standard output:
+            700 .codex
+            750 .codex/skills
+            600 .codex/config.toml
+            700 .tmp
+            755 agent
+            standard input: Solve the task in /task/README.md.
             sandboxctl ops: exit 0: {"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"judge","name":"train","max_bytes":8,"calls":100,"cumulative_seconds":null,"call_timeout_seconds":1},{"kind":"submit","name":"submit","max_bytes":16}]}
             sandboxctl status 0: exit 1: {"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}
             sandboxctl judge nope six: exit 1: {"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}

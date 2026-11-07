@@ -8,7 +8,7 @@
 //! writes the IR.
 //!
 //! Deserialization checks each value on its own, so a deserialized IR holds only well-formed
-//! names, images, paths and limits. [`crate::workflow::Workflow::parse`] checks how the parts
+//! names, images, paths, modes and limits. [`crate::workflow::Workflow::parse`] checks how the parts
 //! fit together, and the limits a protocol bounds.
 //!
 //! The crate's tests parse a complete workflow, the LWE task's, in `tests/fixtures/lwe.json`.
@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod values;
 
 pub use values::{
-    AbsolutePath, Argv, Env, EnvVar, Image, JsonPointer, ModelName, Models, Name, Returns,
-    Sha256Digest, WorkflowName,
+    AbsolutePath, Argv, Env, EnvVar, Image, JsonPointer, Mode, ModelName, Models, Name, Returns,
+    RolePath, Sha256Digest, WorkflowName,
 };
 
 /// A workflow.
@@ -91,11 +91,48 @@ pub enum Runtime {
     Judge(JudgeRuntime),
 }
 
+/// An agent harness: its directories and files, which the runtime puts in the agent's sandbox
+/// before its command starts, then the command, which reads its standard input's text.
+///
+/// The runtime makes each of them as the role's user, with its mode exactly, `dirs` first, in
+/// order of their paths, so a directory comes before what it holds: each entry's parent is in
+/// the image or in `dirs`. A file the image has already fails the agent's start, and a directory
+/// it has already is kept as it is. No path is put twice, and none is below a file.
+///
+/// The IR is recorded whole and the agent can read `files`, `stdin` and `env`, so keeping secrets
+/// out of them is the workflow writer's job; the model key stays on the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRuntime {
     /// The command that launches the harness.
     pub command: Command,
+    /// Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirs: Vec<Dir>,
+    /// Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<File>,
+    /// The text the command reads on its standard input, which the runtime puts at
+    /// [`command_stdin()`](crate::sandbox::command_stdin); absent, its standard input is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
+}
+
+/// A directory to make in the agent's sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dir {
+    pub path: RolePath,
+    pub mode: Mode,
+}
+
+/// A text file to write in the agent's sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct File {
+    pub path: RolePath,
+    pub mode: Mode,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

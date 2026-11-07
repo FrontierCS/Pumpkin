@@ -38,7 +38,7 @@ use pumpkin_schema::sandbox::op::{
 };
 use pumpkin_schema::sandbox::tree::Limits;
 use pumpkin_schema::sandbox::{
-    ExitStatus, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath,
+    ExitStatus, Launch, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, dir_mode, file_mode,
 };
 use stdx::process::Environment;
 use stdx::{Context, Deadline};
@@ -357,6 +357,7 @@ fn launch(n: u32, script: &str) -> Launch {
         ])
         .unwrap(),
         cwd: absolute("/pumpkin/home"),
+        stdin: None,
         stdout: absolute(&format!("/pumpkin/log/{n}.stdout")),
         stderr: absolute(&format!("/pumpkin/log/{n}.stderr")),
     }
@@ -463,7 +464,10 @@ fn judge() {
         |fixture| {
             let mut sandbox = fixture.start(&fixture.run, "judge");
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
-            let put = [Put::Dir(&slot), Put::File(&payload, b"ledger")];
+            let put = [
+                Put::Dir(&slot, dir_mode()),
+                Put::File(&payload, file_mode(), b"ledger"),
+            ];
             sandbox
                 .session()
                 .put(&absolute("/pumpkin"), &put, hung())
@@ -971,7 +975,7 @@ fn ops() {
             let sandbox = fixture.try_start(&fixture.run, "ops", sandboxd, image(), ops);
             let mut sandbox = sandbox.unwrap();
             let session = sandbox.session();
-            let put = [Put::File(&relative("payload"), &payload)];
+            let put = [Put::File(&relative("payload"), file_mode(), &payload)];
             session
                 .put(&absolute("/pumpkin/home"), &put, hung())
                 .unwrap();
@@ -1151,7 +1155,7 @@ fn turns() {
                 .arrivals
                 .recv_timeout(Duration::from_secs(30))
                 .unwrap();
-            let held = [Put::Dir(&relative("held"))];
+            let held = [Put::Dir(&relative("held"), dir_mode())];
             sandbox
                 .session()
                 .put(&absolute("/pumpkin/in"), &held, hung())

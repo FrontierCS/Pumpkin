@@ -157,10 +157,18 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         argv,
         env,
         cwd,
+        stdin,
         stdout,
         stderr,
     } = launch;
     let program = argv.program();
+    let stdin = match stdin {
+        Some(stdin) => {
+            let path = Path::new(stdin.as_str());
+            Stdio::from(sys::open_regular(path, OpenOptions::new().read(true))?)
+        }
+        None => Stdio::null(),
+    };
     let mut output = OpenOptions::new();
     output.write(true).create(true).truncate(true);
     let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
@@ -169,7 +177,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
         .args(argv.args())
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
         .current_dir(cwd.as_str())
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr)
         .process_group(0)
