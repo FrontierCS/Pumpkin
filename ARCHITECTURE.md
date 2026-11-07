@@ -20,8 +20,7 @@ harming the host or the run.
 ## Entry points
 
 The binaries are `pumpkin` (`crates/pumpkin-cli/src/main.rs`), which runs a workflow,
-`sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), the factory's
-`pumpkin-frontier-cs` (`crates/pumpkin-frontier-cs/src/main.rs`), and `cargo xtask`
+`sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
 parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`, a provider a
 run has connected to; `Engine`, Docker's.
@@ -120,13 +119,8 @@ it to `Run` as a `Provider`.
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
 directory the in-sandbox contract reserves for it.
 - **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates it depends
-  only on `pumpkin-schema`, so a harness reaches an agent alike whichever factory builds its image.
-
-**`crates/pumpkin-frontier-cs`.** The FrontierCS factory, which builds the images of a task
-ported from FrontierCS as data, each in `tasks/frontier-cs/<problem id>/`, from its `Task`, read
-once from that directory, and adds Codex to its agent's.
-- **Architecture Invariant:** no crate depends on it, so nothing that runs a workflow knows
-  where a task came from.
+  only on `pumpkin-schema`. A harness therefore reaches an agent alike whichever factory builds
+  its image, and any factory, in this repository or outside it, may use it.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.
