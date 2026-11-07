@@ -25,8 +25,8 @@ use stdx::process::Environment;
 use crate::provider::{Locals, Subject};
 
 /// A small public image, pinned by digest.
-// Repeated in `providers/docker/tests/it.rs` and `crates/pumpkin-cli/tests/it.rs`: change all
-// three.
+// Repeated in `providers/docker/tests/it.rs`, `crates/pumpkin-cli/tests/it.rs` and
+// `crates/pumpkin-harness/tests/it/docker.rs`: change all four.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
@@ -52,7 +52,7 @@ pub(crate) fn engine() -> &'static Engine {
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
 // Repeated in `providers/docker/tests/it.rs` and
-// `crates/pumpkin-frontier-cs/tests/it/build.rs`: change all three.
+// `crates/pumpkin-harness/tests/it/docker.rs`: change all three.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
