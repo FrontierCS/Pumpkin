@@ -7,7 +7,10 @@
   existing helpers instead of creating parallel ones
 - ALWAYS put new code where `ARCHITECTURE.md` places it, and update `ARCHITECTURE.md` in the
   same pull request only when a crate or module boundary, or an invariant it states, changes
-- PREFER the smallest change that fits the existing design
+- PREFER small, focused changes: one concern per pull request, nothing speculative
+- PREFER fixing a misplaced boundary over working around it: when keeping a rule needs a
+  patch on top (duplicated configuration, a check that keeps copies in step, a ban on what a
+  crate can merely reach), move the code so the structure itself enforces the rule
 - TREAT a new dependency, crate or `pub` item as an architectural change, and say why in the
   pull request
 - PREFER types that only hold valid values: parse input once at the boundary, and take the
