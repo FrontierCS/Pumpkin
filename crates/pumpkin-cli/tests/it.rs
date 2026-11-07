@@ -27,8 +27,8 @@ use stdx::process::Environment;
 const LWE: &str = include_str!("../../pumpkin-schema/tests/fixtures/lwe.json");
 
 /// A small public image, pinned by digest.
-// Repeated in `providers/docker/tests/it.rs` and `crates/pumpkin/tests/it/docker.rs`: change
-// all three.
+// Repeated in `providers/docker/tests/it.rs`, `crates/pumpkin/tests/it/docker.rs` and
+// `crates/pumpkin-harness/tests/it/docker.rs`: change all four.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 

@@ -119,9 +119,10 @@ it to `Run` as a `Provider`.
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
 directory the in-sandbox contract reserves for it, and each with an adapter, such as `Codex`,
 that writes the agent's runtime that runs it.
-- **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates it depends
-  only on `pumpkin-schema`. A harness therefore reaches an agent alike whichever factory builds
-  its image, and any factory, in this repository or outside it, may use it.
+- **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates, outside its
+  tests it depends only on `pumpkin-schema`, and its Docker test also uses `stdx`. A harness
+  therefore reaches an agent alike whichever factory builds its image, and any factory, in this
+  repository or outside it, may use it.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
 with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.
