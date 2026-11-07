@@ -1,6 +1,6 @@
 //! The model endpoint: an HTTP/1.1 server on the sandbox's loopback, at [`MODEL_PORT`], through
 //! which a harness in the sandbox reaches its role's model route. Each request goes over the
-//! session whole, as a model request, by [the protocol's rules](pumpkin_schema::sandbox), with
+//! session whole, as a model request, by [the protocol's rules](schema::sandbox), with
 //! its method, its target and every header, names in lowercase, and its response comes back as
 //! it arrives.
 //!
@@ -39,8 +39,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use pumpkin_schema::sandbox::frame::{MAX_BODY_BYTES, MAX_MESSAGE_BYTES};
-use pumpkin_schema::sandbox::{
+use schema::sandbox::frame::{MAX_BODY_BYTES, MAX_MESSAGE_BYTES};
+use schema::sandbox::{
     FromSandbox, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MODEL_PORT,
 };
 use stdx::{Context, unpoisoned};

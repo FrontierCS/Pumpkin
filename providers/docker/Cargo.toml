@@ -9,15 +9,15 @@ publish.workspace = true
 test = false
 
 [dependencies]
-pumpkin-provider = { path = "../../crates/pumpkin-provider" }
-pumpkin-schema = { path = "../../crates/pumpkin-schema" }
+provider = { path = "../../crates/provider" }
+schema = { path = "../../crates/schema" }
 stdx = { path = "../../crates/stdx" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-pumpkin-gateway = { path = "../../crates/pumpkin-gateway" }
+gateway = { path = "../../crates/gateway" }
 expect-test.workspace = true
 
 [lints]

@@ -3,7 +3,7 @@
 //! holds `sandboxd`'s grammar, as `sandboxd --help` prints it.
 //!
 //! It connects to the gateway at its Unix socket and serves the session
-//! ([`pumpkin_schema::sandbox`]) until the gateway closes it: it writes the trees it is put,
+//! ([`schema::sandbox`]) until the gateway closes it: it writes the trees it is put,
 //! starts commands and reports their exits, freezes the sandbox, and sends the trees it is
 //! asked to collect. When the session ends it kills its commands and exits, which
 //! stops a sandbox whose first process it is.

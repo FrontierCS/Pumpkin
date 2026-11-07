@@ -24,20 +24,20 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
+use gateway::{Arrival, IncomingModelRequest, Listener, Op, Process, Put, Session};
+use provider::Provider;
 use pumpkin_docker::{Built, ContextName, Engine, Report, Security};
-use pumpkin_gateway::{Arrival, IncomingModelRequest, Listener, Op, Process, Put, Session};
-use pumpkin_provider::Provider;
-use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
-use pumpkin_schema::provider::{
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
+use schema::provider::{
     Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,
 };
-use pumpkin_schema::sandbox::frame::MAX_MESSAGE_BYTES;
-use pumpkin_schema::sandbox::op::{
+use schema::sandbox::frame::MAX_MESSAGE_BYTES;
+use schema::sandbox::op::{
     Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
     StatusReply, SubmitReply, SubmitState,
 };
-use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{
+use schema::sandbox::tree::Limits;
+use schema::sandbox::{
     ExitStatus, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
     MAX_OP_PAYLOAD_BYTES, MODEL_PORT, OpPayloadLimit, RelativePath, dir_mode, file_mode,
 };
@@ -45,8 +45,8 @@ use stdx::process::Environment;
 use stdx::{Context, Deadline};
 
 /// A small public image, pinned by digest.
-// Repeated in `crates/pumpkin/tests/it/docker.rs`, `crates/pumpkin-cli/tests/it.rs` and
-// `crates/pumpkin-harness/tests/it/docker.rs`: change all four.
+// Repeated in `crates/runtime/tests/it/docker.rs`, `crates/pumpkin/tests/it.rs` and
+// `crates/harness/tests/it/docker.rs`: change all four.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
@@ -253,8 +253,8 @@ fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
 }
 
 /// `docker`, run as the provider runs it, against the tests' context alone.
-// Repeated in `crates/pumpkin/tests/it/docker.rs` and
-// `crates/pumpkin-harness/tests/it/docker.rs`: change all three.
+// Repeated in `crates/runtime/tests/it/docker.rs` and
+// `crates/harness/tests/it/docker.rs`: change all three.
 fn docker() -> Command {
     // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
@@ -310,7 +310,7 @@ fn show_logs(run: &RunTag) -> Result<(), String> {
 /// an anonymous volume. Built once, from the pinned image, and tagged, so that no build leaves
 /// an image behind untagged; a build from the cache gives the same ID as the last, so test
 /// processes that run at once share the image.
-// Built alike in `crates/pumpkin/tests/it/docker.rs`: change both.
+// Built alike in `crates/runtime/tests/it/docker.rs`: change both.
 fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {

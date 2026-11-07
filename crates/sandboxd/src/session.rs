@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use pumpkin_schema::sandbox::{FromSandbox, ToSandbox, frame};
+use schema::sandbox::{FromSandbox, ToSandbox, frame};
 use stdx::{Context, unpoisoned};
 
 use crate::commands::Commands;

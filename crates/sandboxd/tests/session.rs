@@ -21,11 +21,11 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use pumpkin_gateway::{Arrival, Listener, Process, Put, Session};
-use pumpkin_schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode};
-use pumpkin_schema::sandbox::frame::MAX_BODY_BYTES;
-use pumpkin_schema::sandbox::tree::Limits;
-use pumpkin_schema::sandbox::{
+use gateway::{Arrival, Listener, Process, Put, Session};
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode};
+use schema::sandbox::frame::MAX_BODY_BYTES;
+use schema::sandbox::tree::Limits;
+use schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, RelativePath, ToSandbox, dir_mode, file_mode, frame,
 };
 use stdx::Deadline;
@@ -53,7 +53,7 @@ impl Sandbox {
     /// Starts `sandboxd` and puts the directories a role expects.
     fn start(name: &str) -> Self {
         let id = std::process::id();
-        let root = std::env::temp_dir().join(format!("pumpkin-sandboxd-{id}-{name}"));
+        let root = std::env::temp_dir().join(format!("sandboxd-{id}-{name}"));
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
         }

@@ -1,0 +1,26 @@
+[package]
+name = "runtime"
+version = "0.0.0"
+description = "Pumpkin's host side: the driver's runtime"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+decision = { path = "../decision" }
+gateway = { path = "../gateway" }
+provider = { path = "../provider" }
+route = { path = "../route" }
+schema = { path = "../schema" }
+stdx = { path = "../stdx" }
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+pumpkin-docker = { path = "../../providers/docker" }
+expect-test.workspace = true
+
+[lints]
+workspace = true
