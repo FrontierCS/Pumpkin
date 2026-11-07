@@ -54,7 +54,6 @@
           },
           "slots": [{ "name": "payload", "max_bytes": 4194304 }],
           "result": {
-            "status": "/status",
             "score": "/raw_score",
             "returns": ["/raw_score", "/metrics", "/failure"]
           }
@@ -81,7 +80,6 @@
           },
           "slots": [{ "name": "payload", "max_bytes": 4194304 }],
           "result": {
-            "status": "/status",
             "score": "/raw_score",
             "returns": ["/raw_score", "/metrics", "/failure"]
           }

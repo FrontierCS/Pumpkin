@@ -147,21 +147,19 @@ pub struct JudgeRuntime {
 }
 
 /// What a judge call writes as its result: the JSON file at
-/// [`result_file()`](crate::sandbox::result_file), of which
-/// its caller sees the status and the fields [`returns`](Self::returns) names.
+/// [`result_file()`](crate::sandbox::result_file), of which its caller sees whether it has a
+/// score, and the fields [`returns`](Self::returns) names.
 ///
 /// Once the judge's command exits, the result alone says how the call went, whatever the exit
 /// status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSpec {
-    /// Points to the call's status in the result: the string `"passed"` or `"failed"`.
-    pub status: JsonPointer,
-    /// Points to the call's score in the result: a number, which a passed result must have and
-    /// a failed one must not have, `null` counting as no score.
+    /// Points to the call's score in the result: a number. The result is scored exactly when
+    /// it does; `null` or nothing there means no score, and any other value is invalid.
     pub score: JsonPointer,
-    /// The fields of the result that the caller's reply returns, besides the status. A field
-    /// the result lacks is left out.
+    /// The fields of the result that the caller's reply returns. A field the result lacks is
+    /// left out.
     pub returns: Returns,
 }
 

@@ -317,7 +317,6 @@ fn submission_json(submission: &Submission) -> Value {
 
 fn result_json(result: &JudgeResult) -> Value {
     json!({
-        "passed": result.passed(),
         "score": result.score(),
         "returned": result.returned(),
     })

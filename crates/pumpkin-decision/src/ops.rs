@@ -29,8 +29,8 @@ use core::time::Duration;
 
 use pumpkin_schema::ir::Name;
 use pumpkin_schema::sandbox::op::{
-    self, Failed, Grant, JobState, JudgeReply, OpReply, OpsReply, Remaining, StatusReply,
-    SubmitReply, SubmitState,
+    self, Grant, JobState, JudgeReply, OpReply, OpsReply, Remaining, StatusReply, SubmitReply,
+    SubmitState,
 };
 use pumpkin_schema::workflow::{JudgeCall, JudgeGrant, JudgeGrantId};
 
@@ -286,9 +286,9 @@ impl Core<'_> {
             State::Ended {
                 outcome: Err(failure),
                 ..
-            } => JobState::Failed(Failed::NoResult {
+            } => JobState::Errored {
                 failure: failure.reply(),
-            }),
+            },
         };
         StatusReply {
             job: id.0,

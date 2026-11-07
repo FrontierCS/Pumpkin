@@ -33,7 +33,7 @@ use pumpkin_schema::provider::{
 };
 use pumpkin_schema::sandbox::frame::MAX_MESSAGE_BYTES;
 use pumpkin_schema::sandbox::op::{
-    Failed, Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
+    Failure, FailureCode, JobState, JudgeReply, OpReply, OpsReply, Remaining, Returned,
     StatusReply, SubmitReply, SubmitState,
 };
 use pumpkin_schema::sandbox::tree::Limits;
@@ -1025,9 +1025,9 @@ fn ops() {
             $ sandboxctl judge train link: exit 0
               {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 1: exit 0
-              {"kind":"status","job":1,"state":"passed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
+              {"kind":"status","job":1,"state":"completed","returned":{"score":1},"scored":true,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 2: exit 2
-              {"kind":"status","job":2,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
+              {"kind":"status","job":2,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 3: exit 1
               {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
             $ sandboxctl judge train big: exit 1
@@ -1077,7 +1077,7 @@ fn refused_calls() {
                 ctl judge Train huge
                 ctl status soon
                 ctl call train huge
-                ctl status 1
+                ctl status 5
                 second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
                 echo "a second sandboxd: exit $?: $second""#,
                 huge = MAX_OP_PAYLOAD_BYTES + 1,
@@ -1110,10 +1110,10 @@ fn refused_calls() {
               sandboxctl: `soon` is not a job: name one by the number a judge call returned
             $ sandboxctl call train huge: exit 1
               sandboxctl: unexpected argument: "call": see `sandboxctl --help`
-            $ sandboxctl status 1: exit 0
-              {"kind":"status","job":1,"state":"passed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl status 5: exit 2
+              {"kind":"status","job":5,"state":"completed","returned":{"score":null},"scored":false,"remaining":{"calls":1,"seconds":null}}
             a second sandboxd: exit 1: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: File exists (os error 17): expected nothing there yet, in a directory this user can write to
-            owner: status 1"#]],
+            owner: status 5"#]],
     );
 }
 
@@ -1185,7 +1185,7 @@ fn turns() {
             Code(0)
             the caller of status 1, which left with its op in flight: exit 143
             the caller of status 4, which left as it waited its turn: exit 143
-            status 2: exit 2: {"kind":"status","job":2,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
+            status 2: exit 2: {"kind":"status","job":2,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
             judge train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
             status 9: exit 1: {"kind":"refused","message":"there is no job 9: name one a judge call returned"}
@@ -1421,7 +1421,7 @@ fn payload() -> Vec<u8> {
 
 /// Answers `arrival`, an op, as a stand-in for the session's owner: one over the limit with its
 /// refusal; ops with no grants; a judge call with job 1; a submission as stored, or accepted if
-/// final; and the status of job 1, which passed, of job 2, which failed, or else a refusal.
+/// final; and the status of job 1, which completed and scored, of job 5, which did not, of job 2, which errored, or else a refusal.
 /// Returns what it asked, saying whether its payload is `payload`.
 fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
@@ -1485,20 +1485,30 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
     asked
 }
 
-/// The status of job `job`, with `remaining`: job 1 passed, job 2 failed, and any other is
+/// The status of job `job`, with `remaining`: job 1 completed and scored, job 5 completed and unscored, job 2 errored, and any other is
 /// refused.
 fn status(job: u64, remaining: Remaining) -> OpReply {
     let state = match job {
         1 => {
             let returned = Returned::from_iter([("score".to_owned(), 1.into())]);
-            JobState::Passed { returned }
+            JobState::Completed {
+                returned,
+                scored: true,
+            }
+        }
+        5 => {
+            let returned = Returned::from_iter([("score".to_owned(), serde_json::Value::Null)]);
+            JobState::Completed {
+                returned,
+                scored: false,
+            }
         }
         2 => {
             let failure = Failure {
                 code: FailureCode::JudgeTimeout,
                 message: "the judge ran past its timeout".to_owned(),
             };
-            JobState::Failed(Failed::NoResult { failure })
+            JobState::Errored { failure }
         }
         _ => {
             let message = format!("there is no job {job}: name one a judge call returned");

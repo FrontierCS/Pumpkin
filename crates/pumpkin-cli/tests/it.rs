@@ -37,9 +37,8 @@ const LWE: &str = include_str!("../../pumpkin-schema/tests/fixtures/lwe.json");
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
-/// What the final judge of the runs on Docker does: passes the payload, with its size as its
-/// score.
-const SCORE: &str = r#"printf '{"status": "passed", "raw_score": %s}' \
+/// What the final judge of the runs on Docker does: scores the payload by its size.
+const SCORE: &str = r#"printf '{"raw_score": %s}' \
     $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"#;
 
 /// The directory test `name` runs `pumpkin` in, empty. Dropping it removes it, unless the test
@@ -667,7 +666,7 @@ fn runs_on_docker() {
         exit status: Some(0)
         pumpkin: run <id> records into runs/<id>
         record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json
-        outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged","result":{"passed":true,"returned":{"raw_score":3},"score":3},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":3},"score":3},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         printed outcome.json: true"#]],
     );
     stand_in.stop();
