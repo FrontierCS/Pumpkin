@@ -639,8 +639,8 @@ fn state_name(reply: &OpReply) -> &'static str {
     match state {
         JobState::Queued => "queued",
         JobState::Running => "running",
-        JobState::Passed { .. } => "passed",
-        JobState::Failed(_) => "failed",
+        JobState::Completed { .. } => "completed",
+        JobState::Errored { .. } => "errored",
     }
 }
 
@@ -727,7 +727,7 @@ impl Files {
 /// What a `judge` command, whose exit comes on `stream`, does with `payload`, the file put at
 /// the path its argument gives, if there is one: for `slow`, it runs until the sandbox is
 /// frozen; for `stall`, it stalls the sandbox; for any other, it writes the result
-/// `{"status": "passed", "raw_score": n}`, where `n` is the payload's size, which it returns,
+/// `{"raw_score": n}`, where `n` is the payload's size, which it returns,
 /// and exits with 0, the result padded with spaces to a byte over [`RESULT_MAX_BYTES`] for
 /// `large`. Without a payload, it exits with 1.
 fn judge(
@@ -748,7 +748,7 @@ fn judge(
         }
         Some(payload) => {
             replies.push(exit(0));
-            let result = json!({ "status": "passed", "raw_score": payload.len() });
+            let result = json!({ "raw_score": payload.len() });
             let mut result = result.to_string().into_bytes();
             if payload == b"large" {
                 result.resize(usize::try_from(RESULT_MAX_BYTES).unwrap() + 1, b' ');

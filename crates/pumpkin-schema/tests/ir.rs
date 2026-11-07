@@ -159,13 +159,13 @@ fn op_replies() {
                 r#"{"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":1,"state":"passed","returned":{"metrics":{"solved":3},"raw_score":3},"remaining":{"calls":99,"seconds":11993}}"#,
+                r#"{"kind":"status","job":1,"state":"completed","returned":{"metrics":{"solved":3},"raw_score":3},"scored":true,"remaining":{"calls":99,"seconds":11993}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":2,"state":"failed","returned":{"failure":"wrong answer","raw_score":null},"remaining":{"calls":98,"seconds":11990}}"#,
+                r#"{"kind":"status","job":2,"state":"completed","returned":{"failure":"wrong answer","raw_score":null},"scored":false,"remaining":{"calls":98,"seconds":11990}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":3,"state":"failed","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
+                r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
             ),
             Reply(r#"{"kind":"submit","state":"accepted","remaining_seconds":60}"#),
             Reply(r#"{"kind":"refused","message":"`train` has no calls left: it allows 100"}"#),
@@ -173,10 +173,10 @@ fn op_replies() {
                 r#"{"kind":"status","job":1,"state":"running","returned":{},"remaining":{"calls":null,"seconds":null}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":1,"state":"passed","remaining":{"calls":null,"seconds":null}}"#,
+                r#"{"kind":"status","job":1,"state":"completed","remaining":{"calls":null,"seconds":null}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":1,"state":"failed","returned":{},"failure":{"code":"judge_error","message":"the judge failed"},"remaining":{"calls":null,"seconds":null}}"#,
+                r#"{"kind":"status","job":1,"state":"errored","returned":{},"failure":{"code":"judge_error","message":"the judge failed"},"remaining":{"calls":null,"seconds":null}}"#,
             ),
         ],
         &expect![[r#"
@@ -184,14 +184,14 @@ fn op_replies() {
             Judge(JudgeReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
-            Status(StatusReply { job: 1, state: Passed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}) }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
-            Status(StatusReply { job: 2, state: Failed(Judged { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }), remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
-            Status(StatusReply { job: 3, state: Failed(NoResult { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }), remaining: Remaining { calls: Some(97), seconds: Some(0) } })
+            Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}), scored: true }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
+            Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}), scored: false }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
+            Status(StatusReply { job: 3, state: Errored { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
             Submit(SubmitReply { state: Accepted, remaining_seconds: 60 })
             Refused { message: "`train` has no calls left: it allows 100" }
-            a job that hasn't finished has no result: give it neither `returned` nor `failure`
-            a passed job has a result: give it `returned`, and no `failure`
-            a failed job has a result or a failure: give it exactly one of `returned` and `failure`"#]],
+            a job that hasn't ended has no result: give it none of `returned`, `scored` and `failure`
+            a completed job has a result: give it `returned` and `scored`, and no `failure`
+            an errored job has no result: give it `failure`, and neither `returned` nor `scored`"#]],
     );
 }
 

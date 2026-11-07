@@ -160,7 +160,7 @@ pub fn result_file() -> RelativePath {
 // into memory to parse it, and a reply returns some of its fields: the bound keeps a result a
 // small document, and what the host holds for it small. A reply has its own bound,
 // `frame::MAX_MESSAGE_BYTES`. Cutting a larger result short would not help, since a JSON document
-// cut short is no document. 1 MiB holds a status, a score and the fields a reply returns with
+// cut short is no document. 1 MiB holds a score and the fields a reply returns with
 // room to spare.
 pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 

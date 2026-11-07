@@ -176,7 +176,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// The score of the selected submission, if the final judge passed it.
+    /// The score of the selected submission, if the final judge scored it.
     pub fn score(&self) -> Option<&Number> {
         match &self.verdict {
             Verdict::Judged { result, .. } => result.score(),
@@ -328,7 +328,7 @@ impl<'w> Core<'w> {
             }
             Event::OpArrived { op, request } => self.op(op, request, &mut actions),
             Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
-            // The run log keeps the status; whether a call passed is its result's to say.
+            // The run log keeps the status; whether a call scored is its result's to say.
             Event::JudgeExited { job, status: _ } => {
                 self.on_job(job, |state| state.ended(at, jobs::End::Exited));
             }
