@@ -23,10 +23,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
+use docker::{Built, ContextName, Engine, Report, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Listener, Op, Process, Put, Session};
 use provider::Provider;
-use pumpkin_docker::{Built, ContextName, Engine, Report, Security};
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use schema::provider::{
     Create, Created, Dial, Listed, Local, Published, Role, RunTag, SOCKET_NAME, SandboxId,

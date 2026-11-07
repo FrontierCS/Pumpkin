@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use pumpkin_docker::{ContextName, Engine};
+use docker::{ContextName, Engine};
 use schema::ir::Image;
 use schema::provider::SandboxId;
 use stdx::process::Environment;

@@ -19,7 +19,7 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-pumpkin-docker = { path = "../../providers/docker" }
+docker = { path = "../../providers/docker" }
 expect-test.workspace = true
 
 [lints]
