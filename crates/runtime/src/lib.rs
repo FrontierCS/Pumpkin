@@ -169,14 +169,14 @@ impl Run {
     fn tag(&self) -> RunTag {
         match RunTag::try_from(self.id.clone()) {
             Ok(tag) => tag,
-            #[expect(
-                clippy::unreachable,
-                reason = "a run's id is a UTC time's digits and `-`, then lowercase hexadecimal \
-                          digits (`record::create`), all of which a run tag allows, and starts \
-                          with a digit; a run tag built from a time and a number, which couldn't \
-                          fail, would be a `pub` item of the schema for this one caller"
-            )]
-            Err(error) => unreachable!("run {}'s id is no run tag: {error}", self.id),
+            // A run tag built from a time and a number, which couldn't fail, would be a `pub`
+            // item of the schema for this one caller.
+            Err(error) => unreachable!(
+                "run {}'s id is no run tag, though it is a UTC time's digits and `-`, then \
+                 lowercase hexadecimal digits (`record::create`), all of which a run tag allows, \
+                 and starts with a digit: {error}",
+                self.id
+            ),
         }
     }
 }
@@ -386,15 +386,13 @@ impl<T> Inbox<T> {
         }
     }
 
-    #[expect(
-        clippy::unreachable,
-        reason = "an inbox holds a sender of its own, so its channel can't disconnect while the \
-                  inbox is borrowed to wait on it; `std`'s channel reports a disconnection, which \
-                  a channel with a sender never has, in the same errors as a timeout and an empty \
-                  channel"
-    )]
+    // `std`'s channel reports a disconnection, which a channel with a sender never has, in the
+    // same errors as a timeout and an empty channel.
     fn disconnected() -> ! {
-        unreachable!("an inbox disconnected, though it holds a sender")
+        unreachable!(
+            "an inbox disconnected, though it holds a sender of its own, so its channel can't \
+             disconnect while the inbox is borrowed to wait on it"
+        )
     }
 }
 
@@ -488,14 +486,12 @@ impl<'r> Runtime<'r> {
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
-        #[expect(
-            clippy::unreachable,
-            reason = "`turns` calls this only until `perform` returns the run's end, on \
-                      `Finish` or `Abandon`, and `tick_due` is `Some` in every phase where the \
-                      run is still going, so `None` here is a bug"
-        )]
         let Some(due) = core.tick_due() else {
-            unreachable!("the run is still going, yet the core has no tick due")
+            unreachable!(
+                "the core has no tick due, though `turns` calls this only until `perform` \
+                 returns the run's end, on `Finish` or `Abandon`, and `tick_due` is `Some` in \
+                 every phase where the run is still going"
+            )
         };
         let until = self.clock.deadline(due);
         loop {
@@ -589,15 +585,14 @@ impl<'r> Runtime<'r> {
     ) -> Result<(), String> {
         let number = self.next_model_request;
         self.next_model_request += 1;
-        #[expect(
-            clippy::unreachable,
-            reason = "the agent's session takes model requests only if the run serves a route \
-                      (`Agent::start`), and one breaks the protocol otherwise, which ends the \
-                      session; no type excludes it, since one `Arrival` serves sessions with \
-                      model requests and without"
-        )]
+        // No type excludes a model request here, since one `Arrival` serves sessions with model
+        // requests and without.
         let Some(served) = self.served else {
-            unreachable!("a model request arrived on the agent's session, which takes none")
+            unreachable!(
+                "a model request arrived on the agent's session, though it takes them only if \
+                 the run serves a route (`Agent::start`), and one breaks the protocol otherwise, \
+                 which ends the session"
+            )
         };
         let Some(scope) = scope else {
             drop(incoming);
@@ -657,16 +652,16 @@ impl<'r> Runtime<'r> {
         let (request, unanswered) = request(incoming);
         let op = OpId(self.next_op);
         self.next_op += 1;
-        #[expect(
-            clippy::unreachable,
-            reason = "the agent's session hands out an op only once the one before it has been \
-                      answered, by `Session::reply`, which only `Runtime::reply` reaches, taking \
-                      that op from here, or by `Session::refuse`, for an op that never comes \
-                      here; the session's one op in flight is a rule of the protocol behind its \
-                      `pub` API, which a type showing it would reshape"
-        )]
+        // The session's one op in flight is a rule of the protocol behind its `pub` API, which
+        // a type showing it would reshape.
         if let Some((earlier, _)) = self.unanswered.replace((op, unanswered)) {
-            unreachable!("op {} arrived while op {} was unanswered", op.0, earlier.0)
+            unreachable!(
+                "op {} arrived while op {} was unanswered, though the agent's session hands out \
+                 an op only once the one before it has been answered, by `Session::reply`, which \
+                 only `Runtime::reply` reaches, taking that op from here, or by \
+                 `Session::refuse`, for an op that never comes here",
+                op.0, earlier.0
+            )
         }
         Event::OpArrived { op, request }
     }
@@ -700,20 +695,19 @@ impl<'r> Runtime<'r> {
                         let by = self.clock.deadline(self.answers_due(core));
                         self.reply(op, reply, by)?;
                     }
-                    #[expect(
-                        clippy::unreachable,
-                        reason = "after `Finish` or `Abandon`, the core only refuses the ops that \
-                                  still arrive, as `Action::Finish` and `Action::Abandon` say; a \
-                                  type showing it would split the core's actions by the run's \
-                                  phase"
-                    )]
+                    // A type excluding these actions here would split the core's actions by the
+                    // run's phase.
                     other @ (Action::StartAgent
                     | Action::StartJudge { .. }
                     | Action::StopJudge { .. }
                     | Action::TearDownAgent
                     | Action::Finish { .. }
                     | Action::Abandon) => {
-                        unreachable!("the core asked for {other:?} once it had ended the run")
+                        unreachable!(
+                            "the core asked for {other:?} once it had ended the run, though \
+                             after `Finish` or `Abandon` it only refuses the ops that still \
+                             arrive, as `Action::Finish` and `Action::Abandon` say"
+                        )
                     }
                 }
             }
@@ -753,16 +747,16 @@ impl<'r> Runtime<'r> {
                     timeout,
                 } => self.start_judge(scope, core, job, call, &payload, timeout)?,
                 Action::StopJudge { job } => {
-                    #[expect(
-                        clippy::unreachable,
-                        reason = "the core stops only a job it has started, and the `StartJudge` \
-                                  that started it, performed before, kept a sender into its \
-                                  call's inbox, even if the call then failed as it started; a \
-                                  type tying the stop to the start would carry the runtime's \
-                                  sender through the core, which holds no runtime state"
-                    )]
+                    // A type tying the stop to the start would carry the runtime's sender through
+                    // the core, which holds no runtime state.
                     let Some(stop) = self.stops.get(&job) else {
-                        unreachable!("job {} was stopped, but never started", job.0)
+                        unreachable!(
+                            "job {} was stopped, but never started, though the core stops only \
+                             a job it has started, and the `StartJudge` that started it, \
+                             performed before, kept a sender into its call's inbox, even if the \
+                             call then failed as it started",
+                            job.0
+                        )
                     };
                     // A call whose thread has ended has nothing left to stop.
                     let _ = stop.send(Message::Stop);
@@ -789,15 +783,15 @@ impl<'r> Runtime<'r> {
     /// first, since a judge call reads it, now or in the final phase; a refused op's bytes are
     /// never written.
     fn reply(&mut self, op: OpId, reply: OpReply, by: Deadline) -> Result<(), String> {
-        #[expect(
-            clippy::unreachable,
-            reason = "the core answers every op it is given exactly once (`Core`), and the \
-                      runtime gives it each op once, under a number that only this takes away; \
-                      a type tying the reply to its op would carry the gateway's `IncomingOp` \
-                      through the core, which does no I/O"
-        )]
+        // A type tying the reply to its op would carry the gateway's `IncomingOp` through the
+        // core, which does no I/O.
         let Some((_, unanswered)) = self.unanswered.take().filter(|(id, _)| *id == op) else {
-            unreachable!("op {} was answered twice, or never given to the core", op.0)
+            unreachable!(
+                "op {} was answered twice, or never given to the core, though the core answers \
+                 every op it is given exactly once (`Core`), and the runtime gives it each op \
+                 once, under a number that only this takes away",
+                op.0
+            )
         };
         let incoming = match unanswered {
             Unanswered::Query(incoming) => incoming,

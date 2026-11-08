@@ -83,14 +83,12 @@ impl Pin {
     pub fn recipe(&self, base: &str) -> String {
         match self.check(base) {
             Ok(()) => {}
-            #[expect(
-                clippy::unreachable,
-                reason = "a pin is written in code, never read from input, and the tests make the \
-                          recipe of each, and a base is named as the engine has accepted it, in \
-                          the characters of every image reference; checking pins as the crate \
-                          builds would take a `const fn` copy of each check"
-            )]
-            Err(error) => unreachable!("pin {}: {error}", self.name),
+            // Checking pins as the crate builds would take a `const fn` copy of each check.
+            Err(error) => unreachable!(
+                "pin {}, written in code and its recipe made by the tests, with a base named as \
+                 the engine accepted it, fails a check: {error}",
+                self.name
+            ),
         }
         let Self {
             name,
@@ -218,11 +216,9 @@ fn plain(text: &str, others: &[u8]) -> bool {
 fn valid(path: &str) -> RelativePath {
     match RelativePath::try_from(path.to_owned()) {
         Ok(path) => path,
-        #[expect(
-            clippy::unreachable,
-            reason = "`Pin::check` accepted the pin's name, which starts with a letter and holds \
-                      no `/`, and each file's path, which is a `RelativePath`"
-        )]
-        Err(error) => unreachable!("{error}"),
+        Err(error) => unreachable!(
+            "`Pin::check` accepted the pin's name, which starts with a letter and holds no `/`, \
+             and each file's path, which is a `RelativePath`; yet {error}"
+        ),
     }
 }

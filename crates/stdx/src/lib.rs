@@ -55,14 +55,10 @@ pub fn abort_on_panic() {
 /// Panics if a thread panicked while holding the lock, which a process can see only where a
 /// panic unwinds, as in tests.
 pub fn unpoisoned<T>(locked: LockResult<T>) -> T {
-    #[expect(
-        clippy::unreachable,
-        reason = "only a thread that panics while holding a lock poisons it, and a panic is a \
-                  bug; a lock that can't be poisoned would take a dependency, as std's \
-                  (`sync::nonpoison`) is unstable"
-    )]
+    // A lock that can't be poisoned would take a dependency, as std's (`sync::nonpoison`) is
+    // unstable.
     let Ok(guard) = locked else {
-        unreachable!("a thread panicked while holding a lock")
+        unreachable!("a thread panicked while holding a lock, which only a bug does")
     };
     guard
 }

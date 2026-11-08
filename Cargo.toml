@@ -36,11 +36,13 @@ dbg_macro = "warn"
 doc_paragraphs_missing_punctuation = "warn"
 expect_used = "warn"
 get_unwrap = "warn"
+infinite_loop = "warn"
 panic = "warn"
 print_stderr = "warn"
 print_stdout = "warn"
+todo = "warn"
 too_long_first_doc_paragraph = "warn"
-unreachable = "warn"
+unimplemented = "warn"
 unwrap_used = "warn"
 use_self = "warn"
 
@@ -57,3 +59,5 @@ debug = "line-tables-only"
 # (`stdx::abort_on_panic`).
 [profile.release]
 panic = "abort"
+# An overflow is a bug too, so release builds check for it, as dev builds do, rather than wrap.
+overflow-checks = true

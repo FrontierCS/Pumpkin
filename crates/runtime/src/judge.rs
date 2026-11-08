@@ -177,25 +177,20 @@ fn wait(call: &Call<'_>, timeout: Deadline) -> Result<Ended, String> {
             Ok(Ended::Ran)
         }
         Some(Message::Session(Arrival::Ended { reason })) => Err(reason),
-        #[expect(
-            clippy::unreachable,
-            reason = "the judge's session was accepted without an op payload limit, and such a \
-                      session ends on an op instead of handing it out (`Listener::accept`); a \
-                      type for a passive session's arrivals would split the gateway's `pub` \
-                      `Arrival` by the kind of session"
-        )]
-        Some(Message::Session(Arrival::Op(_) | Arrival::Refused(_))) => {
-            unreachable!("job {}'s passive session handed out an op", job.0)
-        }
-        #[expect(
-            clippy::unreachable,
-            reason = "the judge's session is accepted without model requests, so one breaks the \
-                      protocol, which ends the session, and arrives as its end; no type excludes \
-                      it, since one `Arrival` serves sessions with model requests and without"
-        )]
-        Some(Message::Session(Arrival::ModelRequest(_))) => {
-            unreachable!("job {}'s session handed out a model request", job.0)
-        }
+        // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
+        // the kind of session.
+        Some(Message::Session(Arrival::Op(_) | Arrival::Refused(_))) => unreachable!(
+            "job {}'s passive session handed out an op, though it was accepted without an op \
+             payload limit, and such a session ends on an op instead (`Listener::accept`)",
+            job.0
+        ),
+        // No type excludes a model request here, since one `Arrival` serves sessions with model
+        // requests and without.
+        Some(Message::Session(Arrival::ModelRequest(_))) => unreachable!(
+            "job {}'s session handed out a model request, though it was accepted without model \
+             requests, so one breaks the protocol, which ends the session, and arrives as its end",
+            job.0
+        ),
     }
 }
 

@@ -357,13 +357,11 @@ impl Provider for Engine {
 
 /// What [`Provider::ready`] gives of an engine that `report` describes.
 fn ready(report: &Report) -> Ready {
-    #[expect(
-        clippy::unreachable,
-        reason = "a `Report` holds only strings, bools and `Option<String>`s, through derived \
-                  impls, none of which serde_json fails to write"
-    )]
     let Ok(json) = serde_json::to_value(report) else {
-        unreachable!("{report:?} can't be written as JSON")
+        unreachable!(
+            "{report:?} can't be written as JSON, though a `Report` holds only strings, bools and \
+             `Option<String>`s, through derived impls, none of which serde_json fails to write"
+        )
     };
     Ready {
         report: json,

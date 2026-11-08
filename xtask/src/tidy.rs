@@ -1,4 +1,6 @@
-//! The check that keeps doc comments within their length caps, which `cargo xtask ci` runs.
+//! The checks of the repository's Rust files that `cargo xtask ci` runs: each doc within its
+//! length cap, each `unreachable!` with a message, and no `debug_assert!`, as `docs/dev/style.md`
+//! asks.
 
 use std::path::Path;
 
@@ -17,8 +19,9 @@ const MODULE_CAP: usize = 40;
 /// The most lines an item's doc, its outer doc comments and `#[doc = "…"]` attributes, may span.
 const ITEM_CAP: usize = 15;
 
-/// Fails unless each doc in the repository's Rust files, tracked or not yet, but not ignored,
-/// is within its cap.
+/// Fails unless, in each of the repository's Rust files, tracked or not yet, but not ignored,
+/// each doc is within its cap, each `unreachable!` has a message and no `debug_assert!` is
+/// used.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     // Every file, filtered here: a pathspec's meaning changes with Git's variables, such as
     // `GIT_LITERAL_PATHSPECS`, and `-z` keeps unusual names as they are rather than quoted.
@@ -36,27 +39,36 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
                 // proc-macro2 counts columns from 0, and editors from 1.
                 let column = column + 1;
                 problems.push(format!(
-                    "{path}:{line}:{column}: the file is not valid Rust here, so its docs can't \
-                     be measured: make it valid Rust"
+                    "{path}:{line}:{column}: the file is not valid Rust here, so it can't be \
+                     checked: make it valid Rust"
                 ));
                 continue;
             }
         };
-        let mut docs = Vec::new();
-        scan(tokens, &mut docs);
-        docs.sort_by_key(|doc| doc.line);
-        problems.extend(docs.into_iter().map(|doc| {
+        let (mut docs, mut banned) = (Vec::new(), Vec::new());
+        scan(tokens, &mut docs, &mut banned);
+        let docs = docs.into_iter().map(|doc| {
             let Doc {
                 line,
                 what,
                 lines,
                 cap,
             } = doc;
-            format!(
+            let problem = format!(
                 "{path}:{line}: {what} is {lines} lines, over the cap of {cap}: shorten it to \
                  {cap} or fewer, moving each fact to its home"
-            )
-        }));
+            );
+            (line, problem)
+        });
+        let banned = banned
+            .into_iter()
+            .map(|(LineColumn { line, column }, what)| {
+                let column = column + 1;
+                (line, format!("{path}:{line}:{column}: {what}"))
+            });
+        let mut found: Vec<(usize, String)> = docs.chain(banned).collect();
+        found.sort_by_key(|(line, _)| *line);
+        problems.extend(found.into_iter().map(|(_, problem)| problem));
     }
     if problems.is_empty() {
         Ok(())
@@ -75,14 +87,16 @@ struct Doc {
 }
 
 /// Adds to `docs` each doc over its cap in `tokens`, a module's or an item's body, and in the
-/// bodies within it.
+/// bodies within it, and to `banned` where each banned macro call there starts, with what is wrong: an
+/// `unreachable!` without a message, or a `debug_assert!`, `debug_assert_eq!` or
+/// `debug_assert_ne!`.
 ///
 /// The tokens hold every doc comment as a `doc` attribute, which spans the comment's lines;
 /// strings and other comments are understood exactly. The inner `doc` attributes of `tokens`
 /// are its module's doc. A run of outer attributes is an item's, whose doc is the outer `doc`
 /// attributes among them. A `doc` attribute counts in the form `doc = "…"`, not in another,
 /// such as `#[doc(hidden)]` or `#[doc = include_str!(…)]`.
-fn scan(tokens: TokenStream, docs: &mut Vec<Doc>) {
+fn scan(tokens: TokenStream, docs: &mut Vec<Doc>, banned: &mut Vec<(LineColumn, String)>) {
     let tokens: Vec<TokenTree> = tokens.into_iter().collect();
     let (mut module, mut item) = (Block::default(), Block::default());
     let mut at = 0;
@@ -97,8 +111,35 @@ fn scan(tokens: TokenStream, docs: &mut Vec<Doc>) {
         }
         docs.extend(item.over("an item's doc", ITEM_CAP));
         item = Block::default();
+        if let [
+            TokenTree::Ident(name),
+            TokenTree::Punct(bang),
+            TokenTree::Group(args),
+            ..,
+        ] = &tokens[at..]
+            && bang.as_char() == '!'
+        {
+            let name_text = name.to_string();
+            if name_text == "unreachable" && args.stream().is_empty() {
+                banned.push((
+                    name.span().start(),
+                    "`unreachable!` has no message: say in one why only a bug can reach it"
+                        .to_owned(),
+                ));
+            } else if let Some(kept) = name_text.strip_prefix("debug_")
+                && matches!(kept, "assert" | "assert_eq" | "assert_ne")
+            {
+                banned.push((
+                    name.span().start(),
+                    format!(
+                        "`{name_text}!` is skipped by release builds: use `{kept}!`, which \
+                         guards the real run too"
+                    ),
+                ));
+            }
+        }
         if let TokenTree::Group(group) = &tokens[at] {
-            scan(group.stream(), docs);
+            scan(group.stream(), docs, banned);
         }
         at += 1;
     }

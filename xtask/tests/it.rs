@@ -1,5 +1,5 @@
-//! xtask's check of doc lengths ([`docs`]), run on a scratch Git repository. xtask is a binary,
-//! so its test binary compiles the check's module itself.
+//! xtask's checks of Rust files ([`tidy`]), run on a scratch Git repository. xtask is a binary,
+//! so its test binary compiles the checks' module itself.
 
 #![expect(
     clippy::unwrap_used,
@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use expect_test::{Expect, expect};
 use xshell::{Shell, cmd};
 
-#[path = "../src/docs.rs"]
-mod docs;
+#[path = "../src/tidy.rs"]
+mod tidy;
 
 /// The result the check returns, as xtask's tasks do.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -69,8 +69,8 @@ fn check(name: &str, files: &[(&str, String, Standing)], expect: &Expect) {
             sh.remove_path(path).unwrap();
         }
     }
-    let reported = match docs::check(&sh) {
-        Ok(()) => "within the caps".to_owned(),
+    let reported = match tidy::check(&sh) {
+        Ok(()) => "passed".to_owned(),
         Err(error) => error.to_string(),
     };
     expect.assert_eq(&reported);
@@ -199,7 +199,44 @@ fn forms() {
             blocks.rs:42: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
             bracket.rs:6: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
             example.rs:1: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            invalid.rs:2:13: the file is not valid Rust here, so its docs can't be measured: make it valid Rust
+            invalid.rs:2:13: the file is not valid Rust here, so it can't be checked: make it valid Rust
             strings.rs:64: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home"#]],
+    );
+}
+
+/// An `unreachable!` without a message and any `debug_assert!` fail, in any delimiters, by their
+/// paths, and in a body or a macro's rule, and are reported beside a long doc in line order; an
+/// `unreachable!` with a message and `assert!` pass, as do the names in a string, a comment or
+/// another identifier, and a call of a function so named.
+#[test]
+fn unreachable() {
+    use Standing::Tracked;
+    let bare = format!(
+        "fn f() {{\n    unreachable!()\n}}\n{}fn g() {{\n    std::unreachable![];\n}}\n\
+         macro_rules! m {{\n    () => {{ core::unreachable! {{}} }};\n}}\n\
+         fn h(x: u8) {{\n    debug_assert!(x > 0);\n    std::debug_assert_eq!(x, 1, \"why\");\n    \
+         debug_assert_ne![x, 2];\n}}\n",
+        lines("/// A line.", 16)
+    );
+    let messages = "#![expect(unreachable_pub, reason = \"unreachable!()\")]\n\
+                    fn f(x: u8) {\n    unreachable!(\"x is {x}\");\n    unreachable!(\"why\", );\n\
+                    // unreachable!()\n    let _ = \"unreachable!()\";\n    unreachable(());\n}\n\
+                    fn h(x: u8) {\n    assert!(x > 0);\n    assert_eq!(x, 1);\n    \
+                    // debug_assert!(x)\n    let _ = \"debug_assert!(x)\";\n    debug_assert(x);\n}\n"
+        .to_owned();
+    check(
+        "unreachable",
+        &[
+            ("bare.rs", bare, Tracked),
+            ("messages.rs", messages, Tracked),
+        ],
+        &expect![[r#"
+            bare.rs:2:5: `unreachable!` has no message: say in one why only a bug can reach it
+            bare.rs:4: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
+            bare.rs:21:10: `unreachable!` has no message: say in one why only a bug can reach it
+            bare.rs:24:19: `unreachable!` has no message: say in one why only a bug can reach it
+            bare.rs:27:5: `debug_assert!` is skipped by release builds: use `assert!`, which guards the real run too
+            bare.rs:28:10: `debug_assert_eq!` is skipped by release builds: use `assert_eq!`, which guards the real run too
+            bare.rs:29:5: `debug_assert_ne!` is skipped by release builds: use `assert_ne!`, which guards the real run too"#]],
     );
 }

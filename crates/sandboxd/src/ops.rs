@@ -89,12 +89,11 @@ impl Ops {
     /// there.
     pub(crate) fn serve(&self, sender: Sender) -> Result<(), String> {
         let socket = Path::new(CONTROL_SOCKET);
-        #[expect(
-            clippy::unreachable,
-            reason = "`CONTROL_SOCKET` is an absolute path to a file in a directory"
-        )]
         let Some(dir) = socket.parent() else {
-            unreachable!("the control socket {CONTROL_SOCKET} has no directory")
+            unreachable!(
+                "the control socket {CONTROL_SOCKET} has no directory, though it is an absolute \
+                 path to a file in one"
+            )
         };
         // Made with no more than the mode, then set to it, since a umask may take bits from
         // the first but not the second.
@@ -151,14 +150,12 @@ impl Ops {
             // leaves part of the op unsent and the session ending. So only a gateway that
             // answers an op before it is whole gets here, with nobody left to tell.
             Ok(()) | Err(TrySendError::Disconnected(_)) => Ok(()),
-            #[expect(
-                clippy::unreachable,
-                reason = "each op's channel holds one reply, and only the call that takes the op \
-                          out of flight, under the lock, sends one; a one-shot channel would take \
-                          a dependency or one written here, as std's (`sync::oneshot`) is \
-                          unstable"
-            )]
-            Err(TrySendError::Full(_)) => unreachable!("op {op} was answered twice"),
+            // A one-shot channel would take a dependency or one written here, as std's
+            // (`sync::oneshot`) is unstable.
+            Err(TrySendError::Full(_)) => unreachable!(
+                "op {op} was answered twice, though its channel holds one reply, and only the \
+                 call that takes the op out of flight, under the lock, sends one"
+            ),
         }
     }
 
@@ -211,15 +208,14 @@ impl Ops {
         // A failed send means the session has failed, and is ending.
         send(sender, op, call, &payload).map_err(|_| Unanswered::Ended)?;
         drop(payload);
-        #[expect(
-            clippy::unreachable,
-            reason = "the op's sender stays in the flight until `Ops::reply` takes it, and sends \
-                      the reply before dropping it, or a later turn's `open` replaces it, which \
-                      can't happen while this caller holds its turn; when the session ends, \
-                      `sandboxd` exits with the sender still there"
-        )]
         let Ok(reply) = reply.recv() else {
-            unreachable!("op {op} lost where its reply goes without a reply")
+            unreachable!(
+                "op {op} lost where its reply goes without a reply, though its sender stays in \
+                 the flight until `Ops::reply` takes it, and sends the reply before dropping it, \
+                 or a later turn's `open` replaces it, which can't happen while this caller \
+                 holds its turn; when the session ends, `sandboxd` exits with the sender still \
+                 there"
+            )
         };
         Ok(reply)
     }
@@ -285,13 +281,12 @@ fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
     }
     // A byte more than the file holds, so that reading it whole takes no second allocation.
     let expected = size + 1;
-    #[expect(
-        clippy::unreachable,
-        reason = "the capacity is at most `MAX_OP_PAYLOAD_BYTES` and a byte, 64 MiB and one, which \
-                  fits the usize of every Linux target, of 32 bits or more"
-    )]
     let Ok(capacity) = usize::try_from(expected) else {
-        unreachable!("a capacity of {expected} bytes overflows a usize")
+        unreachable!(
+            "a capacity of {expected} bytes overflows a usize, though it is at most \
+             `MAX_OP_PAYLOAD_BYTES` and a byte, 64 MiB and one, which fits the usize of every \
+             Linux target, of 32 bits or more"
+        )
     };
     let mut payload = Vec::with_capacity(capacity);
     file.take(MAX_OP_PAYLOAD_BYTES + 1)

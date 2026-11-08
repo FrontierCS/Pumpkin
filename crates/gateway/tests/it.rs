@@ -1127,7 +1127,7 @@ fn another_sessions_op() {
             vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
         })],
         &expect![[
-            r#"the sessions' commands equal: false; op 0 on another session: panicked: internal error: entered unreachable code: op 0 was answered on a session other than the one it arrived on; that session's own op 0: ok; its op 1 refused on another session: panicked: internal error: entered unreachable code: op 1 was answered on a session other than the one it arrived on; the sandbox heard op 0: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
+            r#"the sessions' commands equal: false; op 0 on another session: panicked: internal error: entered unreachable code: op 0 was answered on a session other than the one it arrived on, though the contracts of `reply` and `refuse` require the one that handed it out; that session's own op 0: ok; its op 1 refused on another session: panicked: internal error: entered unreachable code: op 1 was answered on a session other than the one it arrived on, though the contracts of `reply` and `refuse` require the one that handed it out; the sandbox heard op 0: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
         ]],
     );
 }

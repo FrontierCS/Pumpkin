@@ -77,11 +77,10 @@ pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
                 _ => Err(error),
             }
         }
-        #[expect(
-            clippy::unreachable,
-            reason = "given a child's process ID, waitpid returns that ID, 0 or -1"
-        )]
-        returned => unreachable!("waitpid({pid}, WNOHANG) returned {returned}"),
+        returned => unreachable!(
+            "waitpid({pid}, WNOHANG) returned {returned}, though given a child's process ID, it \
+             returns that ID, 0 or -1"
+        ),
     }
 }
 

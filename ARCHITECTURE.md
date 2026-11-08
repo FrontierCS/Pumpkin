@@ -159,8 +159,9 @@ that writes the agent's runtime that runs it.
   therefore reaches an agent alike whichever factory builds its image, and any factory, in this
   repository or outside it, may use it.
 
-**`xtask`.** `cargo xtask ci`, the checks every change passes (its doc length caps in `docs`, and
-with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of `ci`.
+**`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
+and with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of
+`ci`.
 
 ## Cross-cutting concerns
 
