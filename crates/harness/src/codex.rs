@@ -344,13 +344,12 @@ fn carried(model: &ModelName) -> Result<Value, String> {
                 .collect::<Option<Vec<_>>>()
         })
         .filter(|entries| !entries.is_empty());
-    #[expect(
-        clippy::unreachable,
-        reason = "the catalog is a file of this crate, built into it, which the tests read: they \
-                  show its models' slugs and the refusal that lists every slug"
-    )]
     let Some(entries) = entries else {
-        unreachable!("Codex's catalog is not a list of models, each with a slug")
+        unreachable!(
+            "Codex's catalog is not a list of models, each with a slug, though it is a file of \
+             this crate, built into it, which the tests read: they show its models' slugs and \
+             the refusal that lists every slug"
+        )
     };
     if let Some(&(_, entry)) = entries.iter().find(|(slug, _)| *slug == model.as_str()) {
         return Ok(entry.clone());
@@ -398,12 +397,10 @@ fn mode(text: &str) -> ir::Mode {
 fn checked<T>(value: Result<T, String>) -> T {
     match value {
         Ok(value) => value,
-        #[expect(
-            clippy::unreachable,
-            reason = "each value is built from parsed paths, which hold no NUL byte, and from this \
-                      module's constants: a mode, `0` and three octal digits; two variables' \
-                      names, each set once; and a program that is not empty; the tests build each"
-        )]
-        Err(error) => unreachable!("{error}"),
+        Err(error) => unreachable!(
+            "each value is built from parsed paths, which hold no NUL byte, and from this \
+             module's constants: a mode, `0` and three octal digits; two variables' names, each \
+             set once; and a program that is not empty; the tests build each; yet {error}"
+        ),
     }
 }

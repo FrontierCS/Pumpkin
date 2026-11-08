@@ -159,16 +159,14 @@ fn op_payload_limit(workflow: &Workflow) -> OpPayloadLimit {
     let max_bytes = |slot| workflow.slot(slot).max_bytes.get();
     let score = max_bytes(pattern.score.slot);
     let bytes = slots.map(max_bytes).fold(score, u64::max);
-    #[expect(
-        clippy::unreachable,
-        reason = "`Workflow::parse` refuses any judge's slot whose `max_bytes` is over \
-                  `MAX_OP_PAYLOAD_BYTES`, and these are judges' slots, so only a bug in the parse \
-                  can reach this; a parsed slot type carrying the bound would reshape \
-                  `Workflow::slot` and `workflow::Judge::slots`, both `pub`, and the decision \
-                  core's reads of them"
-    )]
+    // A parsed slot type carrying the bound would reshape `Workflow::slot` and
+    // `workflow::Judge::slots`, both `pub`, and the decision core's reads of them.
     let Ok(limit) = OpPayloadLimit::try_from(bytes) else {
-        unreachable!("the agent's largest slot holds {bytes} bytes, over the op payload cap")
+        unreachable!(
+            "the agent's largest slot holds {bytes} bytes, over the op payload cap, though these \
+             are judges' slots, and `Workflow::parse` refuses any whose `max_bytes` is over \
+             `MAX_OP_PAYLOAD_BYTES`"
+        )
     };
     limit
 }

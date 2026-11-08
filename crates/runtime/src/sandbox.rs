@@ -130,15 +130,15 @@ impl<'p> Sandboxes<'p> {
                 socket.display()
             )
         })?;
-        #[expect(
-            clippy::unreachable,
-            reason = "`create` published every role's image, and a run starts sandboxes only for \
-                      its workflow's roles; no type excludes it, since the published names come \
-                      from the provider once the workflow is parsed, and a copy of the workflow's \
-                      roles that held them would serve this one lookup"
-        )]
+        // No type excludes a missing image, since the published names come from the provider
+        // once the workflow is parsed, and a copy of the workflow's roles that held them would
+        // serve this one lookup.
         let Some(image) = self.images.get(&sandbox.image) else {
-            unreachable!("role `{}`'s image wasn't published", sandbox.name)
+            unreachable!(
+                "role `{}`'s image wasn't published, though `create` published every role's \
+                 image, and a run starts sandboxes only for its workflow's roles",
+                sandbox.name
+            )
         };
         let create = Create {
             run: self.run.clone(),

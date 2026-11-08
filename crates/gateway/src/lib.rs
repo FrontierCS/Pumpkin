@@ -621,15 +621,12 @@ impl Session {
         } = refused;
         self.clear_flight(session, number);
         match self.answer(number, OpReply::Refused { message }, by) {
-            #[expect(
-                clippy::unreachable,
-                reason = "the refusal's message is `RefusedOp::message`, which names only the \
-                          payload's size, a `u64`, and the limit, so its frame's message is under \
-                          200 bytes, far under `frame::MAX_MESSAGE_BYTES`, 64 KiB"
-            )]
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-                unreachable!("the refusal of op {number} is too long: {error}")
-            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => unreachable!(
+                "the refusal of op {number} is too long, though its message is \
+                 `RefusedOp::message`, which names only the payload's size, a `u64`, and the \
+                 limit, so its frame's message is under 200 bytes, far under \
+                 `frame::MAX_MESSAGE_BYTES`, 64 KiB: {error}"
+            ),
             answered => answered,
         }
     }
@@ -637,14 +634,13 @@ impl Session {
     /// Takes op `number`, which arrived on session `session`, out of the flight, before its
     /// answer is written.
     fn clear_flight(&self, session: u64, number: u32) {
-        #[expect(
-            clippy::unreachable,
-            reason = "the owner answers each op on the session that handed it out, as the \
-                      contracts of `reply` and `refuse` require; a lifetime brand tying each op to \
-                      its session would reshape all of `Session`'s `pub` API"
-        )]
+        // A lifetime brand tying each op to its session would reshape all of `Session`'s `pub`
+        // API.
         if session != self.id {
-            unreachable!("op {number} was answered on a session other than the one it arrived on")
+            unreachable!(
+                "op {number} was answered on a session other than the one it arrived on, though \
+                 the contracts of `reply` and `refuse` require the one that handed it out"
+            )
         }
         // Before the answer, since the sandbox may open the next op as soon as it reads one,
         // which a later clearing would drop.
@@ -903,15 +899,13 @@ impl Drop for Session {
         // wait only for a `collect`, which has returned, dropping their queue, before anything
         // can drop the session; and it takes the routes' lock only around steps that never
         // block, as every holder does, and this thread holds it no longer.
-        #[expect(
-            clippy::unreachable,
-            reason = "a panic on the reader thread aborts the process (`AbortOnUnwind` in `route`), \
-                      so the thread never ends in one"
-        )]
         if let Some(reader) = self.reader.take()
             && reader.join().is_err()
         {
-            unreachable!("the session's reader thread panicked")
+            unreachable!(
+                "the session's reader thread ended in a panic, though one there aborts the \
+                 process (`AbortOnUnwind` in `route`)"
+            )
         }
     }
 }
@@ -1495,13 +1489,12 @@ impl Assembler {
         }
         flight.models.insert(number);
         drop(flight);
-        #[expect(
-            clippy::unreachable,
-            reason = "the size is at most `MAX_MODEL_REQUEST_BYTES`, 64 MiB, which fits the usize \
-                      of every Linux target, of 32 bits or more"
-        )]
         let Ok(capacity) = usize::try_from(size) else {
-            unreachable!("a model request's body of {size} bytes overflows a usize")
+            unreachable!(
+                "a model request's body of {size} bytes overflows a usize, though it is at most \
+                 `MAX_MODEL_REQUEST_BYTES`, 64 MiB, which fits the usize of every Linux target, \
+                 of 32 bits or more"
+            )
         };
         let request = ModelRequest {
             body: Vec::with_capacity(capacity),
@@ -1600,14 +1593,12 @@ fn payload(
     if size > limit.bytes() {
         return Ok(Payload::Dropped { size, limit });
     }
-    #[expect(
-        clippy::unreachable,
-        reason = "the size is at most the limit, which is at most `MAX_OP_PAYLOAD_BYTES`, 64 MiB \
-                  (an `OpPayloadLimit` holds no more), which fits the usize of every Linux target, \
-                  of 32 bits or more"
-    )]
     let Ok(capacity) = usize::try_from(size) else {
-        unreachable!("a payload of {size} bytes overflows a usize")
+        unreachable!(
+            "a payload of {size} bytes overflows a usize, though it is at most the limit, which \
+             is at most `MAX_OP_PAYLOAD_BYTES`, 64 MiB (an `OpPayloadLimit` holds no more), which \
+             fits the usize of every Linux target, of 32 bits or more"
+        )
     };
     Ok(Payload::Kept(Vec::with_capacity(capacity)))
 }
@@ -1653,16 +1644,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The error of a request on a session that has ended, for the reason in `ended`.
 fn ended(ended: &OnceLock<String>) -> io::Error {
-    #[expect(
-        clippy::unreachable,
-        reason = "every way to learn that the session ended follows the reason's recording: `end` \
-                  records it before it closes the routes, which close otherwise only after a frame \
-                  that ends their request or once nothing receives from them; and the rest call \
-                  `end` or check the reason first; sending the reason as each channel's last \
-                  message would need room in queues that may be full"
-    )]
+    // Sending the reason as each channel's last message would need room in queues that may be
+    // full.
     let Some(reason) = ended.get() else {
-        unreachable!("the session ended without a reason")
+        unreachable!(
+            "the session ended without a reason, though every way to learn that it ended follows \
+             the reason's recording: `end` records it before it closes the routes, which close \
+             otherwise only after a frame that ends their request or once nothing receives from \
+             them; and the rest call `end` or check the reason first"
+        )
     };
     io::Error::new(io::ErrorKind::ConnectionAborted, reason.clone())
 }

@@ -205,14 +205,12 @@ fn reaper(shared: &Shared) -> Result<Infallible, String> {
         }
         // Commands may start while the reaper waits for a child.
         drop(state);
-        #[expect(
-            clippy::unreachable,
-            reason = "the reaper found children under the lock, and nothing else reaps them: \
-                      starting a command reaps only a child that failed to start, before it lets \
-                      go of the lock"
-        )]
         let Some(pid) = sys::wait_for_child().context("waiting for a child to exit failed")? else {
-            unreachable!("the children found under the lock are gone, reaped by another")
+            unreachable!(
+                "the children found under the lock are gone, reaped by another, though nothing \
+                 else reaps them: starting a command reaps only a child that failed to start, \
+                 before it lets go of the lock"
+            )
         };
         let mut state = shared.lock();
         let Some(raw) = sys::reap(pid).context(format_args!("reaping child {pid} failed"))? else {
@@ -238,14 +236,11 @@ fn exit_status(status: std::process::ExitStatus) -> ExitStatus {
     if let Some(code) = status.code() {
         return ExitStatus::Code(code);
     }
-    #[expect(
-        clippy::unreachable,
-        reason = "waitpid reports an exit, a death by signal, a stop or a continuation; the reaper \
-                  skips stops before decoding, and asks for no continuations"
-    )]
     let Some(signal) = status.signal() else {
         unreachable!(
-            "the status {:#x} is neither an exit nor a death by signal",
+            "the status {:#x} is neither an exit nor a death by signal, though waitpid reports \
+             those, a stop or a continuation, and the reaper skips stops before decoding, and \
+             asks for no continuations",
             status.into_raw()
         )
     };

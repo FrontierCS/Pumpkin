@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use xshell::{Cmd, Shell};
 
-mod docs;
+mod tidy;
 
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -185,13 +185,12 @@ impl Cargo {
 /// The workspace's root, which holds `xtask/`.
 fn root() -> &'static Path {
     let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
-    #[expect(
-        clippy::unreachable,
-        reason = "`Path::parent` finds none only for a root or an empty path, and xtask's \
-                  directory is the workspace's `xtask/`, below its root"
-    )]
     let Some(root) = xtask.parent() else {
-        unreachable!("xtask's directory {} has no parent", xtask.display())
+        unreachable!(
+            "xtask's directory {} has no parent, though it is the workspace's `xtask/`, below \
+             its root, and only a root or an empty path has none",
+            xtask.display()
+        )
     };
     root
 }
@@ -203,7 +202,7 @@ fn root() -> &'static Path {
 /// Docker's own variables set to reach no engine.
 fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
     cargo.fmt().arg("--check").run()?;
-    docs::check(&cargo.sh)?;
+    tidy::check(&cargo.sh)?;
     let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
     clippy.args(["--", "--deny", "warnings"]).run()?;
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);

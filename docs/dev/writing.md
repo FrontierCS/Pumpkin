@@ -18,3 +18,6 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
 - WRITE commit subjects in lowercase imperative, with bodies that explain what and why to a
   reader without other context
 - LIST schema changes in the pull request description
+- SKETCH, in the pull request of a design whose cost grows with its input, what it costs in
+  network, disk, memory and CPU, each by bandwidth and latency, before building it; then
+  measure the claims the choice rests on

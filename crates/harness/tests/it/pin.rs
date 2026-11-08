@@ -83,17 +83,17 @@ fn checks() {
     check(
         &messages.join("\n"),
         &expect![[r#"
-            internal error: entered unreachable code: pin Codex-0.167.0: the name `Codex-0.167.0` is not a harness's name: use a-z, 0-9, `.`, `_` and `-`, starting with a letter
-            internal error: entered unreachable code: pin codex-0.167.0: the URL `http://registry.npmjs.org/codex.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@%+`
-            internal error: entered unreachable code: pin codex-0.167.0: the URL `https://registry.npmjs.org/$CODEX.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@%+`
-            internal error: entered unreachable code: pin codex-0.167.0: `2dc9aa871abb513c3539d20d025f701faf1974c46ee906bda3a1e1f5026d4434` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits
-            internal error: entered unreachable code: pin codex-0.167.0: `package/../vendor` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte
-            internal error: entered unreachable code: pin codex-0.167.0: the path `bin/codex*` is not one a pin can hold: use ASCII letters and digits and `-._/`
-            internal error: entered unreachable code: pin codex-0.167.0: the pin keeps no file: list the files it keeps
-            internal error: entered unreachable code: pin codex-0.167.0: `bin/codex` comes after `codex-path/rg`: list the files once each, sorted by their paths' bytes
-            internal error: entered unreachable code: pin codex-0.167.0: `bin/codex` comes after `bin/codex`: list the files once each, sorted by their paths' bytes
-            internal error: entered unreachable code: pin codex-0.167.0: the base `` is not an image reference a recipe can hold: use ASCII letters and digits and `-._/:@`
-            internal error: entered unreachable code: pin codex-0.167.0: the base `base\nRUN id` is not an image reference a recipe can hold: use ASCII letters and digits and `-._/:@`"#]],
+            internal error: entered unreachable code: pin Codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the name `Codex-0.167.0` is not a harness's name: use a-z, 0-9, `.`, `_` and `-`, starting with a letter
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the URL `http://registry.npmjs.org/codex.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@%+`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the URL `https://registry.npmjs.org/$CODEX.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@%+`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: `2dc9aa871abb513c3539d20d025f701faf1974c46ee906bda3a1e1f5026d4434` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: `package/../vendor` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the path `bin/codex*` is not one a pin can hold: use ASCII letters and digits and `-._/`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the pin keeps no file: list the files it keeps
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: `bin/codex` comes after `codex-path/rg`: list the files once each, sorted by their paths' bytes
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: `bin/codex` comes after `bin/codex`: list the files once each, sorted by their paths' bytes
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the base `` is not an image reference a recipe can hold: use ASCII letters and digits and `-._/:@`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the base `base\nRUN id` is not an image reference a recipe can hold: use ASCII letters and digits and `-._/:@`"#]],
     );
 }
 

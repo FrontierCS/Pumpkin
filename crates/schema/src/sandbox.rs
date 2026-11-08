@@ -242,16 +242,14 @@ pub const MODEL_PORT: u16 = 11235;
 fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
     match T::try_from(value.to_owned()) {
         Ok(value) => value,
-        #[expect(
-            clippy::unreachable,
-            reason = "each of this module's paths is normalized: `/pumpkin`, `/.pumpkin` and \
-                      `/harness` are absolute, and each of `/pumpkin`'s directories and files, \
-                      and a slot's `Name`, from a-z, 0-9, `_` and `-`, one plain component; \
-                      `HOME` is a variable's name; each mode is `0` and three octal digits; \
-                      checking them as the crate builds would take a `const fn` copy of each \
-                      check, and a constructor that skips the checks"
-        )]
-        Err(error) => unreachable!("{error}"),
+        // Checking them as the crate builds would take a `const fn` copy of each check, and a
+        // constructor that skips the checks.
+        Err(error) => unreachable!(
+            "each of this module's paths is normalized: `/pumpkin`, `/.pumpkin` and `/harness` \
+             are absolute, and each of `/pumpkin`'s directories and files, and a slot's `Name`, \
+             from a-z, 0-9, `_` and `-`, one plain component; `HOME` is a variable's name; each \
+             mode is `0` and three octal digits; yet {error}"
+        ),
     }
 }
 
