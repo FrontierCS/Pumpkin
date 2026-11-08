@@ -189,9 +189,10 @@ impl Log {
         self.file
             .write_all(line.as_bytes())
             .context(self.path.display())?;
-        self.file.sync_data().context(self.path.display())?;
+        // Counted once written, so that a record after one whose sync failed, such as the note
+        // of why the run failed, follows it in `seq` as it does in the file.
         self.seq += 1;
-        Ok(())
+        self.file.sync_data().context(self.path.display())
     }
 }
 
