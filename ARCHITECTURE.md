@@ -1,7 +1,8 @@
 # Architecture
 
 A map of Pumpkin's code: where each thing lives, and what stays true across it. The rules for
-changing the code are in [`AGENTS.md`](AGENTS.md). Names in backticks are for symbol search.
+changing the code are in [`AGENTS.md`](AGENTS.md) and the guides it points to in `docs/dev/`.
+Names in backticks are for symbol search.
 
 ## Bird's-eye view
 
@@ -163,4 +164,5 @@ with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check
 
 ## Cross-cutting concerns
 
-Errors, panics, `unsafe` and concurrency follow the rules in [`AGENTS.md`](AGENTS.md).
+Errors follow the rules in [`docs/dev/style.md`](docs/dev/style.md); panics, `unsafe` and
+concurrency follow those in [`AGENTS.md`](AGENTS.md).
