@@ -30,9 +30,7 @@ run has connected to; `Engine`, Docker's.
 
 The workflow IR (`schema`'s `ir`) is the only input the runtime reads, and it holds no
 defaults. Programs that write it are front ends: today, Rust factories, such as a task
-repository's. A more general Pumpkin may offer its own workflow language for programmability, as
-Bazel offers Starlark and Terraform HCL; like theirs, it would be a front end that evaluates to
-the IR, so the runtime and the decision core never see it.
+repository's.
 
 ## Code map
 
@@ -106,9 +104,8 @@ observes and returns the `Action`s the runtime is to perform, until one ends the
   decides when time ends the work phase or the run, the hard end included. The
   crate is `#![no_std]`, so it can name none of `std`'s files, network, processes, environment,
   threads, clock or hashed collections, and it forbids `unsafe`, which `core::arch`'s clock
-  needs. It depends on `schema` alone of Pumpkin's crates; the schema's I/O items
-  (`tree::Writer`, `frame` over `std::io`, and `PathBuf` paths) stay reachable through it until the
-  planned purification moves them out of `schema`.
+  needs. It depends on `schema` alone of Pumpkin's crates, through which the schema's I/O items
+  (`tree::Writer`, `frame` over `std::io`, and `PathBuf` paths) remain reachable.
 - **Architecture Invariant:** only the decision core authorizes ops: `sandboxd` carries any op any
   code in the sandbox makes, and the gateway bounds only what ops cost the host.
 - **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
