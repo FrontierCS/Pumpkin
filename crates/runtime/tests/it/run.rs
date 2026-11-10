@@ -16,12 +16,16 @@ use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use expect_test::{Expect, expect};
+use provider::Provider;
 use route::{Key, Serving, Upstream, UpstreamUrl};
 use runtime::Run;
 use schema::ir::{self, ModelName, Name};
-use schema::workflow::Workflow;
+use schema::provider::Ready;
+use schema::workflow::{Placed, Workflow};
 use serde_json::Value;
 use tempfile::TempDir;
+
+use crate::sim::Sim;
 
 const LWE: &str = include_str!("../../../schema/tests/fixtures/lwe.json");
 
@@ -55,7 +59,8 @@ impl Drop for Runs {
 /// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its
 /// own, with an upstream that serves each model it names, if it names any, and checks what
 /// becomes of each: whether the run is prepared, named by its id, or how it is refused; and its
-/// record, if it has one: its name, its files, and what they hold.
+/// record, if it has one: its name, its files, and what they hold. Each is [placed](placed) on
+/// the simulated provider.
 fn check(
     cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
     expect: &Expect,
@@ -73,9 +78,8 @@ fn check(
         };
         let url = "http://127.0.0.1:9/responses";
         let serving = served.map(|models| serving(&runs.dir, url, models));
-        let prepared = Workflow::parse(&ir)
-            .map_err(|errors| errors.to_string())
-            .and_then(|workflow| Run::prepare(workflow, &dir, now, serving));
+        let prepared = placed(&ir, Sim::new().ready())
+            .and_then(|placed| Run::prepare(placed, &dir, now, serving));
         let record = fs::read_dir(&dir)
             .ok()
             .and_then(|mut entries| entries.next());
@@ -115,6 +119,12 @@ fn check(
         }
     }
     expect.assert_eq(&lines.join("\n"));
+}
+
+/// `ir`, parsed and placed in the classes that a provider that declares `ready` offers.
+pub(crate) fn placed(ir: &ir::Workflow, ready: &Ready) -> Result<Placed, String> {
+    let workflow = Workflow::parse(ir).map_err(|errors| errors.to_string())?;
+    (workflow.place(&ready.classes)).map_err(|errors| errors.to_string())
 }
 
 /// The upstream `stand-in` at `url`, whose key is in a file in `dir`, which serves each of
@@ -158,7 +168,7 @@ fn prepare() {
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
-            20240229-000000-hhhhhhhh: driver.pid, ir.json, record.json
+            20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one; runs directory made: false
@@ -166,13 +176,13 @@ fn prepare() {
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
-            20251231-235959-hhhhhhhh: driver.pid, ir.json, record.json
+            20251231-235959-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
-            21000301-000000-hhhhhhhh: driver.pid, ir.json, record.json
+            21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"record_version":"pumpkin.record/v0"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false"#]],

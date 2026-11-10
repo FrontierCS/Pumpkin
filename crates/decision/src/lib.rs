@@ -17,9 +17,6 @@
 // schema's I/O items (`tree::Writer`, `frame` over `std::io`, `PathBuf` paths) until the planned
 // purification moves them out of `schema`.
 #![no_std]
-// Forbidden, not only warned of as the workspace does, so that no `#[expect(unsafe_code)]` can
-// admit `core::arch`'s clock and random-number intrinsics, which need `unsafe`.
-#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -31,7 +28,7 @@ use core::time::Duration;
 use schema::ir::{Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
-use schema::workflow::{JudgeCall, JudgeGrantId, Main, SoloThenJudge, Workflow};
+use schema::workflow::{JudgeCall, JudgeGrantId, Main, Placed, RoleId, SoloThenJudge, Workflow};
 use serde_json::Number;
 
 mod jobs;
@@ -206,28 +203,33 @@ pub enum Verdict {
     },
 }
 
-/// How long a run of `workflow` may last from its start: its hard end, which [`Core::start`]
+/// How long a run of `placed` may last from its start: its hard end, which [`Core::start`]
 /// sets, after the deadline.
 ///
-/// It is the sum of four shares: the later of the pattern's deadline and `startup`, its finalize
-/// grace, its score's timeout, and twice `startup`. Here `startup` is how long the run's provider
-/// may take to start a sandbox, from when the runtime asks for one to when its session is ready.
-pub fn lasts(workflow: &Workflow, startup: Duration) -> Duration {
+/// It is the sum of five shares: the later of the pattern's deadline and the agent's startup,
+/// its finalize grace, the agent's startup again, its score's timeout, and the final judge's
+/// startup. A role's startup ([`Placed::startup`]) is how long its class may take to start one
+/// of its sandboxes, from when the runtime asks for one to when its session is ready.
+pub fn lasts(placed: &Placed) -> Duration {
+    let workflow = placed.workflow();
     let Main::SoloThenJudge(pattern) = workflow.main();
+    let agent = placed.startup(RoleId::Agent);
+    let final_judge = placed.startup(RoleId::Judge(pattern.score.slot.judge()));
     // Each start is attempted once (a failed start isn't retried today), which is why the hard
     // end counts one startup per start. The core ends the work phase by the deadline, but the
     // agent's teardown waits for its start, which counts against the deadline yet may outrun a
-    // short one: the teardown begins by the later of the deadline and `startup`. The last
-    // startup and the score's timeout are the final judge's, the run's last sandbox: its start
-    // and its command. The other startup and the grace, which the deadline cuts short, are
-    // slack for ending the work phase and collecting what it left, which nothing else bounds: a
-    // margin chosen, not derived.
+    // short one: the teardown begins by the later of the deadline and the agent's startup. The
+    // final judge's startup and the score's timeout are the final judge's, the run's last
+    // sandbox: its start and its command. The grace, which the deadline cuts short, and the
+    // agent's startup again are slack for ending the work phase and collecting what it left,
+    // which nothing else bounds: a margin chosen, not derived.
     pattern
         .deadline
-        .max(startup)
+        .max(agent)
         .saturating_add(pattern.finalize_grace)
+        .saturating_add(agent)
         .saturating_add(pattern.score.timeout)
-        .saturating_add(startup.saturating_mul(2))
+        .saturating_add(final_judge)
 }
 
 /// A run's decision core.
@@ -287,16 +289,16 @@ enum Phase {
 }
 
 impl<'w> Core<'w> {
-    /// Starts a run of `workflow`, whose provider may take `startup` to start a sandbox: its
-    /// work phase begins at time 0, and its hard end is [`lasts`] after. Returns the core and
-    /// its first actions.
-    pub fn start(workflow: &'w Workflow, startup: Duration) -> (Self, Vec<Action>) {
+    /// Starts a run of `placed`: its work phase begins at time 0, and its hard end is
+    /// [`lasts`] after. Returns the core and its first actions.
+    pub fn start(placed: &'w Placed) -> (Self, Vec<Action>) {
+        let workflow = placed.workflow();
         let Main::SoloThenJudge(pattern) = workflow.main();
         let core = Self {
             workflow,
             pattern,
             now: Duration::ZERO,
-            hard_end: lasts(workflow, startup),
+            hard_end: lasts(placed),
             phase: Phase::Work { submission: None },
             jobs: jobs::Jobs::default(),
         };

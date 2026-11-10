@@ -7,7 +7,7 @@ use std::process::Stdio;
 use expect_test::expect;
 use serde_json::{Value, json};
 
-use super::{Scratch, check, invocation, report};
+use super::{Scratch, Step, check, invocation, report};
 
 /// Writes the record `id` in `scratch`'s `runs`, as `pumpkin run` leaves it, with `driver.pid`
 /// unless `pid` is false, and `outcome` as its `outcome.json`, if it has one.
@@ -142,12 +142,17 @@ fn follows() {
     let mut output = child.wait_with_output().unwrap();
     output.stderr = said.into_bytes();
     let text = report(invoked, &output, &scratch.0, false);
-    expect![[r#"
-        $ pumpkin wait 1b8a --runs runs
-        exit status: Some(0)
-        pumpkin: following run 20261107-120000-1b8a6389: ending `pumpkin wait` does not stop it
-        printed outcome.json: {"score":7,"state":"finished"}"#]]
-    .assert_eq(&text);
+    check(
+        &scratch,
+        [Step::Ran(text)],
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin wait 1b8a --runs runs
+            exit status: Some(0)
+            pumpkin: following run 20261107-120000-1b8a6389: ending `pumpkin wait` does not stop it
+            printed outcome.json: {"score":7,"state":"finished"}"#]],
+    );
 }
 
 #[test]
@@ -172,8 +177,8 @@ fn states() {
     for (outcome, contents) in outcomes {
         for pid in pids {
             for version in versions {
-                // A live record of this version, locked with no outcome, is `wait`'s to follow, which
-                // `follows` covers; the matrix would block on it.
+                // A live record of this version, locked with no outcome, is `wait`'s to follow,
+                // which `follows` covers; the matrix would block on it.
                 if pid == "locked" && contents.is_none() && version == Some("v0") {
                     continue;
                 }

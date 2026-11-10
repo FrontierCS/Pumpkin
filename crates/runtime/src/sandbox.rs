@@ -145,7 +145,7 @@ impl<'p> Sandboxes<'p> {
             role: Role {
                 name: sandbox.name.clone(),
                 user: sandbox.user,
-                resources: sandbox.resources,
+                resources: sandbox.needs,
             },
             image: image.clone(),
             sandboxd: self.sandboxd.clone(),

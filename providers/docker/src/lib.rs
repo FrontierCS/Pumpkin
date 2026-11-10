@@ -24,7 +24,7 @@
 //! only containers, labelled with their run's [`RunTag`], by which [`Provider::list`] finds them,
 //! and their anonymous volumes; it pulls no image, and builds on Docker 25.0 or later.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -32,13 +32,14 @@ use std::process::{ExitStatus, Output, Stdio};
 use std::{fmt, io};
 
 use provider::Provider;
-use schema::ir::{Resources, User};
+use schema::ir::{Name, Resources, User};
 use schema::provider::{
-    Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
+    Class, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
     SOCKET_NAME, SandboxId,
 };
 use schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use stdx::Context;
 use stdx::process::Environment;
 
@@ -46,7 +47,15 @@ mod build;
 
 pub use build::{BuildContext, Built, Recipe};
 
-/// The most seconds a sandbox's start takes, as [`Capabilities::startup_seconds`] declares it.
+/// The name of the provider's one class of sandbox, a container on the engine's host, which
+/// gives a role as many CPUs and as much memory as the host has.
+const CLASS: &str = "container";
+
+/// The thousandths of a CPU in a CPU, the unit of a role's CPU limit, which `--cpus` takes as
+/// CPUs with three decimals.
+const MILLIS_PER_CPU: NonZeroU64 = NonZeroU64::new(1000).unwrap();
+
+/// The most seconds a sandbox's start takes, as [`Class::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
@@ -77,7 +86,8 @@ const ROLE_LABEL: &str = "pumpkin.role";
 /// Any name but the empty one, which `docker` would take for no name, and so reach the engine
 /// of the command line's current context. A name no context has is refused by
 /// [`Engine::connect`].
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct ContextName(String);
 
 impl ContextName {
@@ -106,7 +116,7 @@ impl TryFrom<String> for ContextName {
 #[derive(Debug)]
 pub struct Engine {
     report: Report,
-    /// What [`Provider::ready`] gives: the report as JSON, and the capabilities.
+    /// What [`Provider::ready`] gives: the report as JSON, and the one class.
     ready: Ready,
 }
 
@@ -163,6 +173,11 @@ struct InfoJson {
     cpu_cfs_quota: bool,
     /// Whether the engine supports process limits, which [`create_args`] sets.
     pids_limit: bool,
+    /// The CPUs of the engine's host, which a container's CPU limit can't pass.
+    #[serde(rename = "NCPU")]
+    ncpu: NonZeroU64,
+    /// The memory of the engine's host, in bytes.
+    mem_total: NonZeroU64,
     security_options: Option<Vec<String>>,
     kernel_version: String,
     operating_system: String,
@@ -215,6 +230,8 @@ impl Engine {
             swap_limit,
             cpu_cfs_quota,
             pids_limit,
+            ncpu,
+            mem_total,
             security_options,
             kernel_version,
             operating_system,
@@ -244,7 +261,11 @@ impl Engine {
             kernel: kernel_version,
             os: operating_system,
         };
-        let ready = ready(&report);
+        let host = Resources {
+            cpu_millis: ncpu.saturating_mul(MILLIS_PER_CPU),
+            memory_bytes: mem_total,
+        };
+        let ready = ready(&report, host);
         Ok(Self { report, ready })
     }
 
@@ -340,19 +361,19 @@ impl Provider for Engine {
     }
 }
 
-/// What [`Provider::ready`] gives of an engine that `report` describes.
-fn ready(report: &Report) -> Ready {
-    let Ok(json) = serde_json::to_value(report) else {
-        unreachable!(
-            "{report:?} can't be written as JSON, though a `Report` holds only strings, bools and \
-             `Option<String>`s, through derived impls, none of which serde_json fails to write"
-        )
+/// What [`Provider::ready`] gives of an engine that `report` describes, whose host has `host`.
+fn ready(report: &Report, host: Resources) -> Ready {
+    // `Name` checks its value as it is made, and has no constant constructor.
+    let Ok(name) = Name::try_from(CLASS.to_owned()) else {
+        unreachable!("the class `{CLASS}` has no name, though it is a constant that is a name")
+    };
+    let class = Class {
+        resources: host,
+        startup_seconds: STARTUP_SECONDS,
     };
     Ready {
-        report: json,
-        capabilities: Capabilities {
-            startup_seconds: STARTUP_SECONDS,
-        },
+        report: json!(report),
+        classes: BTreeMap::from([(name, class)]),
     }
 }
 
@@ -451,7 +472,11 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
         // Images are the operator's or the build's: a pull would fetch one that no run owns,
         // with the operator's registry credentials.
         "--pull=never".to_owned(),
-        format!("--cpus={}.{:03}", millis / 1000, millis % 1000),
+        format!(
+            "--cpus={}.{:03}",
+            millis / MILLIS_PER_CPU,
+            millis % MILLIS_PER_CPU
+        ),
         format!("--memory={memory}"),
         format!("--memory-swap={memory}"),
         "--log-driver=json-file".to_owned(),

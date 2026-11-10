@@ -128,6 +128,9 @@ impl Commands {
         // letting go of the lock, so once no children are left, every exit has been reported.
         while sys::has_children().context(HAS_CHILDREN_FAILED)? {
             state = self.shared.wait(state);
+            // A process forked as the first kill read `/proc` outlives it, and becomes this
+            // one's child once its parent is killed.
+            kill_everything(&state).context(KILL_FAILED)?;
         }
         Ok(())
     }
@@ -205,15 +208,15 @@ fn reaper(shared: &Shared) -> Result<Infallible, String> {
         }
         // Commands may start while the reaper waits for a child.
         drop(state);
-        let Some(pid) = sys::wait_for_child().context("waiting for a child to exit failed")? else {
+        if !sys::wait_for_child().context("waiting for a child to exit failed")? {
             unreachable!(
                 "the children found under the lock are gone, reaped by another, though nothing \
                  else reaps them: starting a command reaps only a child that failed to start, \
                  before it lets go of the lock"
             )
-        };
+        }
         let mut state = shared.lock();
-        let Some(raw) = sys::reap(pid).context(format_args!("reaping child {pid} failed"))? else {
+        let Some((pid, raw)) = sys::reap().context("reaping a child failed")? else {
             continue;
         };
         let status = std::process::ExitStatus::from_raw(raw);

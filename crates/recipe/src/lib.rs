@@ -24,7 +24,6 @@
 
 // Without `std`, the check can name no file, process or clock: it reads only the text it is given.
 #![no_std]
-#![forbid(unsafe_code)]
 
 extern crate alloc;
 

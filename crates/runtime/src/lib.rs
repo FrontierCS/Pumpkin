@@ -2,7 +2,7 @@
 //! decides, and keeps the run's record. An agent reaches its model through [`route`], which the
 //! runtime serves.
 //!
-//! [`Run::prepare`] begins the record of a parsed workflow, and [`Run::execute`] runs it to
+//! [`Run::prepare`] begins the record of a placed workflow, and [`Run::execute`] runs it to
 //! its outcome, one thread driving the core as [`Core`] says, while each judge call runs on a
 //! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
 //! on one inbox, into which the agent's session hands what it reads, and each judge call's
@@ -26,7 +26,7 @@ use provider::Provider;
 use route::{Answer, Serving};
 use schema::provider::{RunTag, SandboxId};
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
-use schema::workflow::{JudgeCall, Main, Workflow};
+use schema::workflow::{JudgeCall, Main, Placed, RoleId, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
@@ -45,10 +45,10 @@ pub use record::{Ending, Record};
 use record::{Lock, Payloads};
 use sandbox::Sandboxes;
 
-/// A run, prepared: its workflow parsed, and its record begun.
+/// A run, prepared: its workflow placed, and its record begun.
 #[derive(Debug)]
 pub struct Run {
-    workflow: Workflow,
+    placed: Placed,
     /// The agent's model route, as the run serves it, if it has one.
     served: Option<Served>,
     id: String,
@@ -58,7 +58,7 @@ pub struct Run {
 }
 
 impl Run {
-    /// Makes the record of `workflow`'s run in `runs`, which is created if need be, with its IR
+    /// Makes the record of `placed`'s run in `runs`, which is created if need be, with its IR
     /// in `ir.json`. The run's id holds `now`, the time by the caller's clock. The agent's model
     /// route, if it has one, is served as `serving` says, which goes unused for a workflow
     /// without one. A workflow whose route is not served is refused before any record is made.
@@ -68,16 +68,16 @@ impl Run {
     /// Fails if the workflow is refused, if `now` is before 1970, or if the record can't be
     /// written.
     pub fn prepare(
-        workflow: Workflow,
+        placed: Placed,
         runs: &Path,
         now: SystemTime,
         serving: Option<Serving>,
     ) -> Result<Self, String> {
-        let served = Served::new(&workflow, serving)?;
+        let served = Served::new(placed.workflow(), serving)?;
         let (id, dir, lock) = record::create(runs, now)?;
-        record::write_json(&dir, "ir.json", &json!(workflow.ir()))?;
+        record::write_json(&dir, "ir.json", &json!(placed.workflow().ir()))?;
         Ok(Self {
-            workflow,
+            placed,
             served,
             id,
             dir,
@@ -95,17 +95,22 @@ impl Run {
         &self.dir
     }
 
-    /// Runs the workflow to its outcome on `provider`, with `sandboxd`, a static `sandboxd`
-    /// binary, in every sandbox, and records the outcome, or why there is none, in `outcome.json`.
-    /// However the run ends, it deletes the sandboxes that `provider` still lists of it.
+    /// Runs the workflow on `provider`, with `sandboxd`, a static binary, in every sandbox, and
+    /// calls `started` once what they run is published, before the run's clock starts. However
+    /// it ends, it records how in `outcome.json`, and deletes what `provider` still lists of it.
     ///
     /// # Errors
     ///
-    /// Fails if the run can't be set up, recorded or cleaned up, if it was still going at its
-    /// hard end ([`lasts`]), or if the model provider refused the route's key before a final
-    /// submission was accepted, or failed the agent's last request as it exited without one.
-    pub fn execute(self, provider: &dyn Provider, sandboxd: &Path) -> Result<Outcome, String> {
-        let outcome = self.run_on(provider, sandboxd);
+    /// Fails if the run can't be set up, recorded or cleaned up, if `started` fails, if it was
+    /// still going at its hard end ([`lasts`]), or if the model provider refused the route's key
+    /// before a final submission was accepted, or failed the agent's last request without one.
+    pub fn execute(
+        self,
+        provider: &dyn Provider,
+        sandboxd: &Path,
+        started: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Outcome, String> {
+        let outcome = self.run_on(provider, sandboxd, started);
         let recorded = match &outcome {
             Ok(outcome) => {
                 let mut recorded = log::outcome_json(outcome);
@@ -119,20 +124,24 @@ impl Run {
         failed_also(outcome, written)
     }
 
-    /// Records what `provider` declared and publishes what the run's sandboxes run, then starts
-    /// the run's clock and drives the run, keeping its log, and deletes what the provider still
-    /// lists of it.
-    fn run_on(&self, provider: &dyn Provider, sandboxd: &Path) -> Result<Outcome, String> {
-        let ready = provider.ready();
-        record::write_json(&self.dir, "provider.json", &json!(ready))?;
-        let startup = Duration::from_secs(ready.capabilities.startup_seconds.get());
-        let sandboxes = Sandboxes::create(provider, self.tag(), &self.workflow, sandboxd)?;
+    /// Records what `provider` declared and publishes what the run's sandboxes run, calls
+    /// `started`, then starts the run's clock and drives the run, keeping its log, and deletes
+    /// what the provider still lists of it.
+    fn run_on(
+        &self,
+        provider: &dyn Provider,
+        sandboxd: &Path,
+        started: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Outcome, String> {
+        record::write_json(&self.dir, "provider.json", &json!(provider.ready()))?;
+        let workflow = self.placed.workflow();
+        let sandboxes = Sandboxes::create(provider, self.tag(), workflow, sandboxd)?;
+        started()?;
         let clock = Clock::start();
         let unix = record::since_epoch(clock.unix)?;
         let mut runtime = Runtime {
-            workflow: &self.workflow,
+            placed: &self.placed,
             served: self.served.as_ref(),
-            startup,
             dir: &self.dir,
             sandboxes: &sandboxes,
             clock,
@@ -294,11 +303,10 @@ fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
 
 /// The state of a run as it is driven.
 struct Runtime<'r> {
-    workflow: &'r Workflow,
+    /// The run's workflow, placed, which says how long each role's sandboxes take to start.
+    placed: &'r Placed,
     /// The agent's model route, which model requests' threads share, if it has one.
     served: Option<&'r Served>,
-    /// The longest the provider takes to start a sandbox.
-    startup: Duration,
     /// The run's record.
     dir: &'r Path,
     /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
@@ -395,12 +403,16 @@ impl<T> Inbox<T> {
 }
 
 impl<'r> Runtime<'r> {
+    fn workflow(&self) -> &'r Workflow {
+        self.placed.workflow()
+    }
+
     /// Drives the run from its start, `unix` after the Unix epoch, until the core finishes or
     /// abandons it, and waits for its judge calls' threads, stopping those still running; then
     /// gives the core what is left in the inbox ([`Runtime::drain`]).
     fn drive(&mut self, unix: Duration) -> Result<Outcome, String> {
-        let (mut core, actions) = Core::start(self.workflow, self.startup);
-        self.log.start(self.workflow, unix, &actions)?;
+        let (mut core, actions) = Core::start(self.placed);
+        self.log.start(self.workflow(), unix, &actions)?;
         if let Some(served) = self.served {
             self.log.note(self.clock.now(), served.started())?;
         }
@@ -444,20 +456,23 @@ impl<'r> Runtime<'r> {
             {
                 self.finalized_first = !served.key_was_refused();
             }
-            self.log.event(self.workflow, at, &event, &actions)?;
+            self.log.event(self.workflow(), at, &event, &actions)?;
         }
     }
 
     /// The run's hard end, since it started, as the core has it.
     fn hard_end(&self) -> Duration {
-        lasts(self.workflow, self.startup)
+        lasts(self.placed)
     }
 
     /// When the agent's teardown is to end, since the run started: the hard end, less the final
     /// judge's startup and timeout, so that the final judge still has both.
     fn teardown_end(&self) -> Duration {
-        let Main::SoloThenJudge(pattern) = self.workflow.main();
-        let final_judge = self.startup.saturating_add(pattern.score.timeout);
+        let Main::SoloThenJudge(pattern) = self.workflow().main();
+        let startup = self
+            .placed
+            .startup(RoleId::Judge(pattern.score.slot.judge()));
+        let final_judge = startup.saturating_add(pattern.score.timeout);
         self.hard_end().saturating_sub(final_judge)
     }
 
@@ -525,7 +540,9 @@ impl<'r> Runtime<'r> {
             Input::Agent(arrival) => arrival,
             Input::Model(at, note) => return self.log.note(at, &note).map(|()| None),
             Input::ModelAnswered(at, number, answer) => {
-                let answered = self.log.model_answered(self.workflow, at, number, &answer);
+                let answered = self
+                    .log
+                    .model_answered(self.workflow(), at, number, &answer);
                 return answered.map(|()| None);
             }
             Input::Judge(report) => return self.report(report),
@@ -658,7 +675,7 @@ impl<'r> Runtime<'r> {
     /// Refuses `refused`, an op of the agent's whose payload the gateway refused, taken at `at`,
     /// by `by`, and records it in the run log.
     fn refuse(&mut self, at: Duration, refused: RefusedOp, by: Deadline) -> Result<(), String> {
-        self.log.refused(self.workflow, at, &refused)?;
+        self.log.refused(self.workflow(), at, &refused)?;
         let what = "the refusal of an op whose payload was over the agent's limit";
         self.answer(what, by, |agent, by| agent.refuse(refused, by))
     }
@@ -677,7 +694,7 @@ impl<'r> Runtime<'r> {
                 continue;
             };
             let actions = core.handle(at, event.clone());
-            self.log.event(self.workflow, at, &event, &actions)?;
+            self.log.event(self.workflow(), at, &event, &actions)?;
             for action in actions {
                 match action {
                     Action::Reply { op, reply } => {
@@ -718,10 +735,10 @@ impl<'r> Runtime<'r> {
                 Action::StartAgent => {
                     // The agent starts at the run's start, so its startup ends long before the
                     // hard end, which counts it.
-                    let by = Deadline::after(self.startup);
+                    let by = Deadline::after(self.placed.startup(RoleId::Agent));
                     let (sender, model) = (self.inbox.sender(), self.served.is_some());
                     let (agent, event) =
-                        Agent::start(self.sandboxes, self.workflow, model, by, sender);
+                        Agent::start(self.sandboxes, self.workflow(), model, by, sender);
                     self.agent = agent;
                     self.pending.push_back((self.clock.now(), event));
                 }
@@ -861,15 +878,15 @@ impl<'r> Runtime<'r> {
             self.pending.push_back((self.clock.now(), event));
             return Ok(());
         }
-        let slot = self.workflow.call_slot(call);
+        let slot = self.workflow().call_slot(call);
         let jobs = self.dir.join("jobs");
         fs::create_dir_all(&jobs).context(jobs.display())?;
         let dir = jobs.join(job.0.to_string());
         fs::create_dir(&dir).context(dir.display())?;
         let call = judge::Call {
             job,
-            judge: self.workflow.judge(slot.judge()),
-            slot: &self.workflow.slot(slot).name,
+            judge: self.workflow().judge(slot.judge()),
+            slot: &self.workflow().slot(slot).name,
             payload: self.payloads.path(&payload.digest),
             timeout,
             deadlines,
@@ -893,7 +910,8 @@ impl<'r> Runtime<'r> {
     /// By when the steps of a judge call of `call`, whose command runs for at most `timeout`,
     /// starting now, are to be done.
     fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
-        let startup = self.clock.now().saturating_add(self.startup);
+        let judge = RoleId::Judge(self.workflow().call_slot(call).judge());
+        let startup = self.clock.now().saturating_add(self.placed.startup(judge));
         let at = |time| self.clock.deadline(time);
         match call {
             // A call of the agent's ends with the work phase, which ends by the core's next act
