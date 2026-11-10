@@ -44,7 +44,7 @@ use stdx::process::Environment;
 
 mod build;
 
-pub use build::Built;
+pub use build::{BuildContext, Built, Recipe};
 
 /// The most seconds a sandbox's start takes, as [`Capabilities::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();

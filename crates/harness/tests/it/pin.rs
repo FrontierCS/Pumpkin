@@ -1,5 +1,5 @@
-//! A harness's pin and the recipe that adds the harness to an image: Codex's, and the pins and
-//! bases whose recipe can't be made.
+//! A harness's pin and the recipe that adds the harness to an image: Codex's, which passes the
+//! recipe check, and the pins and bases whose recipe can't be made.
 
 use std::thread;
 
@@ -24,9 +24,17 @@ fn codex() {
             COPY --from=codex-0.167.0 /package/vendor/x86_64-unknown-linux-musl/ /out/harness/codex-0.167.0/
             RUN chmod 0444 /out/harness/codex-0.167.0/codex-package.json && chmod 0555 /out/harness /out/harness/codex-0.167.0 /out/harness/codex-0.167.0/bin /out/harness/codex-0.167.0/bin/codex /out/harness/codex-0.167.0/bin/codex-code-mode-host /out/harness/codex-0.167.0/codex-path /out/harness/codex-0.167.0/codex-path/rg
             FROM example/task/agent-base:0123
-            COPY --from=codex-0.167.0-tree --chown=0:0 /out/ /
+            COPY --link --from=codex-0.167.0-tree --chown=0:0 /out/ /
         "#]],
     );
+}
+
+#[test]
+fn checked() {
+    let base = "example/task/agent-base:0123";
+    let text = CODEX_0_167_0.recipe(base);
+    let checked = recipe::check("Dockerfile", text.as_bytes(), &[base]);
+    check(&format!("{checked:?}"), &expect!["Ok(())"]);
 }
 
 #[test]
@@ -45,6 +53,10 @@ fn checks() {
         },
         Pin {
             url: "https://registry.npmjs.org/$CODEX.tgz",
+            ..CODEX_0_167_0
+        },
+        Pin {
+            url: "https://registry.npmjs.org/codex.git",
             ..CODEX_0_167_0
         },
         Pin {
@@ -79,8 +91,9 @@ fn checks() {
         &messages.join("\n"),
         &expect![[r#"
             internal error: entered unreachable code: pin Codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the name `Codex-0.167.0` is not a harness's name: use a-z, 0-9, `.`, `_` and `-`, starting with a letter
-            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the URL `http://registry.npmjs.org/codex.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@%+`
-            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the URL `https://registry.npmjs.org/$CODEX.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@%+`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the URL `http://registry.npmjs.org/codex.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@+`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the URL `https://registry.npmjs.org/$CODEX.tgz` is not one a pin can hold: use `https://`, then ASCII letters and digits and `-._~:/@+`
+            internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: Docker may take `https://registry.npmjs.org/codex.git` for a Git repository's URL, which some of its versions clone without checking a checksum: name no `ADD` source that ends in `.git`, in any case
             internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: `2dc9aa871abb513c3539d20d025f701faf1974c46ee906bda3a1e1f5026d4434` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits
             internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: `package/../vendor` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte
             internal error: entered unreachable code: pin codex-0.167.0, written in code and its recipe made by the tests, with a base named as the engine accepted it, fails a check: the path `bin/codex*` is not one a pin can hold: use ASCII letters and digits and `-._/`

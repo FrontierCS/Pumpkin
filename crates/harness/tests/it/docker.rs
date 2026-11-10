@@ -1,8 +1,8 @@
 //! The recipe that adds Codex to an image, built by a real Docker engine onto a pinned `busybox`:
-//! where the image holds Codex, the modes of its files, and that Codex runs. The build fetches
-//! the pinned tarball and the base, and needs Docker, so the test is ignored, as the Docker
-//! provider's are: `cargo xtask ci --docker` runs it, through the context
-//! `PUMPKIN_DOCKER_CONTEXT` names, `default` if it is unset.
+//! where the image holds Codex, the modes of its files, that Codex runs, and that the layer is
+//! the same on another base. The build fetches the pinned tarball and the base, and needs
+//! Docker, so the test is ignored, as the Docker provider's are: `cargo xtask ci --docker` runs
+//! it, through the context `PUMPKIN_DOCKER_CONTEXT` names, `default` if it is unset.
 
 #![expect(
     clippy::unwrap_used,
@@ -75,18 +75,50 @@ fn build(dockerfile: &str, tag: &str) -> Tagged {
     Tagged(tag.to_owned())
 }
 
+/// The diff ID of the last layer of the image tagged `image`.
+fn last_layer(image: &Tagged) -> String {
+    let inspect = [
+        "image",
+        "inspect",
+        "--format",
+        "{{json .RootFS.Layers}}",
+        &image.0,
+    ];
+    let output = docker().args(inspect).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let layers: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+    layers.last().unwrap().clone()
+}
+
 /// Builds Codex's recipe onto `BUSYBOX`, runs `script` in a container of the image, and
-/// compares with `expect` what it prints.
+/// compares with `expect` what it prints, and whether the recipe adds the same layer onto
+/// another base.
 fn check(script: &str, expect: &Expect) {
-    let tag = format!("pumpkin-tests/harness-{}:codex", std::process::id());
-    let image = build(&CODEX_0_167_0.recipe(BUSYBOX), &tag);
+    let tag = |name: &str| format!("pumpkin-tests/harness-{}:{name}", std::process::id());
+    let image = build(&CODEX_0_167_0.recipe(BUSYBOX), &tag("codex"));
     // With no network, which Codex's files need none of.
     let run = ["run", "--rm", "--network=none", "--label", LABEL];
     let mut docker = docker();
     let output = docker.args(run).arg(&image.0).args(["sh", "-c", script]);
     let output = output.output().unwrap();
     assert!(output.status.success(), "{output:?}");
-    expect.assert_eq(String::from_utf8(output.stdout).unwrap().trim_end());
+    let other = build(
+        &format!("FROM {BUSYBOX}\nRUN mkdir /other\n"),
+        &tag("other"),
+    );
+    let on_other = build(&CODEX_0_167_0.recipe(&other.0), &tag("codex-on-other"));
+    // The same with or without `COPY --link`, which the `pin` tests' snapshot keeps.
+    let same = if last_layer(&image) == last_layer(&on_other) {
+        "the same"
+    } else {
+        "another"
+    };
+    let shown = String::from_utf8(output.stdout).unwrap();
+    let shown = format!(
+        "{}\nCodex's layer on another base: {same}",
+        shown.trim_end()
+    );
+    expect.assert_eq(&shown);
 }
 
 #[test]
@@ -104,6 +136,7 @@ fn codex_layer() {
         -r--r--r-- 0:0 ./codex-package.json
         dr-xr-xr-x 0:0 ./codex-path
         -r-xr-xr-x 0:0 ./codex-path/rg
-        codex-cli 0.167.0"#]],
+        codex-cli 0.167.0
+        Codex's layer on another base: the same"#]],
     );
 }

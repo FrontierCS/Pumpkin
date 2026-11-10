@@ -1,0 +1,16 @@
+[package]
+name = "recipe"
+version = "0.0.0"
+description = "The image recipes Pumpkin builds: the check that a Dockerfile pins all that its build fetches"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

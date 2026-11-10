@@ -57,6 +57,13 @@ exchange. Another program's format, such as `docker info`'s, stays with the code
 - **Architecture Invariant:** a passive sandbox, one whose role makes no ops (`Create::ops`), has
   no `sandboxctl`, so it can make none.
 
+**`crates/recipe`.** The image recipes Pumpkin builds, Dockerfiles: `check` refuses one that may
+have Docker fetch what no digest pins, and `check_source` an `ADD` source Docker may take for a
+Git repository's URL.
+- **Architecture Invariant:** it does no I/O and knows no Pumpkin crate: it depends on none, and
+  it is `#![no_std]`, so it reads only the text it is given, and a harness and a provider share
+  one check without either depending on the other.
+
 **`crates/gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
 `Session`, whose one owner moves trees, runs commands (`Process`) and answers ops, hearing of each
 op, each model request, each command's exit and the session's end as an `Arrival` sent to it.
@@ -86,8 +93,9 @@ consoles.
 **`providers/docker`.** `docker`, a sandbox as a container that needs no root to start:
 `Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), is
 the `Provider` that makes each sandbox a container, and builds images, each tagged by its build's
-inputs. A provider is `providers/<name>`, crate `<name>`, which holds its platform's
-calls and its sandboxes' confinement.
+inputs, from a recipe (`Recipe`) that `recipe::check` passes and a context of directories
+(`BuildContext`) that it stages. A provider is `providers/<name>`, crate `<name>`, which holds its
+platform's calls and its sandboxes' confinement.
 - **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
   its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
   bounds only its own platform calls, so no provider depends on `gateway` outside its
@@ -161,7 +169,7 @@ may reach, of which it hands `Run` the one that serves the route (`Serving`).
 directory the in-sandbox contract reserves for it, and each with an adapter, such as `Codex`,
 that writes the agent's runtime that runs it.
 - **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates, outside its
-  tests it depends only on `schema`, and its Docker test also uses `stdx`. A harness
+  tests it depends only on `schema` and `recipe`, and its Docker test also uses `stdx`. A harness
   therefore reaches an agent alike whichever factory builds its image, and any factory, in this
   repository or outside it, may use it.
 

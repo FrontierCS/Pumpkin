@@ -10,6 +10,7 @@ test = false
 doctest = false
 
 [dependencies]
+recipe = { path = "../recipe" }
 schema = { path = "../schema" }
 serde_json.workspace = true
 

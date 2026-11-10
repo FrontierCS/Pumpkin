@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{env, fs, iter, thread};
 
-use docker::{ContextName, Engine};
+use docker::{BuildContext, ContextName, Engine, Recipe};
 use expect_test::{Expect, expect};
 use provider::Provider as _;
 use schema::provider::RunTag;
@@ -305,7 +305,7 @@ fn lost_on_docker() {
     let sandboxd = sandboxd();
     let context = env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
     let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
-    let image = image(&scratch, &engine);
+    let image = image(&engine);
     scratch.write("sleeps.json", &workflow(&image, &["sleep", "300"]));
     let mut run = scratch.pumpkin(&["run", "sleeps.json", "--docker-context", &context]);
     run.args(["--sandboxd", &sandboxd, "--runs", "runs"]);
@@ -1018,13 +1018,11 @@ fn sandboxd() -> String {
 
 /// The image of the roles that run on Docker, which the provider builds on `engine`: `busybox`
 /// with a world-writable `/workspace`, the fixture's agent's working directory.
-fn image(scratch: &Scratch, engine: &Engine) -> String {
-    let dir = scratch.0.join("image");
-    fs::create_dir(&dir).unwrap();
+fn image(engine: &Engine) -> String {
     let recipe = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
-    fs::write(dir.join("Dockerfile"), recipe).unwrap();
-    let built = engine.build(&dir, "Dockerfile", "pumpkin-tests", |_| Ok(()));
-    built.unwrap().image.as_str().to_owned()
+    let (context, recipe) = (BuildContext::default(), Recipe::Text(recipe));
+    let built = engine.build(&context, &recipe, &[], "pumpkin-tests");
+    built.unwrap().image().as_str().to_owned()
 }
 
 /// The fixture's workflow, without the agent's model route, with `argv` as the agent's command,
@@ -1129,7 +1127,7 @@ fn runs_on_docker() {
     let sandboxd = sandboxd();
     let context = env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
     let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
-    let image = image(&scratch, &engine);
+    let image = image(&engine);
     let stand_in = StandIn::start();
     write_asks(&scratch, &image, &stand_in.address);
     scratch.write("exits.json", &workflow(&image, &["true"]));

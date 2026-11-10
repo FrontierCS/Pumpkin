@@ -30,7 +30,8 @@ pub struct Pin {
     /// [`harness_dir()`] and its recipe's stage that unpacks it: from a-z, 0-9, `.`, `_` and
     /// `-`, starting with a letter.
     pub name: &'static str,
-    /// The tarball's URL: `https://`, then ASCII letters and digits and `-._~:/@%+`.
+    /// The tarball's URL, a plain source ([`recipe::check_source`]): `https://`, then ASCII
+    /// letters and digits and `-._~:/@+`.
     pub url: &'static str,
     /// The tarball's digest, as a [`Sha256Digest`] is written.
     pub sha256: &'static str,
@@ -71,8 +72,8 @@ impl Mode {
 impl Pin {
     /// A Dockerfile that builds on `base`, an image the engine has, named as `FROM` takes it in
     /// ASCII letters, digits and `-._/:@`, with the harness added at [`harness_dir()`]`/<name>`
-    /// in a layer of its own: each file with its [`Mode`], in directories of mode 0555, all
-    /// owned by root. Its `ADD --checksum` needs Docker 25.0 or later.
+    /// in a layer of its own, independent of `base`: each file with its [`Mode`], in directories
+    /// of mode 0555, all owned by root. Its `ADD --checksum` needs Docker 25.0 or later.
     ///
     /// # Panics
     ///
@@ -106,7 +107,8 @@ impl Pin {
         // is copied from, unless `--chmod` gives them all one, but the directories it makes for
         // its destination get bits that differ from engine to engine. So a second stage puts
         // the files in the tree the image gets, and gives each file and directory its mode, and
-        // one `COPY` copies that tree to `/`, which every image has.
+        // one `COPY` copies that tree to `/`, which every image has, with `--link`, so that an
+        // engine that can reuses the layer on any base rather than copying it again.
         let chmods: Vec<String> = (modes(&root, files).into_iter())
             .map(|(bits, paths)| {
                 let paths: Vec<String> = paths.iter().map(|path| format!("{OUT}{path}")).collect();
@@ -116,7 +118,7 @@ impl Pin {
         let _ = write!(
             recipe,
             "\nFROM {BUSYBOX} AS {name}-tree\nCOPY --from={name} /{dir}/ {OUT}{root}/\nRUN {}\nFROM \
-             {base}\nCOPY --from={name}-tree --chown=0:0 {OUT}/ /\n",
+             {base}\nCOPY --link --from={name}-tree --chown=0:0 {OUT}/ /\n",
             chmods.join(" && ")
         );
         recipe
@@ -139,14 +141,15 @@ impl Pin {
             ));
         }
         let fetched =
-            (self.url.strip_prefix("https://")).is_some_and(|rest| plain(rest, b"-._~:/@%+"));
+            (self.url.strip_prefix("https://")).is_some_and(|rest| plain(rest, b"-._~:/@+"));
         if !fetched {
             return Err(format!(
                 "the URL `{}` is not one a pin can hold: use `https://`, then ASCII letters and \
-                 digits and `-._~:/@%+`",
+                 digits and `-._~:/@+`",
                 self.url.escape_debug()
             ));
         }
+        recipe::check_source(self.url)?;
         Sha256Digest::try_from(self.sha256.to_owned())?;
         path(self.dir)?;
         for file in self.files {
