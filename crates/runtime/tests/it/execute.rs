@@ -23,7 +23,7 @@ use decision::lasts;
 use expect_test::{Expect, expect};
 use provider::Provider;
 use route::Serving;
-use runtime::Run;
+use runtime::{Ending, Record, Run};
 use schema::ir::{self, ModelName};
 use schema::provider::{Listed, RunTag};
 use schema::sandbox::{SANDBOXCTL_PATH, command_stdout};
@@ -109,6 +109,7 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
     lines.push("log.jsonl:".to_owned());
     let (log, start, last) = logged(&record, &started);
     lines.extend(log);
+    lines.extend(final_judge_stderr(&record));
     if let Some(last) = last {
         let last = when(&placed, last);
         lines.push(format!("its last record came {last}"));
@@ -303,6 +304,21 @@ fn written(record: &Path, start: Option<u64>) -> Option<Duration> {
     let modified = fs::metadata(record.join("log.jsonl")).and_then(|log| log.modified());
     let written = modified.unwrap().duration_since(UNIX_EPOCH).unwrap();
     Some(written.saturating_sub(start))
+}
+
+fn final_judge_stderr(record: &Path) -> Option<String> {
+    let opened = Record::open(record).unwrap();
+    let Ending::NoResult {
+        judge_stderr: found,
+        ..
+    } = opened.wait(|| {}).unwrap()
+    else {
+        return None;
+    };
+    let found = found.map(|path| path.strip_prefix(opened.dir()).unwrap().to_owned());
+    Some(format!(
+        "the final judge's standard error, as `wait` finds it: {found:?}"
+    ))
 }
 
 /// The standard output that `record`, a run's, holds of the agent's command and of each judge
@@ -663,6 +679,7 @@ fn result_over_the_limit() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":6}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"invalid":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one","job":0,"kind":"judge_collected"},"seq":7}
+            the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
             its last record came before the agent's teardown was to end
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
@@ -1244,6 +1261,7 @@ fn model_stream_cut() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"seq":9}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"seq":10}
+            the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n

@@ -17,12 +17,12 @@ route = { path = "../route" }
 runtime = { path = "../runtime" }
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+clap.workspace = true
 libc.workspace = true
 rustix = { workspace = true, features = ["process", "stdio", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-xflags.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

@@ -136,9 +136,8 @@ fn endpoint<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UpstreamUrl, D
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
     let text = fs::read_to_string(path).map_err(|error| {
         format!(
-            "the configuration {} can't be read ({error}): write one there whose `[docker]` \
-             table names the `context` that reaches the engine, as `docker context ls` lists it, \
-             or name another file with `--config`",
+            "the configuration {} can't be read ({error}): write one there, as \
+             `pumpkin help config` says, or name another file with `--config`",
             path.display()
         )
     })?;

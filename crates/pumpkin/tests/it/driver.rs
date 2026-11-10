@@ -140,14 +140,14 @@ fn does_not_start() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run absent.json --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: publishing what the run's sandboxes run failed: the engine of context `default` has no image absent@sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none
+            pumpkin: run <id> failed: publishing what the run's sandboxes run failed: the engine of context `default` has no image absent@sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
             outcome.json: {"reason":"publishing what the run's sandboxes run failed: the engine of context `default` has no image absent@sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
             printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2)
+            pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
             record: driver.pid, ir.json, outcome.json, provider.json, record.json
             outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}
             printed outcome.json: true
@@ -168,12 +168,12 @@ fn does_not_start() {
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
             outcome.json: none
             printed the id alone: false
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 15
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -181,7 +181,7 @@ fn does_not_start() {
             printed the id alone: false
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 2
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -189,7 +189,7 @@ fn does_not_start() {
             printed the id alone: false
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory"#]],
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>"#]],
     );
 }
 
@@ -288,21 +288,21 @@ fn detaches() {
             the driver's name: pumpkin-driver
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
             ended by signal: 2
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
-            pumpkin: following run <id>: ending `pumpkin run` does not stop it
+            pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
             outcome.json: none
             printed the id alone: false
             the driver runs, leading a session of its own: true
             the driver's name: pumpkin-driver
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
@@ -314,7 +314,7 @@ fn detaches() {
             the driver's name: pumpkin-driver
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: """#]],
     );
@@ -425,6 +425,6 @@ fn lost_on_docker() {
             printed the id alone: true
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory"#]],
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>"#]],
     );
 }

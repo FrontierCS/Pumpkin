@@ -7,6 +7,7 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+clap = { version = "4.6.7", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 expect-test = "1"
 libc = "0.2.191"
 rustix = "1.1.6"

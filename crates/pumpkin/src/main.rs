@@ -1,10 +1,11 @@
-//! `pumpkin`, the operator's command line. [`flags`] holds its grammar and describes each
-//! command, as `pumpkin --help` prints it. `run` starts a workflow's run with [`runtime`], on the
-//! Docker provider, in a driver process ([`driver`]), with the `sandboxd` that [`sandboxd`]
-//! finds, and [`config`] reads the machine's configuration.
+//! `pumpkin`, the operator's command line, which [`cli`] parses and describes, as
+//! `pumpkin --help` prints it. `run` starts a workflow's run with [`runtime`], on the Docker
+//! provider, in a driver process ([`driver`]), with the `sandboxd` that [`sandboxd`] finds, and
+//! [`config`] reads the machine's configuration.
 
 use std::ffi::OsString;
-use std::io::{self, Write as _};
+use std::fs::File;
+use std::io::{self, Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
@@ -20,130 +21,16 @@ use schema::ir;
 use schema::workflow::{ParseErrors, Workflow};
 use stdx::Context;
 
+mod cli;
 mod config;
 mod driver;
 mod sandboxd;
 
-/// The grammar of `pumpkin`'s command line, from which xflags generates its parser, the types
-/// below and `--help`.
-mod flags {
-    #![expect(
-        unreachable_pub,
-        reason = "xflags declares the types it generates `pub`"
-    )]
-    #![expect(
-        clippy::allow_attributes,
-        clippy::allow_attributes_without_reason,
-        reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
-    )]
-
-    use std::path::PathBuf;
-
-    xflags::xflags! {
-        src "./src/main.rs"
-
-        /// The operator's command line, which runs workflows.
-        cmd pumpkin {
-            /// Starts a run of a workflow on the engine of the configured Docker context, with its
-            /// record in `<runs>/<id>/`, and prints its id once what its sandboxes run is published.
-            /// A driver process drives the run, and writes what it says after the start to the
-            /// record's `driver.log`. Exits with 0 once the run has started, 2 on a usage error, and
-            /// 1 on any other error, after printing a run's `outcome.json` if it failed to start;
-            /// each non-zero exit ends with a `pumpkin:` line on the standard error that says why.
-            /// What ends this process before the start ends the driver too. Killing the driver
-            /// leaves the run's containers (labelled `pumpkin.run=<id>`), its socket directory and
-            /// a record without an `outcome.json`.
-            cmd run {
-                /// The workflow's IR, as JSON.
-                required ir: PathBuf
-                /// The static `sandboxd` binary for every sandbox, which `cargo xtask sandboxd`
-                /// builds: by default, the `sandboxd` beside this `pumpkin`, where
-                /// `cargo xtask install` puts one.
-                optional --sandboxd path: PathBuf
-                /// The directory runs are recorded in: `$HOME/.local/share/pumpkin/runs` by
-                /// default.
-                optional --runs dir: PathBuf
-                /// The machine's configuration: a TOML file whose `[docker]` table gives the
-                /// `context` that reaches the engine, as `docker context ls` lists it, and whose
-                /// `[upstreams.<name>]` tables, if any, each give an upstream that a model route
-                /// may reach: the base `url` of its API, below which the route reaches
-                /// `/responses`, the `key_file` that holds its key, below the configuration's
-                /// directory unless absolute, and the `models` it serves, each listed once, with
-                /// the `name` a route allows and the `upstream_name` it takes.
-                /// `$HOME/.config/pumpkin/pumpkin.toml` by default.
-                optional --config file: PathBuf
-                /// Once the run has started, follows it to its end as `pumpkin wait` does, and
-                /// prints its `outcome.json` instead of the id, with the exit status that
-                /// `pumpkin wait` gives.
-                optional --wait
-            }
-
-            /// Waits until a run has ended, then prints its `outcome.json`. Exits with 0 if the
-            /// run finished with a score, 3 if it finished without one, 2 on a usage error, and
-            /// 1 on any other error, a run that failed, or was lost as its driver ended without
-            /// an `outcome.json`, included; every exit but 0 ends with a `pumpkin:` line on the
-            /// standard error that says why. Ending this process does not stop the run. A record
-            /// made before records were locked has no `driver.pid`, and is refused.
-            cmd wait {
-                /// The run: its id, a prefix of its id or of the 8 random digits that end it,
-                /// that no other run in `--runs` shares, or the path of its record, which has a
-                /// `/`.
-                required run: String
-                /// The directory runs are recorded in: `$HOME/.local/share/pumpkin/runs` by
-                /// default.
-                optional --runs dir: PathBuf
-            }
-        }
-    }
-    // generated start
-    // The following code is generated by `xflags` macro.
-    // Run `env UPDATE_XFLAGS=1 cargo build` to regenerate.
-    #[derive(Debug)]
-    pub struct Pumpkin {
-        pub subcommand: PumpkinCmd,
-    }
-
-    #[derive(Debug)]
-    pub enum PumpkinCmd {
-        Run(Run),
-        Wait(Wait),
-    }
-
-    #[derive(Debug)]
-    pub struct Run {
-        pub ir: PathBuf,
-
-        pub sandboxd: Option<PathBuf>,
-        pub runs: Option<PathBuf>,
-        pub config: Option<PathBuf>,
-        pub wait: bool,
-    }
-
-    #[derive(Debug)]
-    pub struct Wait {
-        pub run: String,
-
-        pub runs: Option<PathBuf>,
-    }
-
-    impl Pumpkin {
-        #[allow(dead_code)]
-        pub fn from_env_or_exit() -> Self {
-            Self::from_env_or_exit_()
-        }
-
-        #[allow(dead_code)]
-        pub fn from_env() -> xflags::Result<Self> {
-            Self::from_env_()
-        }
-
-        #[allow(dead_code)]
-        pub fn from_vec(args: Vec<std::ffi::OsString>) -> xflags::Result<Self> {
-            Self::from_vec_(args)
-        }
-    }
-    // generated end
-}
+/// The most bytes of a final judge's standard error that a run's ending shows ([`end`]): one
+/// that holds more is named, and not shown.
+// A judge's diagnostic, such as a traceback, fits many times over; more is a log, which the record
+// keeps for reading, rather than a message for a terminal.
+const JUDGE_STDERR_SHOWN_BYTES: u64 = 1 << 20;
 
 fn main() -> ExitCode {
     // A run's judge calls, and each session's reader, run on threads of their own.
@@ -153,17 +40,24 @@ fn main() -> ExitCode {
     if argv0.is_some_and(|name| name.as_bytes() == ARGV0.to_bytes()) {
         return finish(driver_run(args.collect()));
     }
-    let done = match flags::Pumpkin::from_env().map(|flags| flags.subcommand) {
-        Ok(flags::PumpkinCmd::Run(flags)) => run(flags),
-        Ok(flags::PumpkinCmd::Wait(flags::Wait { run, runs })) => wait(&run, runs),
-        Err(error) if error.is_help() => error.exit(),
-        // A usage error exits with 2, as xflags exits, apart from the command's errors.
-        Err(error) => {
-            say(format_args!("{error}: see `pumpkin --help`"));
-            return ExitCode::from(2);
-        }
+    let done = match cli::parse(args) {
+        Ok(cli::Command::Run(flags)) => run(flags),
+        Ok(cli::Command::Wait(flags)) => wait(flags),
+        Ok(cli::Command::Print(text)) => print(text.as_bytes())
+            .context("printing to the standard output failed")
+            .map(|()| ExitCode::SUCCESS),
+        Err(refusal) => return usage_error(refusal),
     };
     finish(done)
+}
+
+/// Says `refusal` as clap words it, then the command that prints the help it breaks, and returns
+/// 2, clap's exit status for a usage error.
+fn usage_error(refusal: cli::Refusal) -> ExitCode {
+    let cli::Refusal { error, help } = refusal;
+    to_stderr(error.render().to_string().as_bytes());
+    say(format_args!("to read how to use it: {help}"));
+    ExitCode::from(2)
 }
 
 /// The exit status of a command that ended with `done`: its own, or 1 with the error said.
@@ -180,12 +74,12 @@ fn finish(done: Result<ExitCode, String>) -> ExitCode {
 /// Starts the driver of the run that `flags` ask for, recorded in their runs directory, or
 /// [`default_runs`], made absolute. Once the run has started, prints its id, or with `wait`
 /// follows it and prints its outcome; returns the exit status that `run`'s help gives.
-fn run(flags: flags::Run) -> Result<ExitCode, String> {
-    let flags::Run {
+fn run(flags: cli::Run) -> Result<ExitCode, String> {
+    let cli::Run {
         ir,
-        sandboxd,
         runs,
         config,
+        sandboxd,
         wait,
     } = flags;
     let runs = match runs {
@@ -220,8 +114,7 @@ fn run(flags: flags::Run) -> Result<ExitCode, String> {
             say(format_args!(
                 "run {id} started: `pumpkin wait {id}` follows it"
             ));
-            let mut stdout = io::stdout().lock();
-            (writeln!(stdout, "{id}").and_then(|()| stdout.flush())).context(format_args!(
+            print(format!("{id}\n").as_bytes()).context(format_args!(
                 "run {id} has started, but printing its id failed"
             ))?;
             Ok(ExitCode::SUCCESS)
@@ -277,14 +170,13 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     // `ps` and `pgrep` show the driver by this name, rather than as `exe`, the base name of the
     // path that `run` executes.
     rustix::thread::set_name(ARGV0).context("naming the driver failed")?;
-    let flags = flags::Pumpkin::from_vec(args.collect()).map_err(|error| error.to_string())?;
-    let flags::PumpkinCmd::Run(flags::Run {
+    let Ok(cli::Command::Run(cli::Run {
         ir,
-        sandboxd,
         runs: Some(runs),
         config,
+        sandboxd,
         wait: _,
-    }) = flags.subcommand
+    })) = cli::parse(args)
     else {
         return Err(refused());
     };
@@ -316,24 +208,26 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     say(format_args!("run {id} records into {}", dir.display()));
     driver::locked(&id)?;
     // `execute` records why the run failed in its `outcome.json`, which `run` prints if the run
-    // failed to start.
+    // failed to start; this line, the driver's last, then closes that ending.
     let executed = run.execute(&engine, sandboxd.path(), || driver::announce(&dir));
-    executed.map_err(|reason| format!("run {id} failed: {reason}"))?;
+    executed.map_err(|reason| closing(&id, &format!("failed: {reason}"), &dir))?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// Waits until the run that `wait` names in `runs`, or [`default_runs`], has ended, and prints its
-/// outcome; returns the exit status that `wait`'s help gives.
-fn wait(run: &str, runs: Option<PathBuf>) -> Result<ExitCode, String> {
-    // A path needs no runs directory, and so no `HOME`.
-    let record = if run.contains('/') {
-        Record::open(Path::new(run))?
-    } else {
-        let runs = match runs {
-            Some(runs) => runs,
-            None => default_runs()?,
-        };
-        Record::find(&runs, run)?
+/// Waits until the run that `flags` name, in their runs directory or [`default_runs`], has
+/// ended, and prints its outcome; returns the exit status that `wait`'s help gives.
+fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
+    let cli::Wait { run, runs } = flags;
+    let record = match run {
+        // A path needs no runs directory, and so no `HOME`.
+        cli::RunName::Record(path) => Record::open(&path)?,
+        cli::RunName::Prefix(prefix) => {
+            let runs = match runs {
+                Some(runs) => runs,
+                None => default_runs()?,
+            };
+            Record::find(&runs, &prefix)?
+        }
     };
     follow(&record, "wait")
 }
@@ -343,29 +237,91 @@ fn wait(run: &str, runs: Option<PathBuf>) -> Result<ExitCode, String> {
 fn follow(record: &Record, command: &str) -> Result<ExitCode, String> {
     let ending = record.wait(|| {
         say(format_args!(
-            "following run {}: ending `pumpkin {command}` does not stop it",
-            record.id()
+            "following run {}, recorded in {}: ending `pumpkin {command}` does not stop it",
+            record.id(),
+            record.dir().display()
         ));
     })?;
     end(record, &ending)
 }
 
-/// Prints the outcome of `record`, a run that has `ended`, and returns the exit status that
-/// `run`'s and `wait`'s help give; a run without a score says why on the standard error.
+/// Prints the outcome of the run of `record`, which ended as `ending` says, then the standard
+/// error of a final judge that returned no result ([`show_judge_stderr`]), then the line that
+/// closes the ending ([`closing`]); returns the exit status that `run`'s and `wait`'s help give.
 fn end(record: &Record, ending: &Ending) -> Result<ExitCode, String> {
     print_outcome(record.dir())?;
-    let id = record.id();
-    Ok(match ending {
-        Ending::Scored => ExitCode::SUCCESS,
-        Ending::Unscored(why) => {
-            say(format_args!("run {id} {why}"));
-            ExitCode::from(3)
+    let (exit, how) = match ending {
+        Ending::Scored(how) => (ExitCode::SUCCESS, how),
+        Ending::Unscored(why) => (ExitCode::from(3), why),
+        Ending::NoResult { why, judge_stderr } => {
+            match judge_stderr {
+                Ok(path) => show_judge_stderr(path),
+                Err(error) => say(format_args!(
+                    "the final judge's standard error can't be found: {error}"
+                )),
+            }
+            (ExitCode::from(3), why)
         }
-        Ending::Failed(why) => {
-            say(format_args!("run {id} {why}"));
-            ExitCode::FAILURE
+        Ending::Failed(how) => (ExitCode::FAILURE, how),
+    };
+    say(closing(record.id(), how, record.dir()));
+    Ok(exit)
+}
+
+/// The line that closes a run's ending on the standard error: the run `id`, `how` it ended, as
+/// an [`Ending`] says, and where its record is, `dir`.
+fn closing(id: &str, how: &str, dir: &Path) -> String {
+    format!("run {id} {how}; its record is {}", dir.display())
+}
+
+/// Shows on the standard error the final judge's standard error, which its record holds at
+/// `path`, under a line that names it ([`indented`]). One of more than
+/// [`JUDGE_STDERR_SHOWN_BYTES`], or that can't be read, is named alone; one that is empty, or
+/// wasn't collected, is not shown.
+fn show_judge_stderr(path: &Path) {
+    let named = format!("the final judge's standard error, {},", path.display());
+    let mut bytes = Vec::new();
+    let read = File::open(path).and_then(|file| {
+        let size = file.metadata()?.len();
+        if size <= JUDGE_STDERR_SHOWN_BYTES {
+            file.take(JUDGE_STDERR_SHOWN_BYTES)
+                .read_to_end(&mut bytes)?;
         }
-    })
+        Ok(size)
+    });
+    match read {
+        Ok(size) if size > JUDGE_STDERR_SHOWN_BYTES => say(format_args!(
+            "{named} holds {size} bytes, more than the {JUDGE_STDERR_SHOWN_BYTES} shown here: read \
+             it there"
+        )),
+        Ok(_) if bytes.is_empty() => {}
+        Ok(_) => {
+            say(format_args!("{named} holds:"));
+            to_stderr(indented(&bytes).as_bytes());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => say(format_args!("{named} can't be read: {error}")),
+    }
+}
+
+/// `bytes`, which a sandbox wrote, as text for a terminal: each line indented, and each control
+/// character but a tab escaped.
+fn indented(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut shown = String::new();
+    for line in text.strip_suffix('\n').unwrap_or(&text).split('\n') {
+        shown.push_str("  ");
+        for c in line.chars() {
+            // Control characters would steer the operator's terminal.
+            if c.is_control() && c != '\t' {
+                shown.extend(c.escape_debug());
+            } else {
+                shown.push(c);
+            }
+        }
+        shown.push('\n');
+    }
+    shown
 }
 
 /// `$HOME/.local/share/pumpkin/runs`.
@@ -436,15 +392,24 @@ fn engine(context: ContextName) -> Result<Engine, String> {
 fn print_outcome(dir: &Path) -> Result<(), String> {
     let recorded = dir.join("outcome.json");
     let printed = fs::read(&recorded).context(recorded.display())?;
+    print(&printed).context("printing the outcome failed")
+}
+
+/// Writes `bytes` to the standard output, and flushes it.
+fn print(bytes: &[u8]) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    (stdout.write_all(&printed))
-        .and_then(|()| stdout.flush())
-        .context("printing the outcome failed")
+    stdout.write_all(bytes)?;
+    stdout.flush()
 }
 
 /// Writes `message` to standard error, as `pumpkin: <message>`.
 fn say(message: impl fmt::Display) {
+    to_stderr(format!("pumpkin: {message}\n").as_bytes());
+}
+
+/// Writes `bytes` to standard error.
+fn to_stderr(bytes: &[u8]) {
     // Writing to a terminal that has hung up fails, and `eprintln!` would panic; the exit
     // status and the run's record still say how it ended.
-    let _ = writeln!(io::stderr(), "pumpkin: {message}");
+    let _ = io::stderr().write_all(bytes);
 }

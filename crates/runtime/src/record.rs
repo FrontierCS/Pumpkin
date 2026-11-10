@@ -29,12 +29,14 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use decision::PayloadRef;
+use decision::{JobId, PayloadRef};
 use schema::ir::Sha256Digest;
-use schema::sandbox::{log_dir, out_dir};
+use schema::sandbox::{command_stderr, log_dir, out_dir};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use stdx::Context;
+
+use super::log;
 
 /// The version of the record's form, which a record's `record.json` holds, named as the IR's
 /// version is ([`IrVersion`](schema::ir::IrVersion)): a reader is to check it before it
@@ -119,14 +121,23 @@ pub struct Record {
     dir: PathBuf,
 }
 
-/// How a run ended, as its `outcome.json` says. A run that ended without a score has a
-/// sentence that follows its id and says why.
+/// How a run ended, as its `outcome.json` says, each with a sentence that follows the run's id
+/// and says how in words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// The run finished with a score.
-    Scored,
-    /// The run finished without a score: `finished without a score: <why>`.
+    /// The run finished with a score: `finished with a score of <score>, after the work phase
+    /// ended <how>`.
+    Scored(String),
+    /// The run finished without a score, as the agent submitted nothing or the verdict has
+    /// none: `finished without a score: <why>`.
     Unscored(String),
+    /// The run finished without a score as its final judge returned no result: `finished
+    /// without a score: <why>`. `judge_stderr` is where the record holds that judge's standard
+    /// error, which may not have been collected, or why the run log doesn't say.
+    NoResult {
+        why: String,
+        judge_stderr: Result<PathBuf, String>,
+    },
     /// The run failed: `failed: <reason>`.
     Failed(String),
 }
@@ -137,7 +148,7 @@ impl Record {
     /// # Errors
     ///
     /// Fails if `dir` is no directory, has no `record.json`, or has one that is not a record of
-    /// this version of Pumpkin.
+    /// this version of Pumpkin, or if `dir` is relative and the current directory can't be read.
     pub fn open(dir: &Path) -> Result<Self, String> {
         let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
             return Err(format!(
@@ -172,9 +183,15 @@ impl Record {
                 record["record_version"]
             ));
         }
+        let absolute = std::path::absolute(dir).map_err(|error| {
+            format!(
+                "the record {} can't be made absolute ({error}): name it by its absolute path",
+                dir.display()
+            )
+        })?;
         Ok(Self {
             id: id.to_owned(),
-            dir: dir.to_owned(),
+            dir: absolute,
         })
     }
 
@@ -236,7 +253,7 @@ impl Record {
         &self.id
     }
 
-    /// The record's directory.
+    /// The record's directory, absolute.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -280,8 +297,9 @@ impl Record {
                 "run {id} is lost: its driver ended without writing outcome.json, so nothing says \
                  how it ended: remove what it left, which is its containers, labelled \
                  `pumpkin.run={id}`, and its socket directory, `pumpkin-{id}` in the temporary \
-                 directory",
-                id = self.id
+                 directory; its record is {dir}",
+                id = self.id,
+                dir = self.dir.display(),
             )
         })
     }
@@ -299,13 +317,7 @@ impl Record {
             .as_str()
             .unwrap_or("no reason is recorded");
         match outcome["state"].as_str() {
-            Some("finished") if outcome["score"].is_null() => {
-                let why = unscored(&outcome);
-                Ok(Some(Ending::Unscored(format!(
-                    "finished without a score: {why}"
-                ))))
-            }
-            Some("finished") => Ok(Some(Ending::Scored)),
+            Some("finished") => Ok(Some(finished(&outcome, &self.dir))),
             Some("failed") => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
             Some(_) | None => Err(format!(
                 "{}'s state is not one pumpkin knows: expected `finished` or `failed`",
@@ -315,14 +327,19 @@ impl Record {
     }
 }
 
-/// Why `outcome`, a finished run's `outcome.json`, has no score, from its verdict and how its
-/// work phase ended.
-fn unscored(outcome: &serde_json::Value) -> String {
+/// How `outcome`, a finished run's `outcome.json`, says the run ended: with its score, or why it
+/// has none, from its verdict, and how its work phase ended; its record is in `dir`.
+fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
     let work_end = &outcome["work_end"];
+    let status = &work_end["status"];
     let ended = match work_end["kind"].as_str() {
         Some("deadline") => "at its deadline".to_owned(),
         Some("finalized") => "when the agent finalized".to_owned(),
-        Some("agent_exited") => "when the agent exited".to_owned(),
+        Some("agent_exited") => match (status["code"].as_i64(), status["signal"].as_i64()) {
+            (Some(code), _) => format!("when the agent exited with status {code}"),
+            (None, Some(signal)) => format!("when signal {signal} killed the agent"),
+            (None, None) => "when the agent exited".to_owned(),
+        },
         Some("agent_failed") => {
             let reason = work_end["reason"]
                 .as_str()
@@ -331,22 +348,44 @@ fn unscored(outcome: &serde_json::Value) -> String {
         }
         Some(_) | None => "in a way this pumpkin doesn't know".to_owned(),
     };
+    let score = &outcome["score"];
+    if !score.is_null() {
+        return Ending::Scored(format!(
+            "finished with a score of {score}, after the work phase ended {ended}"
+        ));
+    }
+    let unscored = |why: String| format!("finished without a score: {why}");
     match outcome["verdict"]["kind"].as_str() {
-        Some("no_submission") => {
-            format!("the agent submitted nothing, and the work phase ended {ended}")
-        }
+        Some("no_submission") => Ending::Unscored(unscored(format!(
+            "the agent submitted nothing, and the work phase ended {ended}"
+        ))),
         Some("no_result") => {
             let failure = &outcome["verdict"]["failure"];
             let kind = failure["kind"].as_str().unwrap_or("of an unknown kind");
             let detail = failure["reason"]
                 .as_str()
                 .map_or_else(String::new, |r| format!(": {r}"));
-            format!(
-                "the final judge returned no result ({kind}{detail}), after the work phase ended {ended}"
-            )
+            Ending::NoResult {
+                why: unscored(format!(
+                    "the final judge returned no result ({kind}{detail}), after the work phase \
+                     ended {ended}"
+                )),
+                judge_stderr: final_judge_stderr(dir),
+            }
         }
-        Some(_) | None => format!("the verdict has no score, after the work phase ended {ended}"),
+        Some(_) | None => Ending::Unscored(unscored(format!(
+            "the verdict has no score, after the work phase ended {ended}"
+        ))),
     }
+}
+
+/// Where the record in `dir` holds the final judge's standard error,
+/// `jobs/<n>/log/command.stderr`, for the job `n` that its run log names
+/// ([`log::final_judge`]), or why the run log doesn't say.
+fn final_judge_stderr(dir: &Path) -> Result<PathBuf, String> {
+    let JobId(job) = log::final_judge(dir)?;
+    let job = dir.join(format!("jobs/{job}"));
+    Ok(job.join(command_stderr().as_str()))
 }
 
 /// Makes `dir` and those of its ancestors that are missing, as [`fs::create_dir_all`] does,
