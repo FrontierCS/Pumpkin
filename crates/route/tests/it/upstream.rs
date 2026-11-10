@@ -4,8 +4,8 @@
 //! received and what the sandbox heard.
 
 use std::fmt::Write as _;
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::io::{self, BufReader, Write};
+use std::net::{Ipv4Addr, Shutdown, TcpListener};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, iter, thread};
@@ -14,6 +14,7 @@ use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Listener};
 use route::{Answer as Told, Key, Route, Upstream, UpstreamUrl};
 use stdx::Deadline;
+use test_support::http::{read_request, write_chunk};
 
 use super::{HUNG, fake_sandbox, models, next_model_request, post};
 
@@ -315,33 +316,6 @@ fn serve(
         let _ = connection.shutdown(Shutdown::Both);
     }
     received
-}
-
-/// Writes `text` as one chunk of a chunked body: the last, if it is empty.
-pub(crate) fn write_chunk(connection: &mut TcpStream, text: &str) {
-    write!(connection, "{:x}\r\n{text}\r\n", text.len()).unwrap();
-}
-
-/// A request's line, its headers and its body.
-pub(crate) fn read_request(reader: &mut impl BufRead) -> (String, Vec<(String, String)>, Vec<u8>) {
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let mut headers = Vec::new();
-    let mut length = 0;
-    loop {
-        let mut header = String::new();
-        reader.read_line(&mut header).unwrap();
-        let Some((name, value)) = header.trim_end().split_once(": ") else {
-            break;
-        };
-        if name == "content-length" {
-            length = value.parse().unwrap();
-        }
-        headers.push((name.to_owned(), value.to_owned()));
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).unwrap();
-    (line.trim_end().to_owned(), headers, body)
 }
 
 #[test]

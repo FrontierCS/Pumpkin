@@ -24,6 +24,7 @@ use schema::ir::ModelName;
 use schema::sandbox::{FromSandbox, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
+use test_support::http::read_request;
 
 mod upstream;
 
@@ -58,7 +59,7 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     thread::spawn(move || {
         for connection in stand_in.incoming() {
             let mut connection = connection.unwrap();
-            let (line, headers, body) = upstream::read_request(&mut BufReader::new(&connection));
+            let (line, headers, body) = read_request(&mut BufReader::new(&connection));
             let answer = "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
             connection.write_all(answer.as_bytes()).unwrap();
             // The owner may have finished.

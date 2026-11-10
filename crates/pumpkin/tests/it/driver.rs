@@ -12,10 +12,11 @@ use docker::{ContextName, Engine};
 use expect_test::expect;
 use provider::Provider as _;
 use schema::provider::RunTag;
+use test_support::{docker_context, sandboxd};
 
 use super::{
-    Scratch, StandIn, Step, check, context, docker_table, image, invocation, poll, ran, record,
-    report, sandboxd, signal, workflow,
+    Scratch, StandIn, Step, check, docker_table, image, invocation, poll, ran, record, report,
+    signal, workflow,
 };
 
 /// How `child` ended, waited for a minute at most, and what it printed: its standard output,
@@ -384,8 +385,8 @@ fn alive(pid: i64) -> bool {
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn lost_on_docker() {
     let scratch = Scratch::new("lost");
-    let sandboxd = sandboxd();
-    let context = context();
+    let sandboxd = sandboxd().into_os_string().into_string().unwrap();
+    let context = docker_context();
     let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
     let image = image(&engine);
     scratch.write("sleeps.json", &workflow(&image, &["sleep", "300"]));

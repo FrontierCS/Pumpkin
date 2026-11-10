@@ -1,7 +1,5 @@
 //! The Docker provider, against a real Docker daemon. These tests need Docker, so they are
-//! ignored; `cargo xtask ci --docker` runs them, with `PUMPKIN_SANDBOXD` naming the static
-//! `sandboxd` binary that `cargo xtask sandboxd` builds. Run without it, they fail. They reach
-//! Docker through the context `PUMPKIN_DOCKER_CONTEXT` names, `default` if it is unset.
+//! ignored.
 
 #![expect(
     clippy::unwrap_used,
@@ -14,11 +12,9 @@
 )]
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -42,15 +38,9 @@ use schema::sandbox::{
     ExitStatus, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
     MAX_OP_PAYLOAD_BYTES, MODEL_PORT, OpPayloadLimit, RelativePath, dir_mode, file_mode,
 };
-use stdx::process::Environment;
 use stdx::{Context, Deadline};
 use tempfile::TempDir;
-
-/// A small public image, pinned by digest.
-// Repeated in `crates/runtime/tests/it/docker.rs`, `crates/pumpkin/tests/it/main.rs` and
-// `crates/harness/tests/it/docker.rs`: change all four.
-const BUSYBOX: &str =
-    "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
+use test_support::{BUSYBOX, docker};
 
 /// A request's deadline, which only a test that hangs reaches, so no outcome rests on it.
 fn hung() -> Deadline {
@@ -69,12 +59,6 @@ struct Fixture {
 impl Fixture {
     /// The fixture for test `name`.
     fn new(name: &str) -> Self {
-        let Some(sandboxd) = std::env::var_os("PUMPKIN_SANDBOXD") else {
-            panic!(
-                "`PUMPKIN_SANDBOXD` is unset: run the Docker tests with `cargo xtask ci --docker`, \
-                 which builds sandboxd and sets it"
-            );
-        };
         let tag = |suffix: &str| format!("pk-{}-{name}{suffix}", std::process::id());
         let tag = |suffix: &str| RunTag::try_from(tag(suffix)).unwrap();
         // Private to this user, as the parent of every socket directory must be.
@@ -84,7 +68,7 @@ impl Fixture {
             .tempdir()
             .unwrap();
         Self {
-            sandboxd: PathBuf::from(sandboxd).canonicalize().unwrap(),
+            sandboxd: test_support::sandboxd(),
             dir,
             run: tag(""),
             other_run: tag("-other"),
@@ -223,14 +207,11 @@ impl Drop for Fixture {
     }
 }
 
-/// The engine the tests reach Docker through, by the context `PUMPKIN_DOCKER_CONTEXT` names,
-/// or `default`, or why it can't be reached.
+/// The engine the tests reach Docker through ([`test_support::docker_context`]), or why it
+/// can't be reached.
 fn connected() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
-    ENGINE.get_or_init(|| {
-        let name = std::env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned());
-        Engine::connect(ContextName::try_from(name)?)
-    })
+    ENGINE.get_or_init(|| Engine::connect(ContextName::try_from(test_support::docker_context())?))
 }
 
 /// The engine the tests reach Docker through.
@@ -253,17 +234,6 @@ fn startup() -> Deadline {
 /// The IDs of the sandboxes a list found.
 fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
     listed.into_iter().map(|Listed { id }| id).collect()
-}
-
-/// `docker`, run as the provider runs it, against the tests' context alone.
-// Repeated in `crates/runtime/tests/it/docker.rs` and
-// `crates/harness/tests/it/docker.rs`: change all three.
-fn docker() -> Command {
-    // Only what the provider's `docker` keeps of the environment, for the reasons it gives.
-    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
-    let mut docker = stdx::process::command("docker", kept);
-    docker.arg(format!("--context={}", engine().report().context.as_str()));
-    docker
 }
 
 /// What `format` shows of each of the run's containers, running or not, as `docker ps` finds
@@ -313,31 +283,12 @@ fn show_logs(run: &RunTag) -> Result<(), String> {
 /// an anonymous volume. Built once, from the pinned image, and tagged, so that no build leaves
 /// an image behind untagged; a build from the cache gives the same ID as the last, so test
 /// processes that run at once share the image.
-// Built alike in `crates/runtime/tests/it/docker.rs`: change both.
 fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile =
             format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace /volume\nVOLUME /volume\n");
-        // A provenance attestation records each build's own ID and times, so a build with one
-        // gets an ID of its own; and as a build moves the tag to its ID, the containerd image
-        // store keeps no image by the ID the tag had, which another test process, running at
-        // once, may be using.
-        let mut build = docker()
-            .args(["build", "--quiet", "--provenance=false"])
-            .args(["--tag=pumpkin-docker-tests:workspace", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        // Dropping its standard input once written ends the Dockerfile.
-        (build.stdin.take().unwrap())
-            .write_all(dockerfile.as_bytes())
-            .unwrap();
-        let build = build.wait_with_output().unwrap();
-        assert!(build.status.success(), "{build:?}");
-        String::from_utf8(build.stdout).unwrap().trim().to_owned()
+        test_support::build(&dockerfile, "pumpkin-docker-tests:workspace")
     });
     Image::try_from(id.clone()).unwrap()
 }

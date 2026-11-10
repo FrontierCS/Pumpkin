@@ -2,10 +2,8 @@
 //! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
 //! includes the model route of a workflow that has one reaching a stand-in model provider;
 //! `wait`; and `driver`, for the process that drives each run, which `run` starts. The tests on
-//! Docker are ignored, as the Docker provider's are, and fail without `PUMPKIN_SANDBOXD`, which
-//! `cargo xtask ci --docker` sets; they reach Docker through the context that
-//! `PUMPKIN_DOCKER_CONTEXT` names, `default` if it is unset, which they write into the
-//! configuration that they give `run`.
+//! Docker are ignored, and write the context they reach ([`test_support::docker_context`]) into
+//! the configuration that they give `run`.
 
 #![expect(
     clippy::unwrap_used,
@@ -24,28 +22,21 @@ use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
-use std::{env, fs, iter, thread};
+use std::{fs, iter, thread};
 
 use docker::{BuildContext, Engine, Recipe};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
 use tempfile::TempDir;
+use test_support::{BUSYBOX, WORKFLOW, files};
 
 mod driver;
 mod run;
 mod wait;
 
-const LWE: &str = include_str!("../../../schema/tests/fixtures/lwe.json");
-
 /// The `pumpkin` that the tests run.
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
-
-/// A small public image, pinned by digest.
-// Repeated in `providers/docker/tests/it.rs`, `crates/runtime/tests/it/docker.rs` and
-// `crates/harness/tests/it/docker.rs`: change all four.
-const BUSYBOX: &str =
-    "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
 
 /// What the final judge of the runs on Docker does: scores the payload by its size.
 const SCORE: &str = r#"printf '{"raw_score": %s}' \
@@ -237,7 +228,7 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
 fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
-    let mut lines = vec![format!("record: {}", files(record, record).join(", "))];
+    let mut lines = vec![format!("record: {}", files(record).join(", "))];
     // A run that didn't start has no run log.
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
     for line in log.lines() {
@@ -267,29 +258,6 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     lines
 }
 
-/// The files and empty directories below `dir`, by their paths from `base`, sorted.
-fn files(base: &Path, dir: &Path) -> Vec<String> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    paths.sort();
-    let mut lines = Vec::new();
-    for path in paths {
-        let name = path.strip_prefix(base).unwrap().display().to_string();
-        if path.is_dir() {
-            let below = files(base, &path);
-            if below.is_empty() {
-                lines.push(format!("{name}/"));
-            }
-            lines.extend(below);
-        } else {
-            lines.push(name);
-        }
-    }
-    lines
-}
-
 /// What `look` returns once it returns something, tried every 100 ms for a minute.
 fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
     for _ in 0..600 {
@@ -299,18 +267,6 @@ fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("nothing came in a minute");
-}
-
-/// The static `sandboxd` that `PUMPKIN_SANDBOXD` names.
-fn sandboxd() -> String {
-    let Some(sandboxd) = env::var_os("PUMPKIN_SANDBOXD") else {
-        panic!(
-            "`PUMPKIN_SANDBOXD` is unset: run the Docker tests with `cargo xtask ci --docker`, \
-             which builds sandboxd and sets it"
-        );
-    };
-    let sandboxd = PathBuf::from(sandboxd).canonicalize().unwrap();
-    sandboxd.into_os_string().into_string().unwrap()
 }
 
 /// The image of the roles that run on Docker, which the provider builds on `engine`: `busybox`
@@ -326,7 +282,7 @@ fn image(engine: &Engine) -> String {
 /// the final judge as [`SCORE`] says, and every role running `image` with a small machine's
 /// share.
 fn workflow(image: &str, argv: &[&str]) -> Value {
-    let mut ir: Value = serde_json::from_str(LWE).unwrap();
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     ir["roles"][0].as_object_mut().unwrap().remove("egress");
     ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     ir["roles"][2]["runtime"]["judge"]["command"]["argv"] = json!(["sh", "-c", SCORE]);
@@ -347,11 +303,6 @@ fn signal(name: &str, target: i64) -> bool {
         .args(["-s", name, "--", &target.to_string()])
         .status();
     kill.unwrap().success()
-}
-
-/// The Docker context the tests on Docker reach: `PUMPKIN_DOCKER_CONTEXT`, or `default`.
-fn context() -> String {
-    env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned())
 }
 
 /// The table of a configuration that names `context` as the one that reaches the engine.

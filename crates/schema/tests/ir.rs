@@ -1,13 +1,11 @@
-//! The workflow IR and its parsing, tested through the crate's public API against a
-//! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
-//! policy. Its image digests, the agent's command, files and standard input, and the judges'
-//! environment are placeholders.
+//! The workflow IR and its parsing, tested through the crate's public API against a complete
+//! workflow, [`WORKFLOW`].
 //! Also placing the workflow's roles in classes of sandbox, the JSON of ops' replies, which
 //! `sandboxctl` prints, the in-sandbox contract, and the run tags that providers find a run's
 //! sandboxes by.
 //!
-//! The workflow stays whole, as the IR's golden fixture: `lwe` compares a round trip of all of
-//! it, and every other IR case is a change to it (`lwe_json`, `lwe_with`).
+//! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of all
+//! of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
 
 #![expect(
     clippy::unwrap_used,
@@ -28,18 +26,17 @@ use schema::sandbox::{
 };
 use schema::workflow::{Main, RoleId, Workflow};
 use serde_json::{Value, json};
-
-const LWE: &str = include_str!("fixtures/lwe.json");
+use test_support::WORKFLOW;
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn lwe_json() -> Value {
-    serde_json::from_str(LWE).unwrap()
+fn fixture() -> Value {
+    serde_json::from_str(WORKFLOW).unwrap()
 }
 
-/// The LWE workflow with `value` set at `pointer`, whose parent is an object.
-fn lwe_with(pointer: &str, value: Value) -> Value {
-    let mut ir = lwe_json();
+/// [`WORKFLOW`] with `value` set at `pointer`, whose parent is an object.
+fn fixture_with(pointer: &str, value: Value) -> Value {
+    let mut ir = fixture();
     let (parent, key) = pointer.rsplit_once('/').unwrap();
     let parent = ir.pointer_mut(parent).unwrap().as_object_mut().unwrap();
     parent.insert(key.to_owned(), value);
@@ -101,8 +98,8 @@ impl Case for Placing {
     }
 }
 
-/// Two classes: `large`, whose starts take 30 s, which every LWE role fits, and `small`, whose
-/// starts take 60 s, which gives a role exactly what each LWE judge asks for.
+/// Two classes: `large`, whose starts take 30 s, which every role of [`WORKFLOW`] fits, and
+/// `small`, whose starts take 60 s, which gives a role exactly what each of its judges asks for.
 fn classes() -> BTreeMap<ir::Name, Class> {
     let class = |name: &str, cpu_millis, memory_bytes, startup_seconds| {
         let class = Class {
@@ -171,14 +168,14 @@ impl Case for Tag {
 
 #[test]
 fn placement() {
-    let mut larger = lwe_json();
+    let mut larger = fixture();
     larger["roles"][1]["needs"]["cpu_millis"] = json!(8001);
     larger["roles"][2]["needs"]["memory_bytes"] = json!((2u64 << 30) + 1);
-    let mut unplaced = lwe_json();
+    let mut unplaced = fixture();
     unplaced["roles"][0]["needs"]["cpu_millis"] = json!(16_001);
     unplaced["roles"][2]["needs"]["memory_bytes"] = json!((64u64 << 30) + 1);
     check(
-        [Placing(lwe_json()), Placing(larger), Placing(unplaced)],
+        [Placing(fixture()), Placing(larger), Placing(unplaced)],
         &expect![[r#"
             agent's starts take at most 30s, train_judge's starts take at most 60s, final_judge's starts take at most 60s
             agent's starts take at most 30s, train_judge's starts take at most 30s, final_judge's starts take at most 30s
@@ -309,12 +306,12 @@ fn in_sandbox_contract() {
 }
 
 #[test]
-fn lwe() {
-    let ir: ir::Workflow = serde_json::from_str(LWE).unwrap();
+fn round_trip() {
+    let ir: ir::Workflow = serde_json::from_str(WORKFLOW).unwrap();
     // Whatever writes the IR serializes these types, so each must read back what it wrote.
     assert_eq!(
         serde_json::to_value(&ir).unwrap(),
-        lwe_json(),
+        fixture(),
         "a round trip"
     );
     let workflow = Workflow::parse(&ir).unwrap();
@@ -332,37 +329,37 @@ fn checked_values() {
     let result = "/roles/1/runtime/judge/result";
     check(
         [
-            lwe_with("/name", json!("lwe structured recovery")),
-            lwe_with(&format!("{agent}/name"), json!("Agent")),
-            lwe_with(&format!("{agent}/name"), json!("bad\nname")),
-            lwe_with(&format!("{agent}/image"), json!(format!("sha256:{HEX}"))),
-            lwe_with(&format!("{agent}/image"), json!("ubuntu:24.04")),
-            lwe_with(&format!("{command}/cwd"), json!("workspace")),
-            lwe_with(&format!("{command}/cwd"), json!("/workspace/")),
-            lwe_with(&format!("{command}/argv"), json!([])),
-            lwe_with(&format!("{command}/env"), json!(["MODE"])),
-            lwe_with(&format!("{command}/env"), json!(["1ST=value"])),
-            lwe_with(
+            fixture_with("/name", json!("example task")),
+            fixture_with(&format!("{agent}/name"), json!("Agent")),
+            fixture_with(&format!("{agent}/name"), json!("bad\nname")),
+            fixture_with(&format!("{agent}/image"), json!(format!("sha256:{HEX}"))),
+            fixture_with(&format!("{agent}/image"), json!("ubuntu:24.04")),
+            fixture_with(&format!("{command}/cwd"), json!("workspace")),
+            fixture_with(&format!("{command}/cwd"), json!("/workspace/")),
+            fixture_with(&format!("{command}/argv"), json!([])),
+            fixture_with(&format!("{command}/env"), json!(["MODE"])),
+            fixture_with(&format!("{command}/env"), json!(["1ST=value"])),
+            fixture_with(
                 &format!("{command}/env"),
                 json!(["MODE=train", "MODE=eval"]),
             ),
-            lwe_with(&format!("{agent}/egress/model/models"), json!([])),
-            lwe_with(
+            fixture_with(&format!("{agent}/egress/model/models"), json!([])),
+            fixture_with(
                 &format!("{agent}/egress/model/models"),
                 json!(["gpt-6-astra", "gpt-6-astra"]),
             ),
-            lwe_with(&format!("{result}/score"), json!("raw_score")),
-            lwe_with(&format!("{result}/score"), json!("/raw~2score")),
-            lwe_with(&format!("{result}/returns"), json!(["/metrics", ""])),
-            lwe_with(&format!("{result}/returns"), json!(["/metrics/"])),
-            lwe_with(&format!("{result}/returns"), json!(["/x/a~1b", "/a~1b"])),
-            lwe_with(
+            fixture_with(&format!("{result}/score"), json!("raw_score")),
+            fixture_with(&format!("{result}/score"), json!("/raw~2score")),
+            fixture_with(&format!("{result}/returns"), json!(["/metrics", ""])),
+            fixture_with(&format!("{result}/returns"), json!(["/metrics/"])),
+            fixture_with(&format!("{result}/returns"), json!(["/x/a~1b", "/a~1b"])),
+            fixture_with(
                 "/roles/2/runtime/judge/slots/0/max_bytes",
                 json!(MAX_OP_PAYLOAD_BYTES + 1),
             ),
         ],
         &expect![[r#"
-            `lwe structured recovery` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
+            `example task` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
             `Agent` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             `bad\nname` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             parsed
@@ -389,7 +386,7 @@ fn agent_files() {
     let agent = "/roles/0/runtime/agent";
     let dir = |path: &str| json!({ "path": path, "mode": "0755" });
     let file = |path: &str| json!({ "path": path, "mode": "0644", "content": "" });
-    let mut broken = lwe_json();
+    let mut broken = fixture();
     let runtime = &mut broken["roles"][0]["runtime"]["agent"];
     runtime["dirs"] = json!([
         dir("/workspace/a"),
@@ -400,15 +397,15 @@ fn agent_files() {
     let path = format!("{agent}/files/0/path");
     check(
         [
-            lwe_with(&format!("{agent}/dirs/0/mode"), json!("0777")),
-            lwe_with(&format!("{agent}/dirs/0/mode"), json!("0800")),
-            lwe_with(&format!("{agent}/dirs/0/mode"), json!("4755")),
-            lwe_with(&format!("{agent}/dirs/0/mode"), json!("755")),
-            lwe_with(&path, json!("/pumpkinx/config.toml")),
-            lwe_with(&path, json!("/")),
-            lwe_with(&path, json!("/pumpkin/in/command.stdin")),
-            lwe_with(&path, json!("/.pumpkin/bin/sandboxctl")),
-            lwe_with(&path, json!("/harness")),
+            fixture_with(&format!("{agent}/dirs/0/mode"), json!("0777")),
+            fixture_with(&format!("{agent}/dirs/0/mode"), json!("0800")),
+            fixture_with(&format!("{agent}/dirs/0/mode"), json!("4755")),
+            fixture_with(&format!("{agent}/dirs/0/mode"), json!("755")),
+            fixture_with(&path, json!("/pumpkinx/config.toml")),
+            fixture_with(&path, json!("/")),
+            fixture_with(&path, json!("/pumpkin/in/command.stdin")),
+            fixture_with(&path, json!("/.pumpkin/bin/sandboxctl")),
+            fixture_with(&path, json!("/harness")),
             broken,
         ],
         &expect![[r#"
@@ -429,7 +426,7 @@ fn agent_files() {
 
 #[test]
 fn broken_references() {
-    let mut ir = lwe_json();
+    let mut ir = fixture();
     let train_judge = ir["roles"][1].clone();
     ir["roles"].as_array_mut().unwrap().push(train_judge);
     let payload = ir["roles"][2]["runtime"]["judge"]["slots"][0].clone();
@@ -457,7 +454,7 @@ fn broken_references() {
 
 #[test]
 fn broken_pattern() {
-    let mut ir = lwe_json();
+    let mut ir = fixture();
     let mut helper = ir["roles"][0].clone();
     helper["name"] = json!("helper");
     ir["roles"].as_array_mut().unwrap().push(helper);
@@ -472,13 +469,13 @@ fn broken_pattern() {
         .extend([submit, retrain]);
     pattern["grants"][0]["judge"]["slot"] = json!("submission");
     pattern["score"]["role"] = json!("train_judge");
-    let mut none = lwe_json();
+    let mut none = fixture();
     none["roles"].as_array_mut().unwrap().remove(0);
     none["main"]["solo_then_judge"]["grants"]
         .as_array_mut()
         .unwrap()
         .remove(1);
-    let mut untimed = lwe_json();
+    let mut untimed = fixture();
     untimed["main"]["solo_then_judge"]["grants"][0]["judge"]
         .as_object_mut()
         .unwrap()

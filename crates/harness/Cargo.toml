@@ -15,8 +15,8 @@ schema = { path = "../schema" }
 serde_json.workspace = true
 
 [dev-dependencies]
+test-support = { path = "../test-support" }
 expect-test.workspace = true
-stdx = { path = "../stdx" }
 
 [lints]
 workspace = true

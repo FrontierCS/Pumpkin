@@ -24,10 +24,9 @@ use schema::provider::Ready;
 use schema::workflow::{Placed, Workflow};
 use serde_json::Value;
 use tempfile::TempDir;
+use test_support::{WORKFLOW, files};
 
 use crate::sim::Sim;
-
-const LWE: &str = include_str!("../../../schema/tests/fixtures/lwe.json");
 
 /// The runs directory of test `name`. Dropping it removes it, unless the test failed, when it
 /// shows where the records are.
@@ -105,7 +104,7 @@ fn check(
             }
             Err(reason) => lines.push(format!("refused: {reason}")),
         }
-        let files = files(&record, &record).join(", ");
+        let files = files(&record).join(", ");
         lines.push(format!("{}: {files}", id_form(name)));
         let kept: Value =
             serde_json::from_slice(&fs::read(record.join("ir.json")).unwrap()).unwrap();
@@ -147,8 +146,8 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
 
 #[test]
 fn prepare() {
-    let lwe: Value = serde_json::from_str(LWE).unwrap();
-    let mut no_route = lwe.clone();
+    let ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut no_route = ir.clone();
     no_route["roles"][0]
         .as_object_mut()
         .unwrap()
@@ -158,9 +157,9 @@ fn prepare() {
             // A leap day's first second, a year's last, and 2100's first of March, which follows
             // its 28th of February, as 2100 isn't a leap year.
             (1_709_164_800, no_route.clone(), None),
-            (1_767_225_599, lwe.clone(), None),
-            (1_767_225_599, lwe.clone(), Some(&["gpt-6-sol"][..])),
-            (1_767_225_599, lwe, Some(&["gpt-6-sol", "gpt-6-astra"][..])),
+            (1_767_225_599, ir.clone(), None),
+            (1_767_225_599, ir.clone(), Some(&["gpt-6-sol"][..])),
+            (1_767_225_599, ir, Some(&["gpt-6-sol", "gpt-6-astra"][..])),
             (4_107_542_400, no_route.clone(), None),
             (-1, no_route, None),
         ],
@@ -194,29 +193,6 @@ fn id_form(id: &str) -> String {
     let (time, suffix) = id.rsplit_once('-').unwrap();
     let suffix = suffix.replace(|c| matches!(c, '0'..='9' | 'a'..='f'), "h");
     format!("{time}-{suffix}")
-}
-
-/// The files and empty directories below `dir`, sorted.
-pub(crate) fn files(base: &Path, dir: &Path) -> Vec<String> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    paths.sort();
-    let mut lines = Vec::new();
-    for path in paths {
-        let name = path.strip_prefix(base).unwrap().display().to_string();
-        if path.is_dir() {
-            let below = files(base, &path);
-            if below.is_empty() {
-                lines.push(format!("{name}/"));
-            }
-            lines.extend(below);
-        } else {
-            lines.push(name);
-        }
-    }
-    lines
 }
 
 /// Pretty-printed JSON on one line.

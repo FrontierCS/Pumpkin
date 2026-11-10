@@ -114,6 +114,7 @@ dependencies = [
  "expect-test",
  "schema",
  "serde_json",
+ "test-support",
 ]
 
 [[package]]
@@ -146,6 +147,7 @@ dependencies = [
  "sha2",
  "stdx",
  "tempfile",
+ "test-support",
 ]
 
 [[package]]
@@ -210,7 +212,7 @@ dependencies = [
  "recipe",
  "schema",
  "serde_json",
- "stdx",
+ "test-support",
 ]
 
 [[package]]
@@ -319,6 +321,7 @@ dependencies = [
  "serde_json",
  "stdx",
  "tempfile",
+ "test-support",
  "toml",
 ]
 
@@ -362,6 +365,7 @@ dependencies = [
  "serde_json",
  "stdx",
  "tempfile",
+ "test-support",
  "ureq",
 ]
 
@@ -381,6 +385,7 @@ dependencies = [
  "sha2",
  "stdx",
  "tempfile",
+ "test-support",
 ]
 
 [[package]]
@@ -453,6 +458,7 @@ dependencies = [
  "expect-test",
  "serde",
  "serde_json",
+ "test-support",
 ]
 
 [[package]]
@@ -555,6 +561,13 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "test-support"
+version = "0.0.0"
+dependencies = [
+ "stdx",
 ]
 
 [[package]]

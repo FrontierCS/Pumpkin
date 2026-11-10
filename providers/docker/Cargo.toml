@@ -21,6 +21,7 @@ tempfile.workspace = true
 
 [dev-dependencies]
 gateway = { path = "../../crates/gateway" }
+test-support = { path = "../../crates/test-support" }
 expect-test.workspace = true
 
 [lints]
