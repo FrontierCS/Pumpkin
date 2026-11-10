@@ -72,14 +72,7 @@ impl Platform for Engine {
 }
 
 /// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one,
-/// and executes it on `provider`, with `sandboxd`, and checks what becomes of it: what
-/// `execute` returns, the record's files, the payloads it holds, whether its `provider.json` is
-/// what the provider declared, its `outcome.json`, its log ([`logged`]), when its last record
-/// came ([`when`]), whether `execute` returned once the hard end had passed, if it did, the
-/// standard output of the agent and of each judge call, if collected, whether the run's socket
-/// directories are left, what the platform shows ([`Platform`]), what the run's list finds once
-/// it has ended, and when the client of each stream that the stand-in stalled hung up. The
-/// socket directories show as `<sockets>`, and the stand-in's address as `<stand-in>`.
+/// and executes it on `provider`, with `sandboxd`.
 fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect: &Expect) {
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
@@ -118,15 +111,14 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
     ));
     lines.push(format!("outcome.json: {}", compact(&read("outcome.json"))));
     lines.push("log.jsonl:".to_owned());
-    let (log, last) = logged(&record, &started);
+    let (log, start, last) = logged(&record, &started);
     lines.extend(log);
     if let Some(last) = last {
         let last = when(&ir, provider, last);
         lines.push(format!("its last record came {last}"));
     }
-    // By the whole call's time, which the run's clock starts within.
-    if Duration::from_nanos(started.end() - started.start()) >= hard_end(&ir, provider) {
-        lines.push("execute returned once the hard end had passed".to_owned());
+    if written(&record, start).is_some_and(|written| written >= hard_end(&ir, provider)) {
+        lines.push("its log's last record was written once the hard end had passed".to_owned());
     }
     lines.extend(standard_outputs(&record));
     lines.push(format!("socket directories left: {}", sockets.exists()));
@@ -138,9 +130,9 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
     lines.push(format!("listed once it ended: {listed:?}"));
     let address = stand_in.as_ref().map(|stand_in| stand_in.address.clone());
     for hung_up in stand_in.into_iter().flat_map(StandIn::stop) {
-        // By the whole call's time, which the run's clock starts within, so later than by the
-        // run's clock, if anything.
-        let hung_up = Duration::from_nanos(hung_up - started.start());
+        // A run whose stream stalled has started. The stand-in reads the clock after the
+        // hang-up, so this errs late.
+        let hung_up = Duration::from_nanos(hung_up - start.unwrap());
         // Its place among the run's records isn't shown: a `model_answered` may come after the
         // run's last record, and so may a hang-up that its answer follows.
         let at = when(&ir, provider, hung_up);
@@ -253,14 +245,14 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
     Some(unix_ns())
 }
 
-/// The records of the run log in `record`, a run's, one per line, and the time of its last
-/// record, if it has any. It leaves out the `status` ops answered, alone, while their job was
-/// queued or running, whose number depends on timing, and numbers the rest, and their ops, in
-/// turn. Each record's time is shown only if it is 0 or isn't a decimal string, the run's start
-/// only if it isn't within `started`, the call to `execute`, and the time left in a reply as
-/// `<s>`.
-fn logged(record: &Path, started: &RangeInclusive<u64>) -> (Vec<String>, Option<Duration>) {
-    let (mut lines, mut last, mut polls) = (Vec::new(), None, 0);
+/// The records of the run log in `record`, a run's, one per line; when the run started, in
+/// nanoseconds since the Unix epoch; and the time of its last record, if it has any. `started`
+/// spans the call to `execute`.
+fn logged(
+    record: &Path,
+    started: &RangeInclusive<u64>,
+) -> (Vec<String>, Option<u64>, Option<Duration>) {
+    let (mut lines, mut start, mut last, mut polls) = (Vec::new(), None, None, 0);
     // A run that fails before it starts has no log.
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
     for (seq, line) in log.lines().enumerate() {
@@ -270,6 +262,7 @@ fn logged(record: &Path, started: &RangeInclusive<u64>) -> (Vec<String>, Option<
         last = last.max(Some(at));
         let actions = logged["actions"].as_array().map_or(0, Vec::len);
         let state = logged.pointer("/actions/0/reply/state");
+        // Their number depends on timing.
         if logged["event"]["request"]["kind"] == "status"
             && actions == 1
             && state.is_some_and(|state| state == "queued" || state == "running")
@@ -288,10 +281,11 @@ fn logged(record: &Path, started: &RangeInclusive<u64>) -> (Vec<String>, Option<
         if !at.is_zero() {
             logged["at_ns"] = json!("<ns>");
         }
-        if let Some(unix_ns) = logged.pointer_mut("/event/unix_ns")
-            && nanos(unix_ns).is_some_and(|ns| started.contains(&ns))
-        {
-            *unix_ns = json!("<during execute>");
+        if let Some(unix_ns) = logged.pointer_mut("/event/unix_ns") {
+            start = nanos(unix_ns);
+            if start.is_some_and(|ns| started.contains(&ns)) {
+                *unix_ns = json!("<during execute>");
+            }
         }
         let actions = logged.get_mut("actions").and_then(Value::as_array_mut);
         for action in actions.into_iter().flatten() {
@@ -301,7 +295,18 @@ fn logged(record: &Path, started: &RangeInclusive<u64>) -> (Vec<String>, Option<
         }
         lines.push(logged.to_string());
     }
-    (lines, last)
+    (lines, start, last)
+}
+
+/// How long after its start, `start` nanoseconds since the Unix epoch, the log in `record`, a
+/// run's, was last written, if the run started.
+fn written(record: &Path, start: Option<u64>) -> Option<Duration> {
+    // By the record alone: the call to `execute` also publishes before the run's clock starts,
+    // and removes its sockets after its log ends.
+    let start = Duration::from_nanos(start?);
+    let modified = fs::metadata(record.join("log.jsonl")).and_then(|log| log.modified());
+    let written = modified.unwrap().duration_since(UNIX_EPOCH).unwrap();
+    Some(written.saturating_sub(start))
 }
 
 /// The standard output that `record`, a run's, holds of the agent's command and of each judge
@@ -704,16 +709,12 @@ fn result_over_the_limit() {
     );
 }
 
-/// A run whose agent's `sandboxd` ends the session while the agent's judge call is in flight,
-/// its payload over the score's slot but within the judge's, the larger, so within the most an
-/// op may carry: the op arrived whole, so the core takes it, and accepts it, before the
-/// session's end, which fails the agent; and the reply can't be sent, which the run log notes.
-/// The call's sandbox takes seconds to create, so that the agent's end has stopped the call by
-/// the time its thread looks, before the judge's command starts.
 #[test]
 fn crashes_with_an_op_in_flight() {
     let mut ir = ops_workflow(&["ops", "judge train 12", "crash"], 30);
+    // Slow to create, so that the agent's end stops the call before the judge's command starts.
     ir["roles"][1]["image"] = json!(sim::image(SLOW).as_str());
+    // Over the score's slot but within the judge's, so within the most an op may carry.
     ir["roles"][1]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(16);
     ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(8);
     check(
@@ -726,18 +727,18 @@ fn crashes_with_an_op_in_flight() {
             record: agent/, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81, provider.json, record.json
             payloads hold: ["xxxxxxxxxxxx"]
             provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
             {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12}}},"seq":2}
-            {"at_ns":"<ns>","note":"op 0's reply failed: the sandbox ended the session","seq":3}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"seq":4}
-            {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: the sandbox ended the session","seq":5}
-            {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox ended the session","seq":6}
-            {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":7}
+            {"at_ns":"<ns>","note":"op 0's reply failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":3}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"},"seq":4}
+            {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":5}
+            {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":6}
+            {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":7}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":8}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped before its command started"},"seq":9}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped before its command started"},"seq":9}
             its last record came before the agent's teardown was to end
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
@@ -860,7 +861,7 @@ fn abandoned() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"seq":7}
             {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":8}
             its last record came once the hard end had passed
-            execute returned once the hard end had passed
+            its log's last record was written once the hard end had passed
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
             listed once it ended: []"#]],
@@ -898,7 +899,7 @@ fn reported_before_the_hard_end() {
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":5}
             its last record came before the agent's teardown was to end
-            execute returned once the hard end had passed
+            its log's last record was written once the hard end had passed
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
             listed once it ended: []"#]],
@@ -929,7 +930,7 @@ fn torn_down_past_the_hard_end() {
             {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"seq":4}
             {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":5}
             its last record came once the hard end had passed
-            execute returned once the hard end had passed
+            its log's last record was written once the hard end had passed
             socket directories left: false
             their directory's mode at each create: ["700"]
             listed once it ended: []"#]],

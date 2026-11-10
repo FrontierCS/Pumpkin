@@ -51,13 +51,13 @@ struct Sandbox {
 
 impl Sandbox {
     /// Starts `sandboxd` and puts the directories a role expects.
-    fn start(name: &str) -> Self {
-        let id = std::process::id();
-        let root = std::env::temp_dir().join(format!("sandboxd-{id}-{name}"));
-        if root.exists() {
-            fs::remove_dir_all(&root).unwrap();
-        }
-        fs::create_dir_all(&root).unwrap();
+    fn start() -> Self {
+        // Kept if the test fails.
+        let root = tempfile::Builder::new()
+            .prefix("sandboxd-")
+            .tempdir()
+            .unwrap()
+            .keep();
         // Without symbolic links, as the kernel names the working directories that
         // `processes` finds the sandbox's processes by.
         let root = fs::canonicalize(root).unwrap();
@@ -220,8 +220,8 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 /// scenario reported, what arrived after it, how `sandboxd` exited, and how many processes were
 /// left running in the sandbox, against `expect`. Those left get 2 s to exit, and are then
 /// killed.
-fn check(name: &str, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
-    let mut sandbox = Sandbox::start(name);
+fn check(scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
+    let mut sandbox = Sandbox::start();
     let mut lines = scenario(&mut sandbox);
     let Sandbox {
         root,
@@ -258,7 +258,6 @@ fn check(name: &str, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect:
 #[test]
 fn judge() {
     check(
-        "judge",
         |sandbox| {
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let raw = pattern(2 * MAX_BODY_BYTES + 12345);
@@ -306,7 +305,6 @@ fn judge() {
 #[test]
 fn modes_and_stdin() {
     check(
-        "modes-and-stdin",
         |sandbox| {
             let mode = |mode: &str| Mode::try_from(mode.to_owned()).unwrap();
             let paths = ["home", "in/tools", "in/tools/tool", "in/prompt"].map(relative);
@@ -360,7 +358,6 @@ fn pattern(len: usize) -> Vec<u8> {
 #[test]
 fn freezing() {
     check(
-        "freezing",
         |sandbox| {
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
             let group = sandbox.session.start(launch, hung()).unwrap();
@@ -394,7 +391,6 @@ fn freezing() {
 #[test]
 fn full_sandbox() {
     check(
-        "full",
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
             let sleep = sandbox.session.start(launch, hung()).unwrap();
@@ -435,7 +431,6 @@ fn full_sandbox() {
 #[test]
 fn refusals() {
     check(
-        "refusals",
         |sandbox| {
             let mut lines = Vec::new();
             let mut missing = sandbox.sh("", &[]);
@@ -509,7 +504,6 @@ fn show_error(sandbox: &Sandbox, outcome: io::Result<()>) -> String {
 #[test]
 fn ending_the_session() {
     check(
-        "ending",
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
             sandbox.session.start(launch, hung()).unwrap();
@@ -531,7 +525,6 @@ fn ending_the_session() {
 #[test]
 fn model_answers() {
     check(
-        "models",
         |sandbox| {
             let socket = sandbox.root.join("fake.sock");
             let end = ToSandbox::ModelEnd {
@@ -568,7 +561,6 @@ fn answered(socket: &Path, message: &ToSandbox) -> String {
 #[test]
 fn reading_while_collecting() {
     check(
-        "collecting",
         |sandbox| {
             let tree = pattern(4 * MAX_BODY_BYTES);
             fs::write(sandbox.root.join("out/tree"), &tree).unwrap();

@@ -384,14 +384,16 @@ enum Step {
     /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
     /// process the command left would.
     Exit,
-    /// The session's end, which its `sandboxd` makes.
+    /// The session's end, which its `sandboxd` makes: right after an op, by the op's reply
+    /// failing; otherwise by closing the connection.
     Crash,
 }
 
 /// What of a model response a command waits for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait {
-    Head,
+    /// The first part of its body.
+    Part,
     End,
 }
 
@@ -589,12 +591,12 @@ impl Caller {
                 headers,
             } => {
                 self.print(&format!("model request {request}: {status} {headers:?} "));
-                (request, Some(Wait::Head))
+                (request, None)
             }
             ToSandbox::ModelData { request } => {
                 let text = String::from_utf8_lossy(body).replace('\n', "\\n");
                 self.stdout.push_str(&text);
-                (request, None)
+                (request, Some(Wait::Part))
             }
             ToSandbox::ModelEnd { request, .. } => (request, Some(Wait::End)),
             other => panic!("{other:?} is no frame of a model response"),
@@ -650,7 +652,7 @@ fn state_name(reply: &OpReply) -> &'static str {
 /// and any other is its own bytes; `await <job> <state>`, which makes `status <job>` until its
 /// reply's state is `state`; `model <model> <text>`, a model request that names `model`, with
 /// `text` as its input, whose response's end the next step waits for, or `ask <model> <text>`,
-/// one whose response's head it waits for; or `sleep <seconds>`, `exit` or `crash`.
+/// one whose response's first part it waits for; or `sleep <seconds>`, `exit` or `crash`.
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
@@ -682,7 +684,7 @@ fn step(arg: &str) -> Step {
             let wait = if kind == "model" {
                 Wait::End
             } else {
-                Wait::Head
+                Wait::Part
             };
             return Step::Model { model, text, wait };
         }
@@ -863,15 +865,34 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
             replies.push((FromSandbox::Done { stream }, Vec::new()));
             freezing = None;
         }
-        for (reply, body) in replies.drain(..) {
-            if frame::write(&mut connection, &reply, &body).is_err() {
-                return;
-            }
-        }
-        if crashed {
-            // A shutdown closes the connection for the clone its status keeps too.
-            let _ = connection.shutdown(Shutdown::Both);
+        if !send(&mut connection, &mut replies, crashed) {
             return;
         }
     }
+}
+
+/// Sends `replies` on `connection`, then ends the session if `crashed`, as [`Step::Crash`]
+/// says. Returns whether the session goes on.
+fn send(
+    connection: &mut UnixStream,
+    replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    crashed: bool,
+) -> bool {
+    // Not closed as well: the session's end would then race between the close and the reply's
+    // failed write.
+    let op_out =
+        crashed && (replies.iter()).any(|(reply, _)| matches!(reply, FromSandbox::Op { .. }));
+    if op_out {
+        let _ = connection.shutdown(Shutdown::Read);
+    }
+    for (reply, body) in replies.drain(..) {
+        if frame::write(connection, &reply, &body).is_err() {
+            return false;
+        }
+    }
+    if crashed && !op_out {
+        // A shutdown closes the connection for the clone its status keeps too.
+        let _ = connection.shutdown(Shutdown::Both);
+    }
+    !crashed
 }

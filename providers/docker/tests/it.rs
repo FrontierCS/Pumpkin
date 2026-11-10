@@ -15,7 +15,7 @@
 
 use std::io::Write;
 use std::num::NonZeroU64;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -43,6 +43,7 @@ use schema::sandbox::{
 };
 use stdx::process::Environment;
 use stdx::{Context, Deadline};
+use tempfile::TempDir;
 
 /// A small public image, pinned by digest.
 // Repeated in `crates/runtime/tests/it/docker.rs`, `crates/pumpkin/tests/it.rs` and
@@ -59,7 +60,7 @@ fn hung() -> Deadline {
 /// Dropping it removes the containers of its runs, after showing their logs if the test failed.
 struct Fixture {
     sandboxd: PathBuf,
-    dir: PathBuf,
+    dir: TempDir,
     run: RunTag,
     other_run: RunTag,
 }
@@ -75,11 +76,12 @@ impl Fixture {
         };
         let tag = |suffix: &str| format!("pk-{}-{name}{suffix}", std::process::id());
         let tag = |suffix: &str| RunTag::try_from(tag(suffix)).unwrap();
-        // Socket paths are short: a directory in the system's temporary one, private to this
-        // user, as the parent of every socket directory must be.
-        let dir = std::env::temp_dir().join(format!("pk-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        // Private to this user, as the parent of every socket directory must be.
+        let dir = tempfile::Builder::new()
+            .prefix("docker-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         Self {
             sandboxd: PathBuf::from(sandboxd).canonicalize().unwrap(),
             dir,
@@ -150,7 +152,7 @@ impl Fixture {
         ops: bool,
         model: bool,
     ) -> Result<(Create, Listener), String> {
-        let dir = self.dir.join(role);
+        let dir = self.dir.path().join(role);
         fs::create_dir_all(&dir).unwrap();
         let listener = Listener::bind(dir.join(SOCKET_NAME)).unwrap();
         let role = Role {
@@ -217,7 +219,6 @@ impl Drop for Fixture {
                 }
             }
         }
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -402,7 +403,7 @@ fn serve(sandbox: &mut Started, process: Process, payload: &[u8]) -> (ExitStatus
 
 /// Collects the sandbox's `dir` into the fixture's directory and returns the files' contents.
 fn collect(fixture: &Fixture, sandbox: &mut Started, dir: &str) -> Vec<String> {
-    let into = fixture.dir.join(format!("collected-{dir}"));
+    let into = fixture.dir.path().join(format!("collected-{dir}"));
     let limits = Limits {
         bytes: 1 << 20,
         entries: 100,
@@ -550,7 +551,8 @@ fn confinement() {
             // Rootless Docker and user namespaces each map the container's users to others on
             // the host; a rootful engine without them maps every user to itself.
             collect(fixture, &mut sandbox, "out");
-            let uid_map = fs::read_to_string(fixture.dir.join("collected-out/uid_map")).unwrap();
+            let uid_map =
+                fs::read_to_string(fixture.dir.path().join("collected-out/uid_map")).unwrap();
             let identity = uid_map.split_whitespace().eq(["0", "0", "4294967295"]);
             let Security {
                 rootless,
@@ -688,10 +690,10 @@ fn failed_start() {
     check(
         "failed",
         |fixture| {
-            let not_executable = fixture.dir.join("sandboxd");
+            let not_executable = fixture.dir.path().join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
-            let missing = fixture.dir.join("absent");
-            let comma = fixture.dir.join("sandboxd,readonly=false");
+            let missing = fixture.dir.path().join("absent");
+            let comma = fixture.dir.path().join("sandboxd,readonly=false");
             fs::write(&comma, "").unwrap();
             let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
             let attempts = [
@@ -724,7 +726,7 @@ fn failed_start() {
 /// its version.
 fn redact(fixture: &Fixture, message: &str) -> String {
     let context = format!("context `{}`", engine().report().context.as_str());
-    let message = (message.replace(&fixture.dir.display().to_string(), "<dir>"))
+    let message = (message.replace(&fixture.dir.path().display().to_string(), "<dir>"))
         .replace(&context, "context `<context>`");
     let (from, to) = ("`docker start ", ": fix what Docker reports");
     if let Some((before, rest)) = message.split_once(from)
@@ -747,7 +749,7 @@ fn builds() {
         "builds",
         |fixture| {
             let mut builds = Builds::new(fixture);
-            let dir = fixture.dir.join("context");
+            let dir = fixture.dir.path().join("context");
             let mut lines = vec![format!("built: {}", builds.build("Dockerfile"))];
             let [first] = <[String; 1]>::try_from(builds.tags(&builds.seen[0])).unwrap();
             run(&["image", "rm", &first]);
@@ -844,7 +846,7 @@ impl<'f> Builds<'f> {
     /// process's ID, into an empty image, at `Dockerfile` and at `other/Dockerfile`; each in a
     /// repository of this process's own.
     fn new(fixture: &'f Fixture) -> Self {
-        let dir = fixture.dir.join("context");
+        let dir = fixture.dir.path().join("context");
         let recipe = "FROM scratch\nCOPY file id /\n";
         put(&dir, "Dockerfile", recipe, 0o644);
         put(&dir, "other/Dockerfile", recipe, 0o644);
@@ -868,7 +870,7 @@ impl<'f> Builds<'f> {
     /// if it is none of them, each by the number of its first showing, as their digests cover
     /// `id`; or why the build failed.
     fn build(&mut self, recipe: &str) -> String {
-        let dir = self.fixture.dir.join("context");
+        let dir = self.fixture.dir.path().join("context");
         let (image, returned) = match engine().build(&dir, recipe, &self.repository, |_| Ok(())) {
             Ok(Built { image, tag }) => (image.as_str().to_owned(), tag),
             Err(error) => return redact(self.fixture, &error),
@@ -941,7 +943,7 @@ fn console() {
         "console",
         |fixture| {
             // A `sandboxd` that fails as it starts, saying why.
-            let stand_in = fixture.dir.join("stand-in-sandboxd");
+            let stand_in = fixture.dir.path().join("stand-in-sandboxd");
             let script =
                 "#!/bin/sh\necho 'sandboxd: a stand-in, which exits without dialing' >&2\n";
             fs::write(&stand_in, script).unwrap();
@@ -1063,7 +1065,7 @@ fn refused_calls() {
             let sandbox = fixture.try_start(&fixture.run, "refused", sandboxd, image(), ops, false);
             let mut sandbox = sandbox.unwrap();
             // A session for the second `sandboxd`, which it connects to and never serves.
-            let second = Listener::bind(fixture.dir.join("refused/second")).unwrap();
+            let second = Listener::bind(fixture.dir.path().join("refused/second")).unwrap();
             let script = format!(
                 r#"{CTL}
                 truncate -s {huge} huge
@@ -1406,8 +1408,8 @@ fn respond(incoming: IncomingModelRequest) -> String {
 /// its standard error, if anything was written there.
 fn log(fixture: &Fixture, sandbox: &mut Started) -> Vec<String> {
     collect(fixture, sandbox, "log");
-    let stdout = fs::read_to_string(fixture.dir.join("collected-log/1.stdout")).unwrap();
-    let stderr = fs::read_to_string(fixture.dir.join("collected-log/1.stderr")).unwrap();
+    let stdout = fs::read_to_string(fixture.dir.path().join("collected-log/1.stdout")).unwrap();
+    let stderr = fs::read_to_string(fixture.dir.path().join("collected-log/1.stderr")).unwrap();
     let stderr = (!stderr.is_empty()).then(|| format!("stderr: {}", stderr.trim_end()));
     stdout.lines().map(str::to_owned).chain(stderr).collect()
 }

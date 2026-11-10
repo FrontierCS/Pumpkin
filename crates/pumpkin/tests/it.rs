@@ -32,6 +32,7 @@ use schema::provider::RunTag;
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
 use stdx::process::Environment;
+use tempfile::TempDir;
 
 const LWE: &str = include_str!("../../schema/tests/fixtures/lwe.json");
 
@@ -47,14 +48,15 @@ const SCORE: &str = r#"printf '{"raw_score": %s}' \
 
 /// The directory test `name` runs `pumpkin` in, empty. Dropping it removes it, unless the test
 /// failed, when it shows where it is.
-struct Scratch(PathBuf);
+struct Scratch(PathBuf, TempDir);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = env::temp_dir().join(format!("pk-cli-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir(&dir).unwrap();
-        Self(dir)
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("pumpkin-{name}-"))
+            .tempdir()
+            .unwrap();
+        Self(dir.path().to_owned(), dir)
     }
 
     /// Writes `contents` into the directory's file `name`, making its directory if need be.
@@ -76,9 +78,8 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         if thread::panicking() {
+            self.1.disable_cleanup(true);
             eprintln!("the test's scratch directory is {}", self.0.display());
-        } else {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 }

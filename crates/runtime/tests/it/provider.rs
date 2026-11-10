@@ -13,8 +13,8 @@
     reason = "a run that can't be cleaned up says so"
 )]
 
-use std::fs;
-use std::os::unix::fs::DirBuilderExt;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -28,6 +28,7 @@ use schema::provider::{
 };
 use schema::sandbox::{RelativePath, file_mode};
 use stdx::{Context, Deadline};
+use tempfile::TempDir;
 
 use crate::docker;
 use crate::sim::Sim;
@@ -78,7 +79,7 @@ fn check(name: &str, subject: &dyn Subject) {
         image,
         sandboxd,
         mute,
-    } = subject.locals(&suite.dir);
+    } = subject.locals(suite.dir.path());
     let (sandboxd, mute) = (
         Local::Sandboxd { path: sandboxd },
         Local::Sandboxd { path: mute },
@@ -216,7 +217,7 @@ fn put(mut session: Session) -> String {
 /// sandboxes dial. Dropping it deletes what the run's list finds, and removes the directory.
 struct Suite<'a> {
     provider: &'a dyn Provider,
-    dir: PathBuf,
+    dir: TempDir,
     run: RunTag,
     /// The id of each sandbox created, and its role, by which the outcomes name it.
     roles: Vec<(SandboxId, &'static str)>,
@@ -224,12 +225,13 @@ struct Suite<'a> {
 
 impl<'a> Suite<'a> {
     fn new(name: &str, provider: &'a dyn Provider) -> Self {
-        // Socket paths are short: a directory in the system's temporary one, as the parent of
-        // every socket directory must be private to this user.
         let tag = format!("pk-{}-{name}", std::process::id());
-        let dir = std::env::temp_dir().join(&tag);
-        let _ = fs::remove_dir_all(&dir);
-        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        // Private to this user, as the parent of every socket directory must be.
+        let dir = tempfile::Builder::new()
+            .prefix("runtime-")
+            .permissions(Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         Self {
             provider,
             dir,
@@ -246,7 +248,7 @@ impl<'a> Suite<'a> {
         image: &Published,
         sandboxd: &Published,
     ) -> (SandboxId, Listener) {
-        let dir = self.dir.join(role);
+        let dir = self.dir.path().join(role);
         fs::create_dir(&dir).unwrap();
         let listener = Listener::bind(dir.join(SOCKET_NAME)).unwrap();
         let create = Create {
@@ -327,7 +329,6 @@ impl Drop for Suite<'_> {
         if let Err(error) = deleted {
             eprintln!("run {} can't be cleaned up: {error}", self.run.as_str());
         }
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

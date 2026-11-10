@@ -1,0 +1,3 @@
+[profile.default]
+# So that a hung test fails ci instead of holding it.
+slow-timeout = { period = "60s", terminate-after = 5 }

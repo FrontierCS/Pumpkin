@@ -21,29 +21,33 @@ use runtime::Run;
 use schema::ir::{self, ModelName, Name};
 use schema::workflow::Workflow;
 use serde_json::Value;
+use tempfile::TempDir;
 
 const LWE: &str = include_str!("../../../schema/tests/fixtures/lwe.json");
 
-/// The runs directory of test `name`, empty. Dropping it removes it, unless the test failed,
-/// when it shows where the records are.
+/// The runs directory of test `name`. Dropping it removes it, unless the test failed, when it
+/// shows where the records are.
 pub(crate) struct Runs {
     pub(crate) dir: PathBuf,
+    scratch: TempDir,
 }
 
 impl Runs {
     pub(crate) fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("pk-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        Self { dir }
+        let scratch = tempfile::Builder::new()
+            .prefix(&format!("runtime-{name}-"))
+            .tempdir()
+            .unwrap();
+        let dir = scratch.path().to_owned();
+        Self { dir, scratch }
     }
 }
 
 impl Drop for Runs {
     fn drop(&mut self) {
         if thread::panicking() {
+            self.scratch.disable_cleanup(true);
             eprintln!("the runs' records are in {}", self.dir.display());
-        } else {
-            let _ = fs::remove_dir_all(&self.dir);
         }
     }
 }
