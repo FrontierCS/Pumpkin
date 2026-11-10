@@ -8,9 +8,10 @@
 //! on one inbox, into which the agent's session hands what it reads, and each judge call's
 //! thread its reports. Its sandboxes start on one path, the `sandbox` module's, and the agent's
 //! is the `agent` module's. Each model request of the agent's is answered on a thread of its
-//! own, as the `model` module serves the agent's route, until a finalize or the work phase's
-//! end cuts the route's exchanges short. The record's files and the run log's records, and when
-//! each is written, are laid out in the `record` and `log` modules.
+//! own, as the `model` module serves the agent's route, until the core stops allowing them
+//! ([`Core::model_requests_allowed`]), which ends the route's exchanges. The record's files and
+//! the run log's records, and when each is written, are laid out in the `record` and `log`
+//! modules.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -19,14 +20,12 @@ use std::thread::{self, Scope};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, mem};
 
-use decision::{
-    Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, Verdict, WorkEnd, lasts,
-};
+use decision::{Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, lasts};
 use gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
 use provider::Provider;
 use route::{Answer, Serving};
 use schema::provider::{RunTag, SandboxId};
-use schema::sandbox::op::OpReply;
+use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{JudgeCall, Main, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
@@ -103,8 +102,8 @@ impl Run {
     /// # Errors
     ///
     /// Fails if the run can't be set up, recorded or cleaned up, if it was still going at its
-    /// hard end ([`lasts`]), or if the model provider refused the route's key or failed the
-    /// agent's last request as it exited with no submission finalized.
+    /// hard end ([`lasts`]), or if the model provider refused the route's key before a final
+    /// submission was accepted, or failed the agent's last request as it exited without one.
     pub fn execute(self, provider: &dyn Provider, sandboxd: &Path) -> Result<Outcome, String> {
         let outcome = self.run_on(provider, sandboxd);
         let recorded = match &outcome {
@@ -143,16 +142,18 @@ impl Run {
             unanswered: None,
             next_op: 0,
             next_model_request: 0,
+            finalized_first: false,
             stops: BTreeMap::new(),
             pending: VecDeque::new(),
             inbox: Inbox::new(),
         };
         let outcome = runtime.drive(unix);
-        // What the agent did with a route whose key the provider refused, or whose provider
-        // failed its last request as it exited, is the deployment's failure, not a result of the
-        // agent's to score.
-        let exited = exited_unfinalized(&outcome);
-        let keyed = (self.served.as_ref()).map_or(Ok(()), |served| served.upstream_held(exited));
+        // What the agent did with a route whose key the provider refused before a finalize
+        // locked the selection, or whose provider failed its last request as it exited, is the
+        // deployment's failure, not a result of the agent's to score.
+        let keyed = (self.served.as_ref()).map_or(Ok(()), |served| {
+            served.upstream_held(runtime.finalized_first, &outcome)
+        });
         let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
         let noted = match &outcome {
             Ok(_) => Ok(()),
@@ -204,24 +205,6 @@ impl Clock {
     }
 }
 
-/// Whether `outcome` is one where the agent's exit ended the work phase, with no submission
-/// finalized.
-fn exited_unfinalized(outcome: &Result<Outcome, String>) -> bool {
-    let Ok(Outcome { work_end, verdict }) = outcome else {
-        return false;
-    };
-    let finalized = match verdict {
-        Verdict::NoSubmission => false,
-        Verdict::Judged { submission, .. } | Verdict::NoResult { submission, .. } => {
-            submission.finalized
-        }
-    };
-    match work_end {
-        WorkEnd::AgentExited(_) => !finalized,
-        WorkEnd::Deadline | WorkEnd::Finalized | WorkEnd::AgentFailed(_) => false,
-    }
-}
-
 /// `outcome`, failed also for `then`'s error, if it has one: both reasons are kept.
 fn failed_also<T>(outcome: Result<T, String>, then: Result<(), String>) -> Result<T, String> {
     match (outcome, then) {
@@ -237,6 +220,22 @@ fn accepts(reply: &OpReply) -> bool {
         OpReply::Judge(_) | OpReply::Submit(_) => true,
         OpReply::Ops(_) | OpReply::Status(_) | OpReply::Refused { .. } => false,
     }
+}
+
+/// Whether `actions` accept the agent's final submission, which locks the selection.
+fn finalizes(actions: &[Action]) -> bool {
+    actions.iter().any(|action| {
+        matches!(
+            action,
+            Action::Reply {
+                reply: OpReply::Submit(SubmitReply {
+                    state: SubmitState::Accepted,
+                    ..
+                }),
+                ..
+            }
+        )
+    })
 }
 
 /// An op of the agent's, awaiting the core's reply.
@@ -315,6 +314,9 @@ struct Runtime<'r> {
     next_op: u64,
     /// The number the next model request takes, counting from 0.
     next_model_request: u64,
+    /// Whether the core accepted the agent's final submission while the model provider had not
+    /// refused the route's key ([`Served::upstream_held`]).
+    finalized_first: bool,
     /// A sender into each judge call's inbox, by job, through which the core's stop reaches it.
     stops: BTreeMap<JobId, Sender<Message>>,
     /// Events that performing actions produced, to feed the core next.
@@ -408,11 +410,9 @@ impl<'r> Runtime<'r> {
         let end = thread::scope(|scope| {
             let end = self.turns(scope, &mut core, actions);
             self.stop_jobs();
-            // The route ended once the core stopped allowing model requests, unless the run
-            // ended first, on a failure of the runtime's own: this ends it then. The scope's end
-            // still waits on an exchange resolving the provider's name or connecting to it,
-            // within the upstream's bounds, and on a response written to a session that takes
-            // nothing, until the response's deadline.
+            // The route ended with the work phase, at the agent's teardown, unless the run ended
+            // first: this ends it then. The scope's end still waits on its exchanges, within the
+            // upstream's bounds and the responses' deadlines.
             self.end_route();
             end
         })?;
@@ -437,14 +437,14 @@ impl<'r> Runtime<'r> {
             }
             let (at, event) = self.next_event(scope, core)?;
             actions = core.handle(at, event.clone());
-            self.log.event(self.workflow, at, &event, &actions)?;
-            // The route ends as the core stops allowing model requests, at a finalize or at the
-            // work phase's end, before the core's actions are performed: the responses it cuts
-            // short then end while the agent's teardown, if the actions hold it, still needs the
-            // agent's session.
-            if !core.model_requests_allowed(at) {
-                self.end_route();
+            // The key's refusal is read as the core locks the selection, before the record of it
+            // is written, so that a refusal heard after the lock leaves the run to be scored.
+            if let Some(served) = self.served
+                && finalizes(&actions)
+            {
+                self.finalized_first = !served.key_was_refused();
             }
+            self.log.event(self.workflow, at, &event, &actions)?;
         }
     }
 
@@ -461,12 +461,12 @@ impl<'r> Runtime<'r> {
         self.hard_end().saturating_sub(final_judge)
     }
 
-    /// When the answer to an op is due, since the run started: the next time the core acts of
-    /// itself ([`Core::tick_due`]), or the hard end once it won't.
-    fn answers_due(&self, core: &Core<'_>) -> Duration {
+    /// When the answer to an op is due: by the next time the core acts of itself
+    /// ([`Core::tick_due`]).
+    fn answers_due(&self, core: &Core<'_>) -> Deadline {
         // An answer the agent doesn't read then holds the loop no later than the time it would
         // act on next anyway.
-        core.tick_due().unwrap_or_else(|| self.hard_end())
+        self.clock.deadline(core.tick_due())
     }
 
     /// Waits for the next event: one that performing an action produced; else what arrives in
@@ -482,14 +482,7 @@ impl<'r> Runtime<'r> {
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
-        let Some(due) = core.tick_due() else {
-            unreachable!(
-                "the core has no tick due, though `turns` calls this only until `perform` \
-                 returns the run's end, on `Finish` or `Abandon`, and `tick_due` is `Some` in \
-                 every phase where the run is still going"
-            )
-        };
-        let until = self.clock.deadline(due);
+        let until = self.clock.deadline(core.tick_due());
         loop {
             // The agent's arrivals are timed as the loop takes them, after a due tick, so the
             // tick comes first while the agent is held. Once it is gone, what the inbox holds is
@@ -543,7 +536,7 @@ impl<'r> Runtime<'r> {
         let event = match arrival {
             Arrival::Op(incoming) => Some(self.op(incoming)),
             Arrival::Refused(refused) => {
-                let by = self.clock.deadline(self.answers_due(core));
+                let by = self.answers_due(core);
                 self.refuse(at, refused, by)?;
                 None
             }
@@ -597,8 +590,8 @@ impl<'r> Runtime<'r> {
         };
         let allowed = core.model_requests_allowed(at);
         // A response still open at its deadline ends the agent's session, which the teardown
-        // needs, so it is due by the teardown's end; a finalize or the work phase's end cuts it
-        // short before that (`end_route`).
+        // needs, so it is due by the teardown's end; the work phase's end ends it before that
+        // (`end_route`).
         let by = self.clock.deadline(self.teardown_end());
         let (reports, clock) = (self.inbox.sender(), self.clock);
         // A request stays in flight until its thread writes its response's end, the thread's
@@ -688,7 +681,7 @@ impl<'r> Runtime<'r> {
             for action in actions {
                 match action {
                     Action::Reply { op, reply } => {
-                        let by = self.clock.deadline(self.answers_due(core));
+                        let by = self.answers_due(core);
                         self.reply(op, reply, by)?;
                     }
                     // A type excluding these actions here would split the core's actions by the
@@ -733,7 +726,7 @@ impl<'r> Runtime<'r> {
                     self.pending.push_back((self.clock.now(), event));
                 }
                 Action::Reply { op, reply } => {
-                    let by = self.clock.deadline(self.answers_due(core));
+                    let by = self.answers_due(core);
                     self.reply(op, reply, by)?;
                 }
                 Action::StartJudge {
@@ -757,7 +750,12 @@ impl<'r> Runtime<'r> {
                     // A call whose thread has ended has nothing left to stop.
                     let _ = stop.send(Message::Stop);
                 }
-                Action::TearDownAgent => self.tear_down_agent()?,
+                Action::TearDownAgent => {
+                    // The route ends with the work phase, first, so that its exchanges end while
+                    // the teardown still has the agent's session.
+                    self.end_route();
+                    self.tear_down_agent()?;
+                }
                 Action::Finish { outcome } => end = Some(Ok(outcome)),
                 // Only a reply can follow it in its batch: the refusal of an op taken at the hard
                 // end, by which its answer was due, so `answer` notes it unsent, and the op ends
@@ -902,7 +900,7 @@ impl<'r> Runtime<'r> {
             // of its own, and what it left is collected by the agent's teardown's end, which
             // leaves the final judge its share of the hard end.
             JudgeCall::Grant(_) => {
-                let start = at(startup.min(self.answers_due(core)));
+                let start = at(startup.min(core.tick_due()));
                 Deadlines {
                     startup: start,
                     start,
@@ -922,9 +920,8 @@ impl<'r> Runtime<'r> {
         }
     }
 
-    /// Ends the agent's model route, if it has one, since the core allows no more of its model
-    /// requests: its exchanges in flight are cut short, and any later one fails at once. Ending
-    /// it again does nothing.
+    /// Ends the agent's model route, if it has one, with its every exchange in flight and every
+    /// later one ([`Served::end`]). Ending it again does nothing.
     fn end_route(&self) {
         if let Some(served) = self.served {
             served.end();

@@ -83,7 +83,7 @@ pub(crate) struct Refusal {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Status {
     /// The request breaks a rule of the closure's, the model provider refused it or the route's
-    /// key, or it comes once the route has ended.
+    /// key, or the route has ended before it was answered.
     BadRequest,
     /// Its target is not `/responses`.
     NotFound,
@@ -200,21 +200,20 @@ impl Closed {
 }
 
 impl Refusal {
-    /// The refusal of a request taken once the agent's work phase has ended, with which its
-    /// route ends.
+    /// The refusal of a request once the route has ended, by its caller
+    /// ([`Upstream::serve`](super::Upstream::serve)) or by
+    /// [`Upstream::shutdown`](super::Upstream::shutdown).
     pub(crate) fn ended() -> Self {
-        // A 400, as the harness the runs use takes one as final, and ends its turn, so that it
-        // can exit within the grace; a 403, say, it tries again, as it would a failed stream,
-        // for as long as its retries last.
-        let message = "the work phase has ended, and with it the model route: make no more model \
-                       requests";
+        // A 400, which a harness takes as final, where it would retry a 403. The message names
+        // no cause, as the route knows no run.
+        let message = "the model route has ended: make no more model requests";
         refusal(Status::BadRequest, message.to_owned())
     }
 
     /// The refusal of a request once the model provider has refused the route's key with a 401,
     /// with which the route ends.
     pub(crate) fn key_refused() -> Self {
-        // A 400, as for the work phase's end, so that the harness ends its turn rather than try
+        // A 400, as for the route's end, so that the harness ends its turn rather than try
         // again with the same key, which every later request would carry.
         let message = "the model provider refused the route's key, with a 401, which ends the \
                        model route: make no more model requests";

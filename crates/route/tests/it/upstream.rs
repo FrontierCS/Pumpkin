@@ -4,14 +4,14 @@
 //! received and what the sandbox heard.
 
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, iter, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Listener};
+use gateway::{Arrival, IncomingModelRequest, Listener};
 use route::{Answer as Told, Key, Route, Upstream, UpstreamUrl};
 use stdx::Deadline;
 
@@ -39,8 +39,8 @@ const PARTS: [&str; 2] = [
 
 /// A case: its name, its upstream's URL and the text of its key file (`None` for no file), how
 /// the stand-in answers (`None` if it never receives the request), and whether a second request,
-/// which the stand-in never receives, is served with the same upstream (`Some(allowed)`, as the
-/// work phase has not ended or has).
+/// which the stand-in never receives, is served with the same upstream, and if so whether it is
+/// allowed (`Some(allowed)`).
 struct Case {
     name: &'static str,
     url: &'static str,
@@ -66,6 +66,9 @@ enum Answer {
     BreaksOff,
     /// It hangs up without an answer.
     HangsUp,
+    /// It tells the test that it holds the request, then holds it without an answer until the
+    /// route's end hangs up on it.
+    Holds,
 }
 
 /// A case whose upstream is the stand-in with [`KEY`], never given up on.
@@ -110,7 +113,8 @@ fn check(cases: &[Case], expect: &Expect) {
         .collect();
     let answers = forwarded.iter().filter_map(|case| case.answer).collect();
     let (parts, heard_part) = mpsc::channel();
-    let stand_in = thread::spawn(move || serve(&stand_in, answers, &heard_part));
+    let (holds, held) = mpsc::channel();
+    let stand_in = thread::spawn(move || serve(&stand_in, answers, &heard_part, &holds));
     let socket = dir.join("gateway.sock");
     let listener = Listener::bind(socket.clone()).unwrap();
     let requests = (forwarded.iter())
@@ -125,7 +129,7 @@ fn check(cases: &[Case], expect: &Expect) {
     let mut outcomes = Vec::new();
     for (case, upstream) in cases.iter().zip(&made) {
         let Ok(upstream) = upstream else { continue };
-        let served = serve_case(case, upstream, &route, &arrivals);
+        let served = serve_case(case, upstream, &route, &arrivals, &held);
         outcomes.push((served, upstream.key_was_refused()));
     }
     let mut heard = sandbox.join().unwrap().into_iter();
@@ -160,30 +164,43 @@ fn check(cases: &[Case], expect: &Expect) {
 }
 
 /// Serves `case`'s request, and its second if it has one, with `upstream`, and returns how it
-/// answered each.
+/// answered each. For a case whose stand-in holds the request, the route ends once `held` says
+/// that it does.
 fn serve_case(
     case: &Case,
     upstream: &Upstream,
     route: &Route,
     arrivals: &Receiver<Arrival>,
+    held: &Receiver<()>,
 ) -> Vec<Option<Told>> {
     let by = Deadline::after(HUNG);
-    let mut served = vec![serve_one(upstream, route, arrivals, true, by)];
+    let incoming = next_model_request(arrivals);
+    let first = if case.answer == Some(Answer::Holds) {
+        thread::scope(|scope| {
+            let served = scope.spawn(move || serve_one(upstream, route, incoming, true, by));
+            held.recv_timeout(HUNG).unwrap();
+            upstream.shutdown();
+            served.join().unwrap()
+        })
+    } else {
+        serve_one(upstream, route, incoming, true, by)
+    };
+    let mut served = vec![first];
     if let Some(allowed) = case.then {
-        served.push(serve_one(upstream, route, arrivals, allowed, by));
+        let incoming = next_model_request(arrivals);
+        served.push(serve_one(upstream, route, incoming, allowed, by));
     }
     served
 }
 
-/// Serves the next model request of `arrivals` with `upstream`, and returns how it answered.
+/// Serves `incoming` with `upstream`, and returns how it answered.
 fn serve_one(
     upstream: &Upstream,
     route: &Route,
-    arrivals: &Receiver<Arrival>,
+    incoming: IncomingModelRequest,
     allowed: bool,
     by: Deadline,
 ) -> Option<Told> {
-    let incoming = next_model_request(arrivals);
     let mut told = None;
     upstream.serve(
         route,
@@ -224,11 +241,12 @@ fn got((head, body): (String, Vec<u8>), sent: &[u8], first: &mut Option<String>)
 
 /// Answers a request on each connection in turn, as `answers` say, and returns what each held:
 /// its line and headers, and its body. It sends a stream's second part, or breaks it off, once
-/// `heard_part` says the sandbox heard of its first.
+/// `heard_part` says the sandbox heard of its first, and tells `holds` of each request it holds.
 fn serve(
     listener: &TcpListener,
     answers: Vec<Answer>,
     heard_part: &Receiver<()>,
+    holds: &Sender<()>,
 ) -> Vec<(String, Vec<u8>)> {
     let mut received = Vec::new();
     for answer in answers {
@@ -288,6 +306,11 @@ fn serve(
                 connection.write_all(head.as_bytes()).unwrap();
             }
             Answer::HangsUp => {}
+            Answer::Holds => {
+                holds.send(()).unwrap();
+                // Until the client hangs up.
+                let _ = io::copy(&mut connection, &mut io::sink());
+            }
         }
         let _ = connection.shutdown(Shutdown::Both);
     }
@@ -379,7 +402,7 @@ fn forward() {
             a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); key refused: false
             the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); key refused: false
             the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); key refused: true
-            the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the work phase has ended, and with it the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the work phase has ended, and with it the model route: make no more model requests" }); key refused: false
+            the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); key refused: false
             a request forbidden: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(403), request_id: None, status: 400, message: "the model provider refused the request, with a 403: send only requests that it allows" }); key refused: false
             a redirect: the stand-in got the same head with the body as sent; the sandbox heard 307 [] ; told: Some(Forwarded { status: 307, request_id: None }); key refused: false
             a coded body: the stand-in got the same head with the body as sent; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: Some(200), request_id: None, status: 502, message: "the model provider coded its answer, though the request asked for it uncoded: try again" }); key refused: false
@@ -393,5 +416,18 @@ fn forward() {
             no key file: the key file <dir>/key-14 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
             an empty key file: the key file <dir>/key-15 holds no API key: write the key alone, on one line
             a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line"#]],
+    );
+}
+
+#[test]
+fn shutdown() {
+    check(
+        &[Case {
+            then: Some(true),
+            ..case("a request in flight", Answer::Holds)
+        }],
+        &expect![[
+            r#"a request in flight: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: None, request_id: None, status: 400, message: "the model route has ended: make no more model requests" }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); key refused: false"#
+        ]],
     );
 }

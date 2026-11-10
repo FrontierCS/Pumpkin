@@ -51,12 +51,19 @@ exchange. Another program's format, such as `docker info`'s, stays with the code
   not check again what parsing established.
 - **Architecture Invariant:** the IR holds no defaults: an absent field means what its doc says,
   such as no limit; whatever writes the IR picks the defaults.
+- **Architecture Invariant:** the agent never calls the judge that scores it: parsing
+  (`Parser::score`) refuses a workflow whose score judge is the role of any of the agent's judge
+  grants.
+- **Architecture Invariant:** a passive sandbox, one whose role makes no ops (`Create::ops`), has
+  no `sandboxctl`, so it can make none.
 
 **`crates/gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
 `Session`, whose one owner moves trees, runs commands (`Process`) and answers ops, hearing of each
 op, each model request, each command's exit and the session's end as an `Arrival` sent to it.
 - **Architecture Invariant:** a sandbox can't harm the host through its session: anything out of
   protocol ends the session, and a session costs the host only bounded memory and bounded waits.
+  So a session accepted with no op payload limit (`Listener::accept`) ends at its first op
+  (`Assembler::open`).
 - **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes
   have the same sessions: of Pumpkin's crates, it depends only on `schema` and `stdx`.
 
@@ -127,10 +134,12 @@ so the TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
 run, then drives the decision core on the run's `Provider`, keeping the run's record, whose
 files `record` lays out, and its run log, whose records `log` does. `model` serves the agent's
 model requests through `route`'s `Route` and `Upstream`, and judges the model
-provider's answers, until the agent finalizes, the work phase ends, or the provider refuses the
-route's key.
+provider's answers, until the work phase ends (`model_requests_allowed`), or the provider
+refuses the route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
+- **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and
+  nowhere else: no op reply carries a collected file, so only the operator sees it.
 - **Architecture Invariant:** a record appears in the runs directory only once its `driver.pid`
   is locked (`Lock`), and the lock is held until the run's last write, so a record is ended, live
   or lost, by `outcome.json` and then the lock, and a record without `driver.pid` is not one.

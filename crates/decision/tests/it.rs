@@ -11,7 +11,8 @@
 //!   each an op from the agent, whose payload is named by the op's number;
 //! - `judge_started <job>`, `judge_exited <job> [<code>]`, `judge_timed_out <job>`,
 //!   `collected <job> <result.json>`, `judge_failed <job> <reason>`;
-//! - `tick`.
+//! - `tick`;
+//! - `model`, no event, but the question whether the agent's model requests are allowed then.
 
 #![expect(
     clippy::unwrap_used,
@@ -60,10 +61,20 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        let (at, event) = line.split_once(' ').unwrap();
-        let event = run.event(event);
-        let actions = core.handle(Duration::from_millis(at.parse().unwrap()), event);
-        run.note(line, &actions, core.tick_due());
+        if let Some(at) = line.strip_suffix(" model") {
+            let at = Duration::from_millis(at.parse().unwrap());
+            let allowed = if core.model_requests_allowed(at) {
+                "allowed"
+            } else {
+                "refused"
+            };
+            writeln!(run.transcript, "{line}\n  model requests {allowed}").unwrap();
+        } else {
+            let (at, event) = line.split_once(' ').unwrap();
+            let event = run.event(event);
+            let actions = core.handle(Duration::from_millis(at.parse().unwrap()), event);
+            run.note(line, &actions, core.tick_due());
+        }
     }
     expect.assert_eq(&run.transcript);
 }
@@ -75,7 +86,7 @@ struct Run<'w> {
     ops: u64,
     /// What each job was made under, for its result's spec.
     jobs: BTreeMap<JobId, JudgeCall>,
-    /// When the core last said it next wants a tick.
+    /// When the core last said it next wants a tick, once it has.
     tick_due: Option<Duration>,
     transcript: String,
 }
@@ -154,18 +165,15 @@ impl Run<'_> {
 
     /// Notes an event, the actions it called for, and when the next tick is due if that
     /// changed.
-    fn note(&mut self, event: &str, actions: &[Action], tick_due: Option<Duration>) {
+    fn note(&mut self, event: &str, actions: &[Action], tick_due: Duration) {
         writeln!(self.transcript, "{event}").unwrap();
         for action in actions {
             let action = self.action(action);
             writeln!(self.transcript, "  {action}").unwrap();
         }
-        if tick_due != self.tick_due {
-            self.tick_due = tick_due;
-            let due = tick_due.map_or("no tick due".to_owned(), |due| {
-                format!("tick due at {}", due.as_millis())
-            });
-            writeln!(self.transcript, "  ({due})").unwrap();
+        if self.tick_due != Some(tick_due) {
+            self.tick_due = Some(tick_due);
+            writeln!(self.transcript, "  (tick due at {})", tick_due.as_millis()).unwrap();
         }
     }
 
@@ -310,7 +318,6 @@ fn lwe() {
             20000 judge_exited 1
             20100 collected 1 {"raw_score": 0, "metrics": {"solved": 0}}
               finish: score 0; work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, judged, returning {"metrics":{"solved":0},"raw_score":0}
-              (no tick due)
         "#]],
     );
 }
@@ -437,6 +444,8 @@ fn deadline() {
         55000 judge train 10
         55500 judge_started 0
         59999 tick
+        59999 model
+        60000 model
         60000 tick
         60100 status 0
         60200 agent_exited 137
@@ -456,6 +465,10 @@ fn deadline() {
               start job 0 of train on op 2's payload of 10 bytes, with a timeout of 5s
             55500 judge_started 0
             59999 tick
+            59999 model
+              model requests allowed
+            60000 model
+              model requests refused
             60000 tick
               stop job 0
               tear down the agent
@@ -469,7 +482,6 @@ fn deadline() {
             180500 judge_timed_out 1
             180600 collected 1 {"raw_score": 7}
               finish: no score; work ended at the deadline; the stored submission, op 1's payload of 10 bytes, got no result, Timeout
-              (no tick due)
         "#]],
     );
     check(
@@ -509,6 +521,7 @@ fn agent_ends() {
         3200 agent_exited 0
         3400 collected 0 {"raw_score": 1}
         3500 judge_started 1
+        4000 judge_failed 0 its report came again
         5000 judge_exited 1
         5100 collected 1 {"raw_score": "high"}
         "#,
@@ -529,10 +542,10 @@ fn agent_ends() {
             3400 collected 0 {"raw_score": 1}
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
             3500 judge_started 1
+            4000 judge_failed 0 its report came again
             5000 judge_exited 1
             5100 collected 1 {"raw_score": "high"}
               finish: no score; work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, got no result, InvalidResult("the score at `/raw_score` is not a number: write a number there, or null")
-              (no tick due)
         "#]],
     );
     check(
@@ -547,7 +560,7 @@ fn agent_ends() {
             30000 agent_failed the agent's sandbox did not connect
               tear down the agent
               finish: no score; work ended at the agent's failure, the agent's sandbox did not connect; no submission
-              (no tick due)
+              (tick due at 18200000)
         "#]],
     );
 }
@@ -574,7 +587,7 @@ fn hard_end() {
             260000 ops
               abandon the run at its hard end
               refuse op 2: the run has passed its hard end: make no more ops
-              (no tick due)
+              (tick due at 260000)
             260100 judge_exited 0
         "#]],
     );
@@ -592,7 +605,7 @@ fn hard_end() {
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":59}
             260000 tick
               abandon the run at its hard end
-              (no tick due)
+              (tick due at 260000)
         "#]],
     );
 }
@@ -623,7 +636,6 @@ fn hard_end_after_work() {
             259999 tick
             260000 tick
               abandon the run at its hard end
-              (no tick due)
         "#]],
     );
     check(
@@ -655,7 +667,6 @@ fn hard_end_after_work() {
             229999 tick
             230000 collected 0 {"raw_score": 7}
               abandon the run at its hard end
-              (no tick due)
         "#]],
     );
 }
@@ -675,7 +686,7 @@ fn hard_end_bounds() {
             1000 agent_exited 0
               tear down the agent
               finish: no score; work ended at the agent's exit, Code(0); no submission
-              (no tick due)
+              (tick due at 260000)
             260000 tick
         "#]],
     );
@@ -701,7 +712,6 @@ fn hard_end_bounds() {
             209999 tick
             210000 tick
               abandon the run at its hard end
-              (no tick due)
         "#]],
     );
     check(
@@ -765,6 +775,8 @@ fn finalize_lock() {
         2200 status 0
         2300 submit submit 10
         61999 tick
+        61999 model
+        62000 model
         62000 tick
         62200 judge_failed 0 stopped
         ",
@@ -786,6 +798,10 @@ fn finalize_lock() {
             2300 submit submit 10
               refuse op 5: a final submission was accepted: make no more ops
             61999 tick
+            61999 model
+              model requests allowed
+            62000 model
+              model requests refused
             62000 tick
               stop job 0
               tear down the agent
@@ -798,6 +814,7 @@ fn finalize_lock() {
         |ir| ir["main"]["solo_then_judge"]["finalize_grace_seconds"] = json!(0),
         r"
         2000 submit submit 10 final
+        2000 model
         2100 ops
         ",
         &expect![[r#"
@@ -809,6 +826,8 @@ fn finalize_lock() {
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 18140000)
+            2000 model
+              model requests refused
             2100 ops
               refuse op 2: a final submission was accepted: make no more ops
         "#]],
@@ -816,11 +835,17 @@ fn finalize_lock() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn finalize_near_deadline() {
     check(
         |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(30),
         r"
         10000 submit submit 10 final
+        29999 model
+        30000 model
         ",
         &expect![[r#"
             start
@@ -828,6 +853,65 @@ fn finalize_near_deadline() {
               (tick due at 30000)
             10000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":20}
+            29999 model
+              model requests allowed
+            30000 model
+              model requests refused
+        "#]],
+    );
+    let grace = |ir: &mut Value| {
+        let pattern = &mut ir["main"]["solo_then_judge"];
+        pattern["deadline_seconds"] = json!(30);
+        pattern["finalize_grace_seconds"] = json!(10);
+    };
+    check(
+        grace,
+        r#"
+        19950 submit submit 10 final
+        30100 tick
+        30150 ops
+        30200 judge_started 0
+        30300 judge_exited 0
+        30400 collected 0 {"raw_score": 1}
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 30000)
+            19950 submit submit 10 final
+              reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":10}
+              (tick due at 29950)
+            30100 tick
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 180000)
+            30150 ops
+              refuse op 2: a final submission was accepted: make no more ops
+            30200 judge_started 0
+            30300 judge_exited 0
+            30400 collected 0 {"raw_score": 1}
+              finish: score 1; work ended at a finalize; the finalized submission, op 1's payload of 10 bytes, judged, returning {"raw_score":1}
+        "#]],
+    );
+    check(
+        grace,
+        r"
+        20000 submit submit 10 final
+        30000 tick
+        30000 ops
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 30000)
+            20000 submit submit 10 final
+              reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":10}
+            30000 tick
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 180000)
+            30000 ops
+              refuse op 2: the work phase has ended: make no more ops
         "#]],
     );
 }

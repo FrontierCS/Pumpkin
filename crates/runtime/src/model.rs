@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
+use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Answer, Route, Serving, Upstream};
 use schema::ir::Name;
@@ -21,18 +22,9 @@ pub(super) struct Served {
     /// The run log's note on which upstream serves the route, by its name, and the name that it
     /// takes for each model.
     started: String,
-    /// How the model provider is failing the agent.
-    health: Mutex<Health>,
-}
-
-/// What the route knows of the model provider's failure of the agent's requests.
-#[derive(Debug, Default)]
-struct Health {
-    /// Whether the route has ended ([`Served::end`]), after which no answer counts.
-    ended: bool,
-    /// The failure, if the last request answered while the route was open got one, and no 2xx
-    /// came after it.
-    failing: Option<Failing>,
+    /// How the model provider is failing the agent: the failure, if the last request answered
+    /// while the route was open got one, and no 2xx came after it.
+    failing: Mutex<Option<Failing>>,
 }
 
 /// The model provider's failure of the agent's requests, as the last one answered shows.
@@ -103,7 +95,7 @@ impl Served {
             upstream,
             name,
             started,
-            health: Mutex::new(Health::default()),
+            failing: Mutex::new(None),
         }))
     }
 
@@ -112,11 +104,9 @@ impl Served {
         &self.started
     }
 
-    /// Answers `incoming`, the agent's model request numbered `number`, by `by`: refuses it
-    /// unless `allowed`, or once the model provider has refused the key, and else forwards it
-    /// upstream ([`Upstream::serve`]). It gives `note` a note on a request that it forwards,
-    /// before it does, and tells `answered` how it answered the request, before the answer's end
-    /// is written.
+    /// Answers `incoming`, the agent's model request numbered `number`, as [`Upstream::serve`]
+    /// does. It gives `note` a note on a request that it forwards, before it does, and tells
+    /// `answered` how it answered the request, before the answer's end is written.
     pub(super) fn serve(
         &self,
         number: u64,
@@ -138,19 +128,13 @@ impl Served {
     /// Notes how the route answered request `number`, if the route is open, in what the
     /// provider is failing the agent in.
     fn bear(&self, number: u64, answer: &Answer) {
-        let mut health = unpoisoned(self.health.lock());
-        if health.ended {
+        if self.upstream.was_shut_down() || matches!(answer, Answer::Barred { .. }) {
             return;
         }
-        if matches!(answer, Answer::Barred { .. }) {
-            return;
-        }
-        health.failing = match failure(answer) {
+        let mut failing = unpoisoned(self.failing.lock());
+        *failing = match failure(answer) {
             Some(how) => {
-                let since = health
-                    .failing
-                    .as_ref()
-                    .map_or(number, |failing| failing.since);
+                let since = failing.as_ref().map_or(number, |failing| failing.since);
                 Some(Failing {
                     since,
                     last: (number, how),
@@ -160,16 +144,27 @@ impl Served {
         };
     }
 
-    /// Checks that the model provider did not fail the agent: that it never refused the route's
-    /// key, and, if `exited_unfinalized`, that the agent's last request answered while the route
-    /// was open got no failure from it. `exited_unfinalized` says that the agent's exit ended
-    /// the work phase with no submission finalized.
+    /// Whether the model provider has refused the route's key ([`Upstream::key_was_refused`]).
+    pub(super) fn key_was_refused(&self) -> bool {
+        self.upstream.key_was_refused()
+    }
+
+    /// Checks that the model provider did not fail the agent in a run that ended with `outcome`:
+    /// unless `finalized_first`, that it never refused the route's key, and, if the agent's exit
+    /// ended the work phase with no submission finalized, that the agent's last request answered
+    /// while the route was open got no failure from it.
     ///
     /// # Errors
     ///
     /// Fails, naming the upstream or the fault, if the provider failed the agent so.
-    pub(super) fn upstream_held(&self, exited_unfinalized: bool) -> Result<(), String> {
-        if self.upstream.key_was_refused() {
+    pub(super) fn upstream_held(
+        &self,
+        finalized_first: bool,
+        outcome: &Result<Outcome, String>,
+    ) -> Result<(), String> {
+        // A finalize locks the selection, and so the score, which a refusal heard after it can't
+        // change.
+        if self.upstream.key_was_refused() && !finalized_first {
             return Err(format!(
                 "the upstream `{}` refused its key, with a 401, which ended the agent's model \
                  route: give it a key that it takes, and run again",
@@ -179,9 +174,9 @@ impl Served {
         // An agent that ran to the deadline, or finalized, is scored as usual: Harbor scores an
         // agent that timed out in its provider's backoff, and Inspect's `time_limit` is wall
         // clock, while none of the harnesses studied voids such a run.
-        let health = unpoisoned(self.health.lock());
-        let Some(Failing { since, last }) = health.failing.as_ref().filter(|_| exited_unfinalized)
-        else {
+        let failing = unpoisoned(self.failing.lock());
+        let failed = failing.as_ref().filter(|_| exited_unfinalized(outcome));
+        let Some(Failing { since, last }) = failed else {
             return Ok(());
         };
         let (number, how) = last;
@@ -195,8 +190,25 @@ impl Served {
 
     /// Ends the route's every exchange in flight and every later one ([`Upstream::shutdown`]).
     pub(super) fn end(&self) {
-        unpoisoned(self.health.lock()).ended = true;
         self.upstream.shutdown();
+    }
+}
+
+/// Whether `outcome` is one where the agent's exit ended the work phase, with no submission
+/// finalized.
+fn exited_unfinalized(outcome: &Result<Outcome, String>) -> bool {
+    let Ok(Outcome { work_end, verdict }) = outcome else {
+        return false;
+    };
+    let finalized = match verdict {
+        Verdict::NoSubmission => false,
+        Verdict::Judged { submission, .. } | Verdict::NoResult { submission, .. } => {
+            submission.finalized
+        }
+    };
+    match work_end {
+        WorkEnd::AgentExited(_) => !finalized,
+        WorkEnd::Deadline | WorkEnd::Finalized | WorkEnd::AgentFailed(_) => false,
     }
 }
 

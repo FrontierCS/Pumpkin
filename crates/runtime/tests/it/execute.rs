@@ -935,6 +935,7 @@ fn model_requests() {
         "model m-huge stream",
         "finalize submit 6",
         "model m-large stream",
+        "model m-large expired",
     ];
     check(
         "model-requests",
@@ -955,17 +956,21 @@ fn model_requests() {
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the work phase has ended, and with it the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":null},"seq":7}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":8}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 673 bytes","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":11}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":12}
+            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"upstream_status":200},"seq":8}
+            {"at_ns":"<ns>","note":"model request 3 goes upstream","seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":401},"seq":10}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 930 bytes","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":15}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
             model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the work phase has ended, and with it the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+            model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
             the model endpoint at each create: [true, false]
@@ -981,6 +986,7 @@ fn model_upstream_refusals() {
         "model m-large stream",
         "model m-large expired",
         "model m-large stream",
+        "finalize submit 6",
     ];
     check(
         "model-upstream-refusals",
@@ -989,8 +995,8 @@ fn model_upstream_refusals() {
         SANDBOXD,
         &expect![[r#"
             failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again
-            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            payloads hold: []
+            record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","state":"failed"}
             log.jsonl:
@@ -1004,9 +1010,13 @@ fn model_upstream_refusals() {
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":10}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 966 bytes","seq":11}
-            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":12}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":10}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 966 bytes","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":15}
+            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":16}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}
@@ -1014,8 +1024,8 @@ fn model_upstream_refusals() {
             model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
             model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
             socket directories left: false
-            their directory's mode at each create: ["700"]
-            the model endpoint at each create: [true]
+            their directory's mode at each create: ["700", "700"]
+            the model endpoint at each create: [true, false]
             listed once it ended: []"#]],
     );
 }
@@ -1225,31 +1235,34 @@ fn model_stream_cut() {
 }
 
 #[test]
-fn model_finalize_cut() {
+fn model_grace_cut() {
     let argv = ["ops", "ask m-large stall", "finalize submit 6"];
+    let mut ir = routed(ops_workflow(&argv, 30));
+    // So that the grace runs out while the agent still waits on the stalled stream.
+    ir["main"]["solo_then_judge"]["finalize_grace_seconds"] = json!(1);
     check(
-        "model-finalize-cut",
+        "model-grace-cut",
         &Sim::new(),
-        &routed(ops_workflow(&argv, 30)),
+        &ir,
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
             record: agent/log/collected, agent/log/command.stdout, agent/out/collected, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":5}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":6}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":7}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":5}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":9}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":10}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":10}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
