@@ -1376,7 +1376,10 @@ fn as_root_with_user() {
     start_as_root(&dir, &container, "1234:1235");
     let (sender, arrivals) = mpsc::channel();
     let accepted = registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
-    let lines = as_user(accepted.unwrap(), &arrivals, &root.join("collected"));
+    let mut session = accepted.unwrap();
+    let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
+    lines.extend(left_behind(&mut session, &arrivals, &container));
+    drop(session);
     // Gone already, once the session ended, which is as good as removed.
     let _ = (test_support::docker())
         .args(["rm", "--force", &container])
@@ -1394,19 +1397,24 @@ fn as_root_with_user() {
         CapAmb: 0000000000000000
         NoNewPrivs: 1
         nsenter: setuid: Operation not permitted
-        root refused"#]]
+        root refused
+        left behind: Code(3)
+        before freezing: /sbin/docker-init -- /.pumpkin/sandboxd --user 1234:1235 /.pumpkin/gateway/s, /.pumpkin/sandboxd --user 1234:1235 /.pumpkin/gateway/s, sleep 600, sleep 600
+        after freezing: /sbin/docker-init -- /.pumpkin/sandboxd --user 1234:1235 /.pumpkin/gateway/s, /.pumpkin/sandboxd --user 1234:1235 /.pumpkin/gateway/s"#]]
     .assert_eq(&lines.join("\n"));
     drop(sockets);
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Starts a container, `container`, of [`test_support::BUSYBOX`], as root, whose first process is
-/// the static `sandboxd`, with `--user` and `user`, meeting the gateway at the socket in `dir`.
+/// Starts a container, `container`, of [`test_support::BUSYBOX`], as root, whose first process,
+/// the engine's init, runs the static `sandboxd`, as Modal's own does, with `--user` and `user`,
+/// meeting the gateway at the socket in `dir`.
 fn start_as_root(dir: &Path, container: &str, user: &str) {
     let mount =
         |host: &Path, at: &str| format!("--mount=type=bind,source={},target={at}", host.display());
     let mut docker = test_support::docker();
     docker.args(["run", "--detach", "--rm", "--network=none", "--user=0:0"]);
+    docker.arg("--init");
     docker.arg(format!("--name={container}"));
     docker.arg(mount(dir, "/.pumpkin/gateway"));
     docker.arg(mount(&test_support::sandboxd(), "/.pumpkin/sandboxd"));
@@ -1418,8 +1426,8 @@ fn start_as_root(dir: &Path, container: &str, user: &str) {
 }
 
 /// What a command in `session`'s sandbox finds of its user, and of `/pumpkin`, as it runs: how it
-/// exited, then each line it printed, collected into `collected`; then the session's end.
-fn as_user(mut session: Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
+/// exited, then each line it printed, collected into `collected`.
+fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
     let dirs = ["home", "log"].map(relative);
     let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
     session
@@ -1429,23 +1437,7 @@ fn as_user(mut session: Session, arrivals: &Receiver<Arrival>, collected: &Path)
         stat -c '/pumpkin: %u:%g %a' /pumpkin
         grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
         nsenter --setuid=0 id 2>&1 || echo "root refused""#;
-    let out = absolute(Path::new("/pumpkin/log/out"));
-    let launch = Launch {
-        argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
-        env: Env::try_from(Vec::new()).unwrap(),
-        cwd: absolute(Path::new("/pumpkin/home")),
-        stdin: None,
-        stdout: out.clone(),
-        stderr: out,
-    };
-    let process = session.start(launch, hung()).unwrap();
-    let exited = match arrivals.recv_timeout(Duration::from_secs(30)) {
-        Ok(Arrival::Exited {
-            process: exited,
-            status,
-        }) if exited == process => status,
-        arrived => panic!("the command's exit was to arrive, not {arrived:?}"),
-    };
+    let exited = sh_as_user(session, arrivals, script);
     let limits = Limits {
         bytes: 1 << 20,
         entries: 10,
@@ -1457,4 +1449,75 @@ fn as_user(mut session: Session, arrivals: &Receiver<Arrival>, collected: &Path)
     let printed = printed.lines().map(|line| line.replace('\t', " "));
     lines.extend(printed.map(|line| line.trim_end().to_owned()));
     lines
+}
+
+/// What a command in `session`'s sandbox, the container `container`, leaves behind as it exits,
+/// a process orphaned and one in a session of its own, outside its command's process group: how
+/// the command exited, then the container's processes before the sandbox is frozen and after.
+fn left_behind(
+    session: &mut Session,
+    arrivals: &Receiver<Arrival>,
+    container: &str,
+) -> Vec<String> {
+    let exited = sh_as_user(
+        session,
+        arrivals,
+        "(sleep 600 &); setsid sleep 600 & exit 3",
+    );
+    // The script exits without waiting for its sleeps, which may not run yet: until then, each
+    // shows as the command that starts it.
+    let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
+    let before = contained(container, |listed| sleeping(listed) == 2);
+    session.freeze(hung()).unwrap();
+    // Freezing returns once the processes it kills are gone.
+    let after = contained(container, |_| true);
+    vec![
+        format!("left behind: {exited:?}"),
+        format!("before freezing: {before}"),
+        format!("after freezing: {after}"),
+    ]
+}
+
+/// Runs `script` in `session`'s sandbox, its output in `/pumpkin/log/out`, and returns how it
+/// exited, which it has 30 s to.
+fn sh_as_user(session: &mut Session, arrivals: &Receiver<Arrival>, script: &str) -> ExitStatus {
+    let out = absolute(Path::new("/pumpkin/log/out"));
+    let launch = Launch {
+        argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
+        env: Env::try_from(Vec::new()).unwrap(),
+        cwd: absolute(Path::new("/pumpkin/home")),
+        stdin: None,
+        stdout: out.clone(),
+        stderr: out,
+    };
+    let process = session.start(launch, hung()).unwrap();
+    match arrivals.recv_timeout(Duration::from_secs(30)) {
+        Ok(Arrival::Exited {
+            process: exited,
+            status,
+        }) if exited == process => status,
+        arrived => panic!("the command's exit was to arrive, not {arrived:?}"),
+    }
+}
+
+/// The commands of `container`'s processes, from the host, by process ID, listed every 10 ms
+/// until `done` holds of the list or 30 s pass.
+fn contained(container: &str, done: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let top = test_support::docker()
+            .args(["top", container, "-o", "pid,args"])
+            .output()
+            .unwrap();
+        let top = String::from_utf8(top.stdout).unwrap();
+        let commands = top.lines().skip(1).map(|line| {
+            let (_pid, command) = line.trim_start().split_once(' ').unwrap();
+            command.trim_start().to_owned()
+        });
+        let listed = commands.collect::<Vec<_>>().join(", ");
+        if done(&listed) || Instant::now() >= deadline {
+            return listed;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }

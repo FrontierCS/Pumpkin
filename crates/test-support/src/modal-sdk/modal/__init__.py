@@ -7,14 +7,15 @@ As the SDK does, it takes the profile from `MODAL_PROFILE`: a profile reaches th
 `<profile>-workspace`, but `unknown`, which Modal's configuration lacks, or, if
 `MODAL_CONFIG_PATH` names a file, one whose `[<profile>]` table that file lacks. An image it
 imports gets an id made of its reference's digest, unless that directory holds `import-fails`,
-whose text it fails with. If that directory holds `clock`, the helper reads the time from it, in
-seconds since the Unix epoch.
+whose text it fails with, and keeps its entrypoint, unless the import's commands leave it none. If
+that directory holds `clock`, the helper reads the time from it, in seconds since the Unix epoch.
 
 A sandbox it creates is a process of this machine's, `../sandbox.py`, which runs the real
 `sandboxd` that the image attaches, in a container of its image if it imported that, behind a
 stand-in for Modal's TLS edge: it keeps its files in
-`sandboxes/<id>` there, `sb-1` on, and outlives the call, until it is terminated, or its
-`sandboxd` exits, as `returncode` there then says. Its tunnel's host is `localhost`, which the
+`sandboxes/<id>` there, `sb-1` on, and outlives the call, until it is terminated, its timeout
+ends it, as `timed-out` there then says, or its `sandboxd` exits, as `returncode` there then
+says. Its tunnel's host is `localhost`, which the
 stand-in edge's certificate is for, as `edge.pem` and `edge.key` in that directory hold it.
 """
 
@@ -109,9 +110,11 @@ class Image:
         self.object_id: str | None = None
 
     @staticmethod
-    def from_registry(reference: str, *, secret: Secret) -> "Image":
-        image = Image([{"from_registry": reference, "secret": secret.values}])
-        return image
+    def from_registry(reference: str, *, secret: Secret,
+                      setup_dockerfile_commands: list[str]) -> "Image":
+        layer = {"from_registry": reference, "secret": secret.values,
+                 "setup_dockerfile_commands": setup_dockerfile_commands}
+        return Image([layer])
 
     @staticmethod
     def from_id(image_id: str) -> "Image":
@@ -122,14 +125,18 @@ class Image:
 
     def build(self, app: App) -> "Image":
         [layer] = self.layers
-        called("Image.build", app=app.name, reference=layer["from_registry"], secret=layer["secret"])
+        commands = layer["setup_dockerfile_commands"]
+        called("Image.build", app=app.name, reference=layer["from_registry"], secret=layer["secret"],
+               setup_dockerfile_commands=commands)
         fails = DIR / "import-fails"
         if fails.exists():
             raise exception.InvalidError(fails.read_text().strip())
         digest = hashlib.sha256(layer["from_registry"].encode()).hexdigest()
         self.object_id = f"im-{digest[:22]}"
         IMAGES.mkdir(exist_ok=True)
-        (IMAGES / self.object_id).write_text(layer["from_registry"].split("@")[-1])
+        imported = {"digest": layer["from_registry"].split("@")[-1],
+                    "entrypoint": "ENTRYPOINT []" not in commands}
+        (IMAGES / self.object_id).write_text(json.dumps(imported))
         return self
 
 
@@ -180,9 +187,11 @@ class Sandbox:
         local = next(layer["add_local_file"] for layer in image.layers
                      if layer.get("remote") == args[0])
         imported = IMAGES / image.layers[0]["from_id"]
-        digest = imported.read_text() if imported.exists() else None
+        held = {"digest": None, "entrypoint": False}
+        if imported.exists():
+            held = json.loads(imported.read_text())
         request = {"sandboxd": local, "args": list(args), "grant": env["SANDBOXD_GRANT"],
-                   "digest": digest}
+                   "timeout": options["timeout"], **held}
         name = hashlib.sha256(str(sandbox.dir).encode()).hexdigest()[:16]
         (sandbox.dir / "container").write_text(f"modal-stand-in-{name}")
         (sandbox.dir / "request.json").write_text(json.dumps(request))
@@ -249,6 +258,9 @@ class Sandbox:
         deadline = time.monotonic() + STARTED_SECONDS
         while wait and alive(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
+        # As the SDK's wait reports a sandbox that Modal ended at its timeout.
+        if wait and (self.dir / "timed-out").exists():
+            raise exception.SandboxTimeoutError()
         return self.returncode if wait else None
 
 

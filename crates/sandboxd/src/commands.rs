@@ -1,16 +1,16 @@
 //! The commands `sandboxd` starts, and reaping.
 //!
-//! One thread waits for every child that exits, the orphans that a sandbox's first process
-//! inherits included, and reports the exit of each started command on the stream that started
-//! it. It reaps a child only while holding the lock that starting a command holds, because
-//! starting may reap a child itself: the standard library waits for a child whose program
-//! failed to start, and must find it unreaped.
+//! One thread waits for every child that exits, the orphans that the kernel hands `sandboxd` in
+//! a sandbox ([`sys::gets_orphans`]) included, and reports the exit of each started command on
+//! the stream that started it. It reaps a child only while holding the lock that starting a
+//! command holds, because starting may reap a child itself: the standard library waits for a
+//! child whose program failed to start, and must find it unreaped.
 //!
 //! Whether there are children is asked of the kernel, under that lock too, by the reaper,
 //! which sleeps while there are none, and by freezing, which waits while there are any. That
 //! relies on children appearing only under the lock: only starting a command creates one, and
-//! an orphan the kernel hands a sandbox's first process descends from a child, so it arrives
-//! while there are children already.
+//! an orphan the kernel hands `sandboxd` descends from a child, so it arrives while there are
+//! children already.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -130,9 +130,10 @@ impl Commands {
 
     /// Kills every process this sandboxd may kill, refuses further commands, and returns once
     /// no children are left. As a sandbox's first process, that means no process at all but
-    /// `sandboxd`: every other one descends from it. Its time is quadratic in the sandbox's
-    /// processes, which the sandbox's process limit bounds, as it kills every process again each
-    /// time a child is reaped.
+    /// `sandboxd`: every other one descends from it. Behind a platform's own first process,
+    /// it means none of the role's user's, which descend from it likewise. Its time is quadratic
+    /// in the sandbox's processes, which the sandbox's process limit bounds, as it kills every
+    /// process again each time a child is reaped.
     pub(crate) fn freeze(&self) -> Result<(), String> {
         let mut state = self.shared.lock();
         state.frozen = true;
@@ -158,12 +159,15 @@ impl Commands {
     }
 }
 
-/// Kills every other process in the sandbox when this is its first process, and otherwise the
-/// process groups of the commands still running. A group whose leader has exited may live on
-/// there, but its ID may also have been reused by now. Every group is tried, so that one that
-/// can't be killed leaves no other alive, and the first failure is returned.
+/// Kills every process this one may signal where the kernel hands it their orphans
+/// ([`sys::gets_orphans`]), so that it sees each of them go: as a sandbox's first process, every
+/// other process in the sandbox, and as the role's user behind a platform's own first process,
+/// every other process of that user. Otherwise, as in tests, it kills the process groups of the
+/// commands still running. A group whose leader has exited may live on there, but its ID may also
+/// have been reused by now. Every group is tried, so that one that can't be killed leaves no
+/// other alive, and the first failure is returned.
 fn kill_everything(state: &State) -> io::Result<()> {
-    if sys::is_first_process() {
+    if sys::gets_orphans()? {
         return sys::kill_all_others();
     }
     let killed = state.running.keys().copied().map(stdx::process::kill_group);

@@ -701,19 +701,19 @@ fn publish() {
               aws --no-cli-pager --output json --region us-west-1 ecr batch-get-image --repository-name pumpkin/roles --image-ids imageDigest=<role> --accepted-media-types application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json
               uv run --frozen --quiet --no-config --script <crate>/helper/pumpkin-modal.py
               modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
-              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<role>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}}
+              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<role>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}, "setup_dockerfile_commands": ["ENTRYPOINT []"]}
             again: {"Ok":"im-<id>@<role>"}
               docker --context=default image inspect --format {{json .}} -- <role>
               aws --no-cli-pager --output json --region us-west-1 ecr batch-get-image --repository-name pumpkin/roles --image-ids imageDigest=<role> --accepted-media-types application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json
               uv run --frozen --quiet --no-config --script <crate>/helper/pumpkin-modal.py
               modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
-              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<role>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}}
+              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<role>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}, "setup_dockerfile_commands": ["ENTRYPOINT []"]}
             another: {"Ok":"im-<id>@<other>"}
               docker --context=default image inspect --format {{json .}} -- <other>
               aws --no-cli-pager --output json --region us-west-1 ecr batch-get-image --repository-name pumpkin/roles --image-ids imageDigest=<other> --accepted-media-types application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json
               uv run --frozen --quiet --no-config --script <crate>/helper/pumpkin-modal.py
               modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
-              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<other>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}}
+              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<other>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}, "setup_dockerfile_commands": ["ENTRYPOINT []"]}
             an image the engine lacks: {"Err":"the engine of context `default` has no image sha256:0000000000000000000000000000000000000000000000000000000000000000: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it"}
               docker --context=default image inspect --format {{json .}} -- sha256:0000000000000000000000000000000000000000000000000000000000000000
             an image for another platform: {"Err":"<foreign> is an image for linux/arm64, but Modal runs sandboxes on linux/amd64: name an image for linux/amd64"}
@@ -723,7 +723,7 @@ fn publish() {
               aws --no-cli-pager --output json --region us-west-1 ecr batch-get-image --repository-name pumpkin/roles --image-ids imageDigest=<role> --accepted-media-types application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json
               uv run --frozen --quiet --no-config --script <crate>/helper/pumpkin-modal.py
               modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
-              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<role>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}}
+              modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@<role>", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}, "setup_dockerfile_commands": ["ENTRYPOINT []"]}
             again, the same id: true
             another, another id: true"#]],
     );
@@ -732,7 +732,8 @@ fn publish() {
 /// The images that the publish test builds, each holding a file of this process's own, so that
 /// no other test's image goes when they are removed, as dropping them removes them: a role's
 /// image for `linux/amd64`, on `busybox`, whose `sleep` the suite runs, another, and one for
-/// `linux/arm64`.
+/// `linux/arm64`. Each has an entrypoint that names no program, so a sandbox that ran it would end
+/// as it started.
 struct Built {
     role: String,
     other: String,
@@ -745,7 +746,7 @@ impl Built {
         let context = dir.join("context");
         fs::create_dir(&context).unwrap();
         let build = |content: &str, platform: &str, base: &str| {
-            let recipe = format!("FROM {base}\nCOPY file /\n");
+            let recipe = format!("FROM {base}\nCOPY file /\nENTRYPOINT [\"/absent\"]\n");
             fs::write(context.join("Dockerfile"), recipe).unwrap();
             let file = format!("{content} of {}-{test}\n", std::process::id());
             fs::write(context.join("file"), file).unwrap();
@@ -785,11 +786,11 @@ impl Drop for Built {
 // helper reads the clock as it creates; the create returns its id, its report and the tunnel's
 // endpoint. The run's list finds it, and its console holds what it printed; another run's
 // sandbox can be neither read nor deleted; a delete of it and of an id no sandbox has is done,
-// and the list then finds nothing. Refused before any call to Modal: a create that dials a
+// and the list then finds nothing. One that Modal's timeout ends has a console that ends with
+// status 124, and its delete is done. Refused before any call to Modal: a create that dials a
 // socket, whose role's memory isn't whole MiB, or of a class the provider lacks; and by the
-// helper, one whose hard end has passed, or whose `sandboxd` has changed since it was published.
-// A sandbox whose `sandboxd` prints, then exits with status 137, as one the kernel's OOM killer
-// ends does, has a console that ends with that status.
+// helper, one whose hard end has passed, or whose `sandboxd` has changed since it was published. A sandbox whose `sandboxd` prints, then exits with status 137, as one
+// the kernel's OOM killer ends does, has a console that ends with that status.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -846,7 +847,27 @@ fn creates() {
                 stand_in.call(&Call::Delete(ids))
             ));
             lines.push(format!("listed: {}", stand_in.call(&Call::List)));
-            let past = hard_end - 3600 - 1;
+            // A `sandboxd` that prints nothing, so that its console holds only what the timeout
+            // leaves, however soon its process runs.
+            let silent = stand_in.dir.path().join("silent");
+            fs::write(&silent, b"#!/bin/sh\nexec sleep 300\n").unwrap();
+            fs::set_permissions(&silent, fs::Permissions::from_mode(0o755)).unwrap();
+            let silent = stand_in.call(&Call::PublishSandboxd(silent));
+            let silent = silent["Ok"].as_str().unwrap().to_owned();
+            // The helper's clock a second before the hard end, so the timeout ends the sandbox a
+            // second after its create.
+            let soon = since_epoch(Duration::from_mins(1)).as_secs();
+            fs::write(stand_in.dir.path().join("clock"), (soon - 1).to_string()).unwrap();
+            let timed = stand_in.call(&create(json!({"hard_end": soon, "sandboxd": silent})));
+            let timed = timed["Ok"]["id"].as_str().unwrap().to_owned();
+            await_ended(stand_in.dir.path(), &timed);
+            lines.push(format!(
+                "the console of one that Modal's timeout ended: {}",
+                stand_in.call(&Call::Console(timed.clone()))
+            ));
+            let deleted = stand_in.call(&Call::Delete(vec![timed]));
+            lines.push(format!("deleting it: {deleted}"));
+            let past = since_epoch(Duration::ZERO).as_secs() - 1;
             let refusals = [
                 ("a hard end past", json!({"hard_end": past})),
                 (
@@ -874,18 +895,7 @@ fn creates() {
             let sandboxd_ref = published["Ok"].as_str().unwrap();
             let killed = stand_in.call(&create(json!({"sandboxd": sandboxd_ref})));
             let killed = killed["Ok"]["id"].as_str().unwrap().to_owned();
-            // The stand-in records the status only once `sandboxd` has exited, which may be after
-            // the create returns.
-            let ended = stand_in
-                .dir
-                .path()
-                .join("sandboxes")
-                .join(&killed)
-                .join("returncode");
-            let by = std::time::Instant::now() + Duration::from_secs(30);
-            while !ended.exists() && std::time::Instant::now() < by {
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            await_ended(stand_in.dir.path(), &killed);
             lines.push(format!(
                 "the console of one that exited with status 137: {}",
                 stand_in.call(&Call::Console(killed.clone()))
@@ -919,14 +929,26 @@ fn creates() {
             deleting it as run-1's: {"Err":"Modal failed to delete 1 of the sandboxes: sandbox sb-2: sandbox sb-2 is not run run-1's: expected one of its own: fix what Modal reports"}
             deleting the sandbox and an id no sandbox has: {"Ok":null}
             listed: {"Ok":[]}
+            the console of one that Modal's timeout ended: {"Ok":"pumpkin-modal: sandbox sb-3 exited with status 124\n"}
+            deleting it: {"Ok":null}
             a hard end past: {"Err":"Modal refused the helper's `create`: the create's hard end has passed: expected one to come: fix what Modal reports; what Modal made by then, if anything, the run's list finds"}, calls to Modal: 1
             memory not whole MiB: {"Err":"role `score` asks for 1000000 bytes of memory, which Modal gives in whole MiB: ask for a multiple of 1048576"}, calls to Modal: 0
             a class the provider lacks: {"Err":"the provider has no class `tpu`: expected one of those it declared"}, calls to Modal: 0
             a sandboxd changed since published: {"Err":"Modal refused the helper's `create`: the sandboxd at <dir>/sandboxd has changed since it was published: expected the file whose SHA-256 is 4a1a1f2fc48d755ca56db1f268bc2a71d0401e9abe03e0274249d193d6f48042: fix what Modal reports; what Modal made by then, if anything, the run's list finds"}
-            the console of one that exited with status 137: {"Ok":"sandboxd 127.0.0.1:<port> --listen --by <by> --ops --model\npumpkin-modal: sandbox sb-3 exited with status 137\n"}
+            the console of one that exited with status 137: {"Ok":"sandboxd 127.0.0.1:<port> --listen --by <by> --ops --model\npumpkin-modal: sandbox sb-4 exited with status 137\n"}
             deleting it: {"Ok":null}
             the sandboxes left, each with its run: [("sb-2", "run-2")]"#]],
     );
+}
+
+/// Waits, for up to 30 s, until the stand-in SDK's sandbox `id` in `dir` has ended, as the
+/// stand-in records only then, which may be after its create returns.
+fn await_ended(dir: &Path, id: &str) {
+    let ended = dir.join("sandboxes").join(id).join("returncode");
+    let by = std::time::Instant::now() + Duration::from_secs(30);
+    while !ended.exists() && std::time::Instant::now() < by {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// `line` with the port of each tunnel at `localhost`, and of each loopback address that a

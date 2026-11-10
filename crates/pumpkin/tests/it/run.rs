@@ -1574,7 +1574,7 @@ fn modal() {
             the stand-in SDK was called with:
             modal: Workspace.hydrate {"profile": "pumpkin"}
             modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
-            modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:0000000000000000000000000000000000000000000000000000000000000000", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}}
+            modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:0000000000000000000000000000000000000000000000000000000000000000", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}, "setup_dockerfile_commands": ["ENTRYPOINT []"]}
             modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
             modal: Sandbox.create {"app": "pumpkin-images", "args": ["/.pumpkin/sandboxd", "0.0.0.0:7434", "--listen", "--by", "<by>", "--user", "10001:10001", "--ops"], "cpu": [0.5, 0.5], "encrypted_ports": [7434], "env": {"SANDBOXD_GRANT": "<grant>"}, "gpu": "H100!", "image": [{"from_id": "im-eedd61da80d57048dc8bb5"}, {"add_local_file": "<scratch>/sandboxd", "copy": false, "remote": "/.pumpkin/sandboxd"}, {"add_local_file": "<scratch>/sandboxd", "copy": false, "remote": "/.pumpkin/bin/sandboxctl"}], "inbound_cidr_allowlist": ["203.0.113.7/32"], "memory": [256, 256], "outbound_cidr_allowlist": [], "runtime": "gvisor", "tags": {"pumpkin-role": "agent", "pumpkin-run": "<id>"}, "timeout": <start> + 5880}
             modal: Sandbox.tunnels {"id": "sb-1"}

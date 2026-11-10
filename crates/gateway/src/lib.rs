@@ -528,8 +528,8 @@ impl Session {
         )
     }
 
-    /// Kills every process in the sandbox but `sandboxd`, so that nothing collected afterwards
-    /// changes, and returns once they are gone.
+    /// Kills the sandbox's processes that [`ToSandbox::Freeze`] names, so that nothing collected
+    /// afterwards changes, and returns once they are gone.
     ///
     /// # Errors
     ///

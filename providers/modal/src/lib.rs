@@ -349,8 +349,8 @@ impl Provider for Modal<'_> {
 
     /// Publishes `image`, a role's, as [`Provider::publish_image`] asks: the engine must have it,
     /// for `sandboxd`'s platform, checked first; it is pushed to the repository unless held there
-    /// ([`aws::Cli::publish`]), and Modal imports it from there by its digest, at every publish.
-    /// Its reference is its id in Modal and the digest, `im-…@sha256:…`.
+    /// ([`aws::Cli::publish`]), and Modal imports it from there by its digest, at every publish,
+    /// without its entrypoint. Its reference is its id in Modal and the digest, `im-…@sha256:…`.
     ///
     /// # Errors
     ///

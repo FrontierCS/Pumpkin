@@ -16,3 +16,11 @@ class InvalidError(Error):
 class NotFoundError(Error):
     pass
 
+
+class TimeoutError(Error):
+    pass
+
+
+class SandboxTimeoutError(TimeoutError):
+    pass
+

@@ -2,7 +2,8 @@
 //! creates it, lists, reads and deletes it: in Pumpkin's one App, which holds every run's
 //! sandboxes, tagged with its run, by which its run's list finds it, and which every call on a
 //! sandbox that names one checks;
-//! its first process `sandboxd`, attached from this host as Modal starts it, listening behind
+//! its `sandboxd`, attached from this host, which Modal's own first process there, `dumb-init`,
+//! starts as root, and which becomes the role's user before it serves (`--user`), listening behind
 //! Modal's TLS tunnel, which takes connections from the settings' `dials_from` address alone; with
 //! no connection out, though Modal's resolver still answers its DNS queries; under gVisor, with its
 //! class's GPU, if any, and its role's CPU and memory as both its request and its limit; and ended

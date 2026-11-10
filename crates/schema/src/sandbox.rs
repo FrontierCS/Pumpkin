@@ -584,8 +584,10 @@ pub enum ToSandbox {
     /// still runs, and replies once it has signalled it; the command's exit follows on its own
     /// stream. A process that left the group runs on until a freeze.
     Kill { stream: u32, command: u32 },
-    /// Kills every process in the sandbox but `sandboxd` and refuses to start more, so that
-    /// what is collected afterwards can't change. `sandboxd` replies once they are gone.
+    /// Kills every process that the role's user runs in the sandbox but `sandboxd`, which is
+    /// every process but `sandboxd` where `sandboxd` is the sandbox's first process, and refuses
+    /// to start more, so that what is collected afterwards can't change. A platform's own first
+    /// process, such as Modal's `dumb-init`, runs on. `sandboxd` replies once they are gone.
     Freeze { stream: u32 },
     /// Sends the tree in `dir`: its entries, then an `End`.
     Collect { stream: u32, dir: AbsolutePath },

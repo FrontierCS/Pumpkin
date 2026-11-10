@@ -91,19 +91,24 @@ def imported(modal, request: dict) -> str:
     secret = modal.Secret.from_dict(
         {"AWS_ROLE_ARN": request["role_arn"], "AWS_REGION": request["region"]}
     )
-    image = modal.Image.from_registry(request["reference"], secret=secret)
+    # Modal runs an image's ENTRYPOINT with a sandbox's command as its arguments, and no role's
+    # sandbox runs its image's own (`schema::ir`), so the import leaves the image none.
+    image = modal.Image.from_registry(
+        request["reference"], secret=secret, setup_dockerfile_commands=["ENTRYPOINT []"]
+    )
     image.build(modal.App.lookup(APP, create_if_missing=True))
     return image.object_id
 
 
 def create(modal, request: dict) -> dict:
-    """The sandbox's first process is `sandboxd`, listening at `PORT`, given the grant in its
-    environment, which becomes the role's user; it runs under gVisor, with the class's GPU, if
-    any, the role's CPU and memory as both its request and its limit, no connection out, and its
-    tunnel open to `source` alone; and Modal ends it at its run's `hard_end`, in seconds since the
-    Unix epoch, if nothing ends it first, as its timeout, which Modal counts from its create, is
-    taken just before it. Its `sandboxd` ends it too if no gateway has claimed it a minute after
-    its start's deadline, `by`, as when Modal makes it after the create was given up."""
+    """The sandbox's command is `sandboxd`, which Modal's own first process there, `dumb-init`,
+    runs as root: listening at `PORT`, given the grant in its environment, it becomes the role's
+    user; the sandbox runs under gVisor, with the class's GPU, if any, the role's CPU and memory
+    as both its request and its limit, no connection out, and its tunnel open to `source` alone;
+    and Modal ends it at its run's `hard_end`, in seconds since the Unix epoch, if nothing ends it
+    first, as its timeout, which Modal counts from its create, is taken just before it. Its
+    `sandboxd` ends it too if no gateway has claimed it a minute after its start's deadline, `by`,
+    as when Modal makes it after the create was given up."""
     timeout = request["hard_end"] - int(time.time())
     if timeout <= 0:
         raise Refused("the create's hard end has passed: expected one to come")
@@ -206,6 +211,10 @@ def delete(modal, request: dict) -> dict:
             sandbox = owned(modal, request["run"], id)
             if sandbox is not None:
                 sandbox.terminate(wait=True)
+        except modal.exception.SandboxTimeoutError:
+            # The wait's report of a sandbox that Modal ended at its timeout, which has finished
+            # as any other.
+            pass
         except modal.exception.Error as error:
             failed[id] = f"{type(error).__name__}: {error}"
         except Refused as error:

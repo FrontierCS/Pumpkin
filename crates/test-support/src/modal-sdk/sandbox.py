@@ -1,18 +1,21 @@
 """A stand-in Modal sandbox, which the stand-in for Modal's SDK starts, as
 `python3 -I sandbox.py <dir>`, detached, in a session of its own, so that it outlives the helper's
-call: in `<dir>`, `request.json` holds its `sandboxd`'s path and arguments, its grant, and the
-digest of its image, if the stand-in imported it, and `container` the name of its container,
-which carries the label `pumpkin-modal-stand-in`, of the stand-in SDK's directory, two above
-`<dir>`.
+call: in `<dir>`, `request.json` holds its `sandboxd`'s path and arguments, its grant, its
+timeout, and the digest of its image, if the stand-in imported it, with whether the image keeps
+its entrypoint, and `container` the name of its container, which carries the label
+`pumpkin-modal-stand-in`, of the stand-in SDK's directory, two above `<dir>`.
 
 It runs that `sandboxd`, listening at a port of the loopback in place of the one its arguments
-name: as the first process of a container of that image on the tests' Docker engine, started as
-root, on the machine's network, as `docker run` in front of it; or, if the image is none the
-stand-in imported, as a process of this machine's, without `--user`, as the tests don't run as
-root. Its output goes to `console`;
+name, as Modal runs a sandbox's command: in a container of that image on the tests' Docker
+engine, started as root, behind the engine's init, as Modal's `dumb-init` is the first process
+of its sandboxes, and as the arguments of the image's entrypoint, if it keeps one, on the
+machine's network, as `docker run` in front of it; or, if the image is none the stand-in
+imported, as a process of this machine's, without `--user`, as the tests don't run as root. Its
+output goes to `console`;
 and it stands in front of that port as Modal's tunnel does, ending TLS with the stand-in edge's
 certificate, `edge.pem` and `edge.key` two directories above `<dir>`, at a port of the loopback it writes to
-`port`. Once `sandboxd` exits it writes its status to `returncode` and ends.
+`port`. Once `sandboxd` exits it writes its status to `returncode` and ends; at its timeout, it
+ends `sandboxd` itself, as Modal does, with `timed-out` and the status 124.
 """
 
 import json
@@ -100,12 +103,14 @@ def main() -> None:
             command = [
                 "docker", "run", "--rm", f"--name={(dir / 'container').read_text()}",
                 f"--label=pumpkin-modal-stand-in={dir.parent.parent}",
-                "--network=host", "--user=0:0", "--env=SANDBOXD_GRANT",
+                "--network=host", "--user=0:0", "--init", "--env=SANDBOXD_GRANT",
                 "--mount=" + mount.format(request["sandboxd"], args[0]),
             ]
             if "--ops" in args:
                 command.append("--mount=" + mount.format(request["sandboxd"], SANDBOXCTL_PATH))
-            command += [f"--entrypoint={args[0]}", request["digest"], *kept]
+            if not request["entrypoint"]:
+                command.append("--entrypoint=")
+            command += [request["digest"], args[0], *kept]
         else:
             command = [request["sandboxd"], *kept]
         try:
@@ -129,7 +134,13 @@ def main() -> None:
             serve(client, target)
 
         threading.Thread(target=accept, daemon=True).start()
-        code = child.wait()
+        try:
+            code = child.wait(timeout=request["timeout"])
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+            (dir / "timed-out").write_text("")
+            code = 124
     if container:
         # As `--rm` leaves one that never started, such as one whose `sandboxd` can't run.
         name = (dir / "container").read_text()

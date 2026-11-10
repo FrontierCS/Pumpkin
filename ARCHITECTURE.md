@@ -166,9 +166,11 @@ and `engine` the operator's Docker engine's.
   endpoint of another way.
 - **Architecture Invariant:** no provider depends on another's crate: what two providers share is
   in a crate of its own, as `engine` and `aws` are.
-- **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
-  `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands and the
-  session's owner find them anywhere.
+- **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, or, where
+  its platform puts a process of its own first, as Modal does, as the one command of that
+  process, as root with `--user`, so that a freeze leaves none of the role's processes; and
+  presents `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands
+  and the session's owner find them anywhere.
 - **Architecture Invariant:** a sandbox that no start claims ends itself, so one that a provider
   makes after the run gave up its create runs nothing: a `sandboxd` that dials finds its
   registration gone with the start that issued it, and one that listens gives up a minute after

@@ -13,8 +13,10 @@
 //! requests it carries to the session's owner likewise.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
-//! kills every other process in the sandbox. Run as any other process, as in tests, it kills
-//! only the process groups of the commands still running.
+//! kills every other process in the sandbox. Started with `--user`, behind a platform's own first
+//! process, as Modal's `dumb-init`, it asks for its descendants' orphans ([`sys::adopt_orphans`]),
+//! and freezing kills every other process of the role's user. Run as any other process, as in
+//! tests, it kills only the process groups of the commands still running.
 //!
 //! It runs as the role's user, needing no privileges, from the start or, started as root with
 //! `--user`, from before it does anything else but give `/pumpkin` to that user
@@ -93,7 +95,8 @@ mod flags {
             optional --by seconds: u64
             /// Becomes this user, `uid:gid`, each a number but 0, as sandboxd starts, which must be
             /// as root, having given the user /pumpkin, made if absent: no command, nor sandboxd,
-            /// then keeps or regains a privilege.
+            /// then keeps or regains a privilege. Freezing then kills every other process of the
+            /// user, whether or not sandboxd is its sandbox's first process.
             optional --user user: RoleUser
             /// Serves ops, which callers in the sandbox make through `sandboxctl`, at
             /// /pumpkin/sandboxctl/socket. sandboxd makes its directory, which must not exist
@@ -257,8 +260,9 @@ impl FromStr for RoleUser {
     }
 }
 
-/// Gives [`pumpkin_dir`] to `user`, made with mode 0755 if absent, then becomes `user`. Refuses,
-/// before either, a process that isn't root.
+/// Gives [`pumpkin_dir`] to `user`, made with mode 0755 if absent, then becomes `user`, and has
+/// the kernel hand `sandboxd` the orphans of what it starts, as what starts it as root may put a
+/// process of its own first in the sandbox. Refuses, before any of it, a process that isn't root.
 fn become_role(User { uid, gid }: User) -> Result<(), String> {
     if !sys::is_root() {
         return Err(format!(
@@ -280,7 +284,8 @@ fn become_role(User { uid, gid }: User) -> Result<(), String> {
         .context(format_args!("opening {pumpkin} failed"))?;
     fchown(&dir, Some(uid.get()), Some(gid.get()))
         .context(format_args!("giving {pumpkin} to {uid}:{gid} failed"))?;
-    sys::become_user(uid.get(), gid.get()).context(format_args!("becoming {uid}:{gid} failed"))
+    sys::become_user(uid.get(), gid.get()).context(format_args!("becoming {uid}:{gid} failed"))?;
+    sys::adopt_orphans().context("taking the orphans of sandboxd's commands failed")
 }
 
 /// The registration grant in [`SANDBOXD_GRANT`].
