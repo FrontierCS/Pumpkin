@@ -12,17 +12,19 @@ test = false
 
 [dependencies]
 docker = { path = "../../providers/docker" }
+provider = { path = "../provider" }
 route = { path = "../route" }
 runtime = { path = "../runtime" }
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+libc.workspace = true
+rustix = { workspace = true, features = ["process", "stdio", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 xflags.workspace = true
 
 [dev-dependencies]
-provider = { path = "../provider" }
 expect-test.workspace = true
 tempfile.workspace = true
 

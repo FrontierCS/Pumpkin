@@ -21,10 +21,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use provider::Provider;
-use schema::ir::{AbsolutePath, Image, Name};
+use schema::ir::{AbsolutePath, Image, Name, Resources};
 use schema::provider::{
-    Capabilities, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag,
-    SOCKET_NAME, SandboxId,
+    Class, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag, SOCKET_NAME,
+    SandboxId,
 };
 use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use schema::sandbox::{
@@ -51,6 +51,18 @@ pub(crate) const SLOW: &str = "/sim/slow";
 /// does as the create begins, or a `sandboxd` takes to dial, and far shorter than the startup of
 /// the providers whose tests use it.
 const SLOW_CREATE: Duration = Duration::from_secs(2);
+
+/// What the simulated provider's class `brief` gives a role: a CPU and a GiB of memory. Its
+/// sandboxes take at most [`BRIEF_STARTUP`] seconds to start.
+pub(crate) const BRIEF: Resources = Resources {
+    cpu_millis: NonZeroU64::new(1000).unwrap(),
+    memory_bytes: NonZeroU64::new(1 << 30).unwrap(),
+};
+
+/// How long a start in class `brief` takes at most: seconds, but still far longer than a
+/// simulated sandbox takes to start, so that a busy machine makes a start that succeeds wait
+/// longer, never fail.
+const BRIEF_STARTUP: u64 = 2;
 
 /// How long a command that awaits a job's state waits between the `status` ops it makes.
 const AWAIT_POLL: Duration = Duration::from_millis(10);
@@ -133,14 +145,27 @@ impl Sim {
         Self::with_startup(30)
     }
 
-    /// A simulated provider that declares `seconds` as its startup.
+    /// A simulated provider that declares two classes: `sim`, whose startup is `seconds`, which
+    /// every role fits, and `brief`, which gives a role [`BRIEF`].
     pub(crate) fn with_startup(seconds: u64) -> Self {
+        let class = |name: &str, resources, seconds| {
+            let class = Class {
+                resources,
+                startup_seconds: NonZeroU64::new(seconds).unwrap(),
+            };
+            (Name::try_from(name.to_owned()).unwrap(), class)
+        };
+        let all = Resources {
+            cpu_millis: NonZeroU64::new(1 << 20).unwrap(),
+            memory_bytes: NonZeroU64::new(1 << 50).unwrap(),
+        };
         Self {
             ready: Ready {
                 report: json!({ "provider": "sim" }),
-                capabilities: Capabilities {
-                    startup_seconds: NonZeroU64::new(seconds).unwrap(),
-                },
+                classes: BTreeMap::from([
+                    class("sim", all, seconds),
+                    class("brief", BRIEF, BRIEF_STARTUP),
+                ]),
             },
             state: Mutex::new(State {
                 next: 1,

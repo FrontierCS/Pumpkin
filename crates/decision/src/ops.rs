@@ -269,7 +269,7 @@ impl Core<'_> {
         });
         OpsReply {
             remaining_seconds: self.pattern.deadline.saturating_sub(self.now).as_secs(),
-            resources: self.workflow.agent().sandbox.resources,
+            resources: self.workflow.agent().sandbox.needs,
             grants: judges.chain([submit]).collect(),
         }
     }

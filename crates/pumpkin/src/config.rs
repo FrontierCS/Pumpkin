@@ -1,24 +1,41 @@
-//! The deployment's configuration, which `pumpkin run` reads, as TOML: the model upstreams that
-//! a workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
-//! [`serving`](Config::serving) picks the one that serves it. [`Config`] and the types it holds
-//! say what each key means; every key is required, and any other refused.
+//! The configuration of the machine that `pumpkin run` runs on, as TOML: the Docker context that
+//! reaches the engine to run on, in `[docker]`; and the model upstreams that a workflow's model
+//! route may reach, each a table of its own, `[upstreams.<name>]`, of which
+//! [`serving`](Upstreams::serving) picks the one that serves it. [`Config`] and the types it holds
+//! say what each key means; every key is required, but for `upstreams`, and any other refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use docker::ContextName;
 use route::{self, Key, Serving, UpstreamUrl};
 use schema::ir::{ModelName, Models, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
 
-/// The model upstreams of a deployment, by name, in which each model's name reaches one upstream:
-/// no model is listed twice, under one upstream or two. TOML refuses two upstreams of one name.
+/// The configuration of a machine, which every run on it reads.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
-    upstreams: BTreeMap<Name, Upstream>,
+    pub(crate) docker: Docker,
+    #[serde(default)]
+    pub(crate) upstreams: Upstreams,
 }
+
+/// The Docker engine that every run on the machine runs on.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Docker {
+    /// The context that reaches the engine, as `docker context ls` lists it.
+    pub(crate) context: ContextName,
+}
+
+/// The model upstreams of a machine, by name, in which each model's name reaches one upstream:
+/// no model is listed twice, under one upstream or two. TOML refuses two upstreams of one name.
+#[derive(Default, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Upstreams(BTreeMap<Name, Upstream>);
 
 /// An API that serves models: a provider's own, or a gateway's to several.
 #[derive(Deserialize)]
@@ -45,7 +62,7 @@ struct Model {
     upstream_name: ModelName,
 }
 
-impl Config {
+impl Upstreams {
     /// How a run serves a model route that allows `models`: through the upstream that serves
     /// every one of them, with the key read from its file.
     ///
@@ -58,11 +75,13 @@ impl Config {
                 |model: &ModelName| upstream.models.iter().any(|served| served.name == *model);
             models.as_slice().iter().all(served)
         };
+        let fix = if self.0.is_empty() {
+            "add an `[upstreams.<name>]` that lists them"
+        } else {
+            "list them all under one"
+        };
         // At most one does: each model is listed once, and a route allows one at least.
-        let Some((name, upstream)) = self
-            .upstreams
-            .into_iter()
-            .find(|(_, upstream)| serves(upstream))
+        let Some((name, upstream)) = self.0.into_iter().find(|(_, upstream)| serves(upstream))
         else {
             let named: Vec<String> = models
                 .as_slice()
@@ -70,8 +89,7 @@ impl Config {
                 .map(|model| format!("`{model}`"))
                 .collect();
             return Err(format!(
-                "no upstream serves every model that the workflow's route allows, {}: list them \
-                 all under one",
+                "no upstream serves every model that the workflow's route allows, {}: {fix}",
                 named.join(", ")
             ));
         };
@@ -118,8 +136,9 @@ fn endpoint<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UpstreamUrl, D
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
     let text = fs::read_to_string(path).map_err(|error| {
         format!(
-            "the configuration {} can't be read ({error}): write the upstreams of the \
-             workflow's model route there, or name another file with `--config`",
+            "the configuration {} can't be read ({error}): write one there whose `[docker]` \
+             table names the `context` that reaches the engine, as `docker context ls` lists it, \
+             or name another file with `--config`",
             path.display()
         )
     })?;
@@ -128,21 +147,21 @@ pub(crate) fn read(path: &Path) -> Result<Config, String> {
     let mut config: Config = parsed
         .map_err(|error| error.to_string().trim_end().to_owned())
         .context(path.display())?;
-    unique(&config).context(path.display())?;
+    unique(&config.upstreams).context(path.display())?;
     // Below the file's directory, rather than the working directory or `HOME`, so that a
     // configuration and its keys move together, and no variable of the environment changes
     // which file a key is in. A file that was read has a parent: `""` for a bare file name.
     let dir = path.parent().unwrap_or(Path::new(""));
-    for upstream in config.upstreams.values_mut() {
+    for upstream in config.upstreams.0.values_mut() {
         upstream.key_file = dir.join(&upstream.key_file);
     }
     Ok(config)
 }
 
-/// Checks that no model of `config`'s is listed twice.
-fn unique(config: &Config) -> Result<(), String> {
+/// Checks that no model of `upstreams` is listed twice.
+fn unique(upstreams: &Upstreams) -> Result<(), String> {
     let mut models = BTreeSet::new();
-    for upstream in config.upstreams.values() {
+    for upstream in upstreams.0.values() {
         let listed = &upstream.models;
         if let Some(model) = listed.iter().find(|model| !models.insert(&model.name)) {
             return Err(format!(

@@ -243,10 +243,11 @@ fn provider() -> &'static dyn Provider {
     engine()
 }
 
-/// The deadline of a start that begins now, by the startup the provider declares.
+/// The deadline of a start that begins now, by the startup that the provider's one class
+/// declares.
 fn startup() -> Deadline {
-    let seconds = provider().ready().capabilities.startup_seconds;
-    Deadline::after(Duration::from_secs(seconds.get()))
+    let class = provider().ready().classes.values().next().unwrap();
+    Deadline::after(Duration::from_secs(class.startup_seconds.get()))
 }
 
 /// The IDs of the sandboxes a list found.
@@ -600,16 +601,22 @@ fn report() {
                 os,
             } = engine().report();
             let named = [endpoint, client_version, engine_version, kernel, os];
-            let ready = serde_json::to_value(provider().ready()).unwrap();
+            let mut ready = serde_json::to_value(provider().ready()).unwrap();
             let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
+            let reported = format!("{reported:?}");
+            // The host's, which every engine has its own of.
+            let classes = ready["classes"].as_object_mut().unwrap();
+            for class in classes.values_mut() {
+                class["resources"] = "<the host's>".into();
+            }
             let mut lines = vec![
                 format!(
                     "endpoint, versions, kernel and OS named: {}",
                     named.iter().all(|named| !named.is_empty())
                 ),
                 format!(
-                    "ready: a report of {reported:?}, and {}",
-                    ready["capabilities"]
+                    "ready: a report of {reported}, and the classes {}",
+                    ready["classes"]
                 ),
                 ContextName::try_from(String::new()).unwrap_err(),
             ];
@@ -626,7 +633,7 @@ fn report() {
         },
         &expect![[r#"
             endpoint, versions, kernel and OS named: true
-            ready: a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and {"startup_seconds":540}
+            ready: a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and the classes {"container":{"resources":"<the host's>","startup_seconds":540}}
             the Docker context's name is empty: name one that `docker context ls` lists
             the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
             the Docker context `--help` can't be read: …: name one that `docker context ls` lists"#]],

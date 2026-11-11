@@ -6,6 +6,7 @@
 //!
 //! - `driver.pid`: the pid of the process that drives the run, locked by it until the run's last
 //!   write: see [`Lock`] for the rule that makes the record's state readable;
+//! - `driver.log`: what the driver wrote to its standard output and error once the run started;
 //! - `record.json`: `{"record_version": "pumpkin.record/v0"}`, the version of the record's
 //!   form ([`RECORD_VERSION`]), written first;
 //! - `ir.json`: the workflow's IR;
@@ -95,6 +96,8 @@ fn fill(partial: &Path, dir: &Path, runs: &Path) -> Result<Lock, String> {
         "record.json",
         &json!({ "record_version": RECORD_VERSION }),
     )?;
+    let log = partial.join("driver.log");
+    File::create(&log).context(log.display())?;
     let pid_path = partial.join("driver.pid");
     let mut pid = File::create(&pid_path).context(pid_path.display())?;
     pid.lock().context(pid_path.display())?;

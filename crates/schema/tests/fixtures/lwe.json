@@ -6,7 +6,7 @@
       "name": "agent",
       "image": "pumpkin/lwe-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "user": { "uid": 10001, "gid": 10001 },
-      "resources": {
+      "needs": {
         "cpu_millis": 8000,
         "memory_bytes": 34359738368
       },
@@ -38,7 +38,7 @@
       "name": "train_judge",
       "image": "pumpkin/lwe-verifier@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "user": { "uid": 65532, "gid": 65532 },
-      "resources": {
+      "needs": {
         "cpu_millis": 8000,
         "memory_bytes": 2147483648
       },
@@ -64,7 +64,7 @@
       "name": "final_judge",
       "image": "pumpkin/lwe-verifier@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "user": { "uid": 65532, "gid": 65532 },
-      "resources": {
+      "needs": {
         "cpu_millis": 8000,
         "memory_bytes": 2147483648
       },

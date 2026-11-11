@@ -1,17 +1,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use super::errors::{Errors, Reported};
 use super::{
-    Agent, Judge, JudgeGrant, JudgeId, Main, RoleId, Sandbox, Score, SlotId, SoloThenJudge,
-    SubmitGrant, Workflow,
+    Agent, Judge, JudgeGrant, JudgeId, Main, ParseErrors, RoleId, Sandbox, Score, SlotId,
+    SoloThenJudge, SubmitGrant, Workflow,
 };
 use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::MAX_OP_PAYLOAD_BYTES;
-
-mod errors;
-
-use errors::{Errors, Reported};
-pub use errors::{ParseError, ParseErrors};
 
 impl Workflow {
     /// Parses a deserialized IR: resolves its names to ids and checks the rules that span its
@@ -19,9 +15,9 @@ impl Workflow {
     ///
     /// # Errors
     ///
-    /// Returns the rules the IR breaks, each [at](ParseError::at) its place in the IR, such as
-    /// a name that resolves to nothing or a second agent. A rule about parts that fail to
-    /// resolve is not checked, so fixing those errors may reveal others.
+    /// Returns the rules the IR breaks, each [at](super::ParseError::at) its place in the IR,
+    /// such as a name that resolves to nothing or a second agent. A rule about parts that fail
+    /// to resolve is not checked, so fixing those errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -89,7 +85,7 @@ impl<'ir> Parser<'ir> {
                 name,
                 image,
                 user,
-                resources,
+                needs,
                 runtime,
                 egress: ir::Egress { model },
             } = role;
@@ -97,7 +93,8 @@ impl<'ir> Parser<'ir> {
                 name: name.clone(),
                 image: image.clone(),
                 user: *user,
-                resources: *resources,
+                needs: *needs,
+                at: at.clone(),
                 model_route: model.clone(),
             };
             let id = match runtime {

@@ -57,7 +57,10 @@ pub struct Role {
     pub image: Image,
     /// The user the role's commands run as.
     pub user: User,
-    pub resources: Resources,
+    /// What each of the role's sandboxes needs of the class of sandbox it is created in, which
+    /// placing the workflow finds among those that its provider offers
+    /// ([`Workflow::place`](crate::workflow::Workflow::place)).
+    pub needs: Resources,
     pub runtime: Runtime,
     /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]

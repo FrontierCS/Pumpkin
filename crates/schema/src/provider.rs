@@ -1,10 +1,11 @@
 //! The values that a run and its providers exchange through `provider::Provider`.
 //!
-//! A provider declares what holds while a run is connected to it ([`Ready`]), creates the
-//! sandboxes the run asks for ([`Create`]), and says what it made of them. Every sandbox of a
-//! run carries the run's [`RunTag`], by which a provider lists the run's sandboxes, whatever
-//! made them.
+//! A provider declares what holds while a run is connected to it ([`Ready`]), among it the
+//! [`Class`]es of sandbox it creates, creates the sandboxes the run asks for ([`Create`]), and
+//! says what it made of them. Every sandbox of a run carries the run's [`RunTag`], by which a
+//! provider lists the run's sandboxes, whatever made them.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -18,12 +19,17 @@ use crate::ir::{Image, Name, Resources, User};
 pub struct Ready {
     /// The provider's report of its environment, for the run's record, in a form of its own.
     pub report: Value,
-    pub capabilities: Capabilities,
+    /// The classes of sandbox it creates, by name.
+    pub classes: BTreeMap<Name, Class>,
 }
 
-/// What a run may rely on of a provider's sandboxes.
-#[derive(Debug, Serialize)]
-pub struct Capabilities {
+/// A class of sandbox that a provider creates, such as a size of machine, and what a run may
+/// rely on of its sandboxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Class {
+    /// The most a role whose sandboxes are of the class may ask for of each resource, so a role
+    /// fits the class if it asks for no more.
+    pub resources: Resources,
     /// The most seconds a sandbox's start takes, from the start of its create until its
     /// `sandboxd` has dialed and its session is set up.
     pub startup_seconds: NonZeroU64,

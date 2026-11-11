@@ -23,8 +23,8 @@ harming the host or the run.
 The binaries are `pumpkin` (`crates/pumpkin/src/main.rs`), which runs a workflow,
 `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
-parsed; `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`, a provider a
-run has connected to; `Engine`, Docker's.
+parsed; `Placed`, its roles placed in classes of sandbox; `Core`, a run's decisions; `Session`,
+the host's end of a sandbox; `Provider`, a provider a run has connected to; `Engine`, Docker's.
 
 ## Front ends
 
@@ -40,15 +40,16 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 - **Architecture Invariant:** it knows nothing of Pumpkin: it depends on no Pumpkin crate.
 
 **`crates/schema`.** The formats Pumpkin's programs share, never copied into a consumer:
-`ir`, the workflow IR; `workflow`, a workflow parsed; `sandbox`, the sandbox protocol, its `frame`s,
-`tree`s, ops (`sandbox::op`) and the in-sandbox contract: the paths, limits and environment a
-role's commands and its session's owner share; `provider`, the values a run and its providers
-exchange. Another program's format, such as `docker info`'s, stays with the code that reads it.
+`ir`, the workflow IR; `workflow`, a workflow parsed, and placed; `sandbox`, the sandbox
+protocol, its `frame`s, `tree`s, ops (`sandbox::op`) and the in-sandbox contract: the paths,
+limits and environment a role's commands and its session's owner share; `provider`, the values a
+run and its providers exchange. Another program's format, such as `docker info`'s, stays with the
+code that reads it.
 **API Boundary:** the IR, the in-sandbox contract, `sandboxctl`'s JSON.
 - **Architecture Invariant:** outside its tests, it depends on `serde` and `serde_json` alone,
   because `sandboxd`, a small static binary, depends on it.
-- **Architecture Invariant:** only parsing makes a `workflow::Workflow`, so code past parsing need
-  not check again what parsing established.
+- **Architecture Invariant:** only parsing makes a `workflow::Workflow`, and only placing one
+  makes a `Placed`, so code past them need not check again what they established.
 - **Architecture Invariant:** the IR holds no defaults: an absent field means what its doc says,
   such as no limit; whatever writes the IR picks the defaults.
 - **Architecture Invariant:** the agent never calls the judge that scores it: parsing
@@ -118,8 +119,8 @@ observes and returns the `Action`s the runtime is to perform, until one ends the
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
   decides when time ends the work phase or the run, the hard end included. The
   crate is `#![no_std]`, so it can name none of `std`'s files, network, processes, environment,
-  threads, clock or hashed collections, and it forbids `unsafe`, which `core::arch`'s clock
-  needs. It depends on `schema` alone of Pumpkin's crates, through which the schema's I/O items
+  threads, clock or hashed collections, and the workspace forbids `unsafe`, which
+  `core::arch`'s clock needs. It depends on `schema` alone of Pumpkin's crates, through which the schema's I/O items
   (`tree::Writer`, `frame` over `std::io`, and `PathBuf` paths) remain reachable.
 - **Architecture Invariant:** only the decision core authorizes ops: `sandboxd` carries any op any
   code in the sandbox makes, and the gateway bounds only what ops cost the host.
@@ -151,6 +152,9 @@ refuses the route's key.
 - **Architecture Invariant:** a record appears in the runs directory only once its `driver.pid`
   is locked (`Lock`), and the lock is held until the run's last write, so a record is ended, live
   or lost, by `outcome.json` and then the lock, and a record without `driver.pid` is not one.
+- **Architecture Invariant:** a run takes its workflow placed (`Placed`), so each role fits the
+  class of sandbox it is placed in, and each sandbox is given as long to start as its role's class
+  takes.
 - **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends
   on no provider's crate, only its tests do, so a new provider changes no runtime code.
 - **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
@@ -158,11 +162,14 @@ refuses the route's key.
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
 
-**`crates/pumpkin`.** `pumpkin`, the operator's command line: `run` reaches the engine of a
-named Docker context and runs a workflow on it with `Run`: it reaches a run's provider and hands
-it to `Run` as a `Provider`. `wait` follows a run's record (`Record`) to its end. It reads the
-deployment's configuration (`config`, TOML): the model upstreams that a workflow's model route
-may reach, of which it hands `Run` the one that serves the route (`Serving`).
+**`crates/pumpkin`.** `pumpkin`, the operator's command line: `run` starts a workflow's run on
+the engine of a named Docker context in a driver process (`driver`), which it executes as
+itself, and returns once the run has started; the driver reaches a run's provider and hands it
+to `Run` as a `Provider`, with the static `sandboxd` it has found (`Sandboxd`). `wait` follows a
+run's record (`Record`) to its end. The driver places the workflow's roles in the engine's
+classes before the record is begun. It reads the machine's configuration (`config`, TOML): the
+Docker context, and the model upstreams that a workflow's model route may reach, of which it
+hands `Run` the one that serves the route (`Serving`).
 
 **`crates/harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
@@ -174,9 +181,10 @@ that writes the agent's runtime that runs it.
   repository or outside it, may use it.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
-and with `--docker` the tests that need Docker), `cargo xtask sandboxd`, `cargo xtask mutants`,
-which runs cargo-mutants on the working tree's changes (`diff`), and `cargo xtask install-tools`,
-which installs the contributor tools that `tools` pins. A check is a step of `ci`.
+and with `--docker` the tests that need Docker), `cargo xtask sandboxd`, `cargo xtask install`,
+which installs `pumpkin` beside a static `sandboxd`, `cargo xtask mutants`, which runs
+cargo-mutants on the working tree's changes (`diff`), and `cargo xtask install-tools`, which
+installs the contributor tools that `tools` pins. A check is a step of `ci`.
 
 ## Cross-cutting concerns
 

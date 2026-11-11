@@ -273,14 +273,15 @@ impl<'a> Suite<'a> {
     }
 
     /// Creates a sandbox for `role`, as [`create`](Self::create) does, and accepts its session,
-    /// set up, by the startup the provider declares, from the create's start.
+    /// set up, by the startup of the provider's slowest class, from the create's start.
     fn start(
         &mut self,
         role: &'static str,
         image: &Published,
         sandboxd: &Published,
     ) -> (SandboxId, Result<Session, String>) {
-        let startup = self.provider.ready().capabilities.startup_seconds;
+        let classes = self.provider.ready().classes.values();
+        let startup = classes.map(|class| class.startup_seconds).max().unwrap();
         let by = Deadline::after(Duration::from_secs(startup.get()));
         let (id, listener) = self.create(role, image, sandboxd);
         // The suite starts no commands, so nothing arrives that it needs.

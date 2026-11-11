@@ -6,39 +6,26 @@
 //! Every errno a call returns is the world's, and returned: the kernel's security policy, a
 //! security module's or a seccomp filter's, may fail any call with any errno.
 
-#![expect(
-    unsafe_code,
-    reason = "libc has no safe wrappers for the wait, kill, prctl and recv calls"
-)]
-
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use rustix::io::Errno;
+use rustix::net::RecvFlags;
+use rustix::process::{self, DumpableBehavior, Pid, Signal, WaitId, WaitIdOptions, WaitOptions};
 use stdx::Context;
 
 /// Waits until a child has exited, or a child that made this process its tracer has stopped,
-/// without reaping it, and returns its process ID: `None` if there are no children. Fails with
-/// waitid's errno.
-pub(crate) fn wait_for_child() -> io::Result<Option<i32>> {
+/// without reaping it: false if there are no children. Fails with waitid's errno.
+pub(crate) fn wait_for_child() -> io::Result<bool> {
     loop {
-        // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let options = libc::WEXITED | libc::WNOWAIT;
-        // SAFETY: waitid writes only to `info`, which outlives the call.
-        if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
-            // SAFETY: waitid filled `info` for a child that exited or stopped, so it holds a
-            // process ID.
-            return Ok(Some(unsafe { info.si_pid() }));
-        }
-        let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ECHILD) => return Ok(None),
-            Some(libc::EINTR) => {}
-            _ => return Err(error),
+        match process::waitid(WaitId::All, WaitIdOptions::EXITED | WaitIdOptions::NOWAIT) {
+            Ok(_) => return Ok(true),
+            Err(Errno::CHILD) => return Ok(false),
+            Err(Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -46,58 +33,62 @@ pub(crate) fn wait_for_child() -> io::Result<Option<i32>> {
 /// Whether this process has any children: running, stopped, or exited and not yet reaped.
 /// Fails with waitid's errno.
 pub(crate) fn has_children() -> io::Result<bool> {
-    // SAFETY: siginfo_t is plain data, for which all zeros is a valid value.
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-    // SAFETY: waitid writes only to `info`, which outlives the call.
-    if unsafe { libc::waitid(libc::P_ALL, 0, &raw mut info, options) } == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ECHILD) => Ok(false),
-        _ => Err(error),
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    match process::waitid(WaitId::All, options) {
+        Ok(_) => Ok(true),
+        Err(Errno::CHILD) => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
-/// Reaps child `pid` if it has exited and returns its raw status: `None` if it hasn't exited
-/// yet, or was already reaped. For a child that made this process its tracer, it also returns
-/// the status of a stop, and consumes the report of it, so that no wait returns it again.
-/// Fails with waitpid's errno.
-pub(crate) fn reap(pid: i32) -> io::Result<Option<i32>> {
-    let mut status = 0;
-    // SAFETY: waitpid writes only to `status`, which outlives the call.
-    match unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) } {
-        reaped if reaped == pid => Ok(Some(status)),
-        0 => Ok(None),
-        -1 => {
-            let error = io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::ECHILD) => Ok(None),
-                _ => Err(error),
-            }
-        }
-        returned => unreachable!(
-            "waitpid({pid}, WNOHANG) returned {returned}, though given a child's process ID, it \
-             returns that ID, 0 or -1"
-        ),
+/// Reaps a child that has exited and returns its process ID and raw status: `None` if none has
+/// exited. For a child that made this process its tracer, it also returns the status of a
+/// stop, and consumes the report of it, so that no wait returns it again. Fails with waitpid's
+/// errno.
+pub(crate) fn reap() -> io::Result<Option<(i32, i32)>> {
+    match process::wait(WaitOptions::NOHANG) {
+        Ok(reaped) => Ok(reaped.map(|(pid, status)| (pid.as_raw_pid(), status.as_raw()))),
+        Err(Errno::CHILD) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
 /// Kills the process group `group`, if any of it is left. Fails if this process may kill none
 /// of the group's processes.
 pub(crate) fn kill_group(group: i32) -> io::Result<()> {
-    // SAFETY: killpg takes only integers and touches no memory of this process.
-    killed(unsafe { libc::killpg(group, libc::SIGKILL) })
+    let Some(group) = Pid::from_raw(group) else {
+        unreachable!(
+            "a command's process group is 0, though each is the process ID that starting the \
+             command gave, which is positive"
+        )
+    };
+    killed(process::kill_process_group(group, Signal::KILL))
 }
 
-/// Kills every process this one may signal, and skips the others. As the first process of its
-/// namespace, that is every other process in it: the kernel never sends a signal for `-1` to
-/// the sender itself or to PID 1. Where something other than the user's rights keeps it from
-/// killing a process, such as a security module's policy, it may fail, or skip that one too.
+/// Kills every other process in this one's PID namespace that it may signal, as the first
+/// process of its namespace, and skips the others: each that `/proc` lists. A process that
+/// another forks while `/proc` is read may be missed; freezing kills again each time a child is
+/// reaped ([`Commands::freeze`](crate::commands::Commands::freeze)). Where something other than the user's rights keeps it from
+/// killing a process, such as a security module's policy, it may fail. Every process is tried,
+/// and the first failure is returned.
 pub(crate) fn kill_all_others() -> io::Result<()> {
-    // SAFETY: kill takes only integers and touches no memory of this process.
-    killed(unsafe { libc::kill(-1, libc::SIGKILL) })
+    let own = process::getpid();
+    let mut outcome = Ok(());
+    for entry in fs::read_dir("/proc")? {
+        // Each process is listed by its ID, among files of other names.
+        let name = entry?.file_name();
+        let pid = (name.to_str()).and_then(|name| name.parse().ok());
+        let Some(pid) = pid.and_then(Pid::from_raw).filter(|&pid| pid != own) else {
+            continue;
+        };
+        // One this process may not signal is skipped.
+        let killed = match process::kill_process(pid, Signal::KILL) {
+            Err(Errno::PERM) => Ok(()),
+            killed => killed,
+        };
+        outcome = outcome.and(self::killed(killed));
+    }
+    outcome
 }
 
 /// Whether this is the first process of its PID namespace, as `sandboxd` is in a sandbox.
@@ -115,13 +106,9 @@ pub(crate) fn is_first_process() -> bool {
 /// The commands it starts don't inherit the flag, since `execve` resets it. Fails if the
 /// kernel refuses, as a security module's policy may.
 pub(crate) fn make_non_dumpable() -> io::Result<()> {
-    let off: libc::c_ulong = 0;
-    // SAFETY: `PR_SET_DUMPABLE` takes integer arguments only, each passed as the
-    // `unsigned long` the kernel reads.
-    match unsafe { libc::prctl(libc::PR_SET_DUMPABLE, off, off, off, off) } {
-        0 => Ok(()),
-        _ => Err(io::Error::last_os_error()),
-    }
+    Ok(process::set_dumpable_behavior(
+        DumpableBehavior::NotDumpable,
+    )?)
 }
 
 /// Opens the regular file at `path` with `options`, and fails for anything else there, a
@@ -148,27 +135,19 @@ pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<Fil
 /// Whether the other end of `connection` has closed it, as a killed process's sockets close:
 /// whether reading it would find its end, or fail. It reads nothing, and doesn't wait.
 pub(crate) fn peer_closed(connection: &UnixStream) -> bool {
-    let mut byte = 0_u8;
-    let flags = libc::MSG_PEEK | libc::MSG_DONTWAIT;
-    // SAFETY: recv writes at most one byte, to `byte`, which outlives the call.
-    match unsafe { libc::recv(connection.as_raw_fd(), (&raw mut byte).cast(), 1, flags) } {
-        0 => true,
-        1.. => false,
-        _ => io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock,
+    let mut byte = [0_u8];
+    match rustix::net::recv(connection, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
+        Ok((read, _)) => read == 0,
+        Err(error) => error != Errno::WOULDBLOCK,
     }
 }
 
-/// The outcome of a `kill` or `killpg` that sent `SIGKILL` and returned `result`: finding no
-/// process left to kill is no failure, and any other errno is the world's, as when the user may
-/// not kill a process (`EPERM`, which `kill(-1)` never reports), or a security module's policy
-/// forbids it.
-fn killed(result: libc::c_int) -> io::Result<()> {
-    if result == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(()),
-        _ => Err(error),
+/// The outcome of a kill that sent `SIGKILL` and ended with `result`: finding no process left
+/// to kill is no failure, and any other errno is the world's, as when the user may not kill a
+/// process, or a security module's policy forbids it.
+fn killed(result: rustix::io::Result<()>) -> io::Result<()> {
+    match result {
+        Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }

@@ -1,21 +1,25 @@
 //! A workflow parsed from its IR: references resolved to typed ids, every time given as a
 //! [`Duration`], and the rules that span its parts checked.
 //!
-//! A [`Workflow`] can only be made by [`Workflow::parse`], so code that acts on one need not
-//! check again what parsing established. Each kind of part has its own id type, so that, for
-//! example, the role a [`JudgeGrant`] judges with is known to be a [`Judge`]. Ids are only
-//! valid for the workflow that issued them.
+//! A [`Placed`] workflow has each of its roles in the smallest class of sandbox that fits it. A
+//! [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`] by
+//! [`Workflow::place`], so code that acts on one need not check again what they established.
+//! Each kind of part has its own id type, so that, for example, the role a [`JudgeGrant`]
+//! judges with is known to be a [`Judge`]. Ids are only valid for the workflow that issued them.
 
 use std::num::NonZeroU64;
 use std::time::Duration;
 
 use crate::ir::{
-    Command, Dir, File, Image, ModelRoute, Name, Resources, ResultSpec, Slot, User, WorkflowName,
+    Command, Dir, File, Image, JsonPointer, ModelRoute, Name, Resources, ResultSpec, Slot, User,
+    WorkflowName,
 };
 
+mod errors;
 mod parse;
+mod place;
 
-pub use parse::{ParseError, ParseErrors};
+pub use errors::{ParseError, ParseErrors};
 
 /// A parsed workflow.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +67,17 @@ impl Workflow {
         }
     }
 
+    /// What `f` makes of each role's sandbox, the agent's first, then each judge's in
+    /// [`judges`](Self::judges)' order.
+    pub(crate) fn by_role<T>(&self, mut f: impl FnMut(&Sandbox) -> T) -> ByRole<T> {
+        let agent = f(&self.agent.sandbox);
+        let judges = (self.judges.iter()).map(|judge| f(&judge.sandbox));
+        ByRole {
+            agent,
+            judges: judges.collect(),
+        }
+    }
+
     pub fn slot(&self, id: SlotId) -> &Slot {
         &self.judge(id.judge).slots[id.index]
     }
@@ -97,6 +112,26 @@ impl Workflow {
     }
 }
 
+/// A parsed workflow whose every role is placed in the smallest class of sandbox that fits it
+/// ([`Workflow::place`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placed {
+    workflow: Workflow,
+    /// Each role's class's [`startup_seconds`](crate::provider::Class::startup_seconds).
+    startups: ByRole<Duration>,
+}
+
+impl Placed {
+    pub fn workflow(&self) -> &Workflow {
+        &self.workflow
+    }
+
+    /// The longest a start of one of `role`'s sandboxes takes, as its class declares.
+    pub fn startup(&self, role: RoleId) -> Duration {
+        *self.startups.get(role)
+    }
+}
+
 /// A judge role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JudgeId(usize);
@@ -107,6 +142,24 @@ pub enum RoleId {
     /// The workflow's one agent.
     Agent,
     Judge(JudgeId),
+}
+
+/// A value for each role of the workflow that made it ([`Workflow::by_role`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ByRole<T> {
+    agent: T,
+    /// Each judge's, in [`Workflow::judges`]' order.
+    judges: Vec<T>,
+}
+
+impl<T> ByRole<T> {
+    /// The value for `role`, a role of the workflow that made this.
+    pub(crate) fn get(&self, role: RoleId) -> &T {
+        match role {
+            RoleId::Agent => &self.agent,
+            RoleId::Judge(judge) => &self.judges[judge.0],
+        }
+    }
 }
 
 /// A slot of a judge.
@@ -140,7 +193,9 @@ pub struct Sandbox {
     pub name: Name,
     pub image: Image,
     pub user: User,
-    pub resources: Resources,
+    pub needs: Resources,
+    /// The role's place in the IR, where placing it reports what is wrong.
+    pub(crate) at: JsonPointer,
     /// Only the agent's may be set.
     pub model_route: Option<ModelRoute>,
 }

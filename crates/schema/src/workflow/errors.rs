@@ -1,5 +1,5 @@
-//! The errors a parse reports. A parse collects them, so that it reports every rule it checks
-//! that the IR breaks, not only the first.
+//! The errors a parse, or a placement, reports. Each collects them, so that it reports every
+//! rule it checks that the IR breaks, not only the first.
 //!
 //! A part that fails to parse returns a [`Reported`], which only [`Errors::report`] makes, so a
 //! failed parse always has an error to return.
@@ -28,8 +28,9 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
-/// The rules an IR breaks, in the order the parse finds them; see
-/// [`Workflow::parse`](crate::workflow::Workflow::parse) for which rules. Never empty.
+/// The rules an IR breaks, in the order the parse, or the placement, finds them; see
+/// [`Workflow::parse`](crate::workflow::Workflow::parse) and
+/// [`Workflow::place`](crate::workflow::Workflow::place) for which rules. Never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseErrors(Vec<ParseError>);
 
@@ -70,7 +71,7 @@ impl Errors {
         Reported(())
     }
 
-    /// Ends a parse: fails with the errors reported, if there are any.
+    /// Ends a parse, or a placement: fails with the errors reported, if there are any.
     pub(super) fn finish<T>(self, parsed: Result<T, Reported>) -> Result<T, ParseErrors> {
         match parsed {
             Ok(parsed) if self.0.is_empty() => Ok(parsed),

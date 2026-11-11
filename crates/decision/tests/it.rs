@@ -1,7 +1,8 @@
 //! The driver's decision core, fed event scripts on the LWE workflow that `schema`
 //! tests parsing with, or on variants of it. Each test shows what the core did after each
-//! event, and when it next wants a tick whenever that changes. Each run's provider may take
-//! [`STARTUP`] to start a sandbox, which sets the run's hard end.
+//! event, and when it next wants a tick whenever that changes. Each role is placed in a class
+//! whose sandboxes may take [`STARTUP`] to start, or, if it asks for more memory than that class
+//! gives, [`SLOW_STARTUP`], which sets the run's hard end.
 //!
 //! A script has one event per line: the time in milliseconds since the run started, then one
 //! of these:
@@ -22,6 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use decision::{
@@ -29,7 +31,8 @@ use decision::{
     Verdict, WorkEnd,
 };
 use expect_test::{Expect, expect};
-use schema::ir::{self, Name, Sha256Digest};
+use schema::ir::{self, Name, Resources, Sha256Digest};
+use schema::provider::Class;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
 use schema::workflow::{JudgeCall, Workflow};
@@ -37,8 +40,14 @@ use serde_json::{Value, json};
 
 const LWE: &str = include_str!("../../schema/tests/fixtures/lwe.json");
 
-/// How long each run's provider may take to start a sandbox.
+/// How long a sandbox may take to start in the class that every LWE role fits.
 const STARTUP: Duration = Duration::from_secs(10);
+
+/// How long a sandbox may take to start in the class that gives a role more memory.
+const SLOW_STARTUP: Duration = Duration::from_secs(30);
+
+/// The memory that the slow class gives a role.
+const SLOW_MEMORY_BYTES: u64 = 2 << 40;
 
 /// Runs `script` on the LWE workflow with `edit` applied, and compares what the core did
 /// with `expect`.
@@ -46,15 +55,15 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut ir: Value = serde_json::from_str(LWE).unwrap();
     edit(&mut ir);
     let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
-    let workflow = Workflow::parse(&ir).unwrap();
+    let placed = Workflow::parse(&ir).unwrap().place(&classes()).unwrap();
     let mut run = Run {
-        workflow: &workflow,
+        workflow: placed.workflow(),
         ops: 0,
         jobs: BTreeMap::new(),
         tick_due: None,
         transcript: String::new(),
     };
-    let (mut core, actions) = Core::start(&workflow, STARTUP);
+    let (mut core, actions) = Core::start(&placed);
     run.note("start", &actions, core.tick_due());
     for line in script
         .lines()
@@ -77,6 +86,25 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         }
     }
     expect.assert_eq(&run.transcript);
+}
+
+/// Two classes: one whose starts take [`STARTUP`], which every LWE role fits, and one whose
+/// starts take [`SLOW_STARTUP`], which gives a role [`SLOW_MEMORY_BYTES`].
+fn classes() -> BTreeMap<Name, Class> {
+    let class = |name: &str, memory_bytes, startup: Duration| {
+        let class = Class {
+            resources: Resources {
+                cpu_millis: NonZeroU64::new(64_000).unwrap(),
+                memory_bytes: NonZeroU64::new(memory_bytes).unwrap(),
+            },
+            startup_seconds: NonZeroU64::new(startup.as_secs()).unwrap(),
+        };
+        (Name::try_from(name.to_owned()).unwrap(), class)
+    };
+    BTreeMap::from([
+        class("fast", 1 << 40, STARTUP),
+        class("slow", SLOW_MEMORY_BYTES, SLOW_STARTUP),
+    ])
 }
 
 /// What a script needs to know as it runs.
@@ -730,6 +758,65 @@ fn hard_end_bounds() {
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 18446744073709551615999)
+        "#]],
+    );
+}
+
+#[test]
+fn hard_end_startups() {
+    // In the slow class, the agent's startup counts twice, and stands in for a deadline shorter
+    // than it.
+    check(
+        |ir| {
+            ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(5);
+            ir["roles"][0]["needs"]["memory_bytes"] = json!(SLOW_MEMORY_BYTES);
+        },
+        r"
+        1000 submit submit 10
+        5000 tick
+        249999 tick
+        250000 tick
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 5000)
+            1000 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":4}
+            5000 tick
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 250000)
+            249999 tick
+            250000 tick
+              abandon the run at its hard end
+        "#]],
+    );
+    // In the slow class, the final judge's startup counts once.
+    check(
+        |ir| {
+            ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60);
+            ir["roles"][2]["needs"]["memory_bytes"] = json!(SLOW_MEMORY_BYTES);
+        },
+        r"
+        1000 submit submit 10
+        60000 tick
+        279999 tick
+        280000 tick
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 60000)
+            1000 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":59}
+            60000 tick
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 280000)
+            279999 tick
+            280000 tick
+              abandon the run at its hard end
         "#]],
     );
 }

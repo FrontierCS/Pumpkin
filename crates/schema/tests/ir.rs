@@ -2,8 +2,9 @@
 //! hand-written workflow for the LWE task (`lwe_structured_recovery`) that follows the task's
 //! policy. Its image digests, the agent's command, files and standard input, and the judges'
 //! environment are placeholders.
-//! Also the JSON of ops' replies, which `sandboxctl` prints, the in-sandbox contract, and the run
-//! tags that providers find a run's sandboxes by.
+//! Also placing the workflow's roles in classes of sandbox, the JSON of ops' replies, which
+//! `sandboxctl` prints, the in-sandbox contract, and the run tags that providers find a run's
+//! sandboxes by.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `lwe` compares a round trip of all of
 //! it, and every other IR case is a change to it (`lwe_json`, `lwe_with`).
@@ -13,15 +14,19 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::collections::BTreeMap;
+use std::iter;
+use std::num::NonZeroU64;
+
 use expect_test::{Expect, expect};
 use schema::ir;
-use schema::provider::RunTag;
+use schema::provider::{Class, RunTag};
 use schema::sandbox::op::OpReply;
 use schema::sandbox::{
     MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdin, command_stdout,
     evidence_dir, pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
 };
-use schema::workflow::{Main, Workflow};
+use schema::workflow::{Main, RoleId, Workflow};
 use serde_json::{Value, json};
 
 const LWE: &str = include_str!("fixtures/lwe.json");
@@ -72,6 +77,49 @@ impl Case for Value {
     }
 }
 
+/// An IR placed by [`classes`]: each role, with its class's startup, or why the IR fails to
+/// parse or be placed.
+struct Placing(Value);
+
+impl Case for Placing {
+    fn outcome(self) -> String {
+        let ir = serde_json::from_value::<ir::Workflow>(self.0).unwrap();
+        let placed = Workflow::parse(&ir)
+            .and_then(|workflow| workflow.place(&classes()))
+            .map_err(|errors| errors.to_string());
+        let placed = match placed {
+            Ok(placed) => placed,
+            Err(error) => return error,
+        };
+        let workflow = placed.workflow();
+        let judges = workflow.judges().map(|(judge, _)| RoleId::Judge(judge));
+        let roles = iter::once(RoleId::Agent).chain(judges).map(|role| {
+            let name = &workflow.sandbox(role).name;
+            format!("{name}'s starts take at most {:?}", placed.startup(role))
+        });
+        roles.collect::<Vec<String>>().join(", ")
+    }
+}
+
+/// Two classes: `large`, whose starts take 30 s, which every LWE role fits, and `small`, whose
+/// starts take 60 s, which gives a role exactly what each LWE judge asks for.
+fn classes() -> BTreeMap<ir::Name, Class> {
+    let class = |name: &str, cpu_millis, memory_bytes, startup_seconds| {
+        let class = Class {
+            resources: ir::Resources {
+                cpu_millis: NonZeroU64::new(cpu_millis).unwrap(),
+                memory_bytes: NonZeroU64::new(memory_bytes).unwrap(),
+            },
+            startup_seconds: NonZeroU64::new(startup_seconds).unwrap(),
+        };
+        (ir::Name::try_from(name.to_owned()).unwrap(), class)
+    };
+    BTreeMap::from([
+        class("large", 16_000, 64 << 30, 30),
+        class("small", 8_000, 2 << 30, 60),
+    ])
+}
+
 /// An op's reply as JSON, which reads as the reply shown and writes back as itself, or fails to
 /// read.
 struct Reply(&'static str);
@@ -119,6 +167,24 @@ impl Case for Tag {
             Err(error) => error,
         }
     }
+}
+
+#[test]
+fn placement() {
+    let mut larger = lwe_json();
+    larger["roles"][1]["needs"]["cpu_millis"] = json!(8001);
+    larger["roles"][2]["needs"]["memory_bytes"] = json!((2u64 << 30) + 1);
+    let mut unplaced = lwe_json();
+    unplaced["roles"][0]["needs"]["cpu_millis"] = json!(16_001);
+    unplaced["roles"][2]["needs"]["memory_bytes"] = json!((64u64 << 30) + 1);
+    check(
+        [Placing(lwe_json()), Placing(larger), Placing(unplaced)],
+        &expect![[r#"
+            agent's starts take at most 30s, train_judge's starts take at most 60s, final_judge's starts take at most 60s
+            agent's starts take at most 30s, train_judge's starts take at most 30s, final_judge's starts take at most 30s
+            /roles/0/needs: `agent` fits no class of sandbox, as `large` offers 16000 thousandths of a CPU, fewer than its 16001; `small` offers 8000 thousandths of a CPU, fewer than its 16001: ask for no more than a class offers
+            /roles/2/needs: `final_judge` fits no class of sandbox, as `large` offers 68719476736 bytes of memory, fewer than its 68719476737; `small` offers 2147483648 bytes of memory, fewer than its 68719476737: ask for no more than a class offers"#]],
+    );
 }
 
 #[test]

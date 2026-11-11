@@ -11,6 +11,8 @@
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -39,6 +41,8 @@ mod flags {
         reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
     )]
 
+    use std::path::PathBuf;
+
     xflags::xflags! {
         src "./src/main.rs"
 
@@ -61,6 +65,13 @@ mod flags {
 
             /// Builds the static sandboxd that every sandbox runs, and prints its path.
             cmd sandboxd {}
+
+            /// Builds `pumpkin` and the static sandboxd, and installs them side by side in
+            /// `<root>/bin`, where `pumpkin` finds that sandboxd by default; prints each path.
+            cmd install {
+                /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
+                optional --root dir: PathBuf
+            }
 
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
             /// listed in `mutants.out`, is a finding to read, not a failure.
@@ -88,6 +99,7 @@ mod flags {
         Fmt(Fmt),
         Ci(Ci),
         Sandboxd(Sandboxd),
+        Install(Install),
         Mutants(Mutants),
         InstallTools(InstallTools),
     }
@@ -104,6 +116,11 @@ mod flags {
 
     #[derive(Debug)]
     pub struct Sandboxd;
+
+    #[derive(Debug)]
+    pub struct Install {
+        pub root: Option<PathBuf>,
+    }
 
     #[derive(Debug)]
     pub struct Mutants {
@@ -159,6 +176,7 @@ fn try_main() -> Result<()> {
             println!("{}", sandboxd(&cargo)?.display());
             Ok(())
         }
+        flags::XtaskCmd::Install(flags::Install { root }) => install(&cargo, root),
         flags::XtaskCmd::Mutants(flags::Mutants { in_diff }) => mutants(&cargo, in_diff.as_deref()),
         flags::XtaskCmd::InstallTools(flags::InstallTools) => tools::install(&cargo),
     }
@@ -334,22 +352,67 @@ fn mutants(cargo: &Cargo, rev: Option<&str>) -> Result<()> {
     }
 }
 
-/// Builds the static `sandboxd` that every sandbox runs, and returns the path cargo reports
-/// for it, so that the path is right wherever cargo's configuration puts the target directory.
+/// Builds the static `sandboxd` that every sandbox runs, and returns its path.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
-    let build = cargo.cmd(&["build", "--release", "--locked"]);
-    let build = build.args(["--package", "sandboxd", "--target", MUSL]);
+    release(cargo, "sandboxd", &["--target", MUSL])
+}
+
+/// Builds the release binary of `package`, which has its name, with the cargo arguments `args`,
+/// and returns the path cargo reports for it, so that the path is right wherever cargo's
+/// configuration puts the target directory.
+fn release(cargo: &Cargo, package: &str, args: &[&str]) -> Result<PathBuf> {
+    let build = cargo.cmd(&["build", "--release", "--locked", "--package", package]);
+    let build = build.args(args);
     let build = build.args(["--message-format", "json-render-diagnostics"]);
     // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {
         let message: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("cargo printed `{line}`, which isn't JSON: {error}"))?;
         if message["reason"] == "compiler-artifact"
-            && message["target"]["name"] == "sandboxd"
+            && message["target"]["name"] == package
             && let Some(path) = message["executable"].as_str()
         {
             return Ok(path.into());
         }
     }
-    Err("cargo reported no sandboxd executable: expected a compiler-artifact message for it".into())
+    Err(format!(
+        "cargo reported no {package} executable: expected a compiler-artifact message for it"
+    )
+    .into())
+}
+
+/// Builds `pumpkin` and the static `sandboxd`, and installs them in `<root>/bin`, made if need be,
+/// replacing what is there: `root` made absolute, or this checkout's `.pumpkin`. Prints each
+/// one's path, and says if `<root>/bin` is not on `PATH`.
+fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
+    let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
+    let bin = root.join("bin");
+    let bin = std::path::absolute(&bin)
+        .map_err(|error| format!("making {} absolute failed: {error}", bin.display()))?;
+    let built = [
+        ("pumpkin", release(cargo, "pumpkin", &[])?),
+        ("sandboxd", sandboxd(cargo)?),
+    ];
+    fs::create_dir_all(&bin)
+        .map_err(|error| format!("making {} failed: {error}", bin.display()))?;
+    for (name, from) in built {
+        let to = bin.join(name);
+        // Copied beside it, then renamed over it: a copy over a `pumpkin` that runs would fail,
+        // as Linux refuses to write a file that a process executes.
+        let copy = bin.join(format!(".{name}.xtask-install"));
+        // Each sandbox's processes run as its role's user, who must execute `sandboxd`.
+        let installed = (fs::copy(from, &copy))
+            .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(0o755)))
+            .and_then(|()| fs::rename(&copy, &to));
+        installed.map_err(|error| format!("installing {} failed: {error}", to.display()))?;
+        println!("{}", to.display());
+    }
+    let path = env::var_os("PATH").unwrap_or_default();
+    if !env::split_paths(&path).any(|dir| dir == bin) {
+        eprintln!(
+            "xtask: {} is not on PATH: add it there to run `pumpkin` by its name",
+            bin.display()
+        );
+    }
+    Ok(())
 }
