@@ -2,6 +2,8 @@
   which also runs the tests that need a Docker engine, when a change touches code only those
   tests reach
 - RUN `cargo xtask install-tools` before the checks, and again when `cargo xtask ci` asks
+- RUN `cargo xtask mutants` at review of a change to the decision core or to the schema's
+  refusals, as `docs/dev/testing.md` says
 - NEVER assume a clippy warning or a test failure is pre-existing
 - PREFER running the narrowest relevant test while iterating
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend

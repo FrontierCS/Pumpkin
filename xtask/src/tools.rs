@@ -17,7 +17,13 @@ pub(crate) const NEXTEST: Tool = Tool {
     version: "0.9.151",
 };
 
-const TOOLS: [Tool; 1] = [NEXTEST];
+pub(crate) const MUTANTS: Tool = Tool {
+    krate: "cargo-mutants",
+    binary: "cargo-mutants",
+    version: "27.1.0",
+};
+
+const TOOLS: [Tool; 2] = [NEXTEST, MUTANTS];
 
 /// Installs each of [`TOOLS`] that cargo doesn't run at its version, into cargo's install root.
 pub(crate) fn install(cargo: &Cargo) -> Result<()> {
