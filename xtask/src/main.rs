@@ -16,6 +16,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use xshell::{Cmd, Shell};
 
+mod diff;
 mod tidy;
 mod tools;
 
@@ -61,6 +62,14 @@ mod flags {
             /// Builds the static sandboxd that every sandbox runs, and prints its path.
             cmd sandboxd {}
 
+            /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
+            /// listed in `mutants.out`, is a finding to read, not a failure.
+            cmd mutants {
+                /// The revision since whose merge base with `HEAD` the changes are taken,
+                /// `origin/main` by default.
+                optional --in-diff rev: String
+            }
+
             /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
             /// pinned version.
             cmd install-tools {}
@@ -79,6 +88,7 @@ mod flags {
         Fmt(Fmt),
         Ci(Ci),
         Sandboxd(Sandboxd),
+        Mutants(Mutants),
         InstallTools(InstallTools),
     }
 
@@ -94,6 +104,11 @@ mod flags {
 
     #[derive(Debug)]
     pub struct Sandboxd;
+
+    #[derive(Debug)]
+    pub struct Mutants {
+        pub in_diff: Option<String>,
+    }
 
     #[derive(Debug)]
     pub struct InstallTools;
@@ -144,6 +159,7 @@ fn try_main() -> Result<()> {
             println!("{}", sandboxd(&cargo)?.display());
             Ok(())
         }
+        flags::XtaskCmd::Mutants(flags::Mutants { in_diff }) => mutants(&cargo, in_diff.as_deref()),
         flags::XtaskCmd::InstallTools(flags::InstallTools) => tools::install(&cargo),
     }
 }
@@ -277,6 +293,45 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
     }
     let failed = failed.join(", and ");
     Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
+}
+
+/// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default.
+/// Missed mutants and timeouts are findings, not failures.
+fn mutants(cargo: &Cargo, rev: Option<&str>) -> Result<()> {
+    tools::require(cargo, tools::MUTANTS)?;
+    tools::require(cargo, tools::NEXTEST)?;
+    let again = match rev {
+        Some(rev) => format!("cargo xtask mutants --in-diff {rev}"),
+        None => "cargo xtask mutants".to_owned(),
+    };
+    let diff = diff::since(&cargo.sh, rev.unwrap_or("origin/main"), &again)?;
+    let scratch = cargo.sh.create_temp_dir()?;
+    let diff_path = scratch.path().join("changes.diff");
+    cargo.sh.write_file(&diff_path, diff)?;
+    let run = cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path);
+    // Relative, so that each copy of the tree cargo-mutants builds has its own: in a shared one,
+    // cargo would take a mutant's artifacts as fresh for the unmutated tree.
+    let run = run.env("CARGO_TARGET_DIR", "target");
+    let line = run.to_string();
+    let status = Command::from(run).status();
+    let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;
+    // cargo-mutants exits with 2 when the tests missed a mutant, and 3 when one timed out.
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(2 | 3) => {
+            let report = root().join("mutants.out");
+            println!(
+                "xtask: the mutants cargo-mutants missed or timed out on are findings, listed in \
+                 `{}` with their diffs",
+                report.display()
+            );
+            Ok(())
+        }
+        _ => Err(format!(
+            "`{line}` ended with {status}: fix what it printed above, and run `{again}` again"
+        )
+        .into()),
+    }
 }
 
 /// Builds the static `sandboxd` that every sandbox runs, and returns the path cargo reports

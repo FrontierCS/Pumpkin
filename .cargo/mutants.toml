@@ -1,0 +1,6 @@
+# The tests assume each a process of its own, as cargo-nextest gives them.
+test_tool = "nextest"
+
+# Only the Docker tests, which run only when asked for, reach the Docker provider, so each of its
+# mutants would read as missed.
+exclude_globs = ["providers/docker/**"]
