@@ -18,6 +18,7 @@ xshell = "0.2.7"
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

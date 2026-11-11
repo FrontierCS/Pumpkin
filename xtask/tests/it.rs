@@ -7,8 +7,6 @@
 )]
 
 use std::error::Error;
-use std::fs;
-use std::path::PathBuf;
 
 use expect_test::{Expect, expect};
 use xshell::{Shell, cmd};
@@ -30,32 +28,23 @@ enum Standing {
     Deleted,
 }
 
-/// A scratch directory, which is removed as it drops, so also when a test fails.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // A directory already gone is fine.
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 /// Writes `files`, each a path, its text and how it stands, into a new Git repository, runs the
 /// check there, and checks what it reports against `expect`.
 fn check(name: &str, files: &[(&str, String, Standing)], expect: &Expect) {
-    let dir = std::env::temp_dir().join(format!("pumpkin-xtask-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let _scratch = Scratch(dir.clone());
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("xtask-{name}-"))
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path();
     let sh = Shell::new().unwrap();
-    sh.change_dir(&dir);
+    sh.change_dir(dir);
     // Git's own variables, inherited, would steer every command here to another repository, as
     // the `GIT_DIR` that `git rebase --exec` sets in a linked worktree would. A `Shell` can set
     // a variable but not remove one, so each that places a repository is set to this one's.
     let git = dir.join(".git");
     sh.set_var("GIT_DIR", &git);
     sh.set_var("GIT_COMMON_DIR", &git);
-    sh.set_var("GIT_WORK_TREE", &dir);
+    sh.set_var("GIT_WORK_TREE", dir);
     sh.set_var("GIT_INDEX_FILE", git.join("index"));
     sh.set_var("GIT_OBJECT_DIRECTORY", git.join("objects"));
     cmd!(sh, "git init --quiet").quiet().run().unwrap();

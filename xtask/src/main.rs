@@ -12,11 +12,12 @@ use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use xshell::{Cmd, Shell};
 
 mod tidy;
+mod tools;
 
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -59,6 +60,10 @@ mod flags {
 
             /// Builds the static sandboxd that every sandbox runs, and prints its path.
             cmd sandboxd {}
+
+            /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
+            /// pinned version.
+            cmd install-tools {}
         }
     }
     // generated start
@@ -74,6 +79,7 @@ mod flags {
         Fmt(Fmt),
         Ci(Ci),
         Sandboxd(Sandboxd),
+        InstallTools(InstallTools),
     }
 
     #[derive(Debug)]
@@ -88,6 +94,9 @@ mod flags {
 
     #[derive(Debug)]
     pub struct Sandboxd;
+
+    #[derive(Debug)]
+    pub struct InstallTools;
 
     impl Xtask {
         #[allow(dead_code)]
@@ -135,6 +144,7 @@ fn try_main() -> Result<()> {
             println!("{}", sandboxd(&cargo)?.display());
             Ok(())
         }
+        flags::XtaskCmd::InstallTools(flags::InstallTools) => tools::install(&cargo),
     }
 }
 
@@ -196,21 +206,22 @@ fn root() -> &'static Path {
 }
 
 /// Runs the checks every change must pass, in order, and stops at the first that fails. With
-/// `docker`, it builds the static `sandboxd` before the tests, names it in `PUMPKIN_SANDBOXD`
-/// and runs the ignored tests too, which are the tests that need Docker; they inherit
-/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
+/// `docker`, it builds the static `sandboxd` before the tests, names it in
+/// `PUMPKIN_SANDBOXD` and runs the ignored tests too, which are the tests that need Docker; they
+/// inherit `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
 /// Docker's own variables set to reach no engine.
 fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
+    tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;
     tidy::check(&cargo.sh)?;
     let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
     clippy.args(["--", "--deny", "warnings"]).run()?;
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
-    let test = cargo.cmd(&["test", "--workspace", "--locked"]);
-    if docker {
+    let test = cargo.cmd(&["nextest", "run", "--workspace", "--locked"]);
+    let test = if docker {
         let sandboxd = sandboxd(cargo)?;
-        let test = test.args(["--", "--include-ignored"]);
+        let test = test.args(["--run-ignored", "all"]);
         // These poison the variables the Docker provider must ignore: passed on to `docker`,
         // they would steer it to an engine that doesn't exist, or to TLS without certificates,
         // so the Docker tests fail unless the provider clears `docker`'s environment.
@@ -218,11 +229,54 @@ fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
             .env("DOCKER_HOST", "unix:///nonexistent/pumpkin-poison.sock")
             .env("DOCKER_CONTEXT", "pumpkin-poison-no-such-context")
             .env("DOCKER_TLS_VERIFY", "1");
-        test.env("PUMPKIN_SANDBOXD", &sandboxd).run()?;
+        test.env("PUMPKIN_SANDBOXD", &sandboxd)
     } else {
-        test.run()?;
+        test
+    };
+    let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
+    let again = if docker {
+        "cargo xtask ci --docker"
+    } else {
+        "cargo xtask ci"
+    };
+    // ci checks snapshots, never rewrites them.
+    tests(
+        test.env_remove("UPDATE_EXPECT"),
+        doctests.env_remove("UPDATE_EXPECT"),
+        again,
+    )
+}
+
+/// Runs `test` and `doctests` at once, and prints what `doctests` printed, if it failed, once
+/// `test` has ended. Fails if either fails, saying to run `again`.
+fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
+    let (test_line, doctests_line) = (test.to_string(), doctests.to_string());
+    let doctests = Command::from(doctests)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let doctests =
+        doctests.map_err(|error| format!("starting `{doctests_line}` failed: {error}"))?;
+    let tested = Command::from(test).status();
+    let tested = tested.map_err(|error| format!("running `{test_line}` failed: {error}"))?;
+    let doctested = doctests.wait_with_output();
+    let doctested =
+        doctested.map_err(|error| format!("waiting for `{doctests_line}` failed: {error}"))?;
+    if doctested.status.success() {
+        println!("xtask: `{doctests_line}` passed");
+    } else {
+        eprint!("{}", String::from_utf8_lossy(&doctested.stderr));
+        print!("{}", String::from_utf8_lossy(&doctested.stdout));
     }
-    Ok(())
+    let ended = [(test_line, tested), (doctests_line, doctested.status)];
+    let failed: Vec<_> = (ended.iter().filter(|(_, status)| !status.success()))
+        .map(|(line, status)| format!("`{line}` ended with {status}"))
+        .collect();
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let failed = failed.join(", and ");
+    Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
 }
 
 /// Builds the static `sandboxd` that every sandbox runs, and returns the path cargo reports

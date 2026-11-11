@@ -157,8 +157,9 @@ that writes the agent's runtime that runs it.
   repository or outside it, may use it.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
-and with `--docker` the tests that need Docker), and `cargo xtask sandboxd`. A check is a step of
-`ci`.
+and with `--docker` the tests that need Docker), `cargo xtask sandboxd`, and
+`cargo xtask install-tools`, which installs the contributor tools that `tools` pins. A check is a
+step of `ci`.
 
 ## Cross-cutting concerns
 

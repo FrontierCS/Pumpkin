@@ -91,13 +91,12 @@ fn unanswered(name: &'static str) -> Case {
 /// sent by a sandbox of a role whose route allows `m-large`, to the stand-in, answering by a
 /// deadline that only a hang reaches. Checks what came of each against `expect`.
 fn check(cases: &[Case], expect: &Expect) {
-    let dir = std::env::temp_dir().join(format!(
-        "pumpkin-upstream-{}-{}",
-        std::process::id(),
-        thread::current().name().unwrap()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    // Kept if the test fails.
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("route-{}-", thread::current().name().unwrap()))
+        .tempdir()
+        .unwrap()
+        .keep();
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
     let made: Vec<Result<Upstream, String>> = (0..)

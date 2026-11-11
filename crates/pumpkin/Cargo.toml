@@ -24,6 +24,7 @@ xflags.workspace = true
 [dev-dependencies]
 provider = { path = "../provider" }
 expect-test.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

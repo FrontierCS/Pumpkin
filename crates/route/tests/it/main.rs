@@ -45,13 +45,12 @@ fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
 /// provider received of each that the route admitted, or the refusal that the sandbox heard,
 /// and checks them against `expect`.
 fn check(cases: &[(&str, Request)], expect: &Expect) {
-    let dir = std::env::temp_dir().join(format!(
-        "pumpkin-route-{}-{}",
-        std::process::id(),
-        thread::current().name().unwrap()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    // Kept if the test fails.
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("route-{}-", thread::current().name().unwrap()))
+        .tempdir()
+        .unwrap()
+        .keep();
     let route = Route::new(models(["m-large", "m-small"]));
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();

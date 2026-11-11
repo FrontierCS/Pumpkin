@@ -61,21 +61,14 @@ fn short() -> Deadline {
 }
 
 /// Runs each case against a fake sandbox of its own, whose session takes ops within `ops`, if
-/// it gives a limit, and model requests if `models`, in a directory named after `name`, and
-/// checks what came of them against `expect`.
-fn check(
-    name: &str,
-    ops: Option<OpPayloadLimit>,
-    models: bool,
-    cases: &[(Action, Answer)],
-    expect: &Expect,
-) {
-    let id = std::process::id();
-    let dir = std::env::temp_dir().join(format!("gateway-{id}-{name}"));
-    if dir.exists() {
-        fs::remove_dir_all(&dir).unwrap();
-    }
-    fs::create_dir_all(&dir).unwrap();
+/// it gives a limit, and model requests if `models`.
+fn check(ops: Option<OpPayloadLimit>, models: bool, cases: &[(Action, Answer)], expect: &Expect) {
+    // Kept if the test fails.
+    let dir = tempfile::Builder::new()
+        .prefix("gateway-")
+        .tempdir()
+        .unwrap()
+        .keep();
     let outcomes: Vec<String> = cases
         .iter()
         .enumerate()
@@ -785,7 +778,6 @@ fn reply(kind: &str, stream: u32) -> (Value, Vec<u8>) {
 #[test]
 fn sandbox_answers() {
     check(
-        "answers",
         None,
         false,
         &[
@@ -863,7 +855,6 @@ fn sandbox_answers() {
 #[test]
 fn protocol_breaks() {
     check(
-        "breaks",
         None,
         false,
         &[
@@ -898,7 +889,6 @@ fn protocol_breaks() {
 #[test]
 fn sandbox_ops() {
     check(
-        "ops",
         Some(OpPayloadLimit::try_from(4).unwrap()),
         false,
         &[
@@ -980,7 +970,6 @@ fn sandbox_ops() {
 #[test]
 fn sandbox_model_requests() {
     check(
-        "models",
         None,
         true,
         &[
@@ -1048,7 +1037,6 @@ fn sandbox_model_requests() {
 #[test]
 fn model_flight() {
     check(
-        "flight",
         None,
         true,
         &[
@@ -1100,7 +1088,6 @@ fn model_flight() {
 #[test]
 fn passive_session() {
     check(
-        "passive",
         None,
         false,
         &[
@@ -1120,7 +1107,6 @@ fn passive_session() {
 #[test]
 fn another_sessions_op() {
     check(
-        "elsewhere",
         Some(OpPayloadLimit::try_from(0).unwrap()),
         false,
         &[(answer_elsewhere, |s| {
@@ -1138,7 +1124,6 @@ fn another_sessions_op() {
 #[test]
 fn deadlines() {
     check(
-        "deadlines",
         Some(OpPayloadLimit::try_from(0).unwrap()),
         false,
         &[
@@ -1204,7 +1189,6 @@ fn deadlines() {
 #[test]
 fn arrivals() {
     check(
-        "arrivals",
         Some(OpPayloadLimit::try_from(0).unwrap()),
         true,
         &[
