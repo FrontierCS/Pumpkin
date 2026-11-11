@@ -94,6 +94,9 @@ pub struct Upstream {
     authorization: HeaderValue,
     // One for the upstream's every exchange, so that `shutdown` ends them all at once.
     agent: ureq::Agent,
+    // Set before `shutdown` ends the exchanges in flight, so that one it ends before the head is
+    // refused for the route's end, not as unanswered, and a later one never goes upstream.
+    shut_down: OnceLock<()>,
     // Set once the provider refuses the key with a 401, which no later request can mend: each
     // carries the same key, read once for the run. Exchanges run on threads of their own, which
     // share the upstream, so the first to hear the refusal sets it for the others to see.
@@ -244,15 +247,16 @@ impl Upstream {
             url,
             authorization,
             agent,
+            shut_down: OnceLock::new(),
             refused: OnceLock::new(),
         }
     }
 
-    /// Sends `closed` to the model provider with the key, and streams the response back to
-    /// `request`'s client by `by`, with only the headers a harness reads, giving up at `until` or
-    /// once the upstream stalls. The client hears 504 if it gives up before the head, 502 if the
-    /// upstream gives no answer or codes the body, 400 if it refuses the key or the request, and
-    /// else the response, cut short if it breaks off; `answered` hears which ([`Answer`]) first.
+    /// Sends `closed` upstream and streams the response back to `request`'s client by `by`, with
+    /// only the headers a harness reads, giving up at `until` or once the upstream stalls. The
+    /// client hears 504 if it gives up before the head, the route's end if shut down by then
+    /// ([`Refusal::ended`]), 502 if the upstream gives no answer or codes the body, 400 if it
+    /// refuses the key or the request, and else the response, cut short if it breaks off.
     ///
     /// # Errors
     ///
@@ -274,6 +278,9 @@ impl Upstream {
         let call = call.header(AUTHORIZATION, &self.authorization);
         let response = match call.send(closed.body()) {
             Ok(response) => response,
+            Err(_) if self.was_shut_down() => {
+                return refuse(Refusal::ended(), None, None, request, by, answered);
+            }
             Err(error) => return refuse(unanswered(&error), None, None, request, by, answered),
         };
         let status = response.status().as_u16();
@@ -323,11 +330,11 @@ impl Upstream {
         }
     }
 
-    /// Answers `request` for the agent, by `by`: refuses it unless `allowed`, or once the model
-    /// provider has refused the key, and else has `route` close it and forwards it
-    /// upstream, which is given up on at `by` too. It calls `forwarding` before it
-    /// forwards a request, and tells `answered` how it answered ([`Answer`]), before the answer's
-    /// end is written.
+    /// Answers `request` for the agent, by `by`: refuses it unless `allowed`, or once the
+    /// upstream has shut down ([`Upstream::shutdown`]) or the model provider has refused the
+    /// key, and else has `route` close it and forwards it upstream, which is given up on at `by`
+    /// too. It calls `forwarding` before it forwards a request, and tells `answered` how it
+    /// answered ([`Answer`]), before the answer's end is written.
     ///
     /// Whether the answer reached the agent isn't told: writing it fails only for a response's
     /// head too long for a frame, or as the agent's session ends, which the run log shows.
@@ -340,7 +347,7 @@ impl Upstream {
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) {
-        let taken = if !allowed {
+        let taken = if !allowed || self.was_shut_down() {
             Err(Refusal::ended())
         } else if self.refused.get().is_some() {
             Err(Refusal::key_refused())
@@ -365,14 +372,21 @@ impl Upstream {
         self.refused.get().is_some()
     }
 
-    /// Gives up on every exchange in flight and every later one ([`Upstream::serve`]): its
-    /// client gets a 502 before the response's head, and the response cut short within its
-    /// body. One still resolving the provider's name, or connecting to it, is given up on once
-    /// that ends (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`).
+    /// Gives up on every exchange in flight and every later one ([`Upstream::serve`]), which
+    /// ends the route: before the response's head, its client gets the refusal for the route's
+    /// end (`Refusal::ended`), as does a later request; within the body, it gets the response
+    /// cut short. One still resolving the provider's name, or connecting to it, is given up on
+    /// once that ends (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`).
     pub fn shutdown(&self) {
+        let _ = self.shut_down.set(());
         // The agent's clones share its pool, whose shutdown closes every connection that any of
         // them reads or writes.
         self.agent.clone().shutdown();
+    }
+
+    /// Whether [`Upstream::shutdown`] has ended the route.
+    pub fn was_shut_down(&self) -> bool {
+        self.shut_down.get().is_some()
     }
 }
 

@@ -5,23 +5,24 @@
 //! failed parse always has an error to return.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::error::Error;
 use std::fmt;
 
-use crate::ir::Name;
+use crate::ir::{JsonPointer, Name};
 
 /// A rule an IR breaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
-    /// Where in the IR, such as `main.solo_then_judge.grants[train].judge.role`. A part is
-    /// named by its name, or by its index where its name repeats, such as `roles[3].name`.
-    pub path: String,
+    /// Where in the IR, such as `/main/solo_then_judge/grants/0/judge/role`. It resolves in the
+    /// JSON that the [`ir::Workflow`](crate::ir::Workflow) parsed serializes to.
+    pub at: JsonPointer,
     pub message: String,
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.path, self.message)
+        write!(f, "{}: {}", self.at, self.message)
     }
 }
 
@@ -61,13 +62,9 @@ pub(super) struct Reported(());
 pub(super) struct Errors(Vec<ParseError>);
 
 impl Errors {
-    pub(super) fn report(
-        &mut self,
-        path: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Reported {
+    pub(super) fn report(&mut self, at: JsonPointer, message: impl Into<String>) -> Reported {
         self.0.push(ParseError {
-            path: path.into(),
+            at,
             message: message.into(),
         });
         Reported(())
@@ -81,49 +78,39 @@ impl Errors {
         }
     }
 
-    /// Labels the parts of a collection for their error paths, as [`ParseError::path`] names
-    /// them, and reports each name that repeats an earlier one.
+    /// Reports each of a list's `names` that an earlier one repeats. The part that holds the
+    /// name at an index, as its `name`, is at `at` of that index.
     pub(super) fn unique<'n>(
         &mut self,
-        collection: &str,
         names: impl IntoIterator<Item = &'n Name>,
-    ) -> Vec<String> {
-        let names: Vec<&Name> = names.into_iter().collect();
-        // The index of each name's first use, and how many parts use it.
-        let mut uses: BTreeMap<&Name, (usize, usize)> = BTreeMap::new();
-        for (index, name) in names.iter().enumerate() {
-            uses.entry(name).or_insert((index, 0)).1 += 1;
-        }
-        let mut labels = Vec::with_capacity(names.len());
+        at: impl Fn(usize) -> JsonPointer,
+    ) {
+        let mut first: BTreeMap<&Name, usize> = BTreeMap::new();
         for (index, name) in names.into_iter().enumerate() {
-            let (first, count) = uses[name];
-            if count == 1 {
-                labels.push(format!("{collection}[{name}]"));
-                continue;
+            match first.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(index);
+                }
+                Entry::Occupied(entry) => {
+                    let earlier = at(*entry.get());
+                    let message = format!("`{name}` also names {earlier}: give each a unique name");
+                    self.report(at(index).token("name"), message);
+                }
             }
-            let label = format!("{collection}[{index}]");
-            if index != first {
-                self.report(
-                    format!("{label}.name"),
-                    format!("`{name}` also names {collection}[{first}]: give each a unique name"),
-                );
-            }
-            labels.push(label);
         }
-        labels
     }
 
-    /// Resolves one reference, reporting an unknown name.
+    /// Resolves one reference, at `at`, reporting an unknown name.
     pub(super) fn resolve<Id: Copy>(
         &mut self,
-        path: &str,
+        at: &JsonPointer,
         name: &Name,
         ids: &BTreeMap<&str, Id>,
         kind: &str,
     ) -> Result<Id, Reported> {
         ids.get(name.as_str()).copied().ok_or_else(|| {
             self.report(
-                path,
+                at.clone(),
                 format!("no {kind} is named `{name}`: name one listed in `{kind}s`"),
             )
         })

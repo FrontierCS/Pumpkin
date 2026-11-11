@@ -52,14 +52,21 @@ trait Case {
     fn outcome(self) -> String;
 }
 
-/// An IR, which parses, or fails to deserialize, or breaks rules.
+/// An IR, which parses, or fails to deserialize, or breaks rules, each at a place that resolves
+/// in the IR's JSON.
 impl Case for Value {
     fn outcome(self) -> String {
         match serde_json::from_value::<ir::Workflow>(self) {
             Err(error) => error.to_string(),
             Ok(ir) => match Workflow::parse(&ir) {
                 Ok(_) => "parsed".to_owned(),
-                Err(errors) => errors.to_string(),
+                Err(errors) => {
+                    let json = serde_json::to_value(&ir).unwrap();
+                    for error in errors.as_slice() {
+                        assert!(error.at.resolve(&json).is_some(), "{error} resolves");
+                    }
+                    errors.to_string()
+                }
             },
         }
     }
@@ -307,7 +314,7 @@ fn checked_values() {
             the empty pointer names the whole result, with no key: point to a field
             `/metrics/` would return the empty key: point to a field with a name
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
-            roles[final_judge].runtime.judge.slots[payload].max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
+            /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
     );
 }
 
@@ -348,15 +355,17 @@ fn agent_files() {
             `/pumpkin/in/command.stdin` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
             `/.pumpkin/bin/sandboxctl` is in `/.pumpkin`, which holds Pumpkin's own files: name a path outside it
             `/harness` is in `/harness`, which holds Pumpkin's own files: name a path outside it
-            roles[agent].runtime.agent.dirs[1].path: `/workspace/a` is dirs[0]'s path too: put each path once
-            roles[agent].runtime.agent.dirs[2].path: `/workspace/b/d` is below files[1], a file: put it in a directory
-            roles[agent].runtime.agent.files[0].path: `/workspace/a` is dirs[0]'s path too: put each path once"#]],
+            /roles/0/runtime/agent/dirs/1/path: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once
+            /roles/0/runtime/agent/dirs/2/path: `/workspace/b/d` is below `/workspace/b`, the file at /roles/0/runtime/agent/files/1: put it in a directory
+            /roles/0/runtime/agent/files/0/path: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once"#]],
     );
 }
 
 #[test]
 fn broken_references() {
     let mut ir = lwe_json();
+    let train_judge = ir["roles"][1].clone();
+    ir["roles"].as_array_mut().unwrap().push(train_judge);
     let payload = ir["roles"][2]["runtime"]["judge"]["slots"][0].clone();
     ir["roles"][2]["runtime"]["judge"]["slots"]
         .as_array_mut()
@@ -371,11 +380,12 @@ fn broken_references() {
     check(
         [ir],
         &expect![[r#"
-            roles[final_judge].runtime.judge.slots[1].name: `payload` also names roles[final_judge].runtime.judge.slots[0]: give each a unique name
-            main.solo_then_judge.grants[2].name: `train` also names main.solo_then_judge.grants[0]: give each a unique name
-            main.solo_then_judge.grants[0].judge.role: no role is named `ghost`: name one listed in `roles`
-            main.solo_then_judge.grants[2].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
-            main.solo_then_judge.score.role: `agent` is an agent: name a judge"#]],
+            /roles/3/name: `train_judge` also names /roles/1: give each a unique name
+            /roles/2/runtime/judge/slots/1/name: `payload` also names /roles/2/runtime/judge/slots/0: give each a unique name
+            /main/solo_then_judge/grants/2/judge/name: `train` also names /main/solo_then_judge/grants/0/judge: give each a unique name
+            /main/solo_then_judge/grants/0/judge/role: no role is named `ghost`: name one listed in `roles`
+            /main/solo_then_judge/grants/2/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
+            /main/solo_then_judge/score/role: `agent` is an agent: name a judge"#]],
     );
 }
 
@@ -410,14 +420,14 @@ fn broken_pattern() {
     check(
         [ir, none, untimed],
         &expect![[r#"
-            roles[final_judge].egress.model: `final_judge` is a judge, and only the agent has a model route: remove it
-            roles[helper].runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
-            main.solo_then_judge.grants[train].judge.slot: `train_judge` has no slot named `submission`: name one of its slots
-            main.solo_then_judge.grants[retrain].judge.role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
-            main.solo_then_judge.grants[resubmit].submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
-            main.solo_then_judge.score.role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
-            roles: no role is an agent: a workflow has exactly one
-            main.solo_then_judge.grants: no submit grant: give the agent exactly one
+            /roles/2/egress/model: `final_judge` is a judge, and only the agent has a model route: remove it
+            /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
+            /main/solo_then_judge/grants/0/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
+            /main/solo_then_judge/grants/3/judge/role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
+            /main/solo_then_judge/grants/2/submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
+            /main/solo_then_judge/score/role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
+            /roles: no role is an agent: a workflow has exactly one
+            /main/solo_then_judge/grants: no submit grant: give the agent exactly one
             missing field `call_timeout_seconds`"#]],
     );
 }

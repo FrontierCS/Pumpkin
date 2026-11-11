@@ -106,6 +106,19 @@ checked_string!(
 );
 
 impl JsonPointer {
+    /// The pointer to the whole document.
+    pub(crate) fn root() -> Self {
+        Self(String::new())
+    }
+
+    /// This pointer with one more reference token, `token`, escaped.
+    #[must_use]
+    pub(crate) fn token(&self, token: impl fmt::Display) -> Self {
+        // `~` first, so that the `~` of a `~1` is not escaped again.
+        let token = token.to_string().replace('~', "~0").replace('/', "~1");
+        Self(format!("{}/{token}", self.0))
+    }
+
     /// The value the pointer names in `document`, if there is one. A token names an object's
     /// member, or an array's element by its index in decimal without leading zeros.
     pub fn resolve<'v>(&self, document: &'v serde_json::Value) -> Option<&'v serde_json::Value> {

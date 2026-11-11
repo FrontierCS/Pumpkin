@@ -5,7 +5,7 @@ use super::{
     Agent, Judge, JudgeGrant, JudgeId, Main, RoleId, Sandbox, Score, SlotId, SoloThenJudge,
     SubmitGrant, Workflow,
 };
-use crate::ir::{self, Name, RolePath};
+use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::MAX_OP_PAYLOAD_BYTES;
 
 mod errors;
@@ -19,8 +19,8 @@ impl Workflow {
     ///
     /// # Errors
     ///
-    /// Returns the rules the IR breaks, each with its [path](ParseError::path) in the IR, such
-    /// as a name that resolves to nothing or a second agent. A rule about parts that fail to
+    /// Returns the rules the IR breaks, each [at](ParseError::at) its place in the IR, such as
+    /// a name that resolves to nothing or a second agent. A rule about parts that fail to
     /// resolve is not checked, so fixing those errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
@@ -28,14 +28,16 @@ impl Workflow {
 }
 
 /// Where a `solo_then_judge` pattern's errors are reported.
-const PATTERN: &str = "main.solo_then_judge";
+fn pattern() -> JsonPointer {
+    JsonPointer::root().token("main").token("solo_then_judge")
+}
 
 #[derive(Default)]
 struct Parser<'ir> {
     errors: Errors,
     role_ids: BTreeMap<&'ir str, RoleId>,
-    /// Every role with an agent runtime, each with its path in the IR.
-    agents: Vec<(String, Agent)>,
+    /// Every role with an agent runtime, each at its place in the IR.
+    agents: Vec<(JsonPointer, Agent)>,
     judges: Vec<Judge>,
 }
 
@@ -78,10 +80,11 @@ impl<'ir> Parser<'ir> {
     }
 
     fn roles(&mut self, roles: &'ir [ir::Role]) {
-        let labels = self
-            .errors
-            .unique("roles", roles.iter().map(|role| &role.name));
-        for (role, path) in roles.iter().zip(labels) {
+        let list = JsonPointer::root().token("roles");
+        let names = roles.iter().map(|role| &role.name);
+        self.errors.unique(names, |index| list.token(index));
+        for (index, role) in roles.iter().enumerate() {
+            let at = list.token(index);
             let ir::Role {
                 name,
                 image,
@@ -98,32 +101,32 @@ impl<'ir> Parser<'ir> {
                 model_route: model.clone(),
             };
             let id = match runtime {
-                ir::Runtime::Agent(agent) => self.agent(path, sandbox, agent),
+                ir::Runtime::Agent(agent) => self.agent(at, sandbox, agent),
                 ir::Runtime::Judge(judge) => {
                     if model.is_some() {
                         self.errors.report(
-                            format!("{path}.egress.model"),
+                            at.token("egress").token("model"),
                             format!(
                                 "`{name}` is a judge, and only the agent has a model route: \
                                  remove it"
                             ),
                         );
                     }
-                    self.judge(&path, sandbox, judge)
+                    self.judge(&at, sandbox, judge)
                 }
             };
             self.role_ids.entry(name.as_str()).or_insert(id);
         }
     }
 
-    fn agent(&mut self, path: String, sandbox: Sandbox, agent: &ir::AgentRuntime) -> RoleId {
+    fn agent(&mut self, at: JsonPointer, sandbox: Sandbox, agent: &ir::AgentRuntime) -> RoleId {
         let ir::AgentRuntime {
             command,
             dirs,
             files,
             stdin,
         } = agent;
-        self.agent_paths(&format!("{path}.runtime.agent"), dirs, files);
+        self.agent_paths(&at.token("runtime").token("agent"), dirs, files);
         let mut dirs = dirs.clone();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
         let agent = Agent {
@@ -133,36 +136,36 @@ impl<'ir> Parser<'ir> {
             files: files.clone(),
             stdin: stdin.clone(),
         };
-        self.agents.push((path, agent));
+        self.agents.push((at, agent));
         RoleId::Agent
     }
 
-    /// Reports each path of the agent's `dirs` and `files`, at `path`, that comes again, or is
-    /// below a file.
-    fn agent_paths(&mut self, path: &str, dirs: &[ir::Dir], files: &[ir::File]) {
-        let label = |kind, n| format!("{kind}[{n}]");
-        let dir_paths = dirs
-            .iter()
-            .enumerate()
-            .map(|(n, dir)| (label("dirs", n), &dir.path));
-        let file_paths =
-            (files.iter().enumerate()).map(|(n, file)| (label("files", n), &file.path));
-        let all: Vec<(String, &RolePath)> = dir_paths.chain(file_paths).collect();
-        let files = &all[dirs.len()..];
-        for (index, (at_label, at)) in all.iter().enumerate() {
-            let earlier = all[..index].iter().find(|(_, earlier)| earlier == at);
-            let file = files.iter().find(|(_, file)| at.is_below(file));
+    /// Reports each path of the agent's `dirs` and `files`, in the runtime at `runtime`, that
+    /// comes again, or is below a file.
+    fn agent_paths(&mut self, runtime: &JsonPointer, dirs: &[ir::Dir], files: &[ir::File]) {
+        let file_paths = files.iter().map(|file| &file.path);
+        let all: Vec<&RolePath> = dirs.iter().map(|dir| &dir.path).chain(file_paths).collect();
+        // The place of the entry at `index` in `all`: a dir, or past them, a file.
+        let at = |index: usize| match index.checked_sub(dirs.len()) {
+            None => runtime.token("dirs").token(index),
+            Some(file) => runtime.token("files").token(file),
+        };
+        for (index, path) in all.iter().enumerate() {
+            let earlier = all[..index].iter().position(|earlier| earlier == path);
+            let file = (dirs.len()..all.len()).find(|&file| path.is_below(all[file]));
             let message = match (earlier, file) {
-                (Some((earlier, _)), _) => {
-                    format!("`{at}` is {earlier}'s path too: put each path once")
+                (Some(earlier), _) => {
+                    let earlier = at(earlier);
+                    format!("`{path}` is also the path of {earlier}: put each path once")
                 }
-                (None, Some((file, _))) => {
-                    format!("`{at}` is below {file}, a file: put it in a directory")
-                }
+                (None, Some(file)) => format!(
+                    "`{path}` is below `{}`, the file at {}: put it in a directory",
+                    all[file],
+                    at(file)
+                ),
                 (None, None) => continue,
             };
-            self.errors
-                .report(format!("{path}.{at_label}.path"), message);
+            self.errors.report(at(index).token("path"), message);
         }
     }
 
@@ -170,38 +173,38 @@ impl<'ir> Parser<'ir> {
     fn the_agent(&mut self) -> Result<Agent, Reported> {
         let mut agents = std::mem::take(&mut self.agents).into_iter();
         let Some((_, agent)) = agents.next() else {
-            return Err(self
-                .errors
-                .report("roles", "no role is an agent: a workflow has exactly one"));
+            return Err(self.errors.report(
+                JsonPointer::root().token("roles"),
+                "no role is an agent: a workflow has exactly one",
+            ));
         };
         let first = agent.sandbox.name.clone();
         let mut parsed = Ok(agent);
-        for (path, other) in agents {
+        for (at, other) in agents {
             let message = format!(
                 "`{}` is a second agent, after `{first}`: a workflow has exactly one",
                 other.sandbox.name
             );
-            parsed = Err(self.errors.report(format!("{path}.runtime"), message));
+            parsed = Err(self.errors.report(at.token("runtime"), message));
         }
         parsed
     }
 
-    fn judge(&mut self, path: &str, sandbox: Sandbox, judge: &ir::JudgeRuntime) -> RoleId {
+    fn judge(&mut self, at: &JsonPointer, sandbox: Sandbox, judge: &ir::JudgeRuntime) -> RoleId {
         let ir::JudgeRuntime {
             command,
             slots,
             result,
         } = judge;
-        let labels = self.errors.unique(
-            &format!("{path}.runtime.judge.slots"),
-            slots.iter().map(|slot| &slot.name),
-        );
+        let list = at.token("runtime").token("judge").token("slots");
+        let names = slots.iter().map(|slot| &slot.name);
+        self.errors.unique(names, |index| list.token(index));
         // Every payload reaches its judge through an op, which carries no more.
-        for (slot, label) in slots.iter().zip(labels) {
+        for (index, slot) in slots.iter().enumerate() {
             let max_bytes = slot.max_bytes.get();
             if max_bytes > MAX_OP_PAYLOAD_BYTES {
                 self.errors.report(
-                    format!("{label}.max_bytes"),
+                    list.token(index).token("max_bytes"),
                     format!(
                         "slot `{}`'s `max_bytes` is {max_bytes}, over the op payload limit of \
                          {MAX_OP_PAYLOAD_BYTES}: give at most that",
@@ -247,28 +250,36 @@ impl<'ir> Parser<'ir> {
         Result<Vec<JudgeGrant>, Reported>,
         Result<SubmitGrant, Reported>,
     ) {
-        let collection = format!("{PATTERN}.grants");
-        let labels = self
-            .errors
-            .unique(&collection, grants.iter().map(ir::Grant::name));
+        let list = pattern().token("grants");
+        // A grant's fields are below its kind, as in `{"judge": {…}}`.
+        let place = |index: usize| {
+            let kind = match grants[index] {
+                ir::Grant::Judge(_) => "judge",
+                ir::Grant::Submit(_) => "submit",
+            };
+            list.token(index).token(kind)
+        };
+        self.errors
+            .unique(grants.iter().map(ir::Grant::name), place);
         let mut judge_grants = Vec::new();
         let mut submit_grants = Vec::new();
-        for (index, (grant, path)) in grants.iter().zip(labels).enumerate() {
+        for (index, grant) in grants.iter().enumerate() {
+            let at = place(index);
             match grant {
                 ir::Grant::Judge(grant) => {
-                    judge_grants.push(self.judge_grant(&path, grant, &grants[..index]));
+                    judge_grants.push(self.judge_grant(&at, grant, &grants[..index]));
                 }
-                ir::Grant::Submit(ir::SubmitGrant { name }) => submit_grants.push((path, name)),
+                ir::Grant::Submit(ir::SubmitGrant { name }) => submit_grants.push((at, name)),
             }
         }
         let judge_grants = judge_grants.into_iter().collect();
-        (judge_grants, self.submit_grant(&collection, &submit_grants))
+        (judge_grants, self.submit_grant(&list, &submit_grants))
     }
 
-    /// A judge grant, at `path`, whose judge none of the `earlier` grants names.
+    /// A judge grant, at `at`, whose judge none of the `earlier` grants names.
     fn judge_grant(
         &mut self,
-        path: &str,
+        at: &JsonPointer,
         grant: &ir::JudgeGrant,
         earlier: &[ir::Grant],
     ) -> Result<JudgeGrant, Reported> {
@@ -280,10 +291,9 @@ impl<'ir> Parser<'ir> {
             cumulative_seconds,
             call_timeout_seconds,
         } = grant;
-        let path = format!("{path}.judge");
         let shared = match self.judge_grant_naming(role, earlier) {
             Some(first) => Err(self.errors.report(
-                format!("{path}.role"),
+                at.token("role"),
                 format!(
                     "`{role}` is named by judge grants `{}` and `{name}`: name each judge from \
                      one grant",
@@ -292,7 +302,7 @@ impl<'ir> Parser<'ir> {
             )),
             None => Ok(()),
         };
-        let slot = self.judge_slot(&path, role, slot)?;
+        let slot = self.judge_slot(at, role, slot)?;
         shared.map(|()| JudgeGrant {
             name: name.clone(),
             slot,
@@ -302,26 +312,26 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// The agent's one submit grant, of those named at their paths. Reports none, and each
-    /// after the first.
+    /// The agent's one submit grant, of those named at their places in the list at `list`.
+    /// Reports none, and each after the first.
     fn submit_grant(
         &mut self,
-        collection: &str,
-        grants: &[(String, &Name)],
+        list: &JsonPointer,
+        grants: &[(JsonPointer, &Name)],
     ) -> Result<SubmitGrant, Reported> {
         let Some(((_, first), others)) = grants.split_first() else {
             return Err(self
                 .errors
-                .report(collection, "no submit grant: give the agent exactly one"));
+                .report(list.clone(), "no submit grant: give the agent exactly one"));
         };
         let mut parsed = Ok(SubmitGrant {
             name: (*first).clone(),
         });
-        for (path, other) in others {
+        for (at, other) in others {
             let message = format!(
                 "`{other}` is a second submit grant, after `{first}`: give the agent exactly one"
             );
-            parsed = Err(self.errors.report(format!("{path}.submit"), message));
+            parsed = Err(self.errors.report(at.clone(), message));
         }
         parsed
     }
@@ -334,10 +344,10 @@ impl<'ir> Parser<'ir> {
             slot,
             timeout_seconds,
         } = score;
-        let path = format!("{PATTERN}.score");
+        let at = pattern().token("score");
         let shared = match self.judge_grant_naming(role, grants) {
             Some(grant) => Err(self.errors.report(
-                format!("{path}.role"),
+                at.token("role"),
                 format!(
                     "`{role}` is also the role of judge grant `{}`: name a judge no grant names",
                     grant.name
@@ -345,7 +355,7 @@ impl<'ir> Parser<'ir> {
             )),
             None => Ok(()),
         };
-        let slot = self.judge_slot(&path, role, slot)?;
+        let slot = self.judge_slot(&at, role, slot)?;
         shared.map(|()| Score {
             slot,
             timeout: Duration::from_secs(timeout_seconds.get()),
@@ -369,18 +379,23 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// Resolves a judge call's slot, `slot` of the judge `role`, with the call at `path`.
-    fn judge_slot(&mut self, path: &str, role: &Name, slot: &Name) -> Result<SlotId, Reported> {
-        let role_path = format!("{path}.role");
+    /// Resolves a judge call's slot, `slot` of the judge `role`, with the call at `at`.
+    fn judge_slot(
+        &mut self,
+        at: &JsonPointer,
+        role: &Name,
+        slot: &Name,
+    ) -> Result<SlotId, Reported> {
+        let role_at = at.token("role");
         let judge = match self
             .errors
-            .resolve(&role_path, role, &self.role_ids, "role")?
+            .resolve(&role_at, role, &self.role_ids, "role")?
         {
             RoleId::Judge(judge) => judge,
             RoleId::Agent => {
                 return Err(self
                     .errors
-                    .report(role_path, format!("`{role}` is an agent: name a judge")));
+                    .report(role_at, format!("`{role}` is an agent: name a judge")));
             }
         };
         let index = self.judges[judge.0]
@@ -390,7 +405,7 @@ impl<'ir> Parser<'ir> {
         match index {
             Some(index) => Ok(SlotId { judge, index }),
             None => Err(self.errors.report(
-                format!("{path}.slot"),
+                at.token("slot"),
                 format!("`{role}` has no slot named `{slot}`: name one of its slots"),
             )),
         }

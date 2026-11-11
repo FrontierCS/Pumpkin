@@ -146,6 +146,10 @@ pub enum Action {
 }
 
 /// Why the work phase ended.
+///
+/// Of the deadline and the end of the grace after a finalize, the first to pass names the end,
+/// however late the runtime observed it, and the deadline if they pass together; the agent's
+/// exit or failure names it only if observed before then ([`Core::handle`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkEnd {
     /// The pattern's deadline passed.
@@ -256,11 +260,12 @@ enum Phase {
         /// The latest submission.
         submission: Option<Submission>,
     },
-    /// The agent finalized `submission`, which is locked as the selection, and the grace after
-    /// it ([`SoloThenJudge::finalize_grace`]) ends at `grace_end`.
+    /// The agent finalized `submission`, which is locked as the selection; unless the agent ends
+    /// it first, the work phase ends at `end`, as `work_end` ([`WorkEnd`]).
     Finalized {
         submission: Submission,
-        grace_end: Duration,
+        end: Duration,
+        work_end: WorkEnd,
     },
     /// The work phase has ended, and the agent has been torn down. The jobs it left, stopped or
     /// collecting, are ending.
@@ -300,19 +305,25 @@ impl<'w> Core<'w> {
 
     /// Takes in `event`, observed `at` after the run started, and returns the actions it calls
     /// for, in the order to perform them.
+    ///
+    /// The time acts before the event: an `at` that reaches the hard end, or the work phase's
+    /// end, abandons the run or ends the work phase first, and the event then finds it so.
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
         let mut actions = Vec::new();
         if self.now >= self.hard_end {
             self.abandon(&mut actions);
         }
-        if self.now >= self.pattern.deadline {
-            self.end_work(WorkEnd::Deadline, &mut actions);
-        }
-        if let Phase::Finalized { grace_end, .. } = self.phase
-            && self.now >= grace_end
-        {
-            self.end_work(WorkEnd::Finalized, &mut actions);
+        let due = match &self.phase {
+            Phase::Work { .. } => (self.now >= self.pattern.deadline).then_some(WorkEnd::Deadline),
+            Phase::Finalized { end, work_end, .. } => (self.now >= *end).then(|| work_end.clone()),
+            Phase::Teardown { .. }
+            | Phase::Final { .. }
+            | Phase::Finished { .. }
+            | Phase::Abandoned => None,
+        };
+        if let Some(work_end) = due {
+            self.end_work(work_end, &mut actions);
         }
         match event {
             // The agent's start is for the run log alone, and a tick only moves the clock, on
@@ -346,30 +357,32 @@ impl<'w> Core<'w> {
         actions
     }
 
-    /// When the core next acts without another event, as a time since the run started: at the
-    /// deadline, or at the end of the grace after a finalize, while the agent works; then at
-    /// the hard end. The runtime sends [`Event::Tick`] once that time has come. `None` once the
-    /// run has ended.
-    pub fn tick_due(&self) -> Option<Duration> {
-        match self.phase {
+    /// When the core next acts without another event, as a time since the run started: while the
+    /// agent works, when the work phase ends; then at the hard end, also once the run has ended.
+    /// The runtime sends [`Event::Tick`] once that time has come.
+    pub fn tick_due(&self) -> Duration {
+        match &self.phase {
             // These phases end by the deadline, which comes before the hard end.
-            Phase::Work { .. } => Some(self.pattern.deadline),
-            Phase::Finalized { grace_end, .. } => Some(grace_end.min(self.pattern.deadline)),
-            Phase::Teardown { .. } | Phase::Final { .. } => Some(self.hard_end),
-            Phase::Finished { .. } | Phase::Abandoned => None,
+            Phase::Work { .. } => self.pattern.deadline,
+            Phase::Finalized { end, .. } => *end,
+            Phase::Teardown { .. }
+            | Phase::Final { .. }
+            | Phase::Finished { .. }
+            | Phase::Abandoned => self.hard_end,
         }
     }
 
     /// Whether the agent's model requests are allowed at `at`, a time since the run started:
-    /// before the deadline, until the agent finalizes a submission. Once they aren't, the
-    /// runtime refuses each that it takes, and cuts short those in flight.
+    /// until the work phase ends, the grace after a finalize included
+    /// ([`finalize_grace_seconds`](schema::ir::SoloThenJudge::finalize_grace_seconds)). Once
+    /// they aren't, the runtime refuses each that it takes, and ends those in flight.
     pub fn model_requests_allowed(&self, at: Duration) -> bool {
-        // The grace after a finalize is for the agent's exit alone: no answer read then can
-        // change the selection, which the finalize has locked.
-        match self.phase {
+        match &self.phase {
             Phase::Work { .. } => at < self.pattern.deadline,
-            Phase::Finalized { .. }
-            | Phase::Teardown { .. }
+            // A harness asks its model once more after each command, the finalize's too, and
+            // fails its turn if refused; the locked selection keeps any answer off the score.
+            Phase::Finalized { end, .. } => at < *end,
+            Phase::Teardown { .. }
             | Phase::Final { .. }
             | Phase::Finished { .. }
             | Phase::Abandoned => false,
@@ -387,19 +400,6 @@ impl<'w> Core<'w> {
         }
         self.phase = Phase::Abandoned;
         actions.push(Action::Abandon);
-    }
-
-    /// Locks `submission`, finalized, as the selection, and starts the grace after it. A grace
-    /// of 0 ends the work phase at once.
-    fn finalize(&mut self, submission: Submission, actions: &mut Vec<Action>) {
-        let grace = self.pattern.finalize_grace;
-        self.phase = Phase::Finalized {
-            submission,
-            grace_end: self.now.saturating_add(grace),
-        };
-        if grace.is_zero() {
-            self.end_work(WorkEnd::Finalized, actions);
-        }
     }
 
     /// Ends the work phase, if it hasn't ended: stops the queued and running jobs, then

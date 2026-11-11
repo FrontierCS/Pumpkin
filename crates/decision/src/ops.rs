@@ -48,8 +48,8 @@ enum Authorized {
         payload: PayloadRef,
         timeout: Duration,
     },
-    /// A submission, and the reply that accepts or stores it.
-    Submit(Submission, SubmitReply),
+    /// A submission, to store, or to lock as the selection if final.
+    Submit(Submission),
 }
 
 /// A grant of the agent's.
@@ -101,15 +101,44 @@ impl Core<'_> {
                     timeout,
                 });
             }
-            Authorized::Submit(submission, reply) => {
-                let reply = OpReply::Submit(reply);
-                actions.push(Action::Reply { op, reply });
+            Authorized::Submit(submission) => {
                 if submission.finalized {
-                    self.finalize(submission, actions);
+                    self.finalize(op, submission, actions);
                 } else {
                     *latest = Some(submission);
+                    let reply = OpReply::Submit(SubmitReply {
+                        state: SubmitState::Stored,
+                        remaining_seconds: self.pattern.deadline.saturating_sub(self.now).as_secs(),
+                    });
+                    actions.push(Action::Reply { op, reply });
                 }
             }
+        }
+    }
+
+    /// Locks `submission`, finalized, as the selection, and answers op `op`, which made it, with
+    /// the time left until the work phase ends ([`WorkEnd`]). A grace of 0 ends the work phase at
+    /// once.
+    fn finalize(&mut self, op: OpId, submission: Submission, actions: &mut Vec<Action>) {
+        let grace = self.pattern.finalize_grace;
+        let grace_end = self.now.saturating_add(grace);
+        let (end, work_end) = if grace_end < self.pattern.deadline {
+            (grace_end, WorkEnd::Finalized)
+        } else {
+            (self.pattern.deadline, WorkEnd::Deadline)
+        };
+        let reply = OpReply::Submit(SubmitReply {
+            state: SubmitState::Accepted,
+            remaining_seconds: end.saturating_sub(self.now).as_secs(),
+        });
+        actions.push(Action::Reply { op, reply });
+        self.phase = Phase::Finalized {
+            submission,
+            end,
+            work_end,
+        };
+        if grace.is_zero() {
+            self.end_work(WorkEnd::Finalized, actions);
         }
     }
 
@@ -218,22 +247,10 @@ impl Core<'_> {
     fn authorize_submit(&self, finalize: bool, payload: PayloadRef) -> Result<Authorized, String> {
         let name = &self.workflow.submit_grant().name;
         fits(name, &payload, self.submission_max_bytes())?;
-        let (state, end) = if finalize {
-            let grace_end = self.now.saturating_add(self.pattern.finalize_grace);
-            (SubmitState::Accepted, grace_end.min(self.pattern.deadline))
-        } else {
-            (SubmitState::Stored, self.pattern.deadline)
-        };
-        let remaining_seconds = end.saturating_sub(self.now).as_secs();
-        let submission = Submission {
+        Ok(Authorized::Submit(Submission {
             payload,
             finalized: finalize,
-        };
-        let reply = SubmitReply {
-            state,
-            remaining_seconds,
-        };
-        Ok(Authorized::Submit(submission, reply))
+        }))
     }
 
     /// The most bytes a submission may hold: the score slot's, so that whatever is selected

@@ -240,8 +240,9 @@ pub struct SoloThenJudge {
     /// score's [`timeout_seconds`](Score::timeout_seconds).
     pub deadline_seconds: NonZeroU64,
     /// How long the agent may keep running after its final submission is accepted. Its ops are
-    /// refused meanwhile, and the work phase ends when it exits, when this runs out, or at the
-    /// deadline, whichever comes first. 0 ends the work phase at the final submission.
+    /// refused meanwhile, while its [model route](ModelRoute) stays open, and the work phase,
+    /// with the route, ends when it exits, when this runs out, or at the deadline, whichever
+    /// comes first. 0 ends the work phase at the final submission.
     pub finalize_grace_seconds: u64,
 }
 
