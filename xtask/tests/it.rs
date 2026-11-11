@@ -96,28 +96,23 @@ fn lines(line: &str, count: usize) -> String {
     format!("{line}\n").repeat(count)
 }
 
-/// Docs at their caps pass, and docs a line over fail: a module doc behind a multi-line inner
-/// attribute or a block comment, or in parts, an item's doc split by attributes, blank lines
-/// and comments, docs in bodies (a method's, an inline module's, and one in a macro's rule),
-/// and those of a file whose name Git would quote and of an untracked file. Lines in raw
-/// strings, an ignored file and a deleted one aren't counted.
 #[test]
 fn caps() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
-    let at_caps = lines("//! A line.", 40) + &lines("/// A line.", 15) + "fn f() {}\n";
+    let at_caps = lines("//! A line.", 25) + &lines("/// A line.", 9) + "fn f() {}\n";
     let behind_attribute = format!(
         "#![expect(\n    dead_code,\n    reason = \"a reason\"\n)]\n{}",
-        lines("//! A line.", 41)
+        lines("//! A line.", 26)
     );
     let in_parts = format!(
         "/* A comment. */\n{}\n#![doc = \"A line.\"]\n{}",
-        lines("//! A line.", 30),
+        lines("//! A line.", 15),
         lines("//! A line.", 10)
     );
     let item_in_parts = format!(
         "{}#[derive(Debug)]\n\n// A comment.\n{}#[doc = \"A line.\"]\nstruct S;\n",
-        lines("/// A line.", 8),
-        lines("/// A line.", 7)
+        lines("/// A line.", 5),
+        lines("/// A line.", 4)
     );
     let raw = format!(
         "const S: &str = r#\"\n{}\"#;\nconst B: &[u8] = br\"\n{}\";\nfn f() {{}}\n",
@@ -125,16 +120,16 @@ fn caps() {
         lines("//! Not a doc.", 41)
     );
     let separate =
-        lines("/// A line.", 15) + "fn a() {}\n" + &lines("/// A line.", 15) + "fn b() {}\n";
-    let long_item = lines("/// A line.", 16) + "fn f() {}\n";
+        lines("/// A line.", 9) + "fn a() {}\n" + &lines("/// A line.", 9) + "fn b() {}\n";
+    let long_item = lines("/// A line.", 10) + "fn f() {}\n";
     let method = format!(
         "struct S;\nimpl S {{\n{}    fn f() {{}}\n}}\n",
-        lines("    /// A line.", 16)
+        lines("    /// A line.", 10)
     );
-    let inline_module = format!("mod m {{\n{}}}\n", lines("    //! A line.", 41));
+    let inline_module = format!("mod m {{\n{}}}\n", lines("    //! A line.", 26));
     let macro_rule = format!(
         "macro_rules! m {{\n    () => {{\n{}        fn f() {{}}\n    }};\n}}\n",
-        lines("        /// A line.", 16)
+        lines("        /// A line.", 10)
     );
     check(
         "caps",
@@ -155,48 +150,44 @@ fn caps() {
         ],
         tidy,
         &expect![[r#"
-            untracked.rs:1: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            behind_attribute.rs:5: the module doc is 41 lines, over the cap of 40: shorten it to 40 or fewer, moving each fact to its home
-            in_parts.rs:2: the module doc is 41 lines, over the cap of 40: shorten it to 40 or fewer, moving each fact to its home
-            inline_module.rs:2: the module doc is 41 lines, over the cap of 40: shorten it to 40 or fewer, moving each fact to its home
-            item_in_parts.rs:1: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            macro_rule.rs:3: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            method.rs:3: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            é.rs:1: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home"#]],
+            untracked.rs:1: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            behind_attribute.rs:5: the module doc is 26 lines, over the cap of 25: shorten it to 25 or fewer, moving each fact to its home
+            in_parts.rs:2: the module doc is 26 lines, over the cap of 25: shorten it to 25 or fewer, moving each fact to its home
+            inline_module.rs:2: the module doc is 26 lines, over the cap of 25: shorten it to 25 or fewer, moving each fact to its home
+            item_in_parts.rs:1: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            macro_rule.rs:3: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            method.rs:3: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            é.rs:1: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home"#]],
     );
 }
 
-/// A doc comment's example may hold a raw string, and a doc comment's lines count however they
-/// read; strings, of any kind, hold no doc, however their lines read. A block doc comment spans
-/// its lines, as a multi-line `doc` attribute does, and a `doc` attribute that holds no string
-/// isn't counted. A file that isn't valid Rust is reported where its tokens break.
 #[test]
 fn forms() {
     use Standing::Tracked;
     let example = format!(
         "/// ```\n/// let s = r#\"\n{}/// \"#;\n/// ```\nfn f() {{}}\n",
-        lines("/// A line.", 12)
+        lines("/// A line.", 6)
     );
     let strings = format!(
         "const A: &str = \"-r\";\nconst B: &str = \"r#\";\nconst C: &CStr = cr\"\n{}\";\n\
          const D: &str = \"\n{}\";\n{}fn f() {{}}\n",
         lines("/// Not a doc.", 16),
         lines("//! Not a doc.", 41),
-        lines("/// A line.", 16)
+        lines("/// A line.", 10)
     );
     let bracket = format!(
         "#[expect(\n    dead_code,\n    reason = \"a [bracket\"\n)]\nfn a() {{}}\n{}fn b() {{}}\n",
-        lines("/// A line.", 16)
+        lines("/// A line.", 10)
     );
     let blocks = format!(
         "/*!\n{}*/\n/**\n{}*/\nfn f() {{}}\n",
-        lines(" A line.", 39),
-        lines(" A line.", 14)
+        lines(" A line.", 24),
+        lines(" A line.", 8)
     );
     let attributes = format!(
         "#[doc = \"A line.\n{}\"]\nfn f() {{}}\n{}#[doc(hidden)]\nfn g() {{}}\n",
-        lines("A line.", 14),
-        lines("/// A line.", 15)
+        lines("A line.", 8),
+        lines("/// A line.", 9)
     );
     let invalid = "fn f() {\n    let c = 'ab';\n}\n".to_owned();
     check(
@@ -211,20 +202,16 @@ fn forms() {
         ],
         tidy,
         &expect![[r#"
-            attributes.rs:1: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            blocks.rs:1: the module doc is 41 lines, over the cap of 40: shorten it to 40 or fewer, moving each fact to its home
-            blocks.rs:42: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            bracket.rs:6: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            example.rs:1: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
+            attributes.rs:1: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            blocks.rs:1: the module doc is 26 lines, over the cap of 25: shorten it to 25 or fewer, moving each fact to its home
+            blocks.rs:27: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            bracket.rs:6: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            example.rs:1: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
             invalid.rs:2:13: the file is not valid Rust here, so it can't be checked: make it valid Rust
-            strings.rs:64: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home"#]],
+            strings.rs:64: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home"#]],
     );
 }
 
-/// An `unreachable!` without a message and any `debug_assert!` fail, in any delimiters, by their
-/// paths, and in a body or a macro's rule, and are reported beside a long doc in line order; an
-/// `unreachable!` with a message and `assert!` pass, as do the names in a string, a comment or
-/// another identifier, and a call of a function so named.
 #[test]
 fn unreachable() {
     use Standing::Tracked;
@@ -233,7 +220,7 @@ fn unreachable() {
          macro_rules! m {{\n    () => {{ core::unreachable! {{}} }};\n}}\n\
          fn h(x: u8) {{\n    debug_assert!(x > 0);\n    std::debug_assert_eq!(x, 1, \"why\");\n    \
          debug_assert_ne![x, 2];\n}}\n",
-        lines("/// A line.", 16)
+        lines("/// A line.", 10)
     );
     let messages = "#![expect(unreachable_pub, reason = \"unreachable!()\")]\n\
                     fn f(x: u8) {\n    unreachable!(\"x is {x}\");\n    unreachable!(\"why\", );\n\
@@ -250,12 +237,35 @@ fn unreachable() {
         tidy,
         &expect![[r#"
             bare.rs:2:5: `unreachable!` has no message: say in one why only a bug can reach it
-            bare.rs:4: an item's doc is 16 lines, over the cap of 15: shorten it to 15 or fewer, moving each fact to its home
-            bare.rs:21:10: `unreachable!` has no message: say in one why only a bug can reach it
-            bare.rs:24:19: `unreachable!` has no message: say in one why only a bug can reach it
-            bare.rs:27:5: `debug_assert!` is skipped by release builds: use `assert!`, which guards the real run too
-            bare.rs:28:10: `debug_assert_eq!` is skipped by release builds: use `assert_eq!`, which guards the real run too
-            bare.rs:29:5: `debug_assert_ne!` is skipped by release builds: use `assert_ne!`, which guards the real run too"#]],
+            bare.rs:4: an item's doc is 10 lines, over the cap of 9: shorten it to 9 or fewer, moving each fact to its home
+            bare.rs:15:10: `unreachable!` has no message: say in one why only a bug can reach it
+            bare.rs:18:19: `unreachable!` has no message: say in one why only a bug can reach it
+            bare.rs:21:5: `debug_assert!` is skipped by release builds: use `assert!`, which guards the real run too
+            bare.rs:22:10: `debug_assert_eq!` is skipped by release builds: use `assert_eq!`, which guards the real run too
+            bare.rs:23:5: `debug_assert_ne!` is skipped by release builds: use `assert_ne!`, which guards the real run too"#]],
+    );
+}
+
+#[test]
+fn test_docs() {
+    use Standing::Tracked;
+    let tests = "/// A doc.\n#[test]\nfn before() {}\n\
+                 #[test]\n/// A doc.\n#[ignore = \"a reason\"]\nfn between() {}\n\
+                 mod m {\n    #[test]\n    /** A doc. */\n    fn inner() {}\n}\n\
+                 #[doc = \"A doc.\"]\n#[test]\nfn attribute() {}\n\
+                 #[test]\n// A comment.\nfn commented() {}\n\
+                 /// A doc.\nfn helper() {}\n\
+                 /// A doc.\n#[cfg(test)]\nfn configured() {}\n"
+        .to_owned();
+    check(
+        "test-docs",
+        &[("tests.rs", tests, Tracked)],
+        tidy,
+        &expect![[r#"
+        tests.rs:1:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+        tests.rs:5:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+        tests.rs:10:5: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+        tests.rs:13:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains"#]],
     );
 }
 

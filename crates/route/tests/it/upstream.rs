@@ -321,12 +321,6 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> (String, Vec<(String, S
     (line.trim_end().to_owned(), headers, body)
 }
 
-/// The harness's request reaches the stand-in with only the headers that pass, the key and the
-/// closed body; its response streams back as it arrives, with only the headers that a harness
-/// reads, and is cut short if the stand-in breaks it off or stalls until it is given up on; and
-/// the sandbox hears a 502 or a 504 if the stand-in gives no answer, a 502 if it codes the body,
-/// and a 400 if it refuses the key or the request. The forward says how it answered each. An
-/// upstream whose URL or key file is refused can't be made.
 #[test]
 fn forward() {
     check(

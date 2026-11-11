@@ -404,8 +404,6 @@ fn short_workflow(argv: &[&str], deadline: u64) -> Value {
     ir
 }
 
-/// A run whose agent's command exits: its exit ends the work phase without a submission, and
-/// the agent's sandbox is collected and deleted, so the run finishes without a score.
 #[test]
 fn exits() {
     // A deadline far later than the exit, so that an exit the run misses ends the work phase.
@@ -434,8 +432,6 @@ fn exits() {
     );
 }
 
-/// A run whose agent's `sandboxd` ends the session once the agent's command has started: the
-/// agent fails, and its sandbox is deleted.
 #[test]
 fn crashes() {
     // A deadline far later than the session's end, so that an end the run misses ends the work
@@ -468,10 +464,6 @@ fn crashes() {
     );
 }
 
-/// A run whose agent's sandbox stalls once its command has started, and whose command never
-/// exits: the deadline ends the work phase, and freezing the sandbox runs out at the
-/// teardown's end, which leaves the final judge its startup and timeout before the hard end;
-/// what couldn't be collected is noted, and the sandbox is deleted.
 #[test]
 fn stalls() {
     let mut ir = workflow(&["stall"]);
@@ -504,13 +496,10 @@ fn stalls() {
     );
 }
 
-/// A run whose agent's `sandboxd` never dials: its start runs out at the provider's startup,
-/// and the sandbox is deleted, with its console quoted in the agent's failure. The start
-/// outlasts the deadline, so the core hears of the failure before the deadline's tick, which
-/// ends the work phase as the failure is taken.
 #[test]
 fn unstarted() {
     let mut ir = workflow(&["exit", "0"]);
+    // Outlasted by the start, so that the core hears of its failure before the deadline's tick.
     ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(1);
     check(
         "unstarted",
@@ -534,8 +523,6 @@ fn unstarted() {
     );
 }
 
-/// A run whose agent's create fails, leaving behind a sandbox it can't name: the agent fails,
-/// and the run's end deletes the sandbox, which the run's list still finds.
 #[test]
 fn lost() {
     check(
@@ -561,8 +548,6 @@ fn lost() {
     );
 }
 
-/// A run whose agent's sandbox can't be deleted: its teardown fails the run, whose end tries to
-/// delete it again and fails too, so the run fails with both reasons.
 #[test]
 fn undeletable() {
     check(
@@ -589,8 +574,6 @@ fn undeletable() {
     );
 }
 
-/// A run whose `sandboxd` the provider can't publish: the run fails before it starts, and
-/// nothing is created.
 #[test]
 fn unpublished() {
     check(
@@ -611,14 +594,6 @@ fn unpublished() {
     );
 }
 
-/// A run whose agent makes ops: `ops`; `status` of a job it doesn't have; a judge call to a
-/// grant it doesn't hold; one with a payload over the grant's slot, which the core refuses; one
-/// over the most an op may carry, which the gateway refuses, without the core; one the core
-/// accepts, whose judge passes it; one whose judge runs past its call's timeout; and a final
-/// submission, which the final judge scores. The agent awaits each call's end by `status`, and
-/// every reply reaches it, since it makes each op once the one before it is answered, and exits
-/// once the last is; the record keeps the accepted payloads alone, and what each call's sandbox
-/// held.
 #[test]
 fn ops() {
     let argv = [
@@ -678,8 +653,6 @@ fn ops() {
     );
 }
 
-/// A run whose agent finalizes a submission whose final judge writes a result over the most a
-/// result may hold: the result is removed from the record, and the run finishes with no score.
 #[test]
 fn result_over_the_limit() {
     check(
@@ -746,10 +719,6 @@ fn crashes_with_an_op_in_flight() {
     );
 }
 
-/// A run whose agent makes a judge call, then exits, and whose judge's sandbox takes seconds to
-/// create, past the deadline: an agent's call starts by the work phase's end, which comes by the
-/// deadline, however long the provider's startup, so the sandbox's set-up fails, and the run
-/// finishes without a submission.
 #[test]
 fn judge_starts_past_the_deadline() {
     // A deadline that the create, which begins once the agent has started, outlasts, and that
@@ -781,11 +750,6 @@ fn judge_starts_past_the_deadline() {
     );
 }
 
-/// A run whose train judge stalls its sandbox once its command has started, which the agent
-/// awaits before it finalizes: the work phase ends at once, so the core stops the call, whose
-/// sandbox's freeze runs out at the agent's teardown's end, which leaves the final judge its
-/// startup and timeout before the hard end. The final judge scores the submission, but its
-/// sandbox can't be deleted, which fails the run, and the run's end can't delete it either.
 #[test]
 fn judge_stalls() {
     let argv = [
@@ -830,9 +794,6 @@ fn judge_stalls() {
     );
 }
 
-/// A run whose agent exits while its judge call runs, so that the core stops the call, whose
-/// sandbox's delete outlasts the run's hard end: the core still waits on the call when the hard
-/// end comes, so the run is abandoned there, and fails once the call's thread has ended.
 #[test]
 fn abandoned() {
     let argv = ["ops", "judge train slow", "await 0 running", "exit"];
@@ -868,11 +829,6 @@ fn abandoned() {
     );
 }
 
-/// A run whose agent's judge call fails once its start runs out, since its judge never dials,
-/// and whose agent's sandbox's delete, as the agent exits, outlasts the run's hard end, so that
-/// the loop takes the call's last report only after it. The report came before the hard end,
-/// at the time it carries, so it ends the call in time, and the run finishes without a
-/// submission rather than be abandoned.
 #[test]
 fn reported_before_the_hard_end() {
     // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
@@ -906,9 +862,6 @@ fn reported_before_the_hard_end() {
     );
 }
 
-/// A run whose agent finalizes a submission, and whose agent's sandbox's delete, in the teardown
-/// that follows, outlasts the run's hard end: the final judge's start is due by then, so its
-/// call fails with no sandbox created, and the run is abandoned.
 #[test]
 fn torn_down_past_the_hard_end() {
     check(
@@ -937,12 +890,6 @@ fn torn_down_past_the_hard_end() {
     );
 }
 
-/// A run whose agent waits 2 s once its first `ops` is answered before it makes its second,
-/// timed as the loop takes it, so that its reply leaves at least 2 s less than the first's,
-/// however long the agent took to start, which the agent checks, exiting with 1 if not. It then
-/// exits, and its sandbox makes a judge call after the exit, as a process the agent left would:
-/// the call arrives once the core has finished the run, so the core refuses it, and the refusal
-/// can't be sent, which the run log notes.
 #[test]
 fn late_ops() {
     let argv = [
@@ -980,14 +927,6 @@ fn late_ops() {
     );
 }
 
-/// A run whose agent makes model requests through its route, each once the one before it is
-/// answered, which the run log says goes to the stand-in, each model under the name it takes:
-/// one goes upstream, its model named as the upstream takes it, with the upstream's key, and its
-/// stream reaches the agent, naming the model that answered as the agent named it; one that
-/// names a model the route doesn't allow is refused; and once the agent has finalized a
-/// submission, one is refused, as the work phase has ended, while the grace after the finalize
-/// lasts for the agent's exit. The run log records how each was answered, before the agent goes
-/// on.
 #[test]
 fn model_requests() {
     let argv = [
@@ -1034,12 +973,6 @@ fn model_requests() {
     );
 }
 
-/// A run whose route's upstream refuses a request with a 403, and then its key with a 401: the
-/// agent hears the route's 400 for each, rather than a status that a harness tries again; the
-/// route goes on after the 403, as a request that follows it streams its answer, but ends at the
-/// 401, as a later request is refused without reaching the upstream, which would have streamed
-/// its answer. The agent, which goes on, then exits, and the run fails, as the provider refused
-/// the deployment's key.
 #[test]
 fn model_upstream_refusals() {
     let argv = [
@@ -1087,11 +1020,6 @@ fn model_upstream_refusals() {
     );
 }
 
-/// A run whose agent exits after the model provider answered its last two requests with a 502,
-/// then a request that the route refused, and with another still in flight: the agent's own
-/// result is unknown, since it never had a model, so the run fails as a deployment fault, though
-/// the agent exited by itself. The route's refusal doesn't clear the failure, nor does the cut
-/// of the request in flight, made as the route ends.
 #[test]
 fn model_provider_down() {
     let argv = [
@@ -1145,9 +1073,6 @@ fn model_provider_down() {
     );
 }
 
-/// A run whose agent exits after a request that the route barred, which the model provider never
-/// saw: the barred request is no failure of the provider, so the run is scored as usual, where
-/// a 502 as the last answer would fail it ([`model_provider_down`]).
 #[test]
 fn model_barred_is_no_failure() {
     let argv = ["ops", "model m-large stream", "model m-huge stream", "exit"];
@@ -1182,8 +1107,6 @@ fn model_barred_is_no_failure() {
     );
 }
 
-/// A run whose agent exits after the provider answered with a 502 and then streamed: the stream
-/// clears the failure, so the run is scored as usual.
 #[test]
 fn model_provider_recovers() {
     let argv = ["ops", "model m-large down", "model m-large stream"];
@@ -1219,9 +1142,6 @@ fn model_provider_recovers() {
     );
 }
 
-/// A run whose agent is still working at the deadline while the model provider answers with a
-/// 502 is scored as usual: harnesses that limit an agent's time score it, as the agent did what it
-/// could in the time.
 #[test]
 fn model_provider_down_at_the_deadline() {
     let argv = [
@@ -1267,12 +1187,6 @@ fn model_provider_down_at_the_deadline() {
     );
 }
 
-/// A run whose agent's model request is still streaming at the deadline: the work phase's end
-/// cuts the stream short, so the upstream's connection closes then, rather than once the
-/// response's deadline, the agent's teardown's end, has passed, or once the run has ended,
-/// after its final judge has run to its timeout on the agent's submission. The stream's cut end
-/// reaches the agent's sandbox while the teardown still holds its session, as the sandbox's
-/// freeze, which waits for it, is done.
 #[test]
 fn model_stream_cut() {
     let argv = ["ops", "submit submit slow", "model m-large stall"];
@@ -1310,10 +1224,6 @@ fn model_stream_cut() {
     );
 }
 
-/// A run whose agent finalizes a submission while its model request is still streaming: the
-/// finalize ends the route, which cuts the stream short then, so the agent, which exits once
-/// the response has ended, exits within the grace after the finalize, rather than being torn
-/// down at the deadline.
 #[test]
 fn model_finalize_cut() {
     let argv = ["ops", "ask m-large stall", "finalize submit 6"];
@@ -1420,8 +1330,6 @@ fn docker_workflow() -> Value {
     ir
 }
 
-/// The ops of [`ops`]'s agent made on Docker, as [`AGENT`] says, and its judges' calls, as
-/// [`JUDGE`] says, in the run of [`docker_workflow`].
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn ops_on_docker() {

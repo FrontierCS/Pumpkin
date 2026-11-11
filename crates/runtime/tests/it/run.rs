@@ -135,12 +135,6 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
     }
 }
 
-/// A workflow is prepared, its record named by its run's id, from the UTC time it is prepared
-/// at, and holding its IR; one that has a model route is prepared with an upstream that serves
-/// every model the route allows, and else refused before anything starts, with its record
-/// saying why. The times are a leap day's first second, a year's last, and the first of March
-/// 2100, which follows the 28th of February in a year that isn't a leap year. A clock that
-/// reads before 1970 is refused before anything is made.
 #[test]
 fn prepare() {
     let lwe: Value = serde_json::from_str(LWE).unwrap();
@@ -151,6 +145,8 @@ fn prepare() {
         .remove("egress");
     check(
         [
+            // A leap day's first second, a year's last, and 2100's first of March, which follows
+            // its 28th of February, as 2100 isn't a leap year.
             (1_709_164_800, no_route.clone(), None),
             (1_767_225_599, lwe.clone(), None),
             (1_767_225_599, lwe.clone(), Some(&["gpt-6-sol"][..])),

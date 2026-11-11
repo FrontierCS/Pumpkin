@@ -89,8 +89,6 @@ fn check(script: &str, expect: &Expect) {
     expect.assert_eq(String::from_utf8(output.stdout).unwrap().trim_end());
 }
 
-/// Codex's files in an image built on `busybox`: each one's mode, owner and path below the
-/// reserved directory, and what Codex prints as it runs.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn codex_layer() {

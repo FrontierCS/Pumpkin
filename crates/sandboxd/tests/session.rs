@@ -252,14 +252,12 @@ fn check(scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// What a judge does: reads its payload, writes a result and evidence, and exits. The payload
-/// is longer than two frames, and the judge keeps it as evidence, so that it is put and then
-/// collected in several frames.
 #[test]
 fn judge() {
     check(
         |sandbox| {
             let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
+            // Over two frames, and kept as evidence, so that it is put and collected in several.
             let raw = pattern(2 * MAX_BODY_BYTES + 12345);
             let root = absolute(&sandbox.root);
             let put = [
@@ -299,9 +297,6 @@ fn judge() {
     );
 }
 
-/// A tree put gives what it makes its mode exactly, whatever the umask, and keeps a directory
-/// that exists as it is; a command reads its standard input from the regular file its launch
-/// names, which must exist.
 #[test]
 fn modes_and_stdin() {
     check(
@@ -353,8 +348,6 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|n| u8::try_from(n % 251).unwrap()).collect()
 }
 
-/// Freezing kills every process in each command's group, not only the command's own, returns
-/// once the commands have exited, and refuses new commands.
 #[test]
 fn freezing() {
     check(
@@ -384,10 +377,6 @@ fn freezing() {
     );
 }
 
-/// A sandbox whose processes fill its limit, as a fork bomb's do, so that `sandboxd` can start
-/// neither a command nor a thread, still freezes, and its trees are still collected, as the
-/// run's record. `sandboxd`'s own limit on its user's processes, lowered to 1 once it runs,
-/// stands in for the sandbox's: either fails a new process or thread alike.
 #[test]
 fn full_sandbox() {
     check(
@@ -396,6 +385,8 @@ fn full_sandbox() {
             let sleep = sandbox.session.start(launch, hung()).unwrap();
             fs::write(sandbox.root.join("out/kept"), "kept").unwrap();
             let pid = sandbox.sandboxd.id().to_string();
+            // `sandboxd`'s own limit on its user's processes stands in for the sandbox's: either
+            // fails a new process or thread alike.
             let limited = stdx::process::command("prlimit", PATH_ONLY)
                 .args(["--pid", &pid, "--nproc=1"])
                 .status()
@@ -427,7 +418,6 @@ fn full_sandbox() {
     );
 }
 
-/// Requests that `sandboxd` refuses, each with the reason it gives.
 #[test]
 fn refusals() {
     check(
@@ -500,7 +490,6 @@ fn show_error(sandbox: &Sandbox, outcome: io::Result<()>) -> String {
     sandbox.show(&outcome.unwrap_err())
 }
 
-/// Ending the session kills the commands still running.
 #[test]
 fn ending_the_session() {
     check(
@@ -519,13 +508,11 @@ fn ending_the_session() {
     );
 }
 
-/// A `sandboxd` that serves no model endpoint opens no model requests, so it exits 1, saying
-/// why, once its gateway answers one. A fake gateway sends it, as the gateway's end never answers
-/// a request it didn't take.
 #[test]
 fn model_answers() {
     check(
         |sandbox| {
+            // A fake gateway, as the gateway's end never answers a request it didn't take.
             let socket = sandbox.root.join("fake.sock");
             let end = ToSandbox::ModelEnd {
                 request: 0,
@@ -552,16 +539,12 @@ fn answered(socket: &Path, message: &ToSandbox) -> String {
     ended(sandboxd)
 }
 
-/// A tree put while a collect is held up, as a slow link holds one, is written meanwhile, and
-/// the collected tree then arrives whole: `sandboxd` reads on while it sends a tree, as the
-/// gateway's writers beside its requests need. A fake gateway holds the collect up by reading
-/// nothing until it has sent the put. Each tree is several frames, far more than a connection
-/// buffers, so a `sandboxd` that read nothing while it collected would hold the put's write up
-/// until its deadline.
 #[test]
 fn reading_while_collecting() {
     check(
         |sandbox| {
+            // Far more than a connection buffers, so that a `sandboxd` that read nothing while it
+            // collected would hold the put's write up until its deadline.
             let tree = pattern(4 * MAX_BODY_BYTES);
             fs::write(sandbox.root.join("out/tree"), &tree).unwrap();
             let (mut gateway, sandboxd) = fake_gateway(&sandbox.root.join("fake.sock"));

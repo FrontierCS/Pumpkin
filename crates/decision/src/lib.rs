@@ -229,14 +229,12 @@ pub fn lasts(workflow: &Workflow, startup: Duration) -> Duration {
 /// A run's decision core.
 ///
 /// A runtime drives it: [`Core::start`] begins the run, at time 0, and returns the first
-/// actions; the runtime then feeds each [`Event`] it observes to [`Core::handle`], with the
-/// time since the run started, and performs the actions it returns, in order. Replies to ops
-/// are actions too ([`Action::Reply`]), and every op gets exactly one.
-///
-/// Time passes only as events say, so a runtime with nothing else to report sends
-/// [`Event::Tick`] when [`Core::tick_due`] says. An event that doesn't apply to the run's
-/// state, such as a second report on a job that has ended, changes nothing, and one whose
-/// time is before an earlier event's doesn't move the core's clock back.
+/// actions; the runtime then feeds each [`Event`] it observes to [`Core::handle`], with the time
+/// since the run started, and performs the actions it returns, in order; every op gets exactly
+/// one reply ([`Action::Reply`]). Time passes only as events say, so a runtime with nothing else
+/// to report sends [`Event::Tick`] when [`Core::tick_due`] says. An event that doesn't apply to
+/// the run's state changes nothing, and one older than an earlier event doesn't move the clock
+/// back.
 #[derive(Debug)]
 pub struct Core<'w> {
     workflow: &'w Workflow,

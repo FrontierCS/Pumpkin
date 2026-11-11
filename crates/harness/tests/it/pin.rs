@@ -11,7 +11,6 @@ fn check(actual: &str, expect: &Expect) {
     expect.assert_eq(actual);
 }
 
-/// Codex's recipe, on a base named as the factory's build tags one.
 #[test]
 fn codex() {
     let base = "example/task/agent-base:0123";
@@ -30,10 +29,6 @@ fn codex() {
     );
 }
 
-/// The panic of making the recipe of a pin that differs from Codex's in one field, one for each
-/// check: a name, a URL, a digest and paths that a pin can't hold; no files, files out of order
-/// and twice. Then of making Codex's on a base a recipe can't hold: none, and one that would add
-/// an instruction.
 #[test]
 fn checks() {
     const CODEX: PinnedFile = file("bin/codex", Mode::Executable);

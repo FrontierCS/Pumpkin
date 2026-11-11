@@ -1,41 +1,28 @@
-//! The gateway's end of the sessions that sandboxes open; the protocol is
-//! [`schema::sandbox`].
+//! The gateway's end of the sessions that sandboxes open, by [the protocol](schema::sandbox).
 //!
-//! Each sandbox gets a [`Listener`] of its own: a Unix socket that only that sandbox can
-//! reach. The first connection on it becomes the sandbox's [`Session`] and the socket is
-//! removed, so no second connection can follow. The socket, not a secret, tells which sandbox
-//! is talking.
+//! Each sandbox gets a [`Listener`] of its own, a Unix socket that only that sandbox can reach,
+//! so the socket, not a secret, tells which sandbox is talking. The first connection on it
+//! becomes the sandbox's [`Session`], and the socket is removed, so no second one can follow.
 //!
-//! A sandbox, however buggy, can't harm the host through its session. A message that fails to
+//! A sandbox, however buggy, can't harm the host through its session: a message that fails to
 //! parse or comes out of turn, more replies than a waiting request takes, or a malformed tree
-//! ends the session, which stops the sandbox. A late reply, on a stream whose request has
-//! returned, is dropped, since a request that gives up closes its stream while `sandboxd` may
-//! still be answering. A collected tree is written into a new directory of its own, within
+//! ends the session, which stops the sandbox. A late reply, on a stream whose request has given
+//! up, is dropped. A collected tree is written into a new directory of its own, within
 //! [`Limits`]: a tree that passes them fails only its collect.
 //!
 //! # Deadlines
 //!
-//! Every request waits on the sandbox until the deadline its caller gives, so a slow link makes
-//! it wait, never fail. A request whose deadline passes fails with [`io::ErrorKind::TimedOut`]
-//! and ends the session. A sandbox that closes its connection ends the session at once. The
-//! owner's requests and the responses to model requests take turns to write whole frames, so a
-//! frame may also wait behind another writer's, until that writer's deadline.
+//! Every request waits on the sandbox until its caller's deadline, so a slow link makes it wait,
+//! never fail. A request whose deadline passes fails with [`io::ErrorKind::TimedOut`] and ends
+//! the session; so does a sandbox that closes its connection, at once. A frame may also wait
+//! behind another writer's, until that writer's deadline.
 //!
-//! # Ops
+//! # Ops and model requests
 //!
-//! A sandbox whose session takes ops ([`Listener::accept`]) may make them, as
-//! [the protocol](schema::sandbox) describes: each reaches the owner as an [`Arrival`],
-//! which it answers with [`Session::reply`], or [`Session::refuse`] if the payload was over the
-//! session's limit. The gateway authorizes nothing, but bounds what ops cost the host, and ends a
-//! session whose sandbox breaks the ops' rules.
-//!
-//! # Model requests
-//!
-//! A sandbox whose session takes model requests ([`Listener::accept`]) may make them, as the
-//! protocol describes: each reaches the owner as an [`Arrival`] once its body has arrived, and
-//! the owner answers it with [`IncomingModelRequest::respond`], whose response streams back from
-//! any thread, beside the owner's requests. Here too the gateway decides nothing, but bounds what
-//! model requests cost the host, and ends a session whose sandbox breaks their rules.
+//! A session takes them if [`Listener::accept`] says so, and each reaches the owner as an
+//! [`Arrival`]: an op is answered with [`Session::reply`] or [`Session::refuse`], and a model
+//! request with [`IncomingModelRequest::respond`], from any thread. The gateway authorizes
+//! nothing, but bounds what they cost the host, and ends a session that breaks their rules.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Write};
@@ -86,19 +73,14 @@ impl Listener {
     }
 
     /// Waits until `by` for the sandbox to connect, then removes the socket. The session's
-    /// reader thread sends each [`Arrival`] on `arrivals` as `wrap` makes it; `wrap` runs on the
-    /// reader, which it holds up, so it only wraps.
-    /// Only [`Arrival::Exited`] names its session, so give each live session a receiver of its
-    /// own; one may serve the next session once this one has dropped ([`Session`]).
-    /// The session takes ops if `ops` gives the most bytes an op's payload may hold: it holds
-    /// one payload at most, and keeps none of the bytes of a payload over the limit
-    /// ([`Arrival::Refused`]). With `None`, an op breaks the protocol. It takes model requests
-    /// if `models`; otherwise a model request breaks the protocol.
+    /// reader sends each [`Arrival`] on `arrivals` as `wrap`, which runs on it, makes it; only
+    /// [`Arrival::Exited`] names its session, so give each live session a receiver of its own.
+    /// The session takes ops whose payloads hold at most `ops` bytes, if given
+    /// ([`Arrival::Refused`]), and model requests if `models`; any other breaks the protocol.
     ///
     /// # Errors
     ///
-    /// Fails with [`io::ErrorKind::TimedOut`] if nothing connects by `by`, or if accepting the
-    /// connection or setting up its session fails.
+    /// Fails with [`io::ErrorKind::TimedOut`] if nothing connects by `by`, or if setup fails.
     pub fn accept<T: Send + 'static>(
         self,
         by: Deadline,
@@ -564,14 +546,11 @@ impl Session {
         collected
     }
 
-    /// Answers an op, which lets the sandbox send its next, as
-    /// [the protocol](schema::sandbox) requires promptly. A reply too long for a frame
-    /// reaches the caller as a refusal that says so.
+    /// Answers an op, promptly, as [the protocol](schema::sandbox) requires.
     ///
     /// # Errors
     ///
-    /// Fails if the reply is too long for a frame, if `by` passes first
-    /// ([deadlines](crate#deadlines)), or if the session has ended.
+    /// Fails if `by` passes, the session ends, or `reply` is too long for a frame, refusing the op.
     ///
     /// # Panics
     ///
@@ -596,8 +575,7 @@ impl Session {
         }
     }
 
-    /// Answers an op whose payload was over the limit with its refusal, as [`Session::reply`]
-    /// answers any other.
+    /// Answers an op whose payload was over the limit with its refusal.
     ///
     /// # Errors
     ///
@@ -913,10 +891,7 @@ impl Drop for Session {
 impl IncomingModelRequest {
     /// Starts the response with `status` and `headers`, and returns it, to stream its body by
     /// `by` ([deadlines](crate#deadlines)). A response that hasn't ended by `by` ends the session
-    /// at its next frame, or as it drops. `sandboxd` passes the headers on to the client, except
-    /// those that frame a message, which it writes itself, and drops the body of a response that
-    /// HTTP gives none: one to `HEAD`, or with a status of 204 or 304. Of a response with a status
-    /// of 1xx, which is interim, it writes nothing, and ends the client's connection.
+    /// at its next frame, or as it drops.
     ///
     /// # Errors
     ///

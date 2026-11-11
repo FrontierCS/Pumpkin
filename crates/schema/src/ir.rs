@@ -99,8 +99,7 @@ pub enum Runtime {
 /// the image or in `dirs`. A file the image has already fails the agent's start, and a directory
 /// it has already is kept as it is. No path is put twice, and none is below a file.
 ///
-/// The IR is recorded whole and the agent can read `files`, `stdin` and `env`, so keeping secrets
-/// out of them is the workflow writer's job; the model key stays on the host.
+/// The agent can read `files`, `stdin` and `env`, and the IR is recorded whole: keep secrets out.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRuntime {

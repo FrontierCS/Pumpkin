@@ -66,21 +66,15 @@ pub struct Built {
 }
 
 impl Engine {
-    /// The image that `recipe`, a Dockerfile's path in `dir`, builds with `dir` as its context,
-    /// tagged `<repository>:<hex>`, the hexadecimal digits of the digest of the build's inputs:
-    /// the options it is built with, `recipe`, and the path, permission bits and content of
-    /// each directory and regular file in `dir`, but not their owners or times. Once `check`
-    /// has passed the recipe's bytes, those the digest covers, it is the image the engine has
-    /// under that tag, or else one built now, with its progress on this process's standard
-    /// error, and then tagged. The tag covers what an image is built from only where its recipe
-    /// names by digest whatever it fetches, such as its base images.
+    /// The image that `recipe`, a Dockerfile's path in `dir`, builds with `dir` as its context:
+    /// the engine's under the tag `<repository>:<hex>`, the digest of the build's inputs (its
+    /// options, `recipe`, and the path, permission bits and content of each entry in `dir`), or
+    /// else one built now. The tag covers what a build fetches only where the recipe pins it.
     ///
     /// # Errors
     ///
-    /// Fails if `dir` can't be read, or holds anything but directories and regular files, or a
-    /// name that isn't UTF-8 or holds whitespace or a control character; if `recipe` is no
-    /// regular file in it; as `check` does; if `docker` can't look the tag up, build the image,
-    /// as its progress then says, or tag it; or if `dir` changed during the build.
+    /// Fails as `check` does, if `dir` holds anything but directories and regular files named in
+    /// UTF-8 without whitespace or controls, if `docker` fails, or if `dir` changed meanwhile.
     pub fn build(
         &self,
         dir: &Path,

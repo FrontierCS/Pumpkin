@@ -17,9 +17,6 @@ fn check(actual: &str, expect: &Expect) {
     expect.assert_eq(actual);
 }
 
-/// Codex working in `/workspace` on `gpt-6.1-terra`, through an upstream that forwards only
-/// function tools: its catalog entry, of which the snapshot shows the fields that set how Codex
-/// sends its tools.
 #[test]
 fn functions() {
     let codex = codex("/workspace", "gpt-6.1-terra", Tools::Functions).unwrap();
@@ -87,10 +84,6 @@ fn functions() {
     );
 }
 
-/// Codex through an upstream that forwards Codex's own forms, which reads no catalog but its
-/// own: on a model whose name its configuration quotes, in a workspace below `/`'s. The
-/// snapshot shows the files and the configuration's lines about the model, the rest being
-/// [`functions`]'s.
 #[test]
 fn native() {
     let codex = codex("/srv/work", r#"vendor/"quoted"\model"#, Tools::Native).unwrap();
@@ -113,8 +106,6 @@ fn native() {
     );
 }
 
-/// Codex through an upstream that forwards Codex's own forms, on a model whose catalog entry
-/// the crate carries and Codex's own catalog lacks: the entry goes in its home.
 #[test]
 fn native_carried() {
     let codex = codex("/workspace", "glm-5.3", Tools::Native).unwrap();
@@ -149,9 +140,6 @@ fn native_carried() {
     );
 }
 
-/// What the adapter refuses: a workspace whose directories a workflow can't put, a model whose
-/// catalog entry sending tools as functions needs and the crate doesn't carry, and an effort
-/// Codex doesn't know.
 #[test]
 fn refusals() {
     let errors = [

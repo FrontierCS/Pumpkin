@@ -16,19 +16,13 @@
 //! - a request while [`MAX_MODEL_REQUESTS_IN_FLIGHT`] are in flight, with 503.
 //!
 //! It writes a response as the session's owner sends it: the status and headers, but those that
-//! frame a message, which are its own, then the body chunked (`transfer-encoding: chunked`), then
-//! the last chunk, and closes the connection. A response cut short, ended without a head, or with a
-//! status of 1xx, which is interim, ends with the connection, before any last chunk, so that its
-//! client doesn't take it as whole. A response to `HEAD`, or with a status of 204 or 304, has no
-//! body: its head alone goes out, once the response ends whole, and its data is dropped. A refusal
-//! to `HEAD` is likewise its head alone. To close, it stops writing, then reads what the client
-//! still sends until the client closes too: the client gets the whole response even when it sent
-//! more than `sandboxd` read.
+//! frame a message, which are its own, then the body chunked, then the last chunk. A response cut
+//! short, ended without a head, or with an interim status (1xx) ends with the connection, before
+//! any last chunk, so that its client doesn't take it as whole. A response to `HEAD`, or with a
+//! status of 204 or 304, is its head alone, as is a refusal to `HEAD`.
 //!
-//! As with [ops](crate::ops), every client is the sandbox's own code, which `sandboxd` doesn't
-//! guard against: a client that connects and sends nothing, reads nothing of its response, or
-//! never closes, holds a thread, with no timeout, and the parts of a response it hasn't read yet.
-//! That harms only the sandbox's own run.
+//! As with [ops](crate::ops), a client that holds its connection holds a thread, with no
+//! timeout, which harms only the sandbox's own run.
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Write as _};

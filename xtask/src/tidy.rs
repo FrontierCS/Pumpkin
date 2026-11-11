@@ -1,6 +1,6 @@
 //! The checks of the repository's Rust files that `cargo xtask ci` runs: each doc within its
-//! length cap, each `unreachable!` with a message, and no `debug_assert!`, as `docs/dev/style.md`
-//! asks.
+//! length cap and none on a test, as `docs/dev/writing.md` asks, and each `unreachable!` with a
+//! message and no `debug_assert!`, as `docs/dev/style.md` asks.
 
 use std::path::Path;
 
@@ -9,19 +9,17 @@ use xshell::{Shell, cmd};
 
 use crate::Result;
 
-// Both caps round up the 99th percentiles of module docs and of item docs in comparable
-// codebases, 36 and 14 lines: a block longer than these is rare among them.
+// The 95th percentiles of module docs' and item docs' lengths in comparable Rust applications.
 
 /// The most lines a module's doc, its inner doc comments and `#![doc = "…"]` attributes, may
 /// span.
-const MODULE_CAP: usize = 40;
+const MODULE_CAP: usize = 25;
 
 /// The most lines an item's doc, its outer doc comments and `#[doc = "…"]` attributes, may span.
-const ITEM_CAP: usize = 15;
+const ITEM_CAP: usize = 9;
 
-/// Fails unless, in each of the repository's Rust files, tracked or not yet, but not ignored,
-/// each doc is within its cap, each `unreachable!` has a message and no `debug_assert!` is
-/// used.
+/// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, passes
+/// the checks.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     // Every file, filtered here: a pathspec's meaning changes with Git's variables, such as
     // `GIT_LITERAL_PATHSPECS`, and `-z` keeps unusual names as they are rather than quoted.
@@ -87,29 +85,34 @@ struct Doc {
 }
 
 /// Adds to `docs` each doc over its cap in `tokens`, a module's or an item's body, and in the
-/// bodies within it, and to `banned` where each banned macro call there starts, with what is wrong: an
-/// `unreachable!` without a message, or a `debug_assert!`, `debug_assert_eq!` or
-/// `debug_assert_ne!`.
+/// bodies within it, and to `banned` where each banned form there starts, with what is wrong: a
+/// doc on a `#[test]` item, an `unreachable!` without a message, or a `debug_assert!`,
+/// `debug_assert_eq!` or `debug_assert_ne!`.
 ///
-/// The tokens hold every doc comment as a `doc` attribute, which spans the comment's lines;
-/// strings and other comments are understood exactly. The inner `doc` attributes of `tokens`
-/// are its module's doc. A run of outer attributes is an item's, whose doc is the outer `doc`
-/// attributes among them. A `doc` attribute counts in the form `doc = "…"`, not in another,
-/// such as `#[doc(hidden)]` or `#[doc = include_str!(…)]`.
+/// A module's doc is its inner `doc = "…"` attributes, doc comments included, and an item's the
+/// outer ones in its run of attributes; each counts the lines it spans.
 fn scan(tokens: TokenStream, docs: &mut Vec<Doc>, banned: &mut Vec<(LineColumn, String)>) {
     let tokens: Vec<TokenTree> = tokens.into_iter().collect();
     let (mut module, mut item) = (Block::default(), Block::default());
     let mut at = 0;
     while at < tokens.len() {
-        if let Some(Attribute { inner, tokens, doc }) = attribute(&tokens[at..]) {
+        if let Some(Attribute {
+            inner,
+            tokens,
+            doc,
+            test,
+        }) = attribute(&tokens[at..])
+        {
+            let block = if inner { &mut module } else { &mut item };
             if let Some((first, lines)) = doc {
-                let block = if inner { &mut module } else { &mut item };
                 block.add(first, lines);
             }
+            block.test |= test;
             at += tokens;
             continue;
         }
         docs.extend(item.over("an item's doc", ITEM_CAP));
+        banned.extend(item.on_test());
         item = Block::default();
         if let [
             TokenTree::Ident(name),
@@ -144,28 +147,40 @@ fn scan(tokens: TokenStream, docs: &mut Vec<Doc>, banned: &mut Vec<(LineColumn, 
         at += 1;
     }
     docs.extend(item.over("an item's doc", ITEM_CAP));
+    banned.extend(item.on_test());
     docs.extend(module.over("the module doc", MODULE_CAP));
 }
 
-/// The lines that the doc attributes of one module or one item span: the first one's number,
-/// and how many.
+/// The attributes of one module or one item: where the first doc attribute starts and how many
+/// lines the doc attributes span, and whether one is `#[test]`.
 #[derive(Default)]
-struct Block(Option<(usize, usize)>);
+struct Block {
+    doc: Option<(LineColumn, usize)>,
+    test: bool,
+}
 
 impl Block {
-    fn add(&mut self, first: usize, lines: usize) {
-        self.0.get_or_insert((first, 0)).1 += lines;
+    fn add(&mut self, first: LineColumn, lines: usize) {
+        self.doc.get_or_insert((first, 0)).1 += lines;
     }
 
     /// The block, as a doc of `what`, if it is longer than `cap`.
     fn over(&self, what: &'static str, cap: usize) -> Option<Doc> {
-        let (line, lines) = self.0?;
+        let (LineColumn { line, .. }, lines) = self.doc?;
         (lines > cap).then_some(Doc {
             line,
             what,
             lines,
             cap,
         })
+    }
+
+    /// Where the doc of a `#[test]` item starts, with what is wrong.
+    fn on_test(&self) -> Option<(LineColumn, String)> {
+        let (first, _) = self.doc.filter(|_| self.test)?;
+        let problem = "a test has a doc: remove it, and put a why the test needs in a `//` comment \
+                       at the line it explains";
+        Some((first, problem.to_owned()))
     }
 }
 
@@ -174,8 +189,9 @@ struct Attribute {
     inner: bool,
     /// How many of the tokens it takes.
     tokens: usize,
-    /// For a `doc = "…"` attribute, its first line's number and how many lines it spans.
-    doc: Option<(usize, usize)>,
+    /// For a `doc = "…"` attribute, where it starts and how many lines it spans.
+    doc: Option<(LineColumn, usize)>,
+    test: bool,
 }
 
 /// The attribute that `tokens` start with, if any.
@@ -200,11 +216,17 @@ fn attribute(tokens: &[TokenTree]) -> Option<Attribute> {
             TokenTree::Punct(equals),
             TokenTree::Literal(_),
         ] if name == "doc" && equals.as_char() == '=' => {
-            let (start, end) = (hash.span().start().line, group.span().end().line);
-            Some((start, end - start + 1))
+            let (start, end) = (hash.span().start(), group.span().end().line);
+            Some((start, end - start.line + 1))
         }
         _ => None,
     };
+    let test = matches!(attribute.as_slice(), [TokenTree::Ident(name)] if name == "test");
     let tokens = if inner { 3 } else { 2 };
-    Some(Attribute { inner, tokens, doc })
+    Some(Attribute {
+        inner,
+        tokens,
+        doc,
+        test,
+    })
 }

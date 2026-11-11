@@ -4,40 +4,25 @@
 //! operator's [context](#the-envelope), and makes each sandbox a container that has:
 //!
 //! - no network but loopback; the dial's socket, in a host directory mounted read-only, is the
-//!   only way out;
-//! - the role's user from its first process, no capabilities, and `no-new-privileges`;
-//! - CPU, memory (swap included) and process limits, and a core file size limit of 0;
+//!   only way out, and files move only over the session;
+//! - the role's user from its first process, no capabilities, `no-new-privileges`, CPU, memory
+//!   (swap included) and process limits, and a core file size limit of 0;
 //! - `sandboxd`, mounted read-only, as its first process, dialing the [`Dial`] its create
 //!   gives, and whose output alone is the container's log, which holds at most 1 MiB;
-//! - [`/pumpkin`](pumpkin_dir), a tmpfs owned by the role's user, for the session's owner to
-//!   put [directories](schema::sandbox::pumpkin_subdirs) in. It holds at most
-//!   [`PUMPKIN_BYTES`], and its files are in memory, counted against the role's memory limit,
-//!   so a role can keep there no more than that limit, less what its processes use;
-//! - `/tmp`, a read-only mask. On disk, a role's code can write only to the container's
-//!   writable layer, which is its workspace, and to the anonymous volume Docker makes for each
-//!   `VOLUME` its image declares, which is removed with the container. Neither has a size
-//!   limit, so a role can fill the disk the Docker daemon stores containers on. Docker's
-//!   `/dev/shm` and `/dev/mqueue` are writable too, but memory-backed, as `/pumpkin` is, so
-//!   what they hold counts against the memory limit;
+//! - [`/pumpkin`](pumpkin_dir), a tmpfs of at most [`PUMPKIN_BYTES`] owned by the role's user,
+//!   whose files count against the memory limit, as `/dev/shm`'s and `/dev/mqueue`'s do;
+//! - `/tmp`, a read-only mask, so a role writes to disk only in the container's writable layer
+//!   and its image's `VOLUME`s, removed with it, neither of which has a size limit;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
 //!   read-only, and `sandboxd` serving ops; other sandboxes are [passive](schema::sandbox);
 //! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
-//! Files move only over the session, never through the Docker daemon.
-//!
 //! # The envelope
 //!
-//! The operator provides the engine, once, as a Docker context, which they name; the provider
-//! picks up none of its own, and nothing in its environment overrides the one named
-//! ([`ContextName`]). [`Engine::connect`] reports the engine before anything starts
-//! ([`Report`]). Within it, the provider creates only containers, known by their IDs, and the
-//! anonymous volumes Docker makes for their images' `VOLUME`s, which are removed with them; it
-//! pulls no image for a sandbox, so its publish checks that the engine has a role's. Each
-//! container is labelled with its run's [`RunTag`], so that [`Provider::list`] finds a run's
-//! containers, and only those, even when the process that started them is gone, and with its
-//! role's name, so that `docker ps` shows which is which. The provider runs on a rootful engine
-//! or a rootless one, and its report says which ([`Security::rootless`]). It builds and tags
-//! images on Docker 25.0 or later with its Buildx plugin ([`Engine::build`]).
+//! The operator names the engine, as a Docker context that nothing in the environment overrides
+//! ([`ContextName`]); [`Engine::connect`] reports it ([`Report`]). In it, the provider creates
+//! only containers, labelled with their run's [`RunTag`], by which [`Provider::list`] finds them,
+//! and their anonymous volumes; it pulls no image, and builds on Docker 25.0 or later.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -611,15 +596,9 @@ where
 /// Runs `docker` against `context` alone with `args`, with its standard error where `stderr`
 /// says, and returns its output. If the command fails, the error says which it was and what
 /// Docker reported, and the caller adds what that means and what to do; if `docker` doesn't
-/// run, the error asks for it on `PATH`.
-///
-/// `docker` keeps only what it needs to find Docker's own configuration: `HOME`, for
-/// `~/.docker` and the configuration, contexts and CLI plugins there; `PATH`, for credential
-/// helpers; and `DOCKER_CONFIG`, if set, Docker's own variable for where that configuration
-/// lives. The rest of the environment is dropped, so that the context named alone steers the
-/// command line: otherwise `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`, among
-/// others, would set the endpoint and TLS of `default`. A context reached over `ssh://` would
-/// need `SSH_AUTH_SOCK` too, which isn't passed.
+/// run, the error asks for it on `PATH`. Of the environment, `docker` gets only `HOME`, `PATH`
+/// and `DOCKER_CONFIG`, so that the context named alone steers it, and a context reached over
+/// `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
 fn docker_to<I, S>(context: &ContextName, args: I, stderr: Stderr) -> Result<Output, Failure>
 where
     I: IntoIterator<Item = S>,

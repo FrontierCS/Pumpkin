@@ -246,8 +246,6 @@ fn at(method: &'static str, path: &str) -> Request {
     (method, path.to_owned(), headers, body)
 }
 
-/// The harness's requests that keep the route closed pass, with only the headers that pass and
-/// the body as the closure read it; every other is refused, as its client hears.
 #[test]
 #[expect(
     clippy::too_many_lines,

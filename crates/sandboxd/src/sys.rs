@@ -124,21 +124,13 @@ pub(crate) fn make_non_dumpable() -> io::Result<()> {
     }
 }
 
-/// Opens the regular file at `path` with `options`, and fails for anything else there.
-/// `sandboxd` runs as the same user as the role's code, which can put anything at the paths
-/// `sandboxd` opens, so this adds to `options`:
-///
-/// - `O_NOFOLLOW`, so that a symbolic link there fails the open instead of leading elsewhere,
-///   such as to `/proc/self/fd/2`, `sandboxd`'s own standard error, which
-///   [`make_non_dumpable`] otherwise keeps from the role's code;
-/// - `O_NONBLOCK`, so that a FIFO fails the open, or is opened at once and refused, instead of
-///   blocking it until the FIFO's other end is opened;
-/// - `O_NOCTTY`, so that a terminal, which a link in a parent directory can lead to, can't
-///   become `sandboxd`'s controlling one.
-///
-/// The file stays non-blocking, which Linux ignores for a regular file's reads and writes, so
-/// a command may be handed it as its standard input, output or error.
+/// Opens the regular file at `path` with `options`, and fails for anything else there, a
+/// symbolic link or a FIFO included. The file stays non-blocking, which Linux ignores for a
+/// regular file, so a command may be handed it as its standard input, output or error.
 pub(crate) fn open_regular(path: &Path, options: &mut OpenOptions) -> Result<File, String> {
+    // The role's code, which runs as this user, can put anything at the paths `sandboxd` opens:
+    // a link, such as to `/proc/self/fd/2`, which `make_non_dumpable` keeps from it; a FIFO,
+    // which would block the open; or a terminal, which would become the controlling one.
     let file = options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
