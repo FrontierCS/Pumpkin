@@ -13,6 +13,7 @@
     reason = "a failed test shows its containers' logs"
 )]
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
@@ -23,7 +24,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use docker::{Built, ContextName, Engine, Report, Security};
+use docker::{BuildContext, Built, ContextName, Engine, Recipe, Report, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Listener, Op, Process, Put, Session};
 use provider::Provider;
@@ -748,10 +749,15 @@ fn builds() {
                 "another recipe: {}",
                 builds.build("other/Dockerfile")
             ));
-            let refuse = |text: &[u8]| Err(format!("refused {:?}", String::from_utf8_lossy(text)));
-            let refused = engine().build(&dir, "Dockerfile", &builds.repository, refuse);
-            let refused = redact(fixture, &refused.unwrap_err());
-            lines.push(format!("built before, now refused by the check: {refused}"));
+            let (context, dockerfile) = (builds.context(), Recipe::File(relative("Dockerfile")));
+            let base = engine().build(&context, &dockerfile, &[], &builds.repository);
+            let base = base.unwrap();
+            let on_base = Recipe::Text(format!("FROM {}\nCOPY file /on-base\n", base.tag()));
+            let built = builds.build_in(&context, &on_base, &[&base]);
+            lines.push(format!("a text on its base: {built}"));
+            let refused = builds.build_in(&context, &on_base, &[]);
+            let refused = refused.replace(base.tag(), "<base>");
+            lines.push(format!("built before, now without its base: {refused}"));
             lines.push(format!(
                 "an absent recipe: {}",
                 builds.build("absent/Dockerfile")
@@ -771,7 +777,7 @@ fn builds() {
             // names pins the digest's text; the lookup fails before anything is built.
             fs::remove_file(dir.join("id")).unwrap();
             let repository = "pumpkin-docker-tests/Builds";
-            let uppercase = engine().build(&dir, "Dockerfile", repository, |_| Ok(()));
+            let uppercase = engine().build(&context, &dockerfile, &[], repository);
             let refused = redact(fixture, &uppercase.unwrap_err());
             lines.push(format!("an uppercase repository: {refused}"));
             lines
@@ -782,12 +788,90 @@ fn builds() {
             the first inputs, their tag moved to B: B, tagged :1 :2
             another mode: C, tagged :3
             another recipe: C, tagged :3 :4
-            built before, now refused by the check: refused "FROM scratch\nCOPY file id /\n"
-            an absent recipe: `absent/Dockerfile` is no regular file in <dir>/context: name the build's recipe by its path there
+            a text on its base: D, tagged :5
+            built before, now without its base: Dockerfile:1: `<base>` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a base the build is given
+            an absent recipe: `absent/Dockerfile` is no regular file in the build's context: name the build's recipe by its path there
             a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
             a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
-            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:e72ff5add1fd15aa47b0cfb11b1b0cc7d18baa49c54fdbaafbb140f329b1564a` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
+            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:ae5393eb92660d45221c68f0974539eb1151a715d549a35397299be084351a30` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn mounts() {
+    check(
+        "mounts",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            let shared = fixture.dir.path().join("shared");
+            put(&shared, "tool", "one", 0o755);
+            let dir = builds.context().dir;
+            let at = |path: &str| BuildContext {
+                dir: dir.clone(),
+                mounts: BTreeMap::from([(relative(path), shared.clone())]),
+            };
+            let recipe = Recipe::Text("FROM scratch\nCOPY file id shared/tool /\n".to_owned());
+            let built = builds.build_in(&at("shared"), &recipe, &[]);
+            let mut lines = vec![format!("mounted: {built}")];
+            put(&shared, "tool", "two", 0o755);
+            let built = builds.build_in(&at("shared"), &recipe, &[]);
+            lines.push(format!("a mounted file changed: {built}"));
+            for (what, path) in [
+                ("over a file", "file"),
+                ("in a file", "file/shared"),
+                ("in nothing", "absent/shared"),
+                ("at a name with a space", "a b"),
+            ] {
+                let refused = builds.build_in(&at(path), &recipe, &[]);
+                lines.push(format!("mounted {what}: {refused}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            mounted: A, tagged :1
+            a mounted file changed: B, tagged :2
+            mounted over a file: the build's context holds `file` already, where <dir>/shared is to be mounted: mount it where the context holds nothing
+            mounted in a file: the build's context holds no directory `file` for <dir>/shared to be mounted in: mount it in a directory the context holds
+            mounted in nothing: the build's context holds no directory `absent` for <dir>/shared to be mounted in: mount it in a directory the context holds
+            mounted at a name with a space: `a b` holds whitespace or a control character: mount <dir>/shared at a path without them"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn modes() {
+    check(
+        "modes",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            let dir = fixture.dir.path().join("context");
+            // Built only if the image holds each file with the mode the stage gives it.
+            let recipe = Recipe::Text(format!(
+                "FROM {BUSYBOX}\nCOPY . /context\nRUN cd /context && test \"$(stat -c %a file \
+                 tool other other/Dockerfile | xargs)\" = '644 755 755 644'\n"
+            ));
+            let mut lines = Vec::new();
+            for (what, [file, tool, dirs]) in [
+                ("group-writable", [0o664, 0o775, 0o775]),
+                ("for their owners alone", [0o600, 0o700, 0o700]),
+                ("as git checks them out", [0o644, 0o755, 0o755]),
+            ] {
+                put(&dir, "file", "one", file);
+                put(&dir, "tool", "", tool);
+                for dir in [dir.join("other"), dir.clone()] {
+                    fs::set_permissions(dir, fs::Permissions::from_mode(dirs)).unwrap();
+                }
+                let built = builds.build_in(&builds.context(), &recipe, &[]);
+                lines.push(format!("{what}: {built}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            group-writable: A, tagged :1
+            for their owners alone: A, tagged :1
+            as git checks them out: A, tagged :1"#]],
     );
 }
 
@@ -847,14 +931,27 @@ impl<'f> Builds<'f> {
         }
     }
 
-    /// Builds `recipe` with the fixture's `context` as its context, and shows the image, by the
-    /// letter of its first build, and its tags in the repository, and the tag the build returned
-    /// if it is none of them, each by the number of its first showing, as their digests cover
-    /// `id`; or why the build failed.
+    /// The fixture's `context`, with nothing mounted in it.
+    fn context(&self) -> BuildContext {
+        BuildContext {
+            dir: Some(self.fixture.dir.path().join("context")),
+            mounts: BTreeMap::new(),
+        }
+    }
+
+    /// [`Builds::build_in`] of the file `recipe` of the fixture's `context`, with no bases.
     fn build(&mut self, recipe: &str) -> String {
-        let dir = self.fixture.dir.path().join("context");
-        let (image, returned) = match engine().build(&dir, recipe, &self.repository, |_| Ok(())) {
-            Ok(Built { image, tag }) => (image.as_str().to_owned(), tag),
+        self.build_in(&self.context(), &Recipe::File(relative(recipe)), &[])
+    }
+
+    /// Builds `recipe` on `bases` with `context`, and shows the image, by the letter of its
+    /// first build, and its tags in the repository, and the tag the build returned if it is
+    /// none of them, each by the number of its first showing, as their digests cover `id`; or
+    /// why the build failed.
+    fn build_in(&mut self, context: &BuildContext, recipe: &Recipe, bases: &[&Built]) -> String {
+        let built = engine().build(context, recipe, bases, &self.repository);
+        let (image, returned) = match built {
+            Ok(built) => (built.image().as_str().to_owned(), built.tag().to_owned()),
             Err(error) => return redact(self.fixture, &error),
         };
         let index = first_seen(&mut self.seen, &image);
