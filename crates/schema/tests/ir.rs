@@ -114,9 +114,6 @@ impl Case for Tag {
     }
 }
 
-/// Tags as runs and tests make them, and tags refused: among them one with a trailing space,
-/// which `docker` trims from a filter's value, so that the tag would find another run's sandboxes,
-/// and ones that start as an option would.
 #[test]
 fn run_tags() {
     check(
@@ -125,6 +122,7 @@ fn run_tags() {
             Tag("pk-4242-cleanup-other"),
             Tag("selftest.v2_a"),
             Tag(""),
+            // `docker` trims a filter's value, so this tag would find another run's sandboxes.
             Tag("pk-run "),
             Tag("pk/run"),
             Tag("-pk"),
@@ -142,8 +140,6 @@ fn run_tags() {
     );
 }
 
-/// Each reply's JSON form, a status's in each of its job's states; and statuses whose fields
-/// don't match their states, which are refused.
 #[test]
 fn op_replies() {
     check(
@@ -195,9 +191,6 @@ fn op_replies() {
     );
 }
 
-/// The in-sandbox contract: the paths a role's commands and its session's owner share, a
-/// slot's for the LWE judges' slot, and a path below `/`, which keeps its one `/`; and a
-/// command's environment, whose `HOME` is the contract's unless its IR sets one.
 #[test]
 fn in_sandbox_contract() {
     let slot = ir::Name::try_from("payload".to_owned()).unwrap();
@@ -318,8 +311,6 @@ fn checked_values() {
     );
 }
 
-/// The agent's directories and files: each at a path outside Pumpkin's directories, put once,
-/// and below no file, with a mode from `0000` to `0777`.
 #[test]
 fn agent_files() {
     let agent = "/roles/0/runtime/agent";
@@ -388,9 +379,6 @@ fn broken_references() {
     );
 }
 
-/// A workflow has one agent, which alone has a model route and holds one submit grant, a judge
-/// grant names a judge no other grant names, and the score judges with a judge no grant names,
-/// even a grant that fails to parse.
 #[test]
 fn broken_pattern() {
     let mut ir = lwe_json();

@@ -97,18 +97,14 @@ impl Run {
     }
 
     /// Runs the workflow to its outcome on `provider`, with `sandboxd`, a static `sandboxd`
-    /// binary, in every sandbox. The outcome, or why the run stopped without one, is also in the
-    /// record's `outcome.json`. However the run ends, it deletes the sandboxes that `provider`
-    /// still lists of it before returning.
+    /// binary, in every sandbox, and records the outcome, or why there is none, in `outcome.json`.
+    /// However the run ends, it deletes the sandboxes that `provider` still lists of it.
     ///
     /// # Errors
     ///
-    /// Fails if what the run's sandboxes run can't be published, or the provider doesn't name
-    /// each thing published; if the run's socket directory can't be made; if the run was still
-    /// going at its hard end ([`lasts`]); if the model provider refused the route's key, or
-    /// failed the agent's last model request as the agent exited with no submission finalized;
-    /// if the machine's clock reads before 1970; if the run's sandboxes can't be listed at its
-    /// end, or one of them can't be deleted; or if the record can't be written.
+    /// Fails if the run can't be set up, recorded or cleaned up, if it was still going at its
+    /// hard end ([`lasts`]), or if the model provider refused the route's key or failed the
+    /// agent's last request as it exited with no submission finalized.
     pub fn execute(self, provider: &dyn Provider, sandboxd: &Path) -> Result<Outcome, String> {
         let outcome = self.run_on(provider, sandboxd);
         let recorded = match &outcome {

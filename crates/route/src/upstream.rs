@@ -248,21 +248,15 @@ impl Upstream {
         }
     }
 
-    /// Sends `closed`, the closed form of `request`, to the model provider with the key, and
-    /// streams the response back to `request`'s client as it arrives, by `by`
-    /// ([`IncomingModelRequest::respond`]): its status and body as they are, with only the
-    /// headers that a harness reads. The upstream is given up on at `until`, or once it stalls
-    /// (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`, `IDLE_TIMEOUT`). The client gets a 504 if the
-    /// upstream is given up on before the response's head, a 502 if it gives no answer
-    /// otherwise or codes the body, a 400 if it refuses the key with a 401, which the upstream
-    /// keeps, or the request with a 403, and a response cut short if it breaks off, or is given
-    /// up on, within the body. `answered` is told which ([`Answer`]) before the answer's end is
-    /// written.
+    /// Sends `closed` to the model provider with the key, and streams the response back to
+    /// `request`'s client by `by`, with only the headers a harness reads, giving up at `until` or
+    /// once the upstream stalls. The client hears 504 if it gives up before the head, 502 if the
+    /// upstream gives no answer or codes the body, 400 if it refuses the key or the request, and
+    /// else the response, cut short if it breaks off; `answered` hears which ([`Answer`]) first.
     ///
     /// # Errors
     ///
-    /// Fails if the response's head is too long for a frame, which cuts the request short
-    /// without a response, if `by` passes first, or if the session has ended.
+    /// Fails if the response's head is too long for a frame, if `by` passes, or the session ends.
     pub(crate) fn forward(
         &self,
         closed: &Closed,

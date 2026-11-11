@@ -9,16 +9,13 @@
 //! - `record.json`: `{"record_version": "pumpkin.record/v0"}`, the version of the record's
 //!   form ([`RECORD_VERSION`]), written first;
 //! - `ir.json`: the workflow's IR;
-//! - `provider.json`: what the run's provider declared, its
-//!   [`Ready`](schema::provider::Ready);
+//! - `provider.json`: what the run's provider declared ([`Ready`](schema::provider::Ready));
 //! - `log.jsonl`: the run log, which the `log` module lays out;
-//! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256. An op the
-//!   core refused appears in the run log by its payload's size and digest, one the gateway
-//!   refused by the size alone, and neither's bytes are kept;
+//! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256; a refused
+//!   op's bytes aren't kept;
 //! - `agent/`, for an agent whose sandbox started: its `out` and `log`, what the sandbox held in
-//!   its [`out_dir()`](schema::sandbox::out_dir) and
-//!   [`log_dir()`](schema::sandbox::log_dir) when the work phase ended, as far as they
-//!   were collected; the run log notes what is incomplete;
+//!   its [`out_dir()`](schema::sandbox::out_dir) and [`log_dir()`](schema::sandbox::log_dir) as
+//!   the work phase ended, as far as collected; the run log notes what is incomplete;
 //! - `jobs/<n>/`, for job `n`'s judge call: its `out` and `log`, what the judge's sandbox held in
 //!   them once its command ended, as far as they were collected, but a result over
 //!   [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES), which is removed;

@@ -1,38 +1,28 @@
 //! The sandbox protocol, v0: what the gateway and `sandboxd` say to each other over a session.
 //!
-//! A session is one connection, which `sandboxd` opens to the gateway when its sandbox starts
-//! and which lasts as long as the sandbox. The connection identifies the sandbox: the gateway
-//! gives each sandbox a socket of its own, which takes a single connection.
+//! A session is one connection, which `sandboxd` opens to the gateway as its sandbox starts and
+//! which lasts as long as the sandbox, on a socket of the sandbox's own, so it identifies it.
 //!
 //! Both sides send [`frame`]s, each a message and a body of raw bytes: [`ToSandbox`] from the
 //! gateway, [`FromSandbox`] from `sandboxd`. Every request from the gateway names a stream, a
-//! number it uses once, and everything sent in reply names the same stream, so that replies
-//! to several requests can interleave.
+//! number it uses once, and everything sent in reply names the same stream. Files move as trees
+//! of [`Entry`]s, each a directory or a regular file whose bytes follow in `Data` frames, every
+//! entry after its parent's, then an `End`, so no link or special file crosses a session, and
+//! every path is a [`RelativePath`]; a tree the gateway puts gives each entry its [`Mode`].
 //!
-//! Files move as trees: [`Entry`]s, each a directory or a regular file whose bytes follow in
-//! `Data` frames, every entry after its parent's, then an `End`. A tree holds nothing else, so
-//! no link or special file crosses a session, and every path in it is a [`RelativePath`],
-//! which can't leave the directory the tree is written to; [`tree::Writer`] writes one there. A
-//! tree the gateway puts gives each entry its [`Mode`].
+//! Ops go the other way ([`op`]): an op opens with [`FromSandbox::Op`], numbered apart from the
+//! gateway's streams, and gives its payload's size first, so the gateway checks it before any
+//! byte arrives; the bytes follow in [`FromSandbox::OpData`], and the gateway answers once, with
+//! [`ToSandbox::OpReply`]. A sandbox has at most one op in flight, so its callers take turns,
+//! and the owner answers each promptly, long work with a job that later ops ask about. A session
+//! takes ops only if accepted with an [`OpPayloadLimit`], and model requests only if accepted
+//! for them ([`FromSandbox::ModelRequest`]).
 //!
-//! Ops go the other way: a caller in the sandbox asks the session's owner for something, such
-//! as judging a payload ([`op`]). An op opens with [`FromSandbox::Op`], numbered apart from the
-//! gateway's streams, and gives its payload's size first, so the gateway checks the size before
-//! any byte arrives; the bytes follow in [`FromSandbox::OpData`], and the gateway answers once,
-//! with [`ToSandbox::OpReply`]. A sandbox has at most one op in flight, from its `Op` to its
-//! reply, so its callers take turns, and the owner answers each promptly: an op that starts
-//! long work, as a judge call does, with a job that later ops ask about. A session takes ops
-//! only if the gateway accepts it with an [`OpPayloadLimit`], and model requests
-//! ([`FromSandbox::ModelRequest`]) only if it accepts it for them.
-//!
-//! Every provider presents [`pumpkin_dir()`], with [`pumpkin_subdirs()`] below it, in the
-//! sandboxes it starts: the session's owner and a role's commands rely on them in any sandbox.
-//! It holds at most [`PUMPKIN_BYTES`]. A sandbox whose role makes ops also has `sandboxctl` at
-//! [`SANDBOXCTL_PATH`], and its `sandboxd` serves ops at [`CONTROL_SOCKET`]. Any other sandbox
-//! is passive: nothing in it can make an op, and its session takes none. A sandbox whose role
-//! has a model route has its `sandboxd` serve the model endpoint at [`MODEL_PORT`]. An agent's
-//! image holds its harness below [`harness_dir()`]. A workflow puts nothing in these directories
-//! ([`RolePath`](crate::ir::RolePath)).
+//! Every provider presents [`pumpkin_dir()`] as [`pumpkin_subdirs()`] says, within
+//! [`PUMPKIN_BYTES`]. A role that makes ops has `sandboxctl` at [`SANDBOXCTL_PATH`], served at
+//! [`CONTROL_SOCKET`]; any other's sandbox is passive, its session taking no op. A role with a
+//! model route has the model endpoint at [`MODEL_PORT`], and an agent's image its harness below
+//! [`harness_dir()`]. A workflow puts nothing there ([`RolePath`](crate::ir::RolePath)).
 
 use op::{OpCall, OpReply};
 use serde::{Deserialize, Serialize};
@@ -93,16 +83,12 @@ pub fn pumpkin_dir() -> AbsolutePath {
 /// The directories below [`pumpkin_dir()`], there before a role's first command starts: the
 /// in-sandbox contract that a task's images are written against, the same for every workflow.
 ///
-/// - `in` holds what the session's owner puts in, as a judge call's payload
-///   ([`slot_payload()`]) or the agent's standard input ([`command_stdin()`]);
-/// - [`out_dir()`] what it collects, as a judge's result ([`result_file()`]) and evidence
-///   ([`evidence_dir()`]);
-/// - `home` the commands' home ([`command_env()`]);
-/// - [`log_dir()`] their output ([`command_stdout()`], [`command_stderr()`]).
-///
-/// The paths these functions give are relative to [`pumpkin_dir()`], which
-/// [`AbsolutePath::join`] joins them to. What the session's owner puts there has [`dir_mode()`]
-/// or [`file_mode()`].
+/// `in` holds what the session's owner puts in, as a judge call's payload ([`slot_payload()`])
+/// or the agent's standard input ([`command_stdin()`]); [`out_dir()`] what it collects, as a
+/// judge's result ([`result_file()`]) and evidence ([`evidence_dir()`]); `home` the commands'
+/// home ([`command_env()`]); and [`log_dir()`] their output ([`command_stdout()`],
+/// [`command_stderr()`]). These paths are relative to [`pumpkin_dir()`], and what the owner puts
+/// there has [`dir_mode()`] or [`file_mode()`].
 pub fn pumpkin_subdirs() -> [RelativePath; 4] {
     [in_dir(), out_dir(), home_dir(), log_dir()]
 }

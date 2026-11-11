@@ -847,11 +847,6 @@ fn sandbox_answers() {
     );
 }
 
-/// A reply that no request takes ends the session, whose end the owner hears last: a tree's end
-/// for a freeze, an exit before its command's start is done, a `done` within a tree, and a
-/// `done` on a stream that no request has opened, past the last one opened, or 0. So does a
-/// malformed tree. The rest of a tree whose collect gave up at a limit is dropped, and the
-/// session goes on until the sandbox ends it.
 #[test]
 fn protocol_breaks() {
     check(
@@ -884,8 +879,6 @@ fn protocol_breaks() {
     );
 }
 
-/// Ops the sandbox makes, which the gateway passes on whole, refuses, or ends the session for,
-/// in a session that takes ops whose payloads hold at most 4 bytes.
 #[test]
 fn sandbox_ops() {
     check(
@@ -965,8 +958,6 @@ fn sandbox_ops() {
     );
 }
 
-/// Model requests the sandbox makes, which the gateway passes on whole, and whose responses it
-/// streams back by their deadlines, or ends the session for.
 #[test]
 fn sandbox_model_requests() {
     check(
@@ -1032,8 +1023,6 @@ fn sandbox_model_requests() {
     );
 }
 
-/// A model request is in flight from its opening to its response's end, whole or cut short, and
-/// no more than the protocol allows are in flight at once.
 #[test]
 fn model_flight() {
     check(
@@ -1083,8 +1072,6 @@ fn model_flight() {
     );
 }
 
-/// A passive session, which takes neither ops nor model requests, so that the first the sandbox
-/// makes breaks the protocol.
 #[test]
 fn passive_session() {
     check(
@@ -1100,10 +1087,6 @@ fn passive_session() {
     );
 }
 
-/// An op answered or refused on a session other than the one it arrived on panics before
-/// anything is sent: every sandbox numbers its ops from 0, so the other's would take the answer
-/// for one of its own. Two sessions' commands never compare equal, though each session numbers
-/// its streams alike.
 #[test]
 fn another_sessions_op() {
     check(
@@ -1118,9 +1101,6 @@ fn another_sessions_op() {
     );
 }
 
-/// Requests wait on the sandbox until their deadlines, and one whose deadline passes fails and
-/// ends the session, however much of it went through; a sandbox that closes its connection
-/// fails a request at once.
 #[test]
 fn deadlines() {
     check(
@@ -1184,8 +1164,6 @@ fn deadlines() {
     );
 }
 
-/// What arrives for the session's owner does in the order the sandbox sent it, ending with the
-/// session's end, which a session that the sandbox keeps open reaches as it drops ([`heard`]).
 #[test]
 fn arrivals() {
     check(

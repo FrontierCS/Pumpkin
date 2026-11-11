@@ -1,41 +1,26 @@
 //! The run log, `log.jsonl`, and the JSON forms of events, actions and outcomes.
 //!
 //! `log.jsonl` holds one JSON record per line, each written and synced before what it records
-//! is acted on, but for a `model_answered`: the loop writes it once it takes it, which may be
-//! after the answer it records was sent, though before what the agent does next. A record is
-//! one of:
+//! is acted on, but for a `model_answered`, which the loop writes once it takes it, before what
+//! the agent does next. A record is one of:
 //!
 //! - an event: `{"seq": n, "at_ns": "t", "event": e, "actions": [a, ...]}`, which the runtime
 //!   observed `t` nanoseconds after the run started, with the actions the core decided on. A
-//!   judge call's events, and its notes, are at the times its thread observed them, which may
-//!   come before an earlier record's, as the loop takes them later. The
-//!   first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u"}`, at `u`
-//!   nanoseconds after the Unix epoch by the driving machine's clock, with the core's first
-//!   actions. Like it, an op the gateway refused, since its payload was over the agent's limit,
-//!   is no event of the core's, which neither decides on it nor learns of it, so it has no
-//!   actions: `{"kind": "op_refused", "request": r, "message": m}`, where the request's payload
-//!   is `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without a
-//!   digest, since the gateway kept none of its bytes, and the message is the refusal the agent
-//!   is sent, unless a note after it says it wasn't. So is how the route answered a model
-//!   request of the agent's, at the time the request's thread observed it, as a judge call's
-//!   events are: `{"kind": "model_answered", "request": n, "upstream_status": u, "answer": a}`,
-//!   with `"request_id": i` besides if the upstream's response named its id for the request, in
-//!   `x-request-id` or `x-oai-request-id`,
-//!   where `u` is the status of the upstream's response, or `null` if none came, and `a` is
-//!   `{"kind": "forwarded"}` for that response whole, `{"kind": "cut"}` for it cut short, or
-//!   `{"kind": "refused", "status": s, "message": m}` for the route's refusal sent in its place,
-//!   without either's body;
+//!   judge call's events, its notes and a `model_answered` are at the times their threads
+//!   observed them, which may come before an earlier record's. The first, `seq` 0, is the run's
+//!   start, `{"kind": "run_started", "unix_ns": "u"}`, `u` nanoseconds after the Unix epoch by
+//!   the driving machine's clock. An `op_refused` ([`Log::refused`]) and a `model_answered`
+//!   ([`Log::model_answered`]) are no events of the core's, so they have no actions;
 //! - a note: `{"seq": n, "at_ns": "t", "note": s}`, something the runtime observed that the
 //!   core doesn't decide on, such as why the run failed.
 //!
 //! `seq` counts records from 0. Each event and action is an object whose `kind` is its name in
 //! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
-//! by their names in the workflow, jobs and ops by their numbers, payloads by size and digest, and
-//! times and durations in nanoseconds, the core's resolution, as decimal strings, where `u64::MAX`
-//! (about 584 years) stands for anything longer. A status's job, a number the agent gave, is a
-//! decimal string too. A judge call's `start_judge` names the agent's grant it was made under,
-//! or `null` for the pattern's score. A reply is the
-//! [`OpReply`](schema::sandbox::op::OpReply) sent.
+//! by their names in the workflow, jobs and ops by their numbers, payloads by size and digest,
+//! and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
+//! anything longer. A status's job, a number the agent gave, is a decimal string too. A judge
+//! call's `start_judge` names the agent's grant it was made under, or `null` for the pattern's
+//! score. A reply is the [`OpReply`](schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -99,8 +84,10 @@ impl Log {
     }
 
     /// Appends the record of `refused`, an op of the agent's whose payload the gateway refused,
-    /// observed at `at`: an `op_refused`, which has no actions, since the core doesn't decide on
-    /// it.
+    /// observed at `at`: `{"kind": "op_refused", "request": r, "message": m}`, where the request's
+    /// payload is `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without
+    /// a digest, as the gateway kept none of its bytes, and the message is the refusal the agent
+    /// is sent, unless a note after it says it wasn't.
     pub(super) fn refused(
         &mut self,
         workflow: &Workflow,
@@ -119,8 +106,10 @@ impl Log {
     }
 
     /// Appends the record of `answer`, how the route answered the agent's model request
-    /// numbered `request`, observed at `at`: a `model_answered`, which has no actions, since the
-    /// core doesn't decide on it.
+    /// numbered `request`, observed at `at`: `{"kind": "model_answered", "request": n,
+    /// "upstream_status": u, "answer": a}`, with `"request_id": i` if the upstream named its id
+    /// for the request, where `u` is the upstream's status, or `null` if no response came, and `a`
+    /// the [`Answer`]'s kind, with a refusal's status and message, but never a body.
     pub(super) fn model_answered(
         &mut self,
         workflow: &Workflow,

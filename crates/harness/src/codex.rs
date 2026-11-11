@@ -54,16 +54,12 @@ pub const CODEX_0_167_0: Pin = Pin {
     ],
 };
 
-/// The catalog entries the crate carries: `gpt-6.1-terra`'s, unchanged, from Codex 0.167.0's own
-/// model catalog, `codex-rs/models-manager/models.json` at its tag `rust-v0.167.0`, which a new
-/// pin takes again from its own version; and `glm-5.3`'s, for a model Codex's own catalog lacks,
-/// from Z.ai's `models.json` for Codex (<https://docs.z.ai/devpack/tool/codex.md>), the entry
-/// Z.ai's API serves at `/api/v1/models`, with one key added: `model_messages`, holding as
-/// `instructions_template` the base instructions Codex sends a model with none of its own,
-/// since Z.ai's entry gives Codex none: `codex-rs/models-manager/prompt.md` at the same tag
-/// (`BASE_INSTRUCTIONS`, used by `model_info_from_slug`, in `src/model_info.rs`), run through
-/// `without_update_plan_instructions` (`codex-rs/prompts/src/update_plan_instructions.rs`), as
-/// Codex does when it has no catalog file and `update_plan` is off, its default.
+/// The catalog entries the crate carries: `gpt-6.1-terra`'s, unchanged, from Codex's
+/// `codex-rs/models-manager/models.json` at `rust-v0.167.0`, which a new pin takes again from its
+/// own version; and `glm-5.3`'s, which Codex's catalog lacks, from Z.ai's `models.json` for Codex
+/// (<https://docs.z.ai/devpack/tool/codex.md>), plus `model_messages`, holding as
+/// `instructions_template` Codex's base instructions (`codex-rs/models-manager/prompt.md`,
+/// without its `update_plan` instructions), since Z.ai's entry gives Codex none.
 ///
 /// OpenAI Codex, Copyright 2025 OpenAI. Its entries are under the Apache License, Version 2.0,
 /// a copy of which is `codex/LICENSE`.

@@ -69,17 +69,14 @@ impl Mode {
 }
 
 impl Pin {
-    /// A Dockerfile that builds `base`, an image the engine has, named as `FROM` takes it, in
-    /// ASCII letters and digits and `-._/:@`, as every image reference is, with the harness added
-    /// at its root, [`harness_dir()`]`/<name>`, in a layer of its own: each file kept, at its
-    /// path there, with its [`Mode`], in directories of mode 0555, all owned by root. The engine
-    /// fetches the tarball, which `ADD --checksum` checks, and so needs Docker 25.0 or later.
+    /// A Dockerfile that builds on `base`, an image the engine has, named as `FROM` takes it in
+    /// ASCII letters, digits and `-._/:@`, with the harness added at [`harness_dir()`]`/<name>`
+    /// in a layer of its own: each file with its [`Mode`], in directories of mode 0555, all
+    /// owned by root. Its `ADD --checksum` needs Docker 25.0 or later.
     ///
     /// # Panics
     ///
-    /// If the pin fails a check that its fields' docs ask for, as only a bug in the code that
-    /// wrote it can, since the tests make each pin's recipe; or if `base` isn't written as above,
-    /// as only a bug in the caller can, since the engine has accepted it.
+    /// If the pin fails a check its fields' docs ask for, or `base` isn't written as above.
     pub fn recipe(&self, base: &str) -> String {
         match self.check(base) {
             Ok(()) => {}

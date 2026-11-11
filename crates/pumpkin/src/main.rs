@@ -38,16 +38,13 @@ mod flags {
         /// The operator's command line, which runs workflows.
         cmd pumpkin {
             /// Runs a workflow on the Docker engine that a context reaches, with its record in
-            /// `<runs>/<id>/`, and prints the record's `outcome.json`, a failed run's too. Says so
-            /// first if the engine runs as root. Exits with 0 if the run finished with a score, 3 if it
-            /// finished without one, 2 on a usage error, and 1 on any other error, a workflow
-            /// it refuses and a run that failed included; every non-zero exit ends with a
-            /// `pumpkin:` line on the standard error that says why. A signal that ends it may leave the
-            /// run's containers stopped but not removed (the engine lists them by the label
-            /// `pumpkin.run=<id>`), its socket directory in the temporary directory, and its
-            /// record without an `outcome.json`. To outlive a logout, run it under `tmux` or
-            /// `nohup`. Its record is locked while it runs, so `pumpkin wait` follows it from
-            /// another shell.
+            /// `<runs>/<id>/`, and prints the record's `outcome.json`, a failed run's too. Exits
+            /// with 0 if the run finished with a score, 3 if it finished without one, 2 on a usage
+            /// error, and 1 on any other error, each non-zero exit ending with a `pumpkin:` line
+            /// on the standard error that says why. A signal that ends it may leave the run's
+            /// containers (labelled `pumpkin.run=<id>`), its socket directory and a record
+            /// without an `outcome.json`. Its record is locked while it runs, so `pumpkin wait`
+            /// follows it from another shell.
             cmd run {
                 /// The workflow's IR, as JSON.
                 required ir: PathBuf

@@ -220,7 +220,6 @@ fn files(base: &Path, dir: &Path) -> Vec<String> {
     lines
 }
 
-/// Usage errors exit with 2, and `--help` with 0.
 #[test]
 fn usage() {
     let scratch = Scratch::new("usage");
@@ -252,14 +251,12 @@ fn usage() {
     );
 }
 
-/// What `run` finds wrong before it reaches the engine exits with 1: a Docker context's empty
-/// name, an IR that can't be read or isn't one, and `HOME` unset or empty where it places the
-/// runs. The context `nowhere` reaches no engine, so reaching for it would fail otherwise.
 #[test]
 fn unrunnable() {
     let scratch = Scratch::new("unrunnable");
     scratch.write("lwe.json", &serde_json::from_str::<Value>(LWE).unwrap());
     scratch.write("empty.json", &json!({}));
+    // `nowhere` reaches no engine, so reaching for it would fail otherwise.
     let run = |ir, context, rest: &[&str]| {
         let mut command = scratch.pumpkin(&["run", ir, "--docker-context", context]);
         command.args(["--sandboxd", "sandboxd"]).args(rest);
@@ -301,9 +298,6 @@ fn unrunnable() {
     );
 }
 
-/// Runs on Docker: a run killed while its agent sleeps leaves its `driver.pid` unlocked and no
-/// `outcome.json`, so `wait` says it is lost. The run's `docker` children, which have run by
-/// then, hold no lock.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn lost_on_docker() {
@@ -331,6 +325,7 @@ fn lost_on_docker() {
     });
     killed.id = Some(id.clone());
     let tag = RunTag::try_from(id.clone()).unwrap();
+    // Once a sandbox is listed, the run's `docker` children have run: they must hold no lock.
     poll(|| Some(()).filter(|()| !engine.list(&tag).unwrap().is_empty()));
     killed.run.kill().unwrap();
     killed.run.wait().unwrap();
@@ -424,10 +419,6 @@ fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) 
     }
 }
 
-/// `wait` prints the `outcome.json` of a run that has ended and exits as `run` does, by its
-/// state and score, for the run named by its id, by a prefix of it or of its random digits, or
-/// by its path. It refuses a name that matches no run or several, listing them, a run whose
-/// driver ended without an `outcome.json`, and a record that has no `driver.pid`.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -524,9 +515,6 @@ fn waits() {
     );
 }
 
-/// `wait` follows a live run, one whose driver holds its `driver.pid`'s lock: it says so, and
-/// ends with the outcome once the driver has written its `outcome.json` and let go. The test's
-/// driver does so after `wait`'s line that it follows the run, which comes before it blocks.
 #[test]
 fn follows() {
     let scratch = Scratch::new("follows");
@@ -541,6 +529,7 @@ fn follows() {
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut said = String::new();
     stderr.read_line(&mut said).unwrap();
+    // After `wait`'s line that it follows the run, which comes before it blocks.
     let outcome = json!({ "state": "finished", "score": 7 });
     scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
     drop(driver);
@@ -556,10 +545,6 @@ fn follows() {
     .assert_eq(&text);
 }
 
-/// `wait` on a record in each state it can be in: its `outcome.json` absent, of each kind, or
-/// unreadable; its `driver.pid` absent, free or locked; and its `record.json` of this version,
-/// of another, or absent. A live record of this version, locked with no outcome, is `follows`'s.
-/// A record that is no record of this version, or has no `driver.pid`, is refused.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -786,9 +771,6 @@ fn states() {
     );
 }
 
-/// A workflow that is refused, for breaking parsing rules or for a route no upstream serves,
-/// exits with 1, makes no record, and ends its standard error with one `pumpkin:` line, after a
-/// line for each rule broken.
 #[test]
 fn refusals() {
     let scratch = Scratch::new("refusals");
@@ -833,13 +815,6 @@ fn refusals() {
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
 
-/// What `run` finds wrong in the deployment's configuration, which it reads for a workflow with
-/// a model route, exits with 1: a configuration that can't be read, where `HOME` places it or
-/// where `--config` names it, `HOME` unset where it would place it, and the configurations
-/// [`write_configurations`] writes to be refused. Past a configuration it accepts, whose key it
-/// reads from the file that the configuration names below its own directory, and past a broken
-/// one that a workflow without a route doesn't read, it reaches for the engine, which it can't
-/// without `docker` on `PATH`.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -864,6 +839,7 @@ fn configurations() {
     homeless.env_remove("HOME");
     let mut served = config("conf/served");
     let mut unrouted = run("unrouted.json", &["--config", "docker.toml"]);
+    // Without `docker` on `PATH`, `run` can't reach the engine past the configuration.
     for command in [&mut served, &mut unrouted] {
         command.env("PATH", scratch.0.join("nowhere"));
     }
@@ -1146,13 +1122,6 @@ impl StandIn {
     }
 }
 
-/// Runs on Docker: a workflow whose agent asks its model, through its route, as the
-/// configuration's upstream serves it, a stand-in, which takes the key that the configuration
-/// names, gets the request renamed for it, with that key, and which the run
-/// log names, with how the request was answered; one whose agent exits without a submission,
-/// recorded below `HOME` whatever `XDG_DATA_HOME` says; and one whose agent submits a payload,
-/// which the final judge scores; then `wait` finds the outcome of each run that recorded into
-/// `runs`.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn runs_on_docker() {

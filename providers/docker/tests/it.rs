@@ -460,9 +460,6 @@ fn processes(sandbox: &Started, done: impl Fn(&str) -> bool) -> String {
     }
 }
 
-/// What a judge does: reads its payload, writes a result and evidence, and exits, leaving
-/// processes behind that freezing kills: one orphaned to `sandboxd`, and one in a session of
-/// its own, outside its command's process group.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn judge() {
@@ -510,10 +507,6 @@ fn judge() {
     );
 }
 
-/// What the role's code can reach, seen from inside the container, which was created to serve
-/// neither ops nor the model endpoint, whether the container's users map to the host's as the
-/// engine's report says, and, seen from the host, the container's log, which `sandboxd` alone
-/// writes, and what `docker create` pinned that the daemon or the image would otherwise decide.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn confinement() {
@@ -590,10 +583,6 @@ fn confinement() {
     );
 }
 
-/// What the provider reports of the engine before anything starts, as far as every engine it
-/// takes shows the same, and declares as ready, and how it refuses an empty context name, and
-/// names no context has, among them `--help`, which `docker context inspect` mustn't take for
-/// its own option, which prints its help and succeeds.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn report() {
@@ -623,6 +612,8 @@ fn report() {
                 ),
                 ContextName::try_from(String::new()).unwrap_err(),
             ];
+            // `docker context inspect` mustn't take `--help` for its own option, which prints its
+            // help and succeeds.
             for name in ["pumpkin-missing", "--help"] {
                 let refused = Engine::connect(ContextName::try_from(name.to_owned()).unwrap());
                 let refused = refused.unwrap_err();
@@ -641,8 +632,6 @@ fn report() {
     );
 }
 
-/// Deleting what a run's list finds removes its containers' anonymous volumes, and no other
-/// run's.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn volumes() {
@@ -681,9 +670,6 @@ fn volume(sandbox: &Started) -> String {
     name
 }
 
-/// A `sandboxd` that doesn't exist is named, and one whose path has a comma, which `--mount`
-/// would read as the start of another option, is refused; a container that Docker creates but
-/// can't start is removed; and an image the engine doesn't have is refused, not pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn failed_start() {
@@ -693,6 +679,7 @@ fn failed_start() {
             let not_executable = fixture.dir.path().join("sandboxd");
             fs::write(&not_executable, "not a program").unwrap();
             let missing = fixture.dir.path().join("absent");
+            // `--mount` would read a comma as the start of another option.
             let comma = fixture.dir.path().join("sandboxd,readonly=false");
             fs::write(&comma, "").unwrap();
             let unpulled = Image::try_from(format!("busybox@sha256:{}", "0".repeat(64))).unwrap();
@@ -737,11 +724,6 @@ fn redact(fixture: &Fixture, message: &str) -> String {
     message
 }
 
-/// A build is tagged by its inputs, and found by that tag rather than built again: another
-/// file's content, another mode or another recipe gives another tag, and the same inputs give
-/// the image their tag names, even one another build made, unless the check refuses the recipe
-/// it is given. A context that can't name its inputs is refused before anything is built, and
-/// so is a repository that Docker can't tag.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn builds() {
@@ -934,8 +916,6 @@ fn first_seen(list: &mut Vec<String>, item: &str) -> usize {
     list.len() - 1
 }
 
-/// Once a sandbox's container has stopped, its console holds what its `sandboxd` printed: here a
-/// stand-in's, which exits without dialing.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn console() {
@@ -969,11 +949,6 @@ fn console() {
 const CTL: &str = r#"
     ctl() { out=$(/.pumpkin/bin/sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
 
-/// Commands in a sandbox that serves ops make them through `sandboxctl`, which a stand-in for
-/// the session's owner answers ([`reply`]), and the gateway refuses a payload over the limit
-/// the sandbox was started with. `sandboxd` made the control socket's directory closed to all
-/// but the role's user, and `sandboxctl` is read-only, so writing it fails the last command.
-/// The sandbox, created to serve ops but not the model endpoint, has no TCP listener.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn ops() {
@@ -1049,11 +1024,6 @@ fn ops() {
     );
 }
 
-/// Calls that `sandboxctl` or `sandboxd` refuse before an op opens, each failing its caller
-/// alone, so that the session serves the next call: among them one with `/proc/1/mem`, the
-/// memory of `sandboxd`, which can't open it, being non-dumpable. And a second `sandboxd`,
-/// connected to a session of its own, is refused the control socket's directory, since the
-/// first made it.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn refused_calls() {
@@ -1066,6 +1036,7 @@ fn refused_calls() {
             let mut sandbox = sandbox.unwrap();
             // A session for the second `sandboxd`, which it connects to and never serves.
             let second = Listener::bind(fixture.dir.path().join("refused/second")).unwrap();
+            // `/proc/1/mem` is `sandboxd`'s memory, which it can't open, being non-dumpable.
             let script = format!(
                 r#"{CTL}
                 truncate -s {huge} huge
@@ -1119,11 +1090,6 @@ fn refused_calls() {
     );
 }
 
-/// Callers whose ops arrive while one is in flight wait their turns, and each is carried once
-/// the op before it is answered. A caller that has left when its turn comes is dropped, its op
-/// unsent; one that leaves after its op was sent has it carried out. A payload's file is read
-/// in its caller's turn, so one replaced by a symbolic link while its caller waits is refused,
-/// as `sandboxd` opens no link.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn turns() {
@@ -1198,18 +1164,6 @@ fn turns() {
     );
 }
 
-/// A harness's requests to the model endpoint of a sandbox created to serve both it and ops, from
-/// inside the sandbox, which has no network but loopback, and the test, as the session's owner,
-/// responding ([`respond`]). The endpoint listens on the loopback alone. Of eight requests at once,
-/// a full flight is held while the one past it is refused (503); then the flight is answered. A
-/// body far larger than its client's buffers arrives whole, though the client sends a byte past its
-/// request and reads only once `sandboxd` has stopped writing. Then a request is streamed whole,
-/// one cut short, one refused by the owner, and one ended without a head; one of HTTP/1.9 answered
-/// 204, then cut short, and one answered 103, an interim status, get nothing, and one of `HEAD` a
-/// head alone, though the owner sends data for each; and a chunked body, two lengths that differ, a
-/// length with a sign, a chunked body with a length, one over the protocol's bound, HTTP/1.0, of
-/// `HEAD` with a head alone and of `POST` with a body, and a head over the endpoint's bound are
-/// refused before they reach the session.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn model_endpoint() {

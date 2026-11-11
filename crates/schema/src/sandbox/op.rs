@@ -1,8 +1,8 @@
 //! Ops: the calls a caller in a sandbox makes to the session's owner, and the owner's replies.
 //!
-//! A caller makes an op with `sandboxctl`, which has a command for each call and prints the
-//! reply's JSON form on one line. This module is the reference for that JSON, which is what an
-//! agent reads; `sandboxctl --help` gives the commands' arguments and exit codes.
+//! A caller makes an op with `sandboxctl`, which prints the reply's JSON form on one line, the
+//! form an agent reads, which this module is the reference for; `sandboxctl --help` gives the
+//! commands' arguments and exit codes.
 //!
 //! | Command | Call | Reply |
 //! | --- | --- | --- |
@@ -11,21 +11,18 @@
 //! | `sandboxctl submit <grant> <file> [--finalize]` | [`OpCall::Submit`] | [`SubmitReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
 //!
-//! The owner may refuse any op instead, with [`OpReply::Refused`], whose message says what is
-//! wrong and what to do instead.
+//! The owner may refuse any op instead, with [`OpReply::Refused`].
 //!
-//! A sandbox's callers take turns ([`super`] says why). A call's payload is read from its file
-//! only in its turn, so leave the file as it is until the call returns; a call whose
-//! `sandboxctl` has gone by its turn is dropped unsent, and any other is carried out even if its
-//! `sandboxctl` is killed meanwhile.
+//! A sandbox's callers take turns ([`super`]). A call's payload is read from its file only in its
+//! turn, so leave the file as it is until the call returns; a call whose `sandboxctl` has gone by
+//! its turn is dropped unsent, and any other is carried out even if it is killed meanwhile.
 //!
 //! # JSON
 //!
 //! A reply is an object whose `kind` names it: `ops`, `judge`, `submit`, `status` or
 //! `refused`. Its other fields are its type's, under the same names; a limit or a quota that
 //! doesn't exist is `null`. A status has `returned` and `scored` once its job's judge has given
-//! a result, whether or not the result has a score, and `failure` only if the job gave no
-//! result. The crate's tests pin an example of each form.
+//! a result, scored or not, and `failure` only if the job gave no result.
 
 use std::num::NonZeroU64;
 

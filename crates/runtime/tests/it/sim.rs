@@ -74,21 +74,14 @@ pub(crate) const LINGERING: &str = "/sim/lingering";
 /// runs whose tests use it.
 const LINGER: Duration = Duration::from_secs(10);
 
-/// A provider whose sandboxes are threads, each running a fake `sandboxd`: it dials, unless its
-/// create names [`MUTE`] or [`LOST`], and then answers each request, and stops reading once
-/// [stalled](Subject::stall). It keeps the files put, and collects a tree of one file,
-/// [`COLLECTED`], from any directory, and from `out` a judge's result too. A command whose
-/// program is `exit` exits at once with the status its argument gives; `stall` starts, then
-/// stalls the sandbox; `crash` starts, then its `sandboxd` ends the session; `ops` takes the
-/// steps its arguments give ([`step`]), making each op, or model request, once the one before
-/// it is answered, then exits with 0, once the response to its last model request has ended,
-/// unless it has, or its `sandboxd` ends the session as a step asks, and prints each response
-/// to its model requests, which it makes only in a sandbox created with the model endpoint, and
-/// whose end a freeze waits for; `judge`
-/// judges the payload put at the path its argument gives ([`judge`]); any other runs until the
-/// sandbox is frozen. It refuses to publish [`UNPUBLISHED`], and to delete a sandbox whose
-/// create names [`UNDELETABLE`]; it takes [`SLOW_CREATE`] to create one that names [`SLOW`],
-/// and [`LINGER`] to delete one that names [`LINGERING`].
+/// A provider whose sandboxes are threads, each running a fake `sandboxd`, which answers each
+/// request until [stalled](Subject::stall), and whose paths and images such as [`MUTE`] and
+/// [`SLOW`] change what it does. It keeps the files put, and collects [`COLLECTED`] from any
+/// directory, and from `out` a judge's result too. A command whose program is `exit` exits with
+/// its argument; `stall` stalls the sandbox; `crash` ends the session; `ops` takes the steps its
+/// arguments give ([`step`]), each once the one before it is answered, then exits with 0;
+/// `judge` judges the payload at the path its argument gives ([`judge`]); any other runs until
+/// the sandbox is frozen.
 pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.

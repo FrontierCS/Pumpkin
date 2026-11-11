@@ -315,8 +315,6 @@ fn lwe() {
     );
 }
 
-/// A train call's timeout is the smaller of its call timeout and the cumulative time left; a
-/// call costs the time its command ran, timed out or not.
 #[test]
 fn quotas() {
     check(
@@ -382,9 +380,6 @@ fn quotas() {
     );
 }
 
-/// A grant runs one call at a time: a call made while another is queued or running is refused
-/// and not charged. A call counts once accepted, even if its job fails before its command
-/// starts.
 #[test]
 fn one_call_at_a_time() {
     check(
@@ -433,10 +428,6 @@ fn one_call_at_a_time() {
     );
 }
 
-/// The deadline ends the work phase, and bounds a train call's timeout before it. The final
-/// judge waits until the agent and its stopped job are gone, and a final judge that times out
-/// leaves no score. A job whose failure comes at the deadline is stopped as the failure is
-/// taken, which is its last report: the final judge starts at once.
 #[test]
 fn deadline() {
     check(
@@ -506,9 +497,6 @@ fn deadline() {
     );
 }
 
-/// The agent's exit and its sandbox's failure end the work phase. A job whose command has
-/// already ended isn't stopped, and the stored submission is judged once it's gone. A result
-/// whose score is not a number is invalid, and leaves none.
 #[test]
 fn agent_ends() {
     check(
@@ -564,9 +552,6 @@ fn agent_ends() {
     );
 }
 
-/// A run still going at its hard end is abandoned while the agent works, or in the grace after
-/// a finalize: an op that comes then is refused, after the run is abandoned, and the reports on
-/// its jobs change nothing. With a deadline of 60 s, the hard end ([`lasts`]) is 260 s in.
 #[test]
 fn hard_end() {
     let deadline = |ir: &mut Value| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60);
@@ -612,9 +597,6 @@ fn hard_end() {
     );
 }
 
-/// After the work phase, the hard end is due: a run is abandoned at it in its teardown, and
-/// under the final judge, whose result gives no outcome once it comes at the hard end, here
-/// with a grace of 30 s, which brings the hard end to 230 s.
 #[test]
 fn hard_end_after_work() {
     check(
@@ -678,10 +660,6 @@ fn hard_end_after_work() {
     );
 }
 
-/// A run that has finished has no hard end. One whose deadline is shorter than its startup has
-/// the startup in the deadline's place, since the agent's start may outrun the deadline: with a
-/// deadline of 5 s, the hard end is 210 s in. One whose times sum past the largest `Duration`
-/// has the largest as its hard end.
 #[test]
 fn hard_end_bounds() {
     check(
@@ -702,6 +680,7 @@ fn hard_end_bounds() {
         "#]],
     );
     check(
+        // Shorter than the startup, which then takes the deadline's place.
         |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(5),
         r"
         1000 submit submit 10
@@ -745,8 +724,6 @@ fn hard_end_bounds() {
     );
 }
 
-/// The agent's start and a judge's exit status are for the run log: neither changes what the
-/// core decides, so a call whose command exits with a failure passes if its result does.
 #[test]
 fn reports_for_the_log() {
     check(
@@ -776,9 +753,6 @@ fn reports_for_the_log() {
     );
 }
 
-/// Once a finalize is accepted, every op is refused. The agent keeps running for the grace,
-/// and its job too, until the grace runs out and the work phase ends without it. With no
-/// grace, the work phase ends at the finalize.
 #[test]
 fn finalize_lock() {
     check(
@@ -841,8 +815,6 @@ fn finalize_lock() {
     );
 }
 
-/// A finalize's reply counts the time left to the end of its grace, or to the deadline if
-/// that comes first.
 #[test]
 fn finalize_near_deadline() {
     check(
@@ -860,7 +832,6 @@ fn finalize_near_deadline() {
     );
 }
 
-/// A status names a job that one of the agent's calls returned.
 #[test]
 fn unknown_jobs() {
     check(

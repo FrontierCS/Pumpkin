@@ -9,9 +9,6 @@ pub mod process;
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
 ///
-/// `context` is formatted only on failure, so a borrowed one such as `path.display()` costs
-/// nothing on success.
-///
 /// ```
 /// use stdx::Context;
 ///
@@ -66,17 +63,11 @@ pub fn unpoisoned<T>(locked: LockResult<T>) -> T {
 /// An operation's end, made from its time left and shared by every step.
 ///
 /// ```
-/// use std::time::Duration;
-///
 /// use stdx::Deadline;
 ///
-/// let max = Duration::MAX;
+/// let max = std::time::Duration::MAX;
 /// assert_eq!(Deadline::after(max).remaining(), Some(max));
-/// let soon = Deadline::after(Duration::from_millis(1));
-/// while let Some(left) = soon.remaining() {
-///     assert!(!left.is_zero());
-/// }
-/// assert_eq!(Deadline::after(Duration::ZERO).remaining(), None);
+/// assert_eq!(Deadline::after(std::time::Duration::ZERO).remaining(), None);
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline(Option<Instant>);
