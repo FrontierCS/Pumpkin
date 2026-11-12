@@ -1,9 +1,11 @@
 //! `run`: what it finds wrong before it reaches the engine, and once it has, and runs on Docker
 //! followed to their ends with `--wait`.
 
+use std::ffi::OsStr;
 use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,37 +18,308 @@ use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
 
 use super::{
-    BUSYBOX, LWE, PUMPKIN, Scratch, StandIn, check, context, docker_table, image, sandboxd,
-    workflow,
+    BUSYBOX, LWE, PUMPKIN, Scratch, StandIn, Step, check, context, docker_table, image, report,
+    sandboxd, workflow,
 };
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn usage() {
     let scratch = Scratch::new("usage");
-    let commands = [
-        scratch.pumpkin(&[]),
-        scratch.pumpkin(&["--help"]),
-        scratch.pumpkin(&["run"]),
-        scratch.pumpkin(&["run", "lwe.json", "--docker-context", "nowhere"]),
+    let same = |args: &[&str], like: &[&str]| {
+        let ran = |args| scratch.pumpkin(args).output().unwrap();
+        let same = ran(args) == ran(like);
+        let (args, like) = (args.join(" "), like.join(" "));
+        Step::Ran(format!(
+            "$ pumpkin {args}\ndoes what `pumpkin {like}` does: {same}"
+        ))
+    };
+    let pumpkin = |args: &[&str]| Step::from(scratch.pumpkin(args));
+    let mut wait = scratch.pumpkin(&["wait"]);
+    let output = wait.arg(OsStr::from_bytes(b"\xff")).output().unwrap();
+    let not_utf8 = Step::Ran(report(
+        "$ pumpkin wait $'\\xff'".to_owned(),
+        &output,
+        &scratch.0,
+        false,
+    ));
+    let steps = [
+        pumpkin(&["--help"]),
+        pumpkin(&["run", "--help"]),
+        pumpkin(&["wait", "-h"]),
+        pumpkin(&["help", "--help"]),
+        pumpkin(&["help", "config"]),
+        same(&["help", "run"], &["run", "--help"]),
+        same(&["help"], &["--help"]),
+        same(&["-h"], &["--help"]),
+        same(&["bogus", "--help"], &["--help"]),
+        same(&["run", "--bogus", "-h", "extra"], &["run", "--help"]),
+        pumpkin(&[]),
+        pumpkin(&["bogus"]),
+        pumpkin(&["--version"]),
+        pumpkin(&["run", "--docker-context", "nowhere"]),
+        pumpkin(&["run"]),
+        pumpkin(&["run", "--runs=a", "--runs", "b", "a.json"]),
+        not_utf8,
+        pumpkin(&["help", "bogus"]),
+        pumpkin(&["wait", "--runs=nowhere", "6a"]),
     ];
     check(
         &scratch,
-        commands,
+        steps,
         false,
         &[],
         &expect![[r#"
-        $ pumpkin
-        exit status: Some(2)
-        pumpkin: subcommand is required: see `pumpkin --help`
-        $ pumpkin --help
-        exit status: Some(0)
-        printed first: pumpkin
-        $ pumpkin run
-        exit status: Some(2)
-        pumpkin: flag is required: `ir`: see `pumpkin --help`
-        $ pumpkin run lwe.json --docker-context nowhere
-        exit status: Some(2)
-        pumpkin: unexpected flag: `--docker-context`: see `pumpkin --help`"#]],
+            $ pumpkin --help
+            exit status: Some(0)
+            printed:
+              Run workflows: in each run, an agent works in a sandbox, and judges score what
+              it submits.
+
+              Usage: pumpkin <command>
+
+              Commands:
+                run   Start a run of a workflow
+                wait  Wait until a run has ended, and print its outcome
+                help  Print the help of a command or a topic
+
+              Options:
+                -h, --help
+                        Print this help.
+
+              Topics:
+                config  The machine's configuration, pumpkin.toml
+
+              `pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
+              does, and `pumpkin help <topic>` a topic.
+            $ pumpkin run --help
+            exit status: Some(0)
+            printed:
+              Start a run of a workflow, and print its id once it has started.
+
+              Usage: pumpkin run [OPTIONS] <ir>
+
+              Arguments:
+                <ir>
+                        The workflow's IR, a JSON file.
+
+              Options:
+                    --runs <dir>
+                        The directory runs are recorded in, each in <dir>/<id>.
+                        Default: $HOME/.local/share/pumpkin/runs
+
+                    --config <file>
+                        The machine's configuration; see `pumpkin help config`.
+                        Default: $HOME/.config/pumpkin/pumpkin.toml
+
+                    --sandboxd <path>
+                        The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
+                        builds it.
+                        Default: the one beside this pumpkin, where `cargo xtask install` puts
+                        one
+
+                    --wait
+                        Follow the run to its end, as `pumpkin wait` does, and print its
+                        outcome.json instead of its id.
+
+                -h, --help
+                        Print this help.
+
+              Examples:
+                pumpkin run workflow.json
+                pumpkin run --wait workflow.json > outcome.json
+
+              Exit status:
+                0  The run has started.
+                1  An error; a run that failed to start prints its outcome.json first.
+                2  A usage error.
+              With --wait, `run` exits as `pumpkin wait` does once the run has started. Every
+              exit but 0 ends with a `pumpkin:` line on the standard error, which says why.
+
+              The run runs on the engine of the Docker context that the configuration names;
+              if that engine runs as root, `run` says so first. A driver process that `run`
+              starts drives the run, and writes what it says after the start to driver.log in
+              the record. Whatever ends `run` before the start ends the driver too; after it,
+              the run goes on without `run`, and `pumpkin wait` follows it.
+
+              The run outlives a logout unless its engine stops then, as rootless Docker does
+              without `loginctl enable-linger`, or logind kills the session's processes
+              (KillUserProcesses): then only a run under the user's manager outlives it, so
+              enable lingering and start `run` under `systemd-run --user --scope`. Killing the
+              driver leaves the run's containers, labelled pumpkin.run=<id>, its socket
+              directory in the temporary directory, and its record without an outcome.json.
+            $ pumpkin wait -h
+            exit status: Some(0)
+            printed:
+              Wait until a run has ended, then print its outcome.json.
+
+              Usage: pumpkin wait [OPTIONS] <run>
+
+              Arguments:
+                <run>
+                        The run: its id; a prefix of its id, or of the 8 hexadecimal digits
+                        that end it, that no other run in --runs shares; or its record's path,
+                        which has a `/`.
+
+              Options:
+                    --runs <dir>
+                        The directory that <run> is looked up in.
+                        Default: $HOME/.local/share/pumpkin/runs
+
+                -h, --help
+                        Print this help.
+
+              Examples:
+                pumpkin wait 20261108-000905-126a21e9
+                pumpkin wait 126a
+                pumpkin wait runs/20261108-000905-126a21e9
+
+              Exit status:
+                0  The run finished with a score.
+                3  The run finished without one.
+                1  The run failed, or was lost as its driver ended without an outcome.json; or
+                   another error.
+                2  A usage error.
+              Once the run has ended, `wait` ends with a `pumpkin:` line on the standard error
+              that says how, and where its record is; any other exit but 0 ends with one that
+              says why.
+              If the final judge returned no result, its standard error is shown first, or,
+              if it is long, named.
+
+              Ending `pumpkin wait` doesn't stop the run. A record made before records were
+              locked has no driver.pid, and is refused.
+            $ pumpkin help --help
+            exit status: Some(0)
+            printed:
+              Print the help of a command or a topic, or `pumpkin --help` without one.
+
+              Usage: pumpkin help [topic]
+
+              Arguments:
+                [topic]
+                        A command, or a topic: `config`, the machine's configuration.
+
+              Options:
+                -h, --help
+                        Print this help.
+
+              Examples:
+                pumpkin help run
+                pumpkin help config
+
+              `pumpkin help <command>` prints what `pumpkin <command> --help` does.
+            $ pumpkin help config
+            exit status: Some(0)
+            printed:
+              pumpkin.toml, the machine's configuration, which every `pumpkin run` reads: the
+              file that --config names, $HOME/.config/pumpkin/pumpkin.toml by default. It is
+              TOML, with the tables below. Every key is required, but the [upstreams.<name>]
+              tables, and any other key is refused.
+
+              Example:
+                [docker]
+                context = "default"
+
+                [upstreams.gateway]
+                url = "https://gateway.example/v1"
+                key_file = "gateway-key"
+                models = [{ name = "model-a", upstream_name = "provider/model-a" }]
+
+              [docker], the Docker engine that the machine's runs run on:
+                context       The context that reaches it, as `docker context ls` lists it.
+
+              [upstreams.<name>], for each upstream that a workflow's model route may reach:
+                url           The base URL of its API: https, or http to a loopback IP
+                              address, such as 127.0.0.1 but not localhost. The route reaches
+                              /responses below it.
+                key_file      The file that holds its key, below this file's directory unless
+                              absolute.
+                models        The models it serves, each with the `name` that a route allows
+                              and the `upstream_name` that the upstream takes for it. No model
+                              is listed twice, under one upstream or two.
+
+              A workflow's model route reaches the one upstream that serves every model it
+              allows.
+            $ pumpkin help run
+            does what `pumpkin run --help` does: true
+            $ pumpkin help
+            does what `pumpkin --help` does: true
+            $ pumpkin -h
+            does what `pumpkin --help` does: true
+            $ pumpkin bogus --help
+            does what `pumpkin --help` does: true
+            $ pumpkin run --bogus -h extra
+            does what `pumpkin run --help` does: true
+            $ pumpkin
+            exit status: Some(2)
+            Run workflows: in each run, an agent works in a sandbox, and judges score what
+            it submits.
+
+            Usage: pumpkin <command>
+
+            Commands:
+              run   Start a run of a workflow
+              wait  Wait until a run has ended, and print its outcome
+              help  Print the help of a command or a topic
+
+            Options:
+              -h, --help  Print this help.
+
+            Topics:
+              config  The machine's configuration, pumpkin.toml
+
+            `pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
+            does, and `pumpkin help <topic>` a topic.
+            pumpkin: to read how to use it: pumpkin help
+            $ pumpkin bogus
+            exit status: Some(2)
+            error: unrecognized subcommand 'bogus'
+
+            Usage: pumpkin <command>
+            pumpkin: to read how to use it: pumpkin help
+            $ pumpkin --version
+            exit status: Some(2)
+            error: unexpected argument '--version' found
+
+            Usage: pumpkin <command>
+            pumpkin: to read how to use it: pumpkin help
+            $ pumpkin run --docker-context nowhere
+            exit status: Some(2)
+            error: unexpected argument '--docker-context' found
+
+              tip: to pass '--docker-context' as a value, use '-- --docker-context'
+
+            Usage: pumpkin run [OPTIONS] <ir>
+            pumpkin: to read how to use it: pumpkin help run
+            $ pumpkin run
+            exit status: Some(2)
+            error: the following required arguments were not provided:
+              <ir>
+
+            Usage: pumpkin run <ir>
+            pumpkin: to read how to use it: pumpkin help run
+            $ pumpkin run --runs=a --runs b a.json
+            exit status: Some(2)
+            error: the argument '--runs <dir>' cannot be used multiple times
+
+            Usage: pumpkin run [OPTIONS] <ir>
+            pumpkin: to read how to use it: pumpkin help run
+            $ pumpkin wait $'\xff'
+            exit status: Some(2)
+            error: invalid value '�' for '<run>': it isn't UTF-8, as every id is: name an id, a prefix of one, or a record's path, which has a `/`
+            pumpkin: to read how to use it: pumpkin help wait
+            $ pumpkin help bogus
+            exit status: Some(2)
+            error: there is no help for `bogus`: expected a command (`run`, `wait`, `help`) or a topic (`config`)
+
+            Usage: pumpkin help [topic]
+            pumpkin: to read how to use it: pumpkin help help
+            $ pumpkin wait --runs=nowhere 6a
+            exit status: Some(1)
+            pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it"#]],
     );
 }
 
@@ -152,11 +425,19 @@ fn wait_for_each_run(scratch: &Scratch) {
         &expect![[r#"
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait <id> --runs runs
             exit status: Some(0)
-            printed outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":3},"score":3},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
+            pumpkin: run <id> finished with a score of 3, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            printed outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":3},"score":3},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(3)
+            pumpkin: the final judge's standard error, <scratch>/runs/<id>/jobs/0/log/command.stderr, holds:
+              scoring failed
+              \u{1b}[1mbold\u{1b}[0m
+            pumpkin: run <id> finished without a score: the final judge returned no result (invalid_result: the judge wrote no result: write it at /pumpkin/out/result.json), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"invalid_result","reason":"the judge wrote no result: write it at /pumpkin/out/result.json"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
     );
 }
 
@@ -262,13 +543,13 @@ fn configurations() {
         &expect![[r#"
             $ HOME=<scratch>/home pumpkin run lwe.json --sandboxd sandboxd --runs runs
             exit status: Some(1)
-            pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write one there whose `[docker]` table names the `context` that reaches the engine, as `docker context ls` lists it, or name another file with `--config`
+            pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
             $ env -u HOME pumpkin run lwe.json --sandboxd sandboxd --runs runs
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
             $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config missing.toml
             exit status: Some(1)
-            pumpkin: the configuration missing.toml can't be read (No such file or directory (os error 2)): write one there whose `[docker]` table names the `context` that reaches the engine, as `docker context ls` lists it, or name another file with `--config`
+            pumpkin: the configuration missing.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
             $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config undocked.toml
             exit status: Some(1)
             pumpkin: undocked.toml: TOML parse error at line 1, column 1
@@ -509,6 +790,10 @@ fn runs_on_docker() {
     scratch.write("exits.json", &workflow(&image, &["true"]));
     let submit = format!("printf six > six && {SANDBOXCTL_PATH} submit submit six --finalize");
     scratch.write("submits.json", &workflow(&image, &["sh", "-c", &submit]));
+    let mut fails = workflow(&image, &["sh", "-c", &submit]);
+    let fail = r"printf 'scoring failed\n\033[1mbold\033[0m\n' >&2; exit 1";
+    fails["roles"][2]["runtime"]["judge"]["command"]["argv"] = json!(["sh", "-c", fail]);
+    scratch.write("fails.json", &fails);
     let run = |ir, rest: &[&str]| {
         let mut command = scratch.pumpkin(&["run", ir, "--sandboxd", &sandboxd, "--wait"]);
         command.args(rest);
@@ -527,6 +812,7 @@ fn runs_on_docker() {
         run("asks.json", &config),
         exits,
         run("submits.json", &config),
+        run("fails.json", &config),
     ];
     let shown = [
         (&sandboxd[..], "<sandboxd>"),
@@ -544,8 +830,8 @@ fn runs_on_docker() {
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
-            pumpkin: following run <id>: ending `pumpkin run` does not stop it
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited
+            pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/answer, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the run log notes: the agent's model route goes to the upstream `provider`, which takes `gpt-6-astra` as `vendor/gpt-6-astra`
             the run log records: {"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200}
@@ -556,8 +842,8 @@ fn runs_on_docker() {
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/home/.local/share/pumpkin/runs/<id>
             pumpkin: run <id> started
-            pumpkin: following run <id>: ending `pumpkin run` does not stop it
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited
+            pumpkin: following run <id>, recorded in <scratch>/home/.local/share/pumpkin/runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/home/.local/share/pumpkin/runs/<id>
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             printed outcome.json: true
@@ -565,9 +851,22 @@ fn runs_on_docker() {
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
-            pumpkin: following run <id>: ending `pumpkin run` does not stop it
+            pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: run <id> finished with a score of 3, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, driver.log, driver.pid, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/, jobs/0/out/result.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json
             outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":3},"score":3},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            printed outcome.json: true
+            $ pumpkin run fails.json --sandboxd <sandboxd> --wait --runs runs --config conf/pumpkin.toml
+            exit status: Some(3)
+            pumpkin: run <id> records into <scratch>/runs/<id>
+            pumpkin: run <id> started
+            pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: the final judge's standard error, <scratch>/runs/<id>/jobs/0/log/command.stderr, holds:
+              scoring failed
+              \u{1b}[1mbold\u{1b}[0m
+            pumpkin: run <id> finished without a score: the final judge returned no result (invalid_result: the judge wrote no result: write it at /pumpkin/out/result.json), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, driver.log, driver.pid, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json
+            outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"invalid_result","reason":"the judge wrote no result: write it at /pumpkin/out/result.json"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             printed outcome.json: true"#]],
     );
     upstream.stop();

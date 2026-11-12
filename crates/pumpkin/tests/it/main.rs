@@ -126,7 +126,7 @@ impl From<Command> for Step {
 /// became of each: its exit status; what it says on its standard error, but for the warning of
 /// a rootful engine, shown only if it doesn't match `rootful`, whether the engine the commands
 /// reach runs as root; and if it names a run's record, the record's files, its `outcome.json`
-/// and whether it printed that, and else the first line it printed, if any. Each shows
+/// and whether it printed that, and else what it printed, if anything. Each shows
 /// `scratch` as `<scratch>`, a run's id as `<id>`, and each of `shown` as its name.
 fn check(
     scratch: &Scratch,
@@ -200,9 +200,12 @@ fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String
         // `wait` prints an `outcome.json` without having started its run.
         if let Ok(outcome) = serde_json::from_str::<Value>(&stdout) {
             lines.push(format!("printed outcome.json: {outcome}"));
-        } else {
-            let first = stdout.lines().next();
-            lines.extend(first.map(|line| format!("printed first: {line}")));
+        } else if !stdout.is_empty() {
+            lines.push("printed:".to_owned());
+            let printed = stdout
+                .lines()
+                .map(|line| format!("  {line}").trim_end().to_owned());
+            lines.extend(printed);
         }
         return lines.join("\n");
     };

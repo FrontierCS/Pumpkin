@@ -23,16 +23,18 @@
 //! score. A reply is the [`OpReply`](schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
+    Action, Event, Failure, JobId, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict,
+    WorkEnd,
 };
 use gateway::RefusedOp;
 use route::Answer;
 use schema::workflow::{JudgeCall, Workflow};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stdx::Context;
 
@@ -251,15 +253,17 @@ fn request_json(request: &Request) -> Value {
 /// The JSON form of an action.
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
-        Action::StartAgent => json!({ "kind": "start_agent" }),
-        Action::Reply { op, reply } => json!({ "kind": "reply", "op": op.0, "reply": reply }),
+        Action::StartAgent => json!({ "kind": ActionKind::StartAgent }),
+        Action::Reply { op, reply } => {
+            json!({ "kind": ActionKind::Reply, "op": op.0, "reply": reply })
+        }
         Action::StartJudge {
             job,
             call,
             payload,
             timeout,
         } => json!({
-            "kind": "start_judge",
+            "kind": ActionKind::StartJudge,
             "job": job.0,
             "grant": match call {
                 JudgeCall::Grant(grant) => Some(workflow.judge_grant(*grant).name.as_str()),
@@ -268,11 +272,76 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             "payload": payload_json(payload),
             "timeout_ns": nanos(*timeout),
         }),
-        Action::StopJudge { job } => json!({ "kind": "stop_judge", "job": job.0 }),
-        Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),
-        Action::Finish { outcome } => json!({ "kind": "finish", "outcome": outcome_json(outcome) }),
-        Action::Abandon => json!({ "kind": "abandon" }),
+        Action::StopJudge { job } => json!({ "kind": ActionKind::StopJudge, "job": job.0 }),
+        Action::TearDownAgent => json!({ "kind": ActionKind::TearDownAgent }),
+        Action::Finish { outcome } => {
+            json!({ "kind": ActionKind::Finish, "outcome": outcome_json(outcome) })
+        }
+        Action::Abandon => json!({ "kind": ActionKind::Abandon }),
     }
+}
+
+/// The kind of an action, as the run log names it ([`action_json`]).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ActionKind {
+    StartAgent,
+    Reply,
+    StartJudge,
+    StopJudge,
+    TearDownAgent,
+    Finish,
+    Abandon,
+}
+
+/// A record of the run log, as [`final_judge`] reads it: its actions' kinds, jobs and grants.
+// Structs, whose unread fields serde_json skips without nesting into them: a judge's result nested
+// past its limit, which a `Value` or an internally tagged enum would refuse, doesn't stop the read.
+#[derive(Deserialize)]
+struct Logged {
+    #[serde(default)]
+    actions: Vec<LoggedAction>,
+}
+
+/// An action, as [`Logged`] reads it.
+#[derive(Deserialize)]
+struct LoggedAction {
+    kind: ActionKind,
+    job: Option<u64>,
+    grant: Option<String>,
+}
+
+/// The final judge's job: the one that the run log of the record in `dir` names in its
+/// `start_judge` without a grant.
+///
+/// # Errors
+///
+/// Fails if the log can't be read, has a line that is no record of it, or names no such job.
+pub(super) fn final_judge(dir: &Path) -> Result<JobId, String> {
+    let path = dir.join("log.jsonl");
+    let log = File::open(&path).context(path.display())?;
+    for (index, line) in BufReader::new(log).lines().enumerate() {
+        let line = line.context(path.display())?;
+        let logged: Logged = serde_json::from_str(&line).context(format_args!(
+            "{}, line {}",
+            path.display(),
+            index + 1
+        ))?;
+        for action in logged.actions {
+            if let LoggedAction {
+                kind: ActionKind::StartJudge,
+                job: Some(job),
+                grant: None,
+            } = action
+            {
+                return Ok(JobId(job));
+            }
+        }
+    }
+    Err(format!(
+        "{} names no final judge: expected a `start_judge` without a grant",
+        path.display()
+    ))
 }
 
 /// The JSON form of an outcome: `{"score": s, "work_end": w, "verdict": v}`, where the score
