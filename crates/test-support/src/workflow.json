@@ -1,10 +1,10 @@
 {
   "ir_version": "pumpkin.ir/v0",
-  "name": "frontier-cs/lwe_structured_recovery",
+  "name": "example/task",
   "roles": [
     {
       "name": "agent",
-      "image": "pumpkin/lwe-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "image": "example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "user": { "uid": 10001, "gid": 10001 },
       "needs": {
         "cpu_millis": 8000,
@@ -36,7 +36,7 @@
     },
     {
       "name": "train_judge",
-      "image": "pumpkin/lwe-verifier@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "image": "example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "user": { "uid": 65532, "gid": 65532 },
       "needs": {
         "cpu_millis": 8000,
@@ -45,11 +45,11 @@
       "runtime": {
         "judge": {
           "command": {
-            "argv": ["/opt/frontier/lwe-verifier"],
+            "argv": ["/usr/local/bin/judge"],
             "cwd": "/pumpkin/home",
             "env": [
-              "FRONTIER_VERIFICATION_MODE=train",
-              "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/train.json"
+              "MODE=train",
+              "DATASET=/data/train.json"
             ]
           },
           "slots": [{ "name": "payload", "max_bytes": 4194304 }],
@@ -62,7 +62,7 @@
     },
     {
       "name": "final_judge",
-      "image": "pumpkin/lwe-verifier@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "image": "example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "user": { "uid": 65532, "gid": 65532 },
       "needs": {
         "cpu_millis": 8000,
@@ -71,11 +71,11 @@
       "runtime": {
         "judge": {
           "command": {
-            "argv": ["/opt/frontier/lwe-verifier"],
+            "argv": ["/usr/local/bin/judge"],
             "cwd": "/pumpkin/home",
             "env": [
-              "FRONTIER_VERIFICATION_MODE=eval",
-              "FRONTIER_DATASET_PATH=/opt/frontier/lwe/datasets/eval.json"
+              "MODE=eval",
+              "DATASET=/data/eval.json"
             ]
           },
           "slots": [{ "name": "payload", "max_bytes": 4194304 }],

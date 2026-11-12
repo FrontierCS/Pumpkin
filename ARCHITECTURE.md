@@ -39,6 +39,12 @@ Each crate depends only on crates above it. **Architecture Invariant** callouts 
 **`crates/stdx`.** What `std` lacks and several crates share, such as `Context` for errors.
 - **Architecture Invariant:** it knows nothing of Pumpkin: it depends on no Pumpkin crate.
 
+**`crates/test-support`.** What the tests of more than one crate share, such as a complete
+workflow (`WORKFLOW`) and what the tests that need Docker reach it with; a helper that one
+crate's tests use stays in that crate's tests.
+- **Architecture Invariant:** only tests use it: each crate that does names it under
+  `[dev-dependencies]`.
+
 **`crates/schema`.** The formats Pumpkin's programs share, never copied into a consumer:
 `ir`, the workflow IR; `workflow`, a workflow parsed, and placed; `sandbox`, the sandbox
 protocol, its `frame`s, `tree`s, ops (`sandbox::op`) and the in-sandbox contract: the paths,
@@ -176,9 +182,9 @@ hands `Run` the one that serves the route (`Serving`).
 directory the in-sandbox contract reserves for it, and each with an adapter, such as `Codex`,
 that writes the agent's runtime that runs it.
 - **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates, outside its
-  tests it depends only on `schema` and `recipe`, and its Docker test also uses `stdx`. A harness
-  therefore reaches an agent alike whichever factory builds its image, and any factory, in this
-  repository or outside it, may use it.
+  tests it depends only on `schema` and `recipe`, and its Docker test also uses `test-support`. A
+  harness therefore reaches an agent alike whichever factory builds its image, and any factory,
+  in this repository or outside it, may use it.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
 and with `--docker` the tests that need Docker), `cargo xtask sandboxd`, `cargo xtask install`,

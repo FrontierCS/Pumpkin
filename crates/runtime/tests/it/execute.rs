@@ -9,7 +9,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -29,12 +29,12 @@ use schema::provider::{Listed, RunTag};
 use schema::sandbox::{SANDBOXCTL_PATH, command_stdout};
 use schema::workflow::{Main, Placed, RoleId};
 use serde_json::{Value, json};
+use test_support::http::{read_request, write_chunk};
+use test_support::{WORKFLOW, files};
 
 use crate::docker;
-use crate::run::{Runs, compact, files, placed, serving};
+use crate::run::{Runs, compact, placed, serving};
 use crate::sim::{self, BRIEF, LINGERING, LOST, MUTE, SLOW, Sim, UNDELETABLE, UNPUBLISHED};
-
-const LWE: &str = include_str!("../../../schema/tests/fixtures/lwe.json");
 
 /// A `sandboxd` that dials.
 const SANDBOXD: &str = "/sim/sandboxd";
@@ -92,7 +92,7 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
         Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
         Err(reason) => format!("failed: {reason}"),
     }];
-    lines.push(format!("record: {}", files(&record, &record).join(", ")));
+    lines.push(format!("record: {}", files(&record).join(", ")));
     let payloads = fs::read_dir(record.join("payloads")).into_iter().flatten();
     let mut payloads: Vec<String> = payloads
         .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
@@ -361,11 +361,11 @@ fn when(placed: &Placed, last: Duration) -> &'static str {
 /// The fixture's workflow, without the agent's model route ([`routed`] gives one), and with
 /// `argv` as the agent's command.
 fn workflow(argv: &[&str]) -> Value {
-    let mut lwe: Value = serde_json::from_str(LWE).unwrap();
-    let agent = &mut lwe["roles"][0];
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let agent = &mut ir["roles"][0];
     agent.as_object_mut().unwrap().remove("egress");
     agent["runtime"]["agent"]["command"]["argv"] = json!(argv);
-    lwe
+    ir
 }
 
 /// The workflow of the runs whose agents make ops: [`workflow`]'s, with `argv` as the agent's
@@ -1385,7 +1385,7 @@ fn docker_workflow() -> Value {
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn ops_on_docker() {
-    let sandboxd = docker::sandboxd();
+    let sandboxd = test_support::sandboxd();
     check(
         "ops-on-docker",
         docker::engine(),
@@ -1460,31 +1460,4 @@ fn unix_ns() -> u64 {
 /// A time or duration of the log's, a decimal string of nanoseconds, as a number.
 fn nanos(value: &Value) -> Option<u64> {
     value.as_str()?.parse().ok()
-}
-
-/// Writes `text` as one chunk of a chunked body: the last, if it is empty.
-fn write_chunk(connection: &mut TcpStream, text: &str) {
-    write!(connection, "{:x}\r\n{text}\r\n", text.len()).unwrap();
-}
-
-/// A request's line, its headers and its body.
-fn read_request(reader: &mut impl BufRead) -> (String, Vec<(String, String)>, Vec<u8>) {
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let mut headers = Vec::new();
-    let mut length = 0;
-    loop {
-        let mut header = String::new();
-        reader.read_line(&mut header).unwrap();
-        let Some((name, value)) = header.trim_end().split_once(": ") else {
-            break;
-        };
-        if name == "content-length" {
-            length = value.parse().unwrap();
-        }
-        headers.push((name.to_owned(), value.to_owned()));
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).unwrap();
-    (line.trim_end().to_owned(), headers, body)
 }

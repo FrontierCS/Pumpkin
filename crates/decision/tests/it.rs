@@ -1,8 +1,8 @@
-//! The driver's decision core, fed event scripts on the LWE workflow that `schema`
-//! tests parsing with, or on variants of it. Each test shows what the core did after each
-//! event, and when it next wants a tick whenever that changes. Each role is placed in a class
-//! whose sandboxes may take [`STARTUP`] to start, or, if it asks for more memory than that class
-//! gives, [`SLOW_STARTUP`], which sets the run's hard end.
+//! The driver's decision core, fed event scripts on [`WORKFLOW`], or on variants of it. Each
+//! test shows what the core did after each event, and when it next wants a tick whenever that
+//! changes. Each role is placed in a class whose sandboxes may take [`STARTUP`] to start, or, if
+//! it asks for more memory than that class gives, [`SLOW_STARTUP`], which sets the run's hard
+//! end.
 //!
 //! A script has one event per line: the time in milliseconds since the run started, then one
 //! of these:
@@ -37,10 +37,9 @@ use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
 use schema::workflow::{JudgeCall, Workflow};
 use serde_json::{Value, json};
+use test_support::WORKFLOW;
 
-const LWE: &str = include_str!("../../schema/tests/fixtures/lwe.json");
-
-/// How long a sandbox may take to start in the class that every LWE role fits.
+/// How long a sandbox may take to start in the class that every role of [`WORKFLOW`] fits.
 const STARTUP: Duration = Duration::from_secs(10);
 
 /// How long a sandbox may take to start in the class that gives a role more memory.
@@ -49,10 +48,10 @@ const SLOW_STARTUP: Duration = Duration::from_secs(30);
 /// The memory that the slow class gives a role.
 const SLOW_MEMORY_BYTES: u64 = 2 << 40;
 
-/// Runs `script` on the LWE workflow with `edit` applied, and compares what the core did
+/// Runs `script` on [`WORKFLOW`] with `edit` applied, and compares what the core did
 /// with `expect`.
 fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
-    let mut ir: Value = serde_json::from_str(LWE).unwrap();
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     edit(&mut ir);
     let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
     let placed = Workflow::parse(&ir).unwrap().place(&classes()).unwrap();
@@ -88,8 +87,8 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     expect.assert_eq(&run.transcript);
 }
 
-/// Two classes: one whose starts take [`STARTUP`], which every LWE role fits, and one whose
-/// starts take [`SLOW_STARTUP`], which gives a role [`SLOW_MEMORY_BYTES`].
+/// Two classes: one whose starts take [`STARTUP`], which every role of [`WORKFLOW`] fits, and one
+/// whose starts take [`SLOW_STARTUP`], which gives a role [`SLOW_MEMORY_BYTES`].
 fn classes() -> BTreeMap<Name, Class> {
     let class = |name: &str, memory_bytes, startup: Duration| {
         let class = Class {
@@ -296,7 +295,7 @@ fn submission_text(submission: &Submission) -> String {
 }
 
 #[test]
-fn lwe() {
+fn whole_run() {
     check(
         |_| {},
         r#"

@@ -1,0 +1,16 @@
+[package]
+name = "test-support"
+version = "0.0.0"
+description = "What the tests of more than one of Pumpkin's crates share"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+stdx = { path = "../stdx" }
+
+[lints]
+workspace = true

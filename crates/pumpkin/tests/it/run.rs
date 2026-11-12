@@ -16,11 +16,9 @@ use docker::{ContextName, Engine};
 use expect_test::expect;
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
+use test_support::{BUSYBOX, WORKFLOW, docker_context, sandboxd};
 
-use super::{
-    BUSYBOX, LWE, PUMPKIN, Scratch, StandIn, Step, check, context, docker_table, image, report,
-    sandboxd, workflow,
-};
+use super::{PUMPKIN, Scratch, StandIn, Step, check, docker_table, image, report, workflow};
 
 #[test]
 #[expect(
@@ -330,7 +328,10 @@ fn usage() {
 )]
 fn unrunnable() {
     let scratch = Scratch::new("unrunnable");
-    scratch.write("lwe.json", &serde_json::from_str::<Value>(LWE).unwrap());
+    scratch.write(
+        "workflow.json",
+        &serde_json::from_str::<Value>(WORKFLOW).unwrap(),
+    );
     scratch.write("empty.json", &json!({}));
     scratch.write_sandboxd("private");
     fs::set_permissions(scratch.0.join("private"), Permissions::from_mode(0o750)).unwrap();
@@ -347,20 +348,20 @@ fn unrunnable() {
     let run = |ir, rest: &[&str]| scratch.pumpkin(&[&["run", ir], &runs[..], rest].concat());
     let dashed = scratch.pumpkin(&[&["run"], &runs[..], &["--", "-missing.json"]].concat());
     let beside = |dir: &PathBuf| {
-        let args = [&["run", "lwe.json"], &runs[..]].concat();
+        let args = [&["run", "workflow.json"], &runs[..]].concat();
         scratch.program(dir.join("pumpkin"), &args)
     };
-    let mut unset = scratch.pumpkin(&["run", "lwe.json"]);
+    let mut unset = scratch.pumpkin(&["run", "workflow.json"]);
     unset.env_remove("HOME");
-    let mut empty = scratch.pumpkin(&["run", "lwe.json"]);
+    let mut empty = scratch.pumpkin(&["run", "workflow.json"]);
     empty.env("HOME", "");
     let commands = [
         run("missing.json", &[]),
         dashed,
         run("empty.json", &[]),
-        run("lwe.json", &["--sandboxd", "missing"]),
-        run("lwe.json", &["--sandboxd", "private"]),
-        run("lwe.json", &["--sandboxd", "script"]),
+        run("workflow.json", &["--sandboxd", "missing"]),
+        run("workflow.json", &["--sandboxd", "private"]),
+        run("workflow.json", &["--sandboxd", "script"]),
         beside(&alone),
         beside(&checkout),
         unset,
@@ -381,25 +382,25 @@ fn unrunnable() {
             $ pumpkin run empty.json --runs runs
             exit status: Some(1)
             pumpkin: the workflow's IR empty.json: missing field `ir_version` at line 1 column 2
-            $ pumpkin run lwe.json --runs runs --sandboxd missing
+            $ pumpkin run workflow.json --runs runs --sandboxd missing
             exit status: Some(1)
             pumpkin: the sandboxd missing can't be read (No such file or directory (os error 2)): name a static one, which `cargo xtask sandboxd` builds
-            $ pumpkin run lwe.json --runs runs --sandboxd private
+            $ pumpkin run workflow.json --runs runs --sandboxd private
             exit status: Some(1)
             pumpkin: the sandboxd private can't be executed by every user, as its mode is 0750: make it executable by every user (`chmod a+x`)
-            $ pumpkin run lwe.json --runs runs --sandboxd script
+            $ pumpkin run workflow.json --runs runs --sandboxd script
             exit status: Some(1)
             pumpkin: the sandboxd script isn't a 64-bit ELF executable: name a static one, which `cargo xtask sandboxd` builds
-            $ <scratch>/alone/pumpkin run lwe.json --runs runs
+            $ <scratch>/alone/pumpkin run workflow.json --runs runs
             exit status: Some(1)
             pumpkin: the sandboxd beside `pumpkin`, <scratch>/alone/sandboxd, can't be read (No such file or directory (os error 2)): `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
-            $ <scratch>/checkout/pumpkin run lwe.json --runs runs
+            $ <scratch>/checkout/pumpkin run workflow.json --runs runs
             exit status: Some(1)
             pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
-            $ env -u HOME pumpkin run lwe.json
+            $ env -u HOME pumpkin run workflow.json
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name a directory with `--runs`
-            $ HOME= pumpkin run lwe.json
+            $ HOME= pumpkin run workflow.json
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name a directory with `--runs`"#]],
     );
@@ -444,8 +445,8 @@ fn wait_for_each_run(scratch: &Scratch) {
 #[test]
 fn refusals() {
     let scratch = Scratch::new("refusals");
-    let mut ir: Value = serde_json::from_str(LWE).unwrap();
-    scratch.write("lwe.json", &ir);
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    scratch.write("workflow.json", &ir);
     ir["roles"][1]["name"] = json!("agent");
     ir["roles"][1]["egress"] = json!({ "model": { "models": ["gpt-6-astra"] } });
     scratch.write("broken.json", &ir);
@@ -464,7 +465,7 @@ fn refusals() {
     };
     let commands = [
         run("broken.json", "conf/served.toml"),
-        run("lwe.json", "unserved.toml"),
+        run("workflow.json", "unserved.toml"),
         stand_in.run("large.json", &[]),
     ];
     check(
@@ -479,7 +480,7 @@ fn refusals() {
             pumpkin: broken.json: /roles/1/egress/model: `agent` is a judge, and only the agent has a model route: remove it
             pumpkin: broken.json: /main/solo_then_judge/grants/0/judge/role: no role is named `train_judge`: name one listed in `roles`
             pumpkin: broken.json: the workflow has 3 problems: fix them and run again
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config unserved.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config unserved.toml
             exit status: Some(1)
             pumpkin: unserved.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: list them all under one
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run large.json --sandboxd sandboxd --runs runs --config pumpkin.toml
@@ -498,8 +499,8 @@ fn refusals() {
 )]
 fn configurations() {
     let scratch = Scratch::new("configurations");
-    let mut ir: Value = serde_json::from_str(LWE).unwrap();
-    scratch.write("lwe.json", &ir);
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    scratch.write("workflow.json", &ir);
     ir["roles"][0].as_object_mut().unwrap().remove("egress");
     scratch.write("unrouted.json", &ir);
     write_configurations(&scratch);
@@ -508,10 +509,10 @@ fn configurations() {
         command.args(["--runs", "runs"]).args(config);
         command
     };
-    let config = |name: &str| run("lwe.json", &["--config", &format!("{name}.toml")]);
-    let mut home = run("lwe.json", &[]);
+    let config = |name: &str| run("workflow.json", &["--config", &format!("{name}.toml")]);
+    let mut home = run("workflow.json", &[]);
     home.env("HOME", scratch.0.join("home"));
-    let mut homeless = run("lwe.json", &[]);
+    let mut homeless = run("workflow.json", &[]);
     homeless.env_remove("HOME");
     let mut served = config("conf/served");
     let mut unrouted = run("unrouted.json", &["--config", "docked.toml"]);
@@ -541,98 +542,98 @@ fn configurations() {
         false,
         &[],
         &expect![[r#"
-            $ HOME=<scratch>/home pumpkin run lwe.json --sandboxd sandboxd --runs runs
+            $ HOME=<scratch>/home pumpkin run workflow.json --sandboxd sandboxd --runs runs
             exit status: Some(1)
             pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
-            $ env -u HOME pumpkin run lwe.json --sandboxd sandboxd --runs runs
+            $ env -u HOME pumpkin run workflow.json --sandboxd sandboxd --runs runs
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config missing.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config missing.toml
             exit status: Some(1)
             pumpkin: the configuration missing.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config undocked.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config undocked.toml
             exit status: Some(1)
             pumpkin: undocked.toml: TOML parse error at line 1, column 1
               |
             1 | [upstreams.gateway]
               | ^
             missing field `docker`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config nameless.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config nameless.toml
             exit status: Some(1)
             pumpkin: nameless.toml: TOML parse error at line 2, column 11
               |
             2 | context = ""
               |           ^^
             the Docker context's name is empty: name one that `docker context ls` lists
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config broken.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config broken.toml
             exit status: Some(1)
             pumpkin: broken.toml: TOML parse error at line 4, column 19
               |
             4 | [upstreams.gateway
               |                   ^
             unclosed table, expected `]`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config inline.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config inline.toml
             exit status: Some(1)
             pumpkin: inline.toml: TOML parse error at line 6, column 1
               |
             6 | key = "sk-1"
               | ^^^
             unknown field `key`, expected one of `url`, `key_file`, `models`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config priced.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config priced.toml
             exit status: Some(1)
             pumpkin: priced.toml: TOML parse error at line 7, column 73
               |
             7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", price = 1 }]
               |                                                                         ^^^^^
             unknown field `price`, expected `name` or `upstream_name`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config keyless.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config keyless.toml
             exit status: Some(1)
             pumpkin: keyless.toml: TOML parse error at line 4, column 1
               |
             4 | [upstreams.gateway]
               | ^^^^^^^^^^^^^^^^^^^
             missing field `key_file`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config invalid.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config invalid.toml
             exit status: Some(1)
             pumpkin: invalid.toml: TOML parse error at line 4, column 12
               |
             4 | [upstreams.Gateway]
               |            ^^^^^^^
             `Gateway` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config twice.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config twice.toml
             exit status: Some(1)
             pumpkin: twice.toml: TOML parse error at line 9, column 12
               |
             9 | [upstreams.gateway]
               |            ^^^^^^^
             duplicate key
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config again.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config again.toml
             exit status: Some(1)
             pumpkin: again.toml: `gpt-6-astra` is listed more than once: list each model once, under the upstream that serves it
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config query.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config query.toml
             exit status: Some(1)
             pumpkin: query.toml: TOML parse error at line 5, column 7
               |
             5 | url = "https://models.example.com/v1?project=1"
               |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
             the upstream's URL has a query or a fragment: name the API's base URL alone, below which the route reaches `/responses`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config fragment.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config fragment.toml
             exit status: Some(1)
             pumpkin: fragment.toml: TOML parse error at line 5, column 7
               |
             5 | url = "https://models.example.com/v1#v2"
               |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
             the upstream's URL has a query or a fragment: name the API's base URL alone, below which the route reaches `/responses`
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config unserved.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config unserved.toml
             exit status: Some(1)
             pumpkin: unserved.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: list them all under one
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config docked.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config docked.toml
             exit status: Some(1)
             pumpkin: docked.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: add an `[upstreams.<name>]` that lists them
-            $ pumpkin run lwe.json --sandboxd sandboxd --runs runs --config conf/unkeyed.toml
+            $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config conf/unkeyed.toml
             exit status: Some(1)
             pumpkin: conf/unkeyed.toml: the key file conf/missing can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
-            $ PATH=<scratch>/nowhere pumpkin run lwe.json --sandboxd sandboxd --runs runs --config conf/served.toml
+            $ PATH=<scratch>/nowhere pumpkin run workflow.json --sandboxd sandboxd --runs runs --config conf/served.toml
             exit status: Some(1)
             pumpkin: the Docker context `nowhere` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists
             $ PATH=<scratch>/nowhere pumpkin run unrouted.json --sandboxd sandboxd --runs runs --config docked.toml
@@ -715,8 +716,8 @@ models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra" }}]
          --post-data '{body}' http://127.0.0.1:{MODEL_PORT}/responses"
     );
     let mut asks = workflow(image, &["sh", "-c", &ask]);
-    let lwe: Value = serde_json::from_str(LWE).unwrap();
-    asks["roles"][0]["egress"] = lwe["roles"][0]["egress"].clone();
+    let fixture: Value = serde_json::from_str(WORKFLOW).unwrap();
+    asks["roles"][0]["egress"] = fixture["roles"][0]["egress"].clone();
     scratch.write("asks.json", &asks);
 }
 
@@ -780,8 +781,8 @@ impl Upstream {
 )]
 fn runs_on_docker() {
     let scratch = Scratch::new("docker");
-    let sandboxd = sandboxd();
-    let context = context();
+    let sandboxd = sandboxd().into_os_string().into_string().unwrap();
+    let context = docker_context();
     let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
     let image = image(&engine);
     let upstream = Upstream::start();
