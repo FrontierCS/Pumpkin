@@ -41,7 +41,7 @@ pub(crate) fn image() -> Image {
     static ID: OnceLock<String> = OnceLock::new();
     let id = ID.get_or_init(|| {
         let dockerfile = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
-        test_support::build(&dockerfile, "pumpkin-tests:workspace")
+        test_support::build(&dockerfile, &[], "pumpkin-tests:workspace")
     });
     Image::try_from(id.clone()).unwrap()
 }

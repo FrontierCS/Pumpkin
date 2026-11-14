@@ -19,6 +19,7 @@ use std::process::{Command, ExitCode, Stdio};
 use xshell::{Cmd, Shell};
 
 mod diff;
+mod star;
 mod tidy;
 mod tools;
 
@@ -67,7 +68,8 @@ mod flags {
             cmd sandboxd {}
 
             /// Builds `pumpkin` and the static sandboxd, and installs them side by side in
-            /// `<root>/bin`, where `pumpkin` finds that sandboxd by default; prints each path.
+            /// `<root>/bin`, with the pinned buildifier, which `pumpkin fmt` and `pumpkin check`
+            /// run, where `pumpkin` finds that sandboxd by default; prints each path.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
@@ -266,11 +268,20 @@ fn root() -> &'static Path {
     root
 }
 
-/// Runs the checks every change must pass, in order, and stops at the first that fails. With
-/// `docker`, it builds the static `sandboxd` before the tests, names it in
-/// `PUMPKIN_SANDBOXD` and runs the ignored tests too, which are the tests that need Docker; they
-/// inherit `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get
-/// Docker's own variables set to reach no engine.
+/// `tests`, a command that runs tests, with the environment that `ci` and `mutants` give every
+/// test: `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which pumpkin's tests
+/// put beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check` find it.
+fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
+    Ok(tests.env("PUMPKIN_BUILDIFIER", star::buildifier(cargo)?))
+}
+
+/// Runs the checks every change must pass, in order, and stops at the first that fails: among
+/// them the check of the repository's `.star` files ([`star::check`]), with the formatter beside
+/// the tests' `pumpkin`, which runs it there, and the tests ([`tested`]). With
+/// `docker`, it builds the static `sandboxd` before the tests, names it in `PUMPKIN_SANDBOXD` and
+/// runs the ignored tests too, which are the tests that need Docker; they inherit
+/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get Docker's
+/// own variables set to reach no engine.
 fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;
@@ -279,7 +290,12 @@ fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
     clippy.args(["--", "--deny", "warnings"]).run()?;
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
+    let buildifier = star::buildifier(cargo)?;
+    let pumpkin = tests_pumpkin(cargo)?;
+    star::place(&buildifier, &pumpkin)?;
+    star::check(&cargo.sh, &pumpkin)?;
     let test = cargo.cmd(&["nextest", "run", "--workspace", "--locked"]);
+    let test = tested(cargo, test)?;
     let test = if docker {
         let sandboxd = sandboxd(cargo)?;
         let test = test.args(["--run-ignored", "all"]);
@@ -295,6 +311,7 @@ fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
         test
     };
     let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
+    let doctests = tested(cargo, doctests)?;
     let again = if docker {
         "cargo xtask ci --docker"
     } else {
@@ -340,14 +357,14 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
     Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
 }
 
-/// Runs the tests of `package`, those whose names hold `filter` if it is given, with
-/// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs, below `CARGO_WORKSPACE_DIR`,
+/// Runs the tests of `package`, those whose names hold `filter` if it is given, with the
+/// environment `ci` gives them ([`tested`]) and `UPDATE_EXPECT=1`, which rewrites each snapshot that differs, below `CARGO_WORKSPACE_DIR`,
 /// this checkout's root, whatever the caller's environment names; then prints `git diff --stat`,
 /// also if a test failed.
 fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);
-    let test = test.args(filter).env("UPDATE_EXPECT", "1");
+    let test = tested(cargo, test.args(filter))?.env("UPDATE_EXPECT", "1");
     // expect-test takes the variable as a directory that ends in `/`.
     let ran = test
         .env("CARGO_WORKSPACE_DIR", format!("{}/", root().display()))
@@ -372,7 +389,7 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let scratch = cargo.sh.create_temp_dir()?;
     let diff_path = scratch.path().join("changes.diff");
     cargo.sh.write_file(&diff_path, diff)?;
-    let run = cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path);
+    let run = tested(cargo, cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path))?;
     // Relative, so that each copy of the tree cargo-mutants builds has its own: in a shared one,
     // cargo would take a mutant's artifacts as fresh for the unmutated tree.
     let run = run.env("CARGO_TARGET_DIR", "target");
@@ -395,6 +412,20 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
             "`{line}` ended with {status}: fix what it printed above, and run `{again}` again"
         )
         .into()),
+    }
+}
+
+/// Builds the workspace's tests, as `cargo nextest run` then finds them, and returns the
+/// `pumpkin` that they run.
+fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
+    let build = cargo.cmd(&["test", "--workspace", "--locked", "--no-run"]);
+    let artifacts = executables(build)?;
+    let mut named = artifacts.iter().filter(|built| {
+        built["target"]["name"] == "pumpkin" && built["target"]["kind"][0] == "bin"
+    });
+    match named.find_map(|built| built["executable"].as_str()) {
+        Some(pumpkin) => Ok(pumpkin.into()),
+        None => Err("cargo reported no pumpkin executable for the tests: expected one".into()),
     }
 }
 
@@ -427,9 +458,27 @@ fn release(cargo: &Cargo, package: &str, args: &[&str]) -> Result<PathBuf> {
     .into())
 }
 
-/// Builds `pumpkin` and the static `sandboxd`, and installs them in `<root>/bin`, made if need be,
-/// replacing what is there: `root` made absolute, or this checkout's `.pumpkin`. Prints each
-/// one's path, and says if `<root>/bin` is not on `PATH`.
+/// Runs `build`, a cargo command that builds, and returns cargo's compiler-artifact message for
+/// each executable it built or found fresh, so that each path is right wherever cargo's
+/// configuration puts the target directory.
+fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
+    let build = build.args(["--message-format", "json-render-diagnostics"]);
+    let mut executables = Vec::new();
+    // One JSON message per line; diagnostics are rendered on standard error instead.
+    for line in build.read()?.lines() {
+        let message: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("cargo printed `{line}`, which isn't JSON: {error}"))?;
+        if message["reason"] == "compiler-artifact" && message["executable"].is_string() {
+            executables.push(message);
+        }
+    }
+    Ok(executables)
+}
+
+/// Builds `pumpkin` and the static `sandboxd`, and installs them, with the pinned buildifier
+/// ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there: `root` made
+/// absolute, or this checkout's `.pumpkin`. Prints each one's path, and says if `<root>/bin` is
+/// not on `PATH`.
 fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
@@ -437,6 +486,7 @@ fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
         .map_err(|error| format!("making {} absolute failed: {error}", bin.display()))?;
     let built = [
         ("pumpkin", release(cargo, "pumpkin", &[])?),
+        ("buildifier", star::buildifier(cargo)?),
         ("sandboxd", sandboxd(cargo)?),
     ];
     fs::create_dir_all(&bin)

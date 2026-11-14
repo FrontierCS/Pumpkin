@@ -294,7 +294,7 @@ fn image() -> Image {
     let id = ID.get_or_init(|| {
         let dockerfile =
             format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace /volume\nVOLUME /volume\n");
-        test_support::build(&dockerfile, "pumpkin-docker-tests:workspace")
+        test_support::build(&dockerfile, &[], "pumpkin-docker-tests:workspace")
     });
     Image::try_from(id.clone()).unwrap()
 }

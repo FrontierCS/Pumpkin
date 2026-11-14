@@ -13,7 +13,9 @@ test = false
 [dependencies]
 docker = { path = "../../providers/docker" }
 engine = { path = "../engine" }
+lang = { path = "../lang" }
 provider = { path = "../provider" }
+recipe = { path = "../recipe" }
 route = { path = "../route" }
 runtime = { path = "../runtime" }
 schema = { path = "../schema" }

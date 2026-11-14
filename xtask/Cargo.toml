@@ -13,6 +13,7 @@ test = false
 [dependencies]
 proc-macro2 = { version = "1.0.107", default-features = false, features = ["span-locations"] }
 serde_json.workspace = true
+sha2.workspace = true
 xflags.workspace = true
 xshell = "0.2.7"
 

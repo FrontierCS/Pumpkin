@@ -9,8 +9,12 @@
 //!
 //! [`command_stdout()`]: schema::sandbox::command_stdout
 
-use std::fmt::Write as _;
-use std::num::NonZeroU64;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::Write as _;
+use core::num::NonZeroU64;
 
 use schema::ir::{
     self, AbsolutePath, AgentRuntime, Argv, Command, Dir, Env, EnvVar, ModelName, RolePath,
@@ -79,6 +83,36 @@ pub enum Tools {
     /// mode's or sub-agents', and not `apply_patch`, which the model runs through the shell
     /// instead.
     Functions,
+}
+
+impl Tools {
+    const ALL: [Self; 2] = [Self::Native, Self::Functions];
+
+    /// The word that names it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Functions => "functions",
+        }
+    }
+}
+
+impl TryFrom<&str> for Tools {
+    type Error = String;
+
+    /// Parses `native` or `functions`.
+    fn try_from(tools: &str) -> Result<Self, Self::Error> {
+        (Self::ALL.into_iter())
+            .find(|known| known.as_str() == tools)
+            .ok_or_else(|| {
+                let all: Vec<&str> = Self::ALL.into_iter().map(Self::as_str).collect();
+                format!(
+                    "`{}` is not a way to send Codex's tools: use one of {}",
+                    tools.escape_debug(),
+                    all.join(", ")
+                )
+            })
+    }
 }
 
 /// How hard the model reasons, Codex's `model_reasoning_effort`, such as `xhigh`.
@@ -205,12 +239,12 @@ pub fn runtime(
     };
     let catalog = content.map(|content| ir::File {
         path: catalog_path,
-        mode: mode("0600"),
+        mode: ir::Mode::new(0o600),
         content,
     });
     let config = ir::File {
         path: config_path,
-        mode: mode("0600"),
+        mode: ir::Mode::new(0o600),
         content: config(model, effort, catalog.as_ref().map(|file| &file.path)),
     };
     // `exec` runs one turn, unattended, on the prompt it reads on its standard input (`-`), and
@@ -232,7 +266,7 @@ pub fn runtime(
         .map(|(name, path)| checked(EnvVar::try_from(format!("{name}={path}"))));
     let dirs = [home, tmp].map(|path| Dir {
         path,
-        mode: mode("0700"),
+        mode: ir::Mode::new(0o700),
     });
     Ok(AgentRuntime {
         command: Command {
@@ -389,19 +423,14 @@ fn toml_string(text: &str) -> String {
     string
 }
 
-/// The permission bits `text` writes, one of this module's.
-fn mode(text: &str) -> ir::Mode {
-    checked(ir::Mode::try_from(text.to_owned()))
-}
-
 /// `value`, built from parsed paths and this module's constants, as valid.
 fn checked<T>(value: Result<T, String>) -> T {
     match value {
         Ok(value) => value,
         Err(error) => unreachable!(
             "each value is built from parsed paths, which hold no NUL byte, and from this \
-             module's constants: a mode, `0` and three octal digits; two variables' names, each \
-             set once; and a program that is not empty; the tests build each; yet {error}"
+             module's constants: two variables' names, each set once, and a program that is not \
+             empty; the tests build each; yet {error}"
         ),
     }
 }

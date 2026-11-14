@@ -1,4 +1,4 @@
-//! The engine, against a real Docker daemon. These tests need Docker, so they are ignored.
+//! The engine, against a real Docker daemon. The tests that need Docker are ignored.
 
 #![expect(
     clippy::unwrap_used,
@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 
 use engine::{BuildContext, Built, ContextName, Engine, Recipe, Report};
 use expect_test::{Expect, expect};
+use recipe::Given;
 use schema::sandbox::RelativePath;
 use tempfile::TempDir;
 use test_support::{BUSYBOX, docker};
@@ -39,7 +40,10 @@ fn check(name: &str, scenario: impl FnOnce(&Fixture) -> Vec<String>, expect: &Ex
 /// or `default`, or why it can't be reached.
 fn connected() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
-    ENGINE.get_or_init(|| Engine::connect(ContextName::try_from(test_support::docker_context())?))
+    ENGINE.get_or_init(|| {
+        let context = ContextName::try_from(test_support::docker_context())?;
+        Engine::connect(context)
+    })
 }
 
 /// The engine the tests reach Docker through.
@@ -97,15 +101,41 @@ fn report() {
     .assert_eq(&lines.join("\n"));
 }
 
+// A build is tagged by its inputs, and found by that tag rather than built again: another
+// file's content, another mode or another recipe gives another tag, and the same inputs give
+// the image their tag names, even one another build made. A recipe, here a text, may build on
+// an image it is given as a named context, and is refused without it; and it gets that image
+// even once the image's tag has moved to another. A context that can't name its inputs is
+// refused before anything is built, and so is a repository that Docker can't tag, whose tag
+// pins the digest's text of a build given nothing. A build removes what a build of a process
+// that has ended left in the system's temporary directory, but not a running one's.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn builds() {
     check(
         "builds",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let dir = fixture.dir.path().join("context");
+            // What a build made for a process that has ended, whose ID is never one, and for one
+            // that runs, the first.
+            let pid_max = fs::read_to_string("/proc/sys/kernel/pid_max").unwrap();
+            let left = |pid: &str| std::env::temp_dir().join(format!("pumpkin-build-{pid}-0"));
+            let (ended, running) = (left(pid_max.trim()), left("1"));
+            for dir in [&ended, &running] {
+                fs::create_dir_all(dir.join("context")).unwrap();
+            }
             let mut lines = vec![format!("built: {}", builds.build("Dockerfile"))];
+            lines.push(format!(
+                "left by an ended process, then: {}; by a running one: {}",
+                ended.exists(),
+                running.exists()
+            ));
+            fs::remove_dir_all(&running).unwrap();
             let [first] = <[String; 1]>::try_from(builds.tags(&builds.seen[0])).unwrap();
             run(&["image", "rm", &first]);
             put(&dir, "file", "two", 0o644);
@@ -122,14 +152,24 @@ fn builds() {
                 builds.build("other/Dockerfile")
             ));
             let (context, dockerfile) = (builds.context(), Recipe::File(relative("Dockerfile")));
-            let base = engine().build(&context, &dockerfile, &[], &builds.repository);
+            let base = engine().build(&context, &dockerfile, &Given::default(), &builds.repository);
             let base = base.unwrap();
-            let on_base = Recipe::Text(format!("FROM {}\nCOPY file /on-base\n", base.tag()));
-            let built = builds.build_in(&context, &on_base, &[&base]);
+            let on_base = Recipe::Text("FROM base\nCOPY file /on-base\n".to_owned());
+            let given = Given {
+                contexts: BTreeMap::from([("base".to_owned(), &base)]),
+                ..Given::default()
+            };
+            let built = builds.build_in(&context, &on_base, &given);
             lines.push(format!("a text on its base: {built}"));
-            let refused = builds.build_in(&context, &on_base, &[]);
-            let refused = refused.replace(base.tag(), "<base>");
-            lines.push(format!("built before, now without its base: {refused}"));
+            let refused = builds.build_in(&context, &on_base, &Given::default());
+            lines.push(format!("without its base: {refused}"));
+            // A recipe of its base alone builds that very image.
+            run(&["tag", &second, base.tag()]);
+            let alone = Recipe::Text("FROM base\n".to_owned());
+            let built = builds.build_in(&context, &alone, &given);
+            lines.push(format!(
+                "its base alone, the base's tag moved to B: {built}"
+            ));
             lines.push(format!(
                 "an absent recipe: {}",
                 builds.build("absent/Dockerfile")
@@ -149,19 +189,21 @@ fn builds() {
             // names pins the digest's text; the lookup fails before anything is built.
             fs::remove_file(dir.join("id")).unwrap();
             let repository = "pumpkin-docker-tests/Builds";
-            let uppercase = engine().build(&context, &dockerfile, &[], repository);
+            let uppercase = engine().build(&context, &dockerfile, &Given::default(), repository);
             let refused = redact(fixture, &uppercase.unwrap_err());
             lines.push(format!("an uppercase repository: {refused}"));
             lines
         },
         &expect![[r#"
             built: A, tagged :1
+            left by an ended process, then: false; by a running one: true
             another content: B, tagged :2
             the first inputs, their tag moved to B: B, tagged :1 :2
             another mode: C, tagged :3
             another recipe: C, tagged :3 :4
             a text on its base: D, tagged :5
-            built before, now without its base: Dockerfile:1: `<base>` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a base the build is given
+            without its base: Dockerfile:1: `base` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+            its base alone, the base's tag moved to B: C, tagged :4 :6
             an absent recipe: `absent/Dockerfile` is no regular file in the build's context: name the build's recipe by its path there
             a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
@@ -170,6 +212,9 @@ fn builds() {
     );
 }
 
+// A directory mounted in a build's context is there for its recipe to copy from, and its files
+// are in the build's inputs. One to be mounted where the context holds something, or holds no
+// directory, or at a path with whitespace, is refused before anything is built.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn mounts() {
@@ -185,10 +230,10 @@ fn mounts() {
                 mounts: BTreeMap::from([(relative(path), shared.clone())]),
             };
             let recipe = Recipe::Text("FROM scratch\nCOPY file id shared/tool /\n".to_owned());
-            let built = builds.build_in(&at("shared"), &recipe, &[]);
+            let built = builds.build_in(&at("shared"), &recipe, &Given::default());
             let mut lines = vec![format!("mounted: {built}")];
             put(&shared, "tool", "two", 0o755);
-            let built = builds.build_in(&at("shared"), &recipe, &[]);
+            let built = builds.build_in(&at("shared"), &recipe, &Given::default());
             lines.push(format!("a mounted file changed: {built}"));
             for (what, path) in [
                 ("over a file", "file"),
@@ -196,7 +241,7 @@ fn mounts() {
                 ("in nothing", "absent/shared"),
                 ("at a name with a space", "a b"),
             ] {
-                let refused = builds.build_in(&at(path), &recipe, &[]);
+                let refused = builds.build_in(&at(path), &recipe, &Given::default());
                 lines.push(format!("mounted {what}: {refused}"));
             }
             lines
@@ -211,6 +256,63 @@ fn mounts() {
     );
 }
 
+// A recipe's `RUN` step may bind-mount the build's context, whose files are in the build's
+// inputs, so another content of a file it mounts gives another tag, and another image, which
+// holds what was mounted; and it may bind-mount a named context it is given, whose tag is in the
+// inputs too, so another image there gives another tag.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn bind_mounts() {
+    check(
+        "bind-mounts",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            let dir = fixture.dir.path().join("context");
+            let context = builds.context();
+            let bound = Recipe::Text(format!(
+                "FROM {BUSYBOX}\nRUN --mount=source=file,target=/mnt/file \
+                 --mount=type=bind,source=id,target=/mnt/id cat /mnt/file /mnt/id > /bound\n"
+            ));
+            let id = std::process::id();
+            // Built only if the named context `bound`'s `/bound` holds `content`.
+            let holds = |content: &str| {
+                Recipe::Text(format!(
+                    "FROM {BUSYBOX}\nRUN --mount=from=bound,source=/bound,target=/bound \
+                     test \"$(cat /bound)\" = {content}{id}\n"
+                ))
+            };
+            let mut lines = Vec::new();
+            for content in ["one", "two", "one"] {
+                put(&dir, "file", content, 0o644);
+                let built = builds.build_in(&context, &bound, &Given::default());
+                lines.push(format!("the bound file holds {content}: {built}"));
+                // Found by its tag, as `build_in` has just built it.
+                let image = engine().build(&context, &bound, &Given::default(), &builds.repository);
+                let image = image.unwrap();
+                let given = Given {
+                    contexts: BTreeMap::from([("bound".to_owned(), &image)]),
+                    ..Given::default()
+                };
+                let built = builds.build_in(&context, &holds(content), &given);
+                lines.push(format!(
+                    "  its image bound as a named context holds it: {built}"
+                ));
+            }
+            lines
+        },
+        &expect![[r#"
+            the bound file holds one: A, tagged :1
+              its image bound as a named context holds it: B, tagged :2
+            the bound file holds two: C, tagged :3
+              its image bound as a named context holds it: D, tagged :4
+            the bound file holds one: A, tagged :1
+              its image bound as a named context holds it: B, tagged :2"#]],
+    );
+}
+
+// A build's stage gives its files and directories git's modes, so files that differ only in
+// other permission bits, as checkouts under other umasks do, have one tag; and the image holds
+// them with those modes, a file its owner may execute still executable.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn modes() {
@@ -235,7 +337,7 @@ fn modes() {
                 for dir in [dir.join("other"), dir.clone()] {
                     fs::set_permissions(dir, fs::Permissions::from_mode(dirs)).unwrap();
                 }
-                let built = builds.build_in(&builds.context(), &recipe, &[]);
+                let built = builds.build_in(&builds.context(), &recipe, &Given::default());
                 lines.push(format!("{what}: {built}"));
             }
             lines
@@ -311,17 +413,23 @@ impl<'f> Builds<'f> {
         }
     }
 
-    /// [`Builds::build_in`] of the file `recipe` of the fixture's `context`, with no bases.
+    /// [`Builds::build_in`] of the file `recipe` of the fixture's `context`, given nothing.
     fn build(&mut self, recipe: &str) -> String {
-        self.build_in(&self.context(), &Recipe::File(relative(recipe)), &[])
+        let recipe = Recipe::File(relative(recipe));
+        self.build_in(&self.context(), &recipe, &Given::default())
     }
 
-    /// Builds `recipe` on `bases` with `context`, and shows the image, by the letter of its
+    /// Builds `recipe` with `context`, given `given`, and shows the image, by the letter of its
     /// first build, and its tags in the repository, and the tag the build returned if it is
     /// none of them, each by the number of its first showing, as their digests cover `id`; or
     /// why the build failed.
-    fn build_in(&mut self, context: &BuildContext, recipe: &Recipe, bases: &[&Built]) -> String {
-        let built = engine().build(context, recipe, bases, &self.repository);
+    fn build_in(
+        &mut self,
+        context: &BuildContext,
+        recipe: &Recipe,
+        given: &Given<&Built>,
+    ) -> String {
+        let built = engine().build(context, recipe, given, &self.repository);
         let (image, returned) = match built {
             Ok(built) => (built.image().as_str().to_owned(), built.tag().to_owned()),
             Err(error) => return redact(self.fixture, &error),

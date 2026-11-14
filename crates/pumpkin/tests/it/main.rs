@@ -1,9 +1,10 @@
 //! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
 //! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
 //! includes the model route of a workflow that has one reaching a stand-in model provider;
-//! `wait`; and `driver`, for the process that drives each run, which `run` starts. The tests on
-//! Docker are ignored, and write the context they reach ([`test_support::docker_context`]) into
-//! the configuration that they give `run`.
+//! `wait`; `check`; `fmt`; `build`; and `driver`, for the process that drives each run, which
+//! `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts beside
+//! the tests' own. The tests on Docker are ignored, and write the context they reach
+//! ([`test_support::docker_context`]) into the configuration that they give `run` and `build`.
 
 #![expect(
     clippy::unwrap_used,
@@ -12,9 +13,11 @@
 )]
 #![expect(
     clippy::print_stderr,
-    reason = "a failed test shows where its scratch directory is"
+    reason = "a failed test shows where its scratch directory is, and one that can't remove its \
+              images says so"
 )]
 
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt as _;
@@ -24,14 +27,16 @@ use std::process::{Command, Output};
 use std::time::Duration;
 use std::{fs, iter, thread};
 
-use engine::{BuildContext, Engine, Recipe};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
 use tempfile::TempDir;
 use test_support::{BUSYBOX, WORKFLOW, files};
 
+mod build;
+mod check;
 mod driver;
+mod fmt;
 mod run;
 mod wait;
 
@@ -42,8 +47,9 @@ const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 const SCORE: &str = r#"printf '{"raw_score": %s}' \
     $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"#;
 
-/// The directory test `name` runs `pumpkin` in, empty. Dropping it removes it, unless the test
-/// failed, when it shows where it is.
+/// The directory test `name` runs `pumpkin` in, empty but for its `.pumpkin/bin`, which holds
+/// the `pumpkin` it runs ([`Scratch::pumpkin`]). Dropping it removes it, unless the test failed,
+/// when it shows where it is.
 struct Scratch(PathBuf, TempDir);
 
 impl Scratch {
@@ -52,7 +58,9 @@ impl Scratch {
             .prefix(&format!("pumpkin-{name}-"))
             .tempdir()
             .unwrap();
-        Self(dir.path().to_owned(), dir)
+        let scratch = Self(dir.path().to_owned(), dir);
+        install(&scratch, ".pumpkin/bin");
+        scratch
     }
 
     /// Writes `contents` into the directory's file `name`, making its directory if need be.
@@ -62,9 +70,42 @@ impl Scratch {
         fs::write(path, contents.to_string()).unwrap();
     }
 
-    /// Writes `contents` into the directory's file `name`, which every user may execute.
+    /// Writes into the directory the task `name`, whose entry is `<name>/task.star`: the workflow
+    /// `ir` gives, but for its images, which every role takes from the recipe `<name>/Dockerfile`
+    /// (`busybox` with a world-writable `/workspace`); and the marker `PUMPKIN.star`, which makes
+    /// the directory the root of its tasks.
+    fn write_task(&self, name: &str, ir: &Value) {
+        self.write_task_in("", name, ir);
+    }
+
+    /// Writes the task `name` as [`write_task`](Self::write_task) does, in the directory `root`,
+    /// the root of its tasks.
+    fn write_task_in(&self, root: &str, name: &str, ir: &Value) {
+        let at = |file: &str| {
+            let dir = Path::new(root).join(name).join(file);
+            dir.to_str().unwrap().to_owned()
+        };
+        self.write(
+            &Path::new(root).join("PUMPKIN.star").display().to_string(),
+            "# The root of the tasks.\n",
+        );
+        let recipe = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
+        self.write(&at("Dockerfile"), &recipe);
+        let images = "IMAGE = image(\"Dockerfile\")\n";
+        let task = format!(
+            "{images}\nworkflow(\n    name = {},\n    roles = {},\n    score = {},\n)\n",
+            starlark(&ir["name"]),
+            starlark(&ir["roles"]),
+            starlark(&ir["score"]),
+        );
+        self.write(&at("task.star"), &task);
+    }
+
+    /// Writes `contents` into the directory's file `name`, which every user may execute, making
+    /// its directory if need be.
     fn write_executable(&self, name: &str, contents: &[u8]) {
         let path = self.0.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, contents).unwrap();
         fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
     }
@@ -78,9 +119,9 @@ impl Scratch {
         self.write_executable(name, &header);
     }
 
-    /// `pumpkin` with `args`, to run in the directory.
+    /// `pumpkin` with `args`, to run in the directory, as its `.pumpkin/bin` holds it.
     fn pumpkin(&self, args: &[&str]) -> Command {
-        self.program(PUMPKIN, args)
+        self.program(self.0.join(".pumpkin/bin/pumpkin"), args)
     }
 
     /// The `pumpkin` executable at `program` with `args`, to run in the directory.
@@ -96,6 +137,35 @@ impl Drop for Scratch {
         if thread::panicking() {
             self.1.disable_cleanup(true);
             eprintln!("the test's scratch directory is {}", self.0.display());
+        }
+    }
+}
+
+/// `value`, JSON, as the workflow language writes it, with each role's image as `IMAGE`, the
+/// recipe's image.
+fn starlark(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => serde_json::to_string(text).unwrap(),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(starlark).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(fields) => {
+            let fields = fields
+                .iter()
+                .map(|(key, value)| match (key.as_str(), value) {
+                    ("image", Value::String(_)) => "\"image\": IMAGE".to_owned(),
+                    _ => format!(
+                        "{}: {}",
+                        serde_json::to_string(key).unwrap(),
+                        starlark(value)
+                    ),
+                });
+            format!("{{{}}}", fields.collect::<Vec<_>>().join(", "))
         }
     }
 }
@@ -154,18 +224,20 @@ fn invocation(command: &Command) -> String {
         Some(value) => format!("{}={} ", name.display(), value.display()),
         None => format!("env -u {} ", name.display()),
     });
-    let args = command.get_args().map(|arg| match arg.to_str().unwrap() {
-        "" => "''",
+    // An argument that isn't UTF-8 shows with U+FFFD for each byte that isn't.
+    let args = command.get_args().map(|arg| match arg.to_string_lossy() {
+        arg if arg.is_empty() => Cow::Borrowed("''"),
         arg => arg,
     });
     let set: String = set.collect();
-    let program = command.get_program().to_str().unwrap();
-    let program = if program == PUMPKIN {
-        "pumpkin"
+    let program = command.get_program().to_string_lossy();
+    // As `Scratch::pumpkin` runs it.
+    let program = if program.contains("/.pumpkin/") && program.ends_with("/bin/pumpkin") {
+        Cow::Borrowed("pumpkin")
     } else {
         program
     };
-    let args: Vec<&str> = iter::once(program).chain(args).collect();
+    let args: Vec<Cow<str>> = iter::once(program).chain(args).collect();
     format!("$ {set}{}", args.join(" "))
 }
 
@@ -269,13 +341,15 @@ fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
     panic!("nothing came in a minute");
 }
 
-/// The image of the roles that run on Docker, which the provider builds on `engine`: `busybox`
-/// with a world-writable `/workspace`, the fixture's agent's working directory.
-fn image(engine: &Engine) -> String {
-    let recipe = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
-    let (context, recipe) = (BuildContext::default(), Recipe::Text(recipe));
-    let built = engine.build(&context, &recipe, &[], "pumpkin-tests");
-    built.unwrap().image().as_str().to_owned()
+/// Builds the images of the task `task`, which `write_task` wrote, on the engine that `config`
+/// names, so that a `run` of it after finds them by their tags and says nothing of building them.
+fn build_first(scratch: &Scratch, task: &str, config: &str) {
+    let entry = format!("{task}/task.star");
+    let built = scratch
+        .pumpkin(&["build", &entry, "--config", config])
+        .output();
+    let built = built.unwrap();
+    assert!(built.status.success(), "{built:?}");
 }
 
 /// The fixture's workflow, without the agent's model route, with `argv` as the agent's command,
@@ -310,15 +384,34 @@ fn docker_table(context: &str) -> String {
     format!("[docker]\ncontext = \"{context}\"\n")
 }
 
+/// Makes `scratch`'s directory `dir`, and links `pumpkin` there; returns the link's path.
+fn install(scratch: &Scratch, dir: &str) -> PathBuf {
+    let dir = scratch.0.join(dir);
+    fs::create_dir_all(&dir).unwrap();
+    // A link, which writes nothing where a copy would write the whole executable.
+    fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
+    // The formatter that `PUMPKIN_BUILDIFIER` names, as `cargo xtask ci` and `cargo xtask
+    // mutants` set it, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin` that
+    // runs.
+    if let Some(buildifier) = std::env::var_os("PUMPKIN_BUILDIFIER") {
+        fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
+    }
+    dir.join("pumpkin")
+}
+
+/// What a recipe holds that the stand-in `docker` builds ([`StandIn`]).
+const BUILDS: &str = "# The stand-in builds this recipe.";
+
 /// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
 /// on a host of 4 CPUs and 8 GiB of memory.
 const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"PidsLimit":true,"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"NCPU":4,"MemTotal":8589934592}"#;
 
 /// A stand-in `docker` in a scratch directory, for the `pumpkin run`s that [`run`](Self::run)
-/// makes: an engine that has every image but those of the repository `absent`, creates no
-/// container and lists none. It holds the driver at each of its commands that
-/// [`hold`](Self::hold) names, such as `create`, until [`release`](Self::release) or the
-/// driver's end; dropping it releases them all.
+/// makes: an engine whose one image is that of the task `stand-in`, ID all zeros, which lacks the
+/// task `lacking`'s, ID all ones, and fails to build the task `unbuilt`'s. It builds a recipe
+/// that holds [`BUILDS`] as the image of ID all twos, tagged as it is then asked; creates and
+/// lists no container; and leaves `docker.ran` once run. It holds the driver at each command that [`hold`](Self::hold) names, such as `create`, until
+/// [`release`](Self::release) or the driver's end; dropping it releases them all.
 struct StandIn<'a> {
     scratch: &'a Scratch,
 }
@@ -326,28 +419,53 @@ struct StandIn<'a> {
 impl<'a> StandIn<'a> {
     fn new(scratch: &'a Scratch) -> Self {
         let dir = scratch.0.display();
-        let digest = "0".repeat(64);
+        let digest = format!("sha256:{}", "0".repeat(64));
+        let absent = format!("sha256:{}", "1".repeat(64));
+        let built = format!("sha256:{}", "2".repeat(64));
         let docker = format!(
             r#"#!/bin/sh
+touch "{dir}/docker.ran"
 # `--context=<name>` comes first.
 shift
-if [ -e "{dir}/hold-$1" ]; then
-    echo $PPID > "{dir}/at-$1.tmp" && mv "{dir}/at-$1.tmp" "{dir}/at-$1"
+# The build's look for an image by its tag, `image inspect --format {{{{.Id}}}} -- <tag>`, is a
+# command of its own to hold.
+name=$1
+case "$1 $6" in
+    "image pumpkin/"*) name=lookup ;;
+esac
+if [ -e "{dir}/hold-$name" ]; then
+    echo $PPID > "{dir}/at-$name.tmp" && mv "{dir}/at-$name.tmp" "{dir}/at-$name"
     # At most the minute that `poll` waits, so that the driver of a test killed meanwhile ends.
     i=0
-    while [ -e "{dir}/hold-$1" ] && kill -0 $PPID 2>/dev/null && [ $i -lt 1200 ]; do
+    while [ -e "{dir}/hold-$name" ] && kill -0 $PPID 2>/dev/null && [ $i -lt 1200 ]; do
         sleep 0.05; i=$((i + 1))
     done
 fi
 case $1 in
     context) echo unix:///stand-in.sock ;;
     info) echo '{INFO}' ;;
-    # `image inspect --format <format> -- <image>`
+    # `image inspect --format <format> -- <image>`, which says it has no image that the engine
+    # lacks, or for the tag `pumpkin/lacking:<digest>`, the image that the engine lacks; for the
+    # tag `pumpkin/unbuilt:<digest>`, no image, which a build then fails to make.
     image) case $6 in
-        absent@*) echo "Error response from daemon: No such image: $6" >&2; exit 1 ;;
-        *) echo sha256:{digest} ;;
+        pumpkin/lacking:*) echo {absent} ;;
+        pumpkin/built:*) grep -qxF "$6" "{dir}/tagged" 2>/dev/null && echo {built} ||
+            {{ echo "Error: No such image: $6" >&2; exit 1; }} ;;
+        pumpkin/unbuilt:*) echo "Error: No such image: $6" >&2; exit 1 ;;
+        {absent}) echo "Error response from daemon: No such image: $6" >&2; exit 1 ;;
+        *) echo {digest} ;;
     esac ;;
     container) ;;
+    # `build ... --file <recipe> --iidfile <file> -- <stage>`, which writes the image's ID there.
+    build) for arg; do
+        case $previous in
+            --file) grep -qF "{BUILDS}" "$arg" || {{ echo "the stand-in creates nothing" >&2; exit 1; }} ;;
+            --iidfile) echo {built} > "$arg" ;;
+        esac
+        previous=$arg
+    done ;;
+    # `tag -- <image> <tag>`.
+    tag) echo "$4" >> "{dir}/tagged" ;;
     *) echo "the stand-in creates nothing" >&2; exit 1 ;;
 esac
 "#
@@ -357,9 +475,9 @@ esac
         fs::set_permissions(scratch.0.join("bin/docker"), mode).unwrap();
         scratch.write_sandboxd("sandboxd");
         scratch.write("pumpkin.toml", &docker_table("default"));
-        scratch.write("stand-in.json", &workflow(BUSYBOX, &["true"]));
-        let absent = format!("absent@sha256:{}", "1".repeat(64));
-        scratch.write("absent.json", &workflow(&absent, &["true"]));
+        scratch.write_task("stand-in", &workflow(&digest, &["true"]));
+        scratch.write_task("lacking", &workflow(&absent, &["true"]));
+        scratch.write_task("unbuilt", &workflow(&digest, &["true"]));
         Self { scratch }
     }
 
@@ -379,12 +497,12 @@ esac
         let _ = fs::remove_file(self.scratch.0.join(format!("hold-{command}")));
     }
 
-    /// `pumpkin run` of the workflow whose IR is in `ir`, and `rest`, against the stand-in, in a
+    /// `pumpkin run` of the task whose entry is `entry`, and `rest`, against the stand-in, in a
     /// process group of its own, so that a signal to the group misses the test. Fails the test if
     /// it ignores or blocks SIGINT or SIGTERM, which `run` would inherit.
-    fn run(&self, ir: &str, rest: &[&str]) -> Command {
+    fn run(&self, entry: &str, rest: &[&str]) -> Command {
         signals_at_default();
-        let mut run = (self.scratch).pumpkin(&["run", ir, "--sandboxd", "sandboxd"]);
+        let mut run = (self.scratch).pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
         run.args(["--runs", "runs", "--config", "pumpkin.toml"])
             .args(rest);
         let bin = self.scratch.0.join("bin");
