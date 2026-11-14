@@ -166,6 +166,14 @@ pub fn result_file() -> RelativePath {
 // room to spare.
 pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
+/// How deep a judge's result ([`result_file()`]) may nest arrays and objects, the document
+/// included: a deeper one is no result.
+// A run's record nests what a result returns at most 7 deep, in its log's `finish` action: the
+// line, its `actions`, the action, its `outcome`, `verdict`, `result` and `returned`. serde_json
+// reads at most 127 nested arrays and objects, so with this bound every line and every
+// `outcome.json` of a run reads back.
+pub const RESULT_MAX_DEPTH: usize = 127 - 7;
+
 /// `out/evidence`, there before a judge's command starts, which holds the files of evidence
 /// that only the operator sees.
 pub fn evidence_dir() -> RelativePath {

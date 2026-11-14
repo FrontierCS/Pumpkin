@@ -16,6 +16,7 @@ use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderValue, Uri};
 
 use super::closure::{Closed, Refusal, Route, Status, refusal};
+use super::usage::{Failure, Scan, Usage};
 
 /// The response headers that reach the client, besides the rate-limit headers that
 /// [`RATE_LIMIT_SUFFIXES`] gives.
@@ -108,19 +109,24 @@ pub struct Upstream {
 ///
 /// An upstream's response comes with the provider's id for the request, from its `x-request-id`
 /// or else `x-oai-request-id`, if it gave one, which an operator names to ask the provider about
-/// the request.
+/// the request, the usage that its body reported, if it did ([`Usage`]), and the failure that it
+/// stated, if it did ([`Failure`]).
 #[derive(Debug)]
 pub enum Answer {
     /// With the upstream's response, whole, which had `status`.
     Forwarded {
         status: u16,
         request_id: Option<String>,
+        usage: Option<Usage>,
+        failed: Option<Failure>,
     },
     /// With the upstream's response, which had `status`, cut short: it broke off, was given up
     /// on, or the session stopped taking it.
     Cut {
         status: u16,
         request_id: Option<String>,
+        usage: Option<Usage>,
+        failed: Option<Failure>,
     },
     /// With a refusal of the route's own, with `status` and `message`, before the request
     /// reached the upstream: the route's rules refused it, or the route had ended.
@@ -317,24 +323,38 @@ impl Upstream {
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
             Err(error) => {
-                answered(Answer::Cut { status, request_id });
+                answered(Answer::Cut {
+                    status,
+                    request_id,
+                    usage: None,
+                    failed: None,
+                });
                 return Err(error);
             }
         };
+        let content_type = (response.headers().get("content-type")).and_then(|v| v.to_str().ok());
+        let mut scan = Scan::new(content_type, closed.usage());
         let mut body = response.into_body().into_reader();
-        match relay(&mut body, &mut client) {
-            Ok(true) => {
-                answered(Answer::Forwarded { status, request_id });
-                client.end()
-            }
-            Ok(false) => {
-                answered(Answer::Cut { status, request_id });
-                client.cut()
-            }
-            Err(error) => {
-                answered(Answer::Cut { status, request_id });
-                Err(error)
-            }
+        let relayed = relay(&mut body, &mut client, &mut scan);
+        let (usage, failed) = scan.finish();
+        answered(match relayed {
+            Relayed::Whole => Answer::Forwarded {
+                status,
+                request_id,
+                usage,
+                failed,
+            },
+            Relayed::BrokeOff | Relayed::Unsent(_) => Answer::Cut {
+                status,
+                request_id,
+                usage,
+                failed,
+            },
+        });
+        match relayed {
+            Relayed::Whole => client.end(),
+            Relayed::BrokeOff => client.cut(),
+            Relayed::Unsent(error) => Err(error),
         }
     }
 
@@ -480,18 +500,32 @@ fn refuse(
     refusal.answer(request, by)
 }
 
-/// Streams `body` to `client` as it arrives, until it ends, and returns whether it arrived
-/// whole, without writing its end.
-fn relay(body: &mut impl Read, client: &mut ModelResponse) -> io::Result<bool> {
+/// How a response's body went to its client ([`relay`]).
+enum Relayed {
+    /// To its end.
+    Whole,
+    /// Until it broke off, or was given up on.
+    BrokeOff,
+    /// Until sending it failed so: the deadline passed, or the session ended.
+    Unsent(io::Error),
+}
+
+/// Streams `body` to `client` as it arrives, showing it to `scan`, until it ends, without writing
+/// its end, and returns how it went.
+fn relay(body: &mut impl Read, client: &mut ModelResponse, scan: &mut Scan) -> Relayed {
     // A read fills at most one frame of the session.
     let mut buffer = vec![0; frame::MAX_BODY_BYTES];
     loop {
         match body.read(&mut buffer) {
-            Ok(0) => return Ok(true),
-            Ok(read) => client.send(&buffer[..read])?,
+            Ok(0) => return Relayed::Whole,
+            Ok(read) => {
+                scan.feed(&buffer[..read]);
+                if let Err(error) = client.send(&buffer[..read]) {
+                    return Relayed::Unsent(error);
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            // A body that broke off, or was given up on, isn't whole.
-            Err(_) => return Ok(false),
+            Err(_) => return Relayed::BrokeOff,
         }
     }
 }

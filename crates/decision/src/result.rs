@@ -5,6 +5,7 @@ use alloc::format;
 use alloc::string::String;
 
 use schema::ir::ResultSpec;
+use schema::sandbox::RESULT_MAX_DEPTH;
 use schema::sandbox::op::{JobState, Returned};
 use serde_json::{Number, Value};
 
@@ -21,12 +22,18 @@ impl JudgeResult {
     ///
     /// # Errors
     ///
-    /// Fails, with the reason, if the file is not JSON or if its score breaks the rule of
-    /// [`ResultSpec::score`].
+    /// Fails, with the reason, if the file is not JSON, nests deeper than [`RESULT_MAX_DEPTH`],
+    /// or if its score breaks the rule of [`ResultSpec::score`].
     pub fn parse(spec: &ResultSpec, json: &[u8]) -> Result<Self, String> {
         let ResultSpec { score, returns } = spec;
         let document: Value = serde_json::from_slice(json)
             .map_err(|error| format!("result.json is not JSON: {error}"))?;
+        if depth(&document) > RESULT_MAX_DEPTH {
+            return Err(format!(
+                "result.json nests arrays and objects more than {RESULT_MAX_DEPTH} deep: nest \
+                 them at most that deep"
+            ));
+        }
         let score = match score.resolve(&document) {
             None | Some(Value::Null) => None,
             Some(Value::Number(number)) => Some(number.clone()),
@@ -63,5 +70,15 @@ impl JudgeResult {
             returned: returned.clone(),
             scored: score.is_some(),
         }
+    }
+}
+
+/// How deep `value` nests arrays and objects, itself included: 0 for a scalar.
+fn depth(value: &Value) -> usize {
+    let deepest = |values: &mut dyn Iterator<Item = &Value>| values.map(depth).max().unwrap_or(0);
+    match value {
+        Value::Array(items) => 1 + deepest(&mut items.iter()),
+        Value::Object(fields) => 1 + deepest(&mut fields.values()),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => 0,
     }
 }

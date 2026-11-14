@@ -33,6 +33,7 @@ use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
 
 use super::upstream::Answer;
+use super::usage;
 
 /// The request headers that pass upstream, for an entry of [`Api::Responses`].
 // Each is one the harness the runs use sends, and describes its client, its session, or the form
@@ -86,6 +87,8 @@ struct Rules {
     target: &'static str,
     /// The request headers that pass upstream.
     headers: &'static [&'static str],
+    /// Where a response's usage gives its tokens.
+    usage: usage::Fields,
     /// Refuses a body that keeps state on the provider's side, or refers to state kept there.
     stored: fn(&Map<String, Value>) -> Result<(), Refusal>,
     /// Refuses a body that picks a feature of the provider's beyond its models and tools.
@@ -101,6 +104,7 @@ type Tool = fn(&Value) -> Result<(), Refusal>;
 const RESPONSES: Rules = Rules {
     target: "/responses",
     headers: &RESPONSES_HEADERS,
+    usage: usage::RESPONSES_FIELDS,
     stored: stateless,
     feature: picks_no_feature,
     tool: client_tool,
@@ -110,6 +114,7 @@ const RESPONSES: Rules = Rules {
 const CHAT: Rules = Rules {
     target: "/v1/chat/completions",
     headers: &CHAT_HEADERS,
+    usage: usage::CHAT_FIELDS,
     stored: stores_nothing,
     feature: searches_nothing,
     tool: function_tool,
@@ -132,6 +137,8 @@ pub(crate) struct Closed {
     /// The model that the request named, and the name that its upstream takes for it, which
     /// `body` names.
     model: (ModelName, ModelName),
+    /// The rules of its API's entry.
+    rules: &'static Rules,
 }
 
 /// Why the route answers a model request with an error, which [`Refusal::answer`] tells its
@@ -216,6 +223,7 @@ impl Route {
             headers,
             body,
             model,
+            rules,
         })
     }
 
@@ -250,6 +258,11 @@ impl Closed {
     /// The request's body, as [`Route::close`] parsed it.
     pub(crate) fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// Where its API's response gives the tokens it used.
+    pub(crate) fn usage(&self) -> usage::Fields {
+        self.rules.usage
     }
 
     /// `answered`, the model that a response says answered the request, as the request named

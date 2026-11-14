@@ -15,6 +15,8 @@
 
 mod closure;
 mod upstream;
+mod usage;
 
 pub use closure::Route;
 pub use upstream::{Answer, Key, Serving, Upstream, UpstreamUrl, serve};
+pub use usage::{Failure, Usage};

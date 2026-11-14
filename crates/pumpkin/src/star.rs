@@ -18,6 +18,7 @@ use engine::{BuildContext, Building, Built, Engine, Started};
 use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe};
 use recipe::fetch::FetchStage;
 use recipe::{Given, Stage};
+use schema::ir::Image;
 use schema::workflow::Workflow;
 
 use crate::say;
@@ -408,6 +409,10 @@ pub(crate) fn check(
     })
 }
 
+/// The tag of each image of a built task, by the image's ID: what its build's inputs name
+/// ([`Built::tag`]).
+pub(crate) type Tags = BTreeMap<Image, String>;
+
 /// A task, [`checked`], on the thread that evaluated it, which its plan can't leave: its
 /// workflow, and how to build its images.
 pub(crate) struct Task<'r> {
@@ -425,19 +430,20 @@ impl Task<'_> {
     /// Builds the task's images on `engine`, as `pumpkin build --help` says ([`Root::start`]),
     /// as many at once as [`jobs`] says, each once those it is built on are, saying each
     /// repository as its first build starts, and each build, after its output, as it ends. Gives
-    /// the workflow that names them.
+    /// the workflow that names them, and their tags.
     ///
     /// # Errors
     ///
     /// Gives each build that failed, at its place.
-    pub(crate) fn build(self, engine: &Engine) -> Result<Workflow, Problems> {
+    pub(crate) fn build(self, engine: &Engine) -> Result<(Workflow, Tags), Problems> {
         let Self {
             root,
             plan,
             workflow: _,
         } = self;
         let mut builds = Builds::new();
-        plan.build(jobs(), |ready| builds.step(root, engine, ready))
+        let built = plan.build(jobs(), |ready| builds.step(root, engine, ready))?;
+        Ok((built, builds.tags))
     }
 }
 
@@ -541,6 +547,8 @@ fn same_inputs<'p>(
 struct Builds {
     building: Vec<((usize, String), Building)>,
     said: BTreeSet<String>,
+    /// The tag of each image that ended, by the image's ID, which the run's record keeps.
+    tags: Tags,
 }
 
 impl Builds {
@@ -549,6 +557,7 @@ impl Builds {
         Self {
             building: Vec::new(),
             said: BTreeSet::new(),
+            tags: Tags::new(),
         }
     }
 
@@ -584,6 +593,10 @@ impl Builds {
                 Err(_) => say(format_args!("the build of an image in {image} failed")),
             }
             ended.push((index, built));
+        }
+        for built in ended.iter().filter_map(|(_, built)| built.as_ref().ok()) {
+            self.tags
+                .insert(built.image().clone(), built.tag().to_owned());
         }
         ended
     }

@@ -31,6 +31,7 @@ use gateway::{
 };
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
+use schema::ir::Image;
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{ByProvider, ByRole, JudgeCall, LeaseGrantId, Placed, RoleId, Workflow};
 use serde_json::json;
@@ -52,6 +53,10 @@ use child::{Child, Deadlines, Message, Report};
 use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
+pub use log::{
+    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, LeaseCommand, LeaseSpan, ModelUse, Place,
+    PlaceUse, Progress, Sandbox, Tokens, Work,
+};
 use log::{Entry, Log};
 use model::Served;
 pub use record::{BUILD, Build, Ending, Reaped, Record, ir_json, minted, named, new_id};
@@ -68,6 +73,8 @@ const LOOK: Duration = Duration::from_millis(50);
 pub struct Recorded<'a> {
     /// The arguments of the `pumpkin run` that started the run.
     pub args: &'a [String],
+    /// The tag of each image's build, by the image's ID.
+    pub tags: &'a BTreeMap<Image, String>,
 }
 
 /// A run, prepared on its host, `H`: its workflow placed, on the providers its roles are placed
@@ -80,6 +87,8 @@ pub struct Run<'r, H> {
     /// Each role's model route, as [`model::routes`] gives it.
     routes: ByRole<Vec<Serving>>,
     id: RunTag,
+    /// The tag of each image's build, by the image's ID, for `provider.json`.
+    tags: &'r BTreeMap<Image, String>,
     dir: PathBuf,
     /// Held until `outcome.json` is written: see [`Lock`].
     lock: Lock,
@@ -107,7 +116,7 @@ impl<'r, H: Host> Run<'r, H> {
         servings: &ByRole<Vec<Serving>>,
         recorded: Recorded<'r>,
     ) -> Result<Self, String> {
-        let Recorded { args } = recorded;
+        let Recorded { args, tags } = recorded;
         let routes = model::routes(placed.workflow(), servings)?;
         let reserved = placed.by_provider(|name| {
             let phases = sandbox::phases(&placed, name);
@@ -122,6 +131,7 @@ impl<'r, H: Host> Run<'r, H> {
             providers,
             routes,
             id,
+            tags,
             dir,
             lock,
             reserved,
@@ -154,7 +164,12 @@ impl<'r, H: Host> Run<'r, H> {
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let outcome = self.run_on(sandboxd, (private, dialer), started);
-        let recorded = match &outcome {
+        // What the run used, as its log, synced, says; none if the run never began its log.
+        let (outcome, usage) = match log::progress(&self.dir) {
+            Ok(progress) => (outcome, progress.as_ref().map(log::usage_of)),
+            Err(error) => (failed_also(outcome, Err(error)), None),
+        };
+        let mut recorded = match &outcome {
             Ok(outcome) => {
                 let mut recorded = log::outcome_json(outcome);
                 recorded["state"] = "finished".into();
@@ -165,6 +180,9 @@ impl<'r, H: Host> Run<'r, H> {
                 json!({ "state": "interrupted", "signal": signal.name() })
             }
         };
+        if let Some(usage) = usage {
+            recorded["usage"] = usage;
+        }
         let written = record::write_json(self.host, &self.dir, "outcome.json", &recorded);
         // Before the lock, which `wait` follows, so that a run that `wait` saw end holds nothing.
         drop(self.reserved);
@@ -183,7 +201,7 @@ impl<'r, H: Host> Run<'r, H> {
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
-        let provided = record::provided(&self.placed, &self.providers);
+        let provided = record::provided(&self.placed, &self.providers, self.tags);
         record::write_json(host, &self.dir, "provider.json", &provided)?;
         let published = Published::create(
             &self.providers,

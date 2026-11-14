@@ -39,8 +39,8 @@ use decision::{
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, Argv, CpuModel, Name, Sha256Digest};
-use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, TransferEnd};
+use schema::sandbox::{ExitStatus, RESULT_MAX_DEPTH};
 use schema::workflow::{Class, JudgeCall, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
@@ -919,6 +919,59 @@ fn agent_ends() {
               tear down the agent
               finish: no score; work ended at the agent's failure, the agent's sandbox did not connect; no submission
               (tick due at 18210000)
+        "#]],
+    );
+}
+
+#[test]
+fn deep_results() {
+    // A result whose `deep` field nests arrays to its depth in all, its object's included.
+    let nested = |depth: usize| {
+        let (open, close) = ("[".repeat(depth - 1), "]".repeat(depth - 1));
+        format!(r#"{{"raw_score": 3, "deep": {open}{close}}}"#)
+    };
+    let (deepest, deeper) = (nested(RESULT_MAX_DEPTH), nested(RESULT_MAX_DEPTH + 1));
+    check(
+        |_| {},
+        &format!(
+            "
+            0 agent_started
+            1000 judge train 10
+            1500 judge_started 0
+            3000 judge_exited 0
+            3100 collected 0 {deepest}
+            3200 status 0
+            3300 submit submit 10
+            3400 agent_exited 0
+            3500 judge_started 1
+            4000 judge_exited 1
+            4100 collected 1 {deeper}
+            "
+        ),
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1000 judge train 10
+              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1500 judge_started 0
+            3000 judge_exited 0
+            3100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+            3200 status 0
+              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":3},"scored":true,"remaining":{"calls":99,"seconds":11998}}
+            3300 submit submit 10
+              reply to op 3: {"kind":"submit","state":"stored","remaining_seconds":17996}
+            3400 agent_exited 0
+              tear down the agent
+              start job 1 of score on op 3's payload of 10 bytes, with a timeout of 120s
+              (tick due at 18210000)
+            3500 judge_started 1
+            4000 judge_exited 1
+            4100 collected 1 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+              finish: no score; work ended at the agent's exit, Code(0); the stored submission, op 3's payload of 10 bytes, got no result, InvalidResult("result.json nests arrays and objects more than 120 deep: nest them at most that deep")
         "#]],
     );
 }

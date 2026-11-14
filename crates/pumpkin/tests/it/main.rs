@@ -1,10 +1,11 @@
 //! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
 //! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
-//! includes the model route of a workflow that has one reaching a stand-in model provider;
-//! `wait`; `cancel`; `reap`; `check`; `fmt`; `build`; `lock`; and `driver`, for the process that
-//! drives each run, which `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts
-//! beside the tests' own. The tests on Docker are ignored, and write the context they reach
-//! ([`test_support::docker_context`]) into the configuration that they give `run` and `build`.
+//! includes the model route of a workflow that has one reaching a stand-in model provider; `ls`,
+//! with a run's first steps, which it follows; `wait`; `cancel`; `reap`; `check`; `fmt`; `build`;
+//! `lock`; and `driver`, for the process that drives each run, which `run` starts. `fmt` runs the
+//! formatter beside `pumpkin`, which `cargo xtask ci` puts beside the tests' own. The tests on
+//! Docker are ignored, and write the context they reach ([`test_support::docker_context`]) into the
+//! configuration that they give `run` and `build`.
 
 #![expect(
     clippy::unwrap_used,
@@ -43,6 +44,7 @@ mod check;
 mod driver;
 mod fmt;
 mod lock;
+mod ls;
 mod reap;
 mod run;
 mod wait;
@@ -307,12 +309,12 @@ fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String
             !warnings.is_empty()
         ));
     }
-    lines.extend(said.into_iter().map(str::to_owned));
+    lines.extend(steady(&said));
     let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     let Some((id, record)) = record(&stderr) else {
         // `wait` prints an `outcome.json` without having started its run.
         if let Ok(outcome) = serde_json::from_str::<Value>(&stdout) {
-            lines.push(format!("printed outcome.json: {outcome}"));
+            lines.push(format!("printed outcome.json: {}", steady_outcome(outcome)));
         } else if !stdout.is_empty() {
             lines.push("printed:".to_owned());
             let printed = stdout
@@ -333,6 +335,66 @@ fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String
         ));
     }
     lines.join("\n").replace(id, "<id>")
+}
+
+/// `said`, lines of `pumpkin`'s standard error, with the times of a run's summary and of its
+/// milestones, which a run on the stand-ins takes as it goes, as `<t>`: each word of their lines
+/// that is a time or a span.
+fn steady(said: &[&str]) -> Vec<String> {
+    let timed = |word: &str| {
+        let word = word.trim_end_matches([',', ';', ':']);
+        let clock = word
+            .split(':')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+        let span = !word.is_empty()
+            && word
+                .trim_end_matches(|c: char| c.is_ascii_digit() || "hms".contains(c))
+                .is_empty()
+            && word.ends_with(['h', 'm', 's'])
+            && word.starts_with(|c: char| c.is_ascii_digit());
+        (clock && word.contains(':')) || span
+    };
+    let mut summary = false;
+    let lines = said.iter().map(|line| {
+        let first =
+            line.starts_with("pumpkin: run ") && line.ends_with(':') && line.contains(" ran ");
+        summary = first || (summary && line.starts_with("  "));
+        // A milestone, said as `wait` follows a run, starts with its time.
+        let milestone = (line.strip_prefix("pumpkin:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|word| timed(word) && word.contains(':'));
+        if !summary && !milestone {
+            return (*line).to_owned();
+        }
+        let words = line.split(' ').map(|word| {
+            if timed(word) {
+                let kept = &word[word.trim_end_matches([',', ';', ':']).len()..];
+                format!("<t>{kept}")
+            } else {
+                word.to_owned()
+            }
+        });
+        words.collect::<Vec<String>>().join(" ")
+    });
+    lines.collect()
+}
+
+/// `outcome`, an `outcome.json`, with the times of its usage, which a run on the stand-ins takes
+/// as it goes, as `<ns>`, and what its sandboxes cost by them as `<usd>`.
+fn steady_outcome(mut outcome: Value) -> Value {
+    if let Some(usage) = outcome.get_mut("usage") {
+        usage["ran_ns"] = "<ns>".into();
+        for sandboxes in usage["sandboxes"].as_array_mut().unwrap() {
+            sandboxes["lasted_ns"] = "<ns>".into();
+            if let Some(usd) = sandboxes.get_mut("usd") {
+                *usd = "<usd>".into();
+            }
+        }
+        if let Some(usd) = usage.get_mut("usd") {
+            *usd = "<usd>".into();
+        }
+    }
+    outcome
 }
 
 /// The id and the record of the run that `stderr`, `pumpkin`'s, says it records, if it does.
@@ -378,7 +440,7 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     if !said.is_empty() {
         lines.push(format!("driver.log: {}", said.replace('\n', "\\n")));
     }
-    lines.push(format!("outcome.json: {compact}"));
+    lines.push(format!("outcome.json: {}", steady_outcome(compact)));
     lines.push(format!("printed outcome.json: {}", stdout == outcome));
     lines
 }
@@ -430,6 +492,309 @@ fn ended(mut child: Child, mut stderr: impl Read, mut said: String) -> Output {
 /// Whether the process `pid` runs: a zombie has ended.
 fn alive(pid: i64) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z "))
+}
+
+/// `ran`, what `ls` printed, with the times that turn on the clock as `<t>`: how long the phase
+/// of a live run, whose id starts with `ids`, and each of its sandboxes, on the lines under it,
+/// have gone on, since its last model answer, and when the live runs end.
+fn masked(ran: &str, ids: &str) -> String {
+    let lines = ran.lines().map(|line| {
+        let mut line = line.to_owned();
+        // A line under a run's starts 25 columns further in, where its id would end.
+        let indent = line.len() - line.trim_start().len();
+        let row = line.trim_start().starts_with(ids).then_some(indent);
+        if let Some(at) = row.or_else(|| (indent > 25).then(|| indent - 25)) {
+            let at = at + 37;
+            line.replace_range(at..at + 7, "    <t>");
+        }
+        for (from, to) in [(" answered ", " ago"), ("ends by ", " UTC")] {
+            if let Some(at) = line.rfind(from)
+                && let Some(end) = line[at..].find(to)
+            {
+                line.replace_range(at + from.len()..at + end, "<t>");
+            }
+        }
+        line
+    });
+    lines.collect::<Vec<String>>().join("\n")
+}
+
+/// The IR of the task, `example/lease`, of the runs whose records the tests of `ls` and `wait`
+/// write ([`write_run`]), as `ir.json` holds it: an agent, `solver`, with a model route and a
+/// deadline of 30 minutes, which may call the train judge, `trainer`, which may lease a `box`,
+/// and lease a `gpu` runner for a minute and a `cpu` runner for 30; and the final judge,
+/// `scorer`. `trainer`, `scorer` and `gpu` each need an `NVIDIA A100-SXM4-80GB`.
+fn lease_task() -> Value {
+    let gpu = json!({ "gpu": { "count": 1, "model": "NVIDIA A100-SXM4-80GB" } });
+    let lease = |name: &str, seconds: u64| json!({ "lease": { "name": name, "role": name, "instance_seconds": seconds } });
+    json!({
+        "name": "example/lease",
+        "score": { "role": "scorer" },
+        "roles": [
+            {
+                "name": "solver",
+                "runtime": { "agent": { "deadline_seconds": 1800 } },
+                "egress": { "model": {} },
+                "grants": [
+                    { "judge": { "name": "train", "role": "trainer" } },
+                    lease("gpu", 60),
+                    lease("cpu", 1800),
+                ],
+            },
+            { "name": "trainer", "needs": gpu, "grants": [lease("box", 60)] },
+            { "name": "scorer", "needs": gpu },
+            { "name": "gpu", "needs": gpu },
+            { "name": "cpu" },
+            { "name": "box" },
+        ],
+    })
+}
+
+/// Where a run of [`lease_task`] places its roles, as `provider.json` holds it: the agent and the
+/// `cpu` runner on `aws/judge`, which starts within 2 minutes, the `box` on `aws/box`, and the
+/// judges and the `gpu` runner on `modal/a100_80`, which starts within 30; at $0.3672 an hour on
+/// `aws/judge` and $2.5 on `modal/a100_80` if `priced`, and never on `aws/box`.
+fn lease_places(priced: bool) -> Value {
+    let place = |provider: &str, class: &str| json!({ "provider": provider, "class": class });
+    let class = |startup_seconds: u64, usd_per_hour: f64| {
+        let mut class = json!({ "startup_seconds": startup_seconds });
+        if priced {
+            class["usd_per_hour"] = json!(usd_per_hour);
+        }
+        class
+    };
+    json!({
+        "roles": {
+            "solver": place("aws", "judge"),
+            "cpu": place("aws", "judge"),
+            "box": place("aws", "box"),
+            "trainer": place("modal", "a100_80"),
+            "scorer": place("modal", "a100_80"),
+            "gpu": place("modal", "a100_80"),
+        },
+        "providers": {
+            "aws": { "classes": { "judge": class(120, 0.3672), "box": { "startup_seconds": 60 } } },
+            "modal": { "classes": { "a100_80": class(1800, 2.5) } },
+        },
+    })
+}
+
+/// A record of a run log, of `event` and the core's `actions`, written `seconds` after the run
+/// started; [`write_run`] numbers it.
+fn logged(seconds: u64, event: Value, actions: Value) -> Value {
+    let mut record = json!({ "at_ns": (seconds * 1_000_000_000).to_string() });
+    record["event"] = event;
+    record["actions"] = actions;
+    record
+}
+
+/// The `outcome.json` of a run of [`lease_task`] whose final judge scored `returned`, what it
+/// returned, as `score`, after the agent exited 0.
+fn judged(score: f64, returned: Value) -> Value {
+    let mut outcome = json!({
+        "state": "finished",
+        "score": score,
+        "verdict": { "kind": "judged", "result": { "score": score } },
+        "work_end": { "kind": "agent_exited", "status": { "code": 0 } },
+    });
+    outcome["verdict"]["result"]["returned"] = returned;
+    outcome
+}
+
+/// The log of a run of [`lease_task`] that went the whole way, but its start, by the second
+/// since the run started: the agent's three model requests, two reporting their tokens; four
+/// train judge calls, one scored, whose call leases a box that a file is put into and a script
+/// runs in, one never started, one stopped and one timed out, with no score; three leases of the
+/// agent's, a `gpu` runner whose sandbox sees the GPU its role needs, closed by the agent, a `cpu`
+/// runner whose command times out, closed as the work phase ends, and a `gpu` runner whose
+/// sandbox sees another GPU, which expires; and the final judge's score, 49.36.
+#[expect(clippy::too_many_lines, reason = "one line for each record")]
+fn judged_log() -> Vec<Value> {
+    let none = || json!([]);
+    let tick = || json!({ "kind": "tick" });
+    let answered = |request: u64, usage: Value| {
+        json!({
+            "kind": "model_answered", "caller": "agent", "request": request,
+            "answer": { "kind": "forwarded" }, "upstream_status": 200, "usage": usage,
+        })
+    };
+    let ask = |job: u64| {
+        let request = json!({ "kind": "judge", "grant": "train" });
+        let timeout = "600000000000";
+        let start =
+            json!({ "kind": "start_judge", "job": job, "grant": "train", "timeout_ns": timeout });
+        (
+            json!({ "kind": "op_arrived", "request": request }),
+            json!([start]),
+        )
+    };
+    let of_job = |kind: &str, job: u64| json!({ "kind": kind, "job": job });
+    let of_lease = |kind: &str, lease: u64| json!({ "kind": kind, "lease": lease });
+    let open = |grant: &str, lease: u64| {
+        let request = json!({ "kind": "lease_open", "grant": grant });
+        let start =
+            json!({ "kind": "start_lease", "grant": grant, "holder": "agent", "lease": lease });
+        (
+            json!({ "kind": "op_arrived", "request": request }),
+            json!([start]),
+        )
+    };
+    let run = |lease: u64, argv: &[&str]| json!([{ "kind": "run_command", "lease": lease, "command": 0, "argv": argv }]);
+    let ended = |lease: u64, end: Value| json!({ "kind": "command_ended", "lease": lease, "command": 0, "end": end });
+    let exited = || json!({ "exited": { "code": 0 } });
+    let saw = |sandbox: &str, gpu: &str| json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": [gpu] });
+    let close = |lease: u64| json!({ "kind": "close_lease", "lease": lease });
+    let collected = |job: u64, result: Value| json!({ "kind": "judge_collected", "job": job, "result": result });
+    let failed =
+        |job: u64, reason: &str| json!({ "kind": "judge_failed", "job": job, "reason": reason });
+    let sxm = "NVIDIA A100-SXM4-80GB";
+    let tokens = |input: u64, output: u64, cached: u64| json!({ "input_tokens": input, "output_tokens": output, "cached_tokens": cached });
+    let mut reasoned = tokens(1000, 100, 800);
+    reasoned["reasoning_tokens"] = json!(40);
+    let (asked_0, start_0) = ask(0);
+    let (asked_1, start_1) = ask(1);
+    let (asked_2, start_2) = ask(2);
+    let (asked_3, start_3) = ask(3);
+    let (opened_1, start_1_lease) = open("gpu", 1);
+    let (opened_2, start_2_lease) = open("cpu", 2);
+    let (opened_3, start_3_lease) = open("gpu", 3);
+    let boxed = json!([{ "kind": "start_lease", "grant": "box", "holder": "job-0", "lease": 0 }]);
+    let put = json!([{
+        "kind": "transfer", "lease": 0, "command": 0, "direction": "put",
+        "from": "/pumpkin/in/payload", "to": "/work/in",
+    }]);
+    let moved = json!({
+        "kind": "transfer_ended", "lease": 0, "command": 0,
+        "end": { "moved": { "bytes": 1, "entries": 1 } },
+    });
+    let closing = json!({ "kind": "op_arrived", "request": { "kind": "lease_close", "lease": 1 } });
+    let unstarted = "the judge's sandbox didn't start: Modal refused the helper's `create`: \
+                     ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
+                     Modal reports";
+    let long = "x".repeat(200);
+    let unscored = json!({ "returned": { "exit_status": 1, "stderr_tail": long } });
+    let final_judge = json!([{
+        "kind": "start_judge", "job": 4, "grant": null, "timeout_ns": "900000000000",
+    }]);
+    let returned = json!({ "raw_score": 49.36 });
+    let finish = json!([{ "kind": "finish", "outcome": judged(49.36, returned.clone()) }]);
+    let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
+    vec![
+        logged(5, json!({ "kind": "agent_started" }), none()),
+        logged(10, answered(0, reasoned), none()),
+        logged(20, answered(1, tokens(2000, 200, 1800)), none()),
+        logged(30, answered(2, Value::Null), none()),
+        logged(40, asked_0, start_0),
+        logged(46, of_job("judge_started", 0), none()),
+        logged(50, tick(), boxed),
+        logged(55, of_lease("lease_ready", 0), none()),
+        logged(56, tick(), put),
+        logged(57, moved, none()),
+        logged(58, tick(), run(0, &["sh", "-c", "set -e\nprint 7"])),
+        logged(62, ended(0, exited()), none()),
+        logged(
+            100,
+            collected(0, json!({ "score": 49.53, "returned": {} })),
+            json!([close(0)]),
+        ),
+        logged(102, of_lease("lease_ended", 0), none()),
+        logged(120, opened_1, start_1_lease),
+        logged(120, opened_2, start_2_lease),
+        logged(126, saw("lease-1", sxm), none()),
+        logged(126, of_lease("lease_ready", 1), none()),
+        logged(130, tick(), run(1, &["nvidia-smi"])),
+        logged(132, ended(1, exited()), none()),
+        logged(140, closing, json!([close(1)])),
+        logged(145, of_lease("lease_ended", 1), none()),
+        logged(150, of_lease("lease_ready", 2), none()),
+        logged(151, tick(), run(2, &["sleep", "60"])),
+        logged(181, ended(2, json!("timed_out")), none()),
+        logged(200, asked_1, start_1),
+        logged(260, failed(1, unstarted), none()),
+        logged(300, asked_2, start_2),
+        logged(310, saw("job-2", sxm), none()),
+        logged(310, of_job("judge_started", 2), none()),
+        logged(320, tick(), json!([of_job("stop_judge", 2)])),
+        logged(330, failed(2, "the call was stopped"), none()),
+        logged(400, asked_3, start_3),
+        logged(405, of_job("judge_started", 3), none()),
+        logged(410, of_job("judge_timed_out", 3), none()),
+        logged(415, collected(3, unscored), none()),
+        logged(500, opened_3, start_3_lease),
+        logged(505, saw("lease-3", "NVIDIA A100 80GB PCIe"), none()),
+        logged(505, of_lease("lease_ready", 3), none()),
+        logged(506, tick(), run(3, &["true"])),
+        logged(507, ended(3, exited()), none()),
+        logged(565, tick(), json!([close(3)])),
+        logged(570, of_lease("lease_ended", 3), none()),
+        logged(1000, exit, json!([{ "kind": "tear_down_agent" }, close(2)])),
+        json!({ "at_ns": "1002000000000", "note": "collected from the agent's sandbox: out, 1 file of 6 bytes" }),
+        logged(1005, of_lease("lease_ended", 2), none()),
+        logged(1006, tick(), final_judge),
+        logged(1010, saw("job-4", sxm), none()),
+        logged(1010, of_job("judge_started", 4), none()),
+        logged(
+            1100,
+            collected(4, json!({ "score": 49.36, "returned": returned })),
+            finish,
+        ),
+    ]
+}
+
+/// The records of `log` written by `seconds` after the run started.
+fn cut(log: &[Value], seconds: u64) -> Vec<Value> {
+    let written = |record: &&Value| {
+        let at: u64 = record["at_ns"].as_str().unwrap().parse().unwrap();
+        at <= seconds * 1_000_000_000
+    };
+    log.iter().filter(written).cloned().collect()
+}
+
+/// Writes the record `id` in `scratch`'s `runs`, as [`write_record`] does, with `outcome`, of a
+/// run of [`lease_task`] on `places` that started `started` after the Unix epoch, with a hard
+/// end two hours on, whose log holds its start, then `log`, each record numbered in turn, and a
+/// `sandbox.json` for each sandbox that the log says started, deleted; returns its directory.
+fn write_run(
+    scratch: &Scratch,
+    id: &str,
+    started: Duration,
+    log: &[Value],
+    outcome: Option<Value>,
+    places: &Value,
+) -> PathBuf {
+    write_record(scratch, id, true, outcome);
+    let dir = scratch.0.join("runs").join(id);
+    scratch.write(&format!("runs/{id}/ir.json"), &lease_task());
+    scratch.write(&format!("runs/{id}/provider.json"), places);
+    let unix_ns = started.as_nanos().to_string();
+    let start =
+        json!({ "kind": "run_started", "unix_ns": unix_ns, "hard_end_ns": "7200000000000" });
+    let start = logged(0, start, json!([{ "kind": "start_agent" }]));
+    let mut lines = String::new();
+    for (seq, record) in (0_u64..).zip(iter::once(&start).chain(log)) {
+        let mut record = record.clone();
+        record["seq"] = json!(seq);
+        lines.push_str(&record.to_string());
+        lines.push('\n');
+        let event = &record["event"];
+        let sandbox = match event["kind"].as_str() {
+            Some("agent_started") => Some("agent".to_owned()),
+            Some("judge_started") => Some(format!("jobs/{}", event["job"])),
+            Some("lease_ready") => Some(format!("leases/{}", event["lease"])),
+            _ => None,
+        };
+        if let Some(sandbox) = sandbox {
+            let deleted = json!({ "delete": { "state": "deleted" } });
+            scratch.write(&format!("runs/{id}/{sandbox}/sandbox.json"), &deleted);
+        }
+    }
+    scratch.write(&format!("runs/{id}/log.jsonl"), &lines);
+    dir
+}
+
+/// When the run `id` started, since the Unix epoch: `seconds` after it was asked for.
+fn asked(id: &str, seconds: u64) -> Duration {
+    runtime::minted(id).unwrap() + Duration::from_secs(seconds)
 }
 
 /// Writes the record `id` in `scratch`'s `runs`, as `pumpkin run --runs runs` leaves it, with
