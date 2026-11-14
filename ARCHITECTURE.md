@@ -78,7 +78,8 @@ Another program's format, such as `docker info`'s, stays with the code that read
 
 **`crates/recipe`.** The image recipes Pumpkin builds, Dockerfiles: `check` refuses one that may
 have Docker fetch what no digest pins, and `check_source` an `ADD` source Docker may take for a
-Git repository's URL.
+Git repository's URL; `fetch` reads a recipe's fetch stage (`FetchStage`), which pins each file
+a step would fetch, and writes the pins into it.
 - **Architecture Invariant:** it does no I/O and knows no Pumpkin crate: it depends on none, and
   it is `#![no_std]`, so it reads only the text it is given, and a harness and a provider share
   one check without either depending on the other.
@@ -87,8 +88,9 @@ Git repository's URL.
 run, whichever provider runs them, and from which it publishes them: `Engine` reaches the engine of
 a named Docker context (`ContextName`), reports it (`Report`), and builds images, each tagged by its
 build's inputs, from a recipe (`Recipe`) that `recipe::check` passes and a context of directories
-(`BuildContext`) that it stages; and `confinement` confines a role's container wherever a
-provider's sandbox is one.
+(`BuildContext`) that it stages; it writes a recipe's fetch stage from what a resolver prints, run
+online in a container of the image that the recipe builds up to that step (`Engine::lock`); and
+`confinement` confines a role's container wherever a provider's sandbox is one.
 - **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
   `recipe`, `schema` and `stdx`, so a crate that only builds or publishes images depends on it,
   and on no provider.
@@ -96,6 +98,12 @@ provider's sandbox is one.
   against the named context alone, so the operator's choice of engine holds. Tests run `docker`
   directly only to observe containers and images, to create and pause containers of their own, or
   to build, tag and remove images of their own.
+- **Architecture Invariant:** what the engine fetches for a build is pinned: an image by digest,
+  a file by `ADD --checksum`, or a Git tree by its full commit (`recipe::check`). What a step's
+  own command fetches is outside this; a recipe may take it from a fetch stage instead, which
+  pins each file (`recipe::fetch`). A base's `ONBUILD` triggers, which the check doesn't read,
+  are outside it too. A lock's resolver (`Engine::lock`) runs online, outside any build or run,
+  and only writes pins into a recipe.
 
 **`crates/gateway`.** The host's end of sessions: where a sandbox meets the gateway (`meeting`), a
 `Registration` that its run's `Sockets` issues, makes the sandbox's `Session`, whose one owner moves
@@ -262,7 +270,7 @@ evaluates a task's source with `lang`, from the files below the root of its repo
 configuration, then lints the files it read (`Plan::lint`) with the formatter beside `pumpkin`
 (`style`), with which `fmt` formats `.star` files. `build` takes the same path, then builds the
 images on the engine of the configuration's Docker context (`Engine::start`) and prints the IR
-that names them.
+that names them; `lock` takes it to a recipe's fetch stage, which it writes (`Engine::lock`).
 `run` starts the run of a task in a driver process (`driver`), which it executes as itself, and
 returns once the run has started: the driver connects each provider that the configuration
 names, as its kind says (`Connected`), then builds the task's images as `build` does, places the

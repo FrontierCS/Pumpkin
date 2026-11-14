@@ -248,6 +248,7 @@ fn tasks() {
     scratch.write("tasks/broken/task.star", &task(0));
     let unpinned = "FROM busybox:1.37\nCOPY judge/run /opt/judge/\n";
     scratch.write("tasks/broken/judge/Dockerfile", unpinned);
+    scratch.write("tasks/other/task.star", &task(8000));
     // A `docker` that says whether it ran, which a check never does.
     fs::create_dir(scratch.0.join("bin")).unwrap();
     scratch.write_executable("bin/docker", b"#!/bin/sh\ntouch \"$0.ran\"\nexit 1\n");
@@ -281,6 +282,15 @@ fn tasks() {
             "deadline=3600",
         ]),
         pumpkin(&["check", "tasks/broken/task.star", "--arg", "model=model-a"]),
+        pumpkin(&[
+            "check",
+            "tasks/broken/task.star",
+            "tasks/bench/task.star",
+            "tasks/other/task.star",
+            "nowhere/task.star",
+            "--arg",
+            "model=model-a",
+        ]),
         bench(&["--arg", "mdoel=model-a"]),
         bench(&["--arg", "model=model-a", "--arg", "deadline=1h"]),
         bench(&[
@@ -296,6 +306,7 @@ fn tasks() {
         pumpkin(&[
             "check",
             "task.json",
+            "notes.md",
             "--arg",
             "model",
             "--arg",
@@ -317,16 +328,18 @@ fn tasks() {
             $ pumpkin check --help
             exit status: Some(0)
             printed:
-              Check a task's source: evaluate its entry file, and the files that it loads,
+              Check each task's source: evaluate its entry file, and the files that it loads,
               with the args given, then check the recipe of each image that it declares, and
-              its workflow, then lint those files, and say every problem found.
+              its workflow, then lint those files, and say every problem found, in all the
+              tasks.
 
-              Usage: pumpkin check [OPTIONS] <entry>
+              Usage: pumpkin check [OPTIONS] <entry>...
 
               Arguments:
-                <entry>
-                        The task's entry file, a .star file below the root of its repository: the
+                <entry>...
+                        A task's entry file, a .star file below the root of its repository: the
                         nearest directory, at or above the entry's, that holds PUMPKIN.star.
+                        Each task is checked with the same args.
 
               Options:
                     --arg <name>=<value>
@@ -340,14 +353,16 @@ fn tasks() {
               Examples:
                 pumpkin check tasks/bench/task.star --arg model=model-a
                 pumpkin check tasks/bench/task.star --arg model=model-a --arg deadline=3600
+                pumpkin check tasks/*/task.star --arg model=model-a
 
               Exit status:
                 0  The check found no problem.
-                1  The task has problems, each said at its place; or another error.
+                1  A task has problems, each said at its place; or another error. Every
+                   task is checked all the same.
                 2  A usage error.
               Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-              why, and an exit of 1 then with the command that checks the task again, its
-              entry's path made absolute. On success, `check` prints nothing.
+              why, and an exit of 1 then with the command that checks again the tasks that
+              failed, their entries' paths made absolute. On success, `check` prints nothing.
 
               A problem is said at its file's path below the root, its line and its column,
               then its source line, with carets under what it is about; a recipe's, at the
@@ -392,6 +407,34 @@ fn tasks() {
                 the IR's /roles/0/needs/cpu_millis
             pumpkin: tasks/broken/task.star: the task has 3 problems
             pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/broken/task.star
+            $ pumpkin check tasks/broken/task.star tasks/bench/task.star tasks/other/task.star nowhere/task.star --arg model=model-a
+            exit status: Some(1)
+            lib/bench.star:78:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does
+                78 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
+                   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `bench_task()`, called at tasks/broken/task.star:5:1
+            lib/bench.star:31:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                31 |         "image": image(recipe, mount = SHARED),
+                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_judge()`, called at lib/bench.star:80:9
+                in `bench_task()`, called at tasks/broken/task.star:5:1
+            tasks/broken/task.star:6:28: `cpu_millis` can't be `0`: expected a positive int
+                6 |     agent = {"cpu_millis": 0, "memory_bytes": 32 * GiB},
+                  |                            ^
+                the IR's /roles/0/needs/cpu_millis
+            pumpkin: tasks/broken/task.star: the task has 3 problems
+            lib/bench.star:78:19: `tasks/other/agent/Dockerfile` doesn't exist: name a regular file below the root that does
+                78 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
+                   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `bench_task()`, called at tasks/other/task.star:5:1
+            lib/bench.star:31:18: `tasks/other/judge/Dockerfile` doesn't exist: name a regular file below the root that does
+                31 |         "image": image(recipe, mount = SHARED),
+                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_judge()`, called at lib/bench.star:80:9
+                in `bench_task()`, called at tasks/other/task.star:5:1
+            pumpkin: tasks/other/task.star: the task has 2 problems
+            pumpkin: nowhere/task.star: the entry's directory nowhere can't be found (No such file or directory (os error 2)): name the entry by a path that exists
+            pumpkin: to check them again: pumpkin check --arg model=model-a <scratch>/tasks/broken/task.star <scratch>/tasks/other/task.star <scratch>/nowhere/task.star
             $ pumpkin check tasks/bench/task.star --arg mdoel=model-a
             exit status: Some(1)
             lib/bench.star:5:9: `--arg model` is required, as this `arg()` gives it no default: give it as `--arg model=<value>`
@@ -441,17 +484,17 @@ fn tasks() {
             $ pumpkin check
             exit status: Some(2)
             error: the following required arguments were not provided:
-              <entry>
+              <entry>...
 
-            Usage: pumpkin check <entry>
+            Usage: pumpkin check <entry>...
             pumpkin: to read how to use it: pumpkin help check
-            $ pumpkin check task.json --arg model --arg =x --arg a=1 --arg a=2 --arg
+            $ pumpkin check task.json notes.md --arg model --arg =x --arg a=1 --arg a=2 --arg
             exit status: Some(2)
-            error: invalid value 'task.json' for '<entry>': `task.json` names no `.star` file: name a task's entry file, whose name ends in `.star`
+            error: invalid value 'task.json' for '<entry>...': `task.json` names no `.star` file: name a task's entry file, whose name ends in `.star`
             pumpkin: to read how to use it: pumpkin help check
             $ pumpkin check tasks/�/task.star --arg model=�
             exit status: Some(2)
-            error: invalid value 'tasks/�/task.star' for '<entry>': it isn't UTF-8, as the commands that `pumpkin` says to run next name it: name one that is
+            error: invalid value 'tasks/�/task.star' for '<entry>...': it isn't UTF-8, as the commands that `pumpkin` says to run next name it: name one that is
             pumpkin: to read how to use it: pumpkin help check"#]],
     );
 }

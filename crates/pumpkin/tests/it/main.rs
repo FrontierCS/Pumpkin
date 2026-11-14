@@ -1,7 +1,7 @@
 //! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
 //! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
 //! includes the model route of a workflow that has one reaching a stand-in model provider;
-//! `wait`; `cancel`; `reap`; `check`; `fmt`; `build`; and `driver`, for the process that
+//! `wait`; `cancel`; `reap`; `check`; `fmt`; `build`; `lock`; and `driver`, for the process that
 //! drives each run, which `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts
 //! beside the tests' own. The tests on Docker are ignored, and write the context they reach
 //! ([`test_support::docker_context`]) into the configuration that they give `run` and `build`.
@@ -42,6 +42,7 @@ mod cancel;
 mod check;
 mod driver;
 mod fmt;
+mod lock;
 mod reap;
 mod run;
 mod wait;

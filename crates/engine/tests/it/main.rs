@@ -9,7 +9,8 @@
     reason = "a test prints the image tags it can't remove"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -18,7 +19,9 @@ use std::sync::OnceLock;
 use engine::{BuildContext, Built, ContextName, Engine, Recipe, Report};
 use expect_test::{Expect, expect};
 use recipe::Given;
+use schema::ir::Image;
 use schema::sandbox::RelativePath;
+use stdx::process::Environment;
 use tempfile::TempDir;
 use test_support::{BUSYBOX, docker};
 
@@ -208,7 +211,7 @@ fn builds() {
             a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
             a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
-            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:ae5393eb92660d45221c68f0974539eb1151a715d549a35397299be084351a30` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
+            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:700c07c0f69ca70bceeae61d7f8c0fb3d3bc44e9e3f4d8a084cf9f706de50dc9` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
     );
 }
 
@@ -349,6 +352,87 @@ fn modes() {
     );
 }
 
+// A build's stage gives its files and directories one time, and the build gives it to its
+// image's history, so builds of the same inputs that share no cache make the same layer of each
+// copy of staged files into `/`, and the same image when its every layer is one: a registry that
+// holds the first has the second. Another content of a file, of the same size, changes only the
+// layer that copies it. A layer that a copy into a directory of the base makes is another in
+// each build, as Docker gives that directory the build's own time. A `RUN` isn't given the
+// build's time as `SOURCE_DATE_EPOCH`, which would change how Python compiles what it installs.
+// Each image's layers, its base's too, are zstd's, in an OCI manifest.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn reproducible() {
+    check(
+        "reproducible",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            let dir = fixture.dir.path().join("context");
+            put(&dir, "tree/deep/leaf", "leaf", 0o644);
+            let context = builds.context();
+            // With the directories that the `RUN` below mounts over, so that it makes no layer:
+            // its own `RUN` leaves those that BuildKit mounts, `/proc` and `/sys`, made.
+            let base = Recipe::Text(format!("FROM {BUSYBOX}\nRUN mkdir /nonce\n"));
+            let base = engine().build(&context, &base, &Given::default(), &builds.repository);
+            let base = base.unwrap();
+            let given = Given {
+                contexts: BTreeMap::from([("base".to_owned(), &base)]),
+                ..Given::default()
+            };
+            // Each build mounts a `nonce` of its own in a `RUN` that changes nothing, so that each
+            // step after it misses the cache, as on a machine of its own.
+            let recipe = |last: &str| {
+                Recipe::Text(format!(
+                    "FROM {BUSYBOX} AS nonce\nCOPY nonce /\nFROM base\nRUN \
+                     --mount=from=nonce,target=/nonce test -z \"${{SOURCE_DATE_EPOCH-}}\"\nCOPY \
+                     file id /\nCOPY \
+                     tree /tree\nWORKDIR /work\n{last}"
+                ))
+            };
+            let (mut layers, mut types) = (Vec::new(), BTreeSet::new());
+            let mut lines = Vec::new();
+            for (nonce, what, file, last) in [
+                (1, "built", "one", ""),
+                (2, "built again", "one", ""),
+                (3, "a copied file changed", "two", ""),
+                (
+                    4,
+                    "copied into a directory of the base",
+                    "two",
+                    "COPY file /etc/\n",
+                ),
+                (5, "  built again", "two", "COPY file /etc/\n"),
+            ] {
+                put(&dir, "nonce", &nonce.to_string(), 0o644);
+                put(&dir, "file", file, 0o644);
+                let shown = builds.build_in(&context, &recipe(last), &given);
+                // Found by its tag, as `build_in` has just built it.
+                let built = engine().build(&context, &recipe(last), &given, &builds.repository);
+                let manifest = builds.manifest(built.unwrap().image());
+                types.insert(manifest["mediaType"].as_str().unwrap().to_owned());
+                let numbers: Vec<String> = (manifest["layers"].as_array().unwrap().iter())
+                    .map(|layer| {
+                        types.insert(layer["mediaType"].as_str().unwrap().to_owned());
+                        let digest = layer["digest"].as_str().unwrap();
+                        (1 + first_seen(&mut layers, digest)).to_string()
+                    })
+                    .collect();
+                lines.push(format!("{what}: {shown}; layers {}", numbers.join(" ")));
+            }
+            let types: Vec<String> = types.into_iter().collect();
+            lines.push(format!("of the media types: {}", types.join(", ")));
+            lines
+        },
+        &expect![[r#"
+            built: A, tagged :1; layers 1 2 3 4 5 6
+            built again: A, tagged :1 :2; layers 1 2 3 4 5 6
+            a copied file changed: B, tagged :3; layers 1 2 3 7 5 6
+            copied into a directory of the base: C, tagged :4; layers 1 2 3 7 5 6 8
+              built again: D, tagged :5; layers 1 2 3 7 5 6 9
+            of the media types: application/vnd.oci.image.layer.v1.tar+zstd, application/vnd.oci.image.manifest.v1+json"#]],
+    );
+}
+
 /// Runs `docker` with `args`, which must succeed.
 fn run(args: &[&str]) {
     let output = docker().args(args).output().unwrap();
@@ -450,6 +534,30 @@ impl<'f> Builds<'f> {
             tags.join(" "),
             stray.unwrap_or_default()
         )
+    }
+
+    /// The manifest of `image`, as `docker image save` writes it.
+    fn manifest(&self, image: &Image) -> serde_json::Value {
+        let saved = self.fixture.dir.path().join("saved");
+        let _ = fs::remove_dir_all(&saved);
+        fs::create_dir(&saved).unwrap();
+        let archive = saved.join("image.tar");
+        let output = docker()
+            .args(["image", "save", "--output"])
+            .args([archive.as_os_str(), OsStr::new(image.as_str())])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut tar = stdx::process::command("tar", Environment::Only(&["PATH"]));
+        let output = (tar.arg("--extract").arg("--file").arg(&archive))
+            .arg("--directory")
+            .arg(&saved)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let hex = image.as_str().strip_prefix("sha256:").unwrap();
+        let manifest = fs::read(saved.join("blobs/sha256").join(hex)).unwrap();
+        serde_json::from_slice(&manifest).unwrap()
     }
 
     /// The tags `image` has in the repository, sorted, or none if the engine has no such image.

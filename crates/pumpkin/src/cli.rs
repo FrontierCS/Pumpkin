@@ -12,6 +12,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{Arg, ArgAction, ArgMatches, Args, CommandFactory as _, FromArgMatches, Parser};
+use recipe::Stage;
 
 use crate::star::Entry;
 
@@ -29,11 +30,12 @@ it submits.",
     subcommand_help_heading = "Commands"
 )]
 enum Parsed {
-    #[command(about = "Check a task's source, building and running nothing")]
+    #[command(about = "Check tasks' sources, building and running nothing")]
     #[command(long_about = "\
-Check a task's source: evaluate its entry file, and the files that it loads,
+Check each task's source: evaluate its entry file, and the files that it loads,
 with the args given, then check the recipe of each image that it declares, and
-its workflow, then lint those files, and say every problem found.")]
+its workflow, then lint those files, and say every problem found, in all the
+tasks.")]
     #[command(after_help = CHECK_NOTES)]
     #[command(mut_arg(ARG, |arg| arg.help(CHECK_ARG)))]
     Check(Check),
@@ -59,6 +61,9 @@ Stop a run, wait until it has ended, remove what it left, and print its
 outcome.json.")]
     #[command(after_help = CANCEL_NOTES)]
     Cancel(Cancel),
+    #[command(about = "Write a recipe's fetch stage, which pins what a step fetches")]
+    #[command(long_about = LOCK_ABOUT, after_help = LOCK_NOTES)]
+    Lock(Lock),
     #[command(about = "Print the help of a command or a topic")]
     #[command(long_about = "\
 Print the help of a command or a topic, or `pumpkin --help` without one.")]
@@ -99,6 +104,7 @@ pub(crate) enum Command {
     Check(Check),
     Fmt(Fmt),
     Build(Build),
+    Lock(Lock),
     /// Help, or the version, for the standard output.
     Print(String),
 }
@@ -285,10 +291,11 @@ Default: $HOME/.local/share/pumpkin/runs")]
 /// What `pumpkin check` is asked for, as `pumpkin check --help` says.
 #[derive(Args)]
 pub(crate) struct Check {
-    #[arg(value_name = "entry", value_parser = entry(), help = "\
-The task's entry file, a .star file below the root of its repository: the
-nearest directory, at or above the entry's, that holds PUMPKIN.star.")]
-    pub(crate) entry: Entry,
+    #[arg(value_name = "entry", required = true, value_parser = entry(), help = "\
+A task's entry file, a .star file below the root of its repository: the
+nearest directory, at or above the entry's, that holds PUMPKIN.star.
+Each task is checked with the same args.")]
+    pub(crate) entries: Vec<Entry>,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
 }
@@ -330,6 +337,25 @@ pub(crate) struct Build {
     pub(crate) config: Option<String>,
 }
 
+/// What `pumpkin lock` is asked for, as `pumpkin lock --help` says.
+#[derive(Args)]
+pub(crate) struct Lock {
+    #[arg(value_name = "entry", value_parser = entry())]
+    #[arg(help = "The task's entry file, as `pumpkin check` takes it.")]
+    pub(crate) entry: Entry,
+    #[arg(value_name = "recipe", value_parser = utf8(": name one that is"), help = "\
+The recipe, a file that an image() call of the task builds, by its path;
+the lock rewrites it in place.")]
+    pub(crate) recipe: String,
+    #[arg(value_name = "stage", help = "The fetch stage's name.")]
+    #[arg(value_parser = utf8(": name one that is").try_map(Stage::try_from))]
+    pub(crate) stage: Stage,
+    #[command(flatten)]
+    pub(crate) args: TaskArgs,
+    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = BUILD_CONFIG)]
+    pub(crate) config: Option<String>,
+}
+
 /// A run, as a command's `<run>` names it.
 #[derive(Clone)]
 pub(crate) enum RunName {
@@ -360,14 +386,16 @@ const CHECK_NOTES: &str = "\
 Examples:
   pumpkin check tasks/bench/task.star --arg model=model-a
   pumpkin check tasks/bench/task.star --arg model=model-a --arg deadline=3600
+  pumpkin check tasks/*/task.star --arg model=model-a
 
 Exit status:
   0  The check found no problem.
-  1  The task has problems, each said at its place; or another error.
+  1  A task has problems, each said at its place; or another error. Every
+     task is checked all the same.
   2  A usage error.
 Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-why, and an exit of 1 then with the command that checks the task again, its
-entry's path made absolute. On success, `check` prints nothing.
+why, and an exit of 1 then with the command that checks again the tasks that
+failed, their entries' paths made absolute. On success, `check` prints nothing.
 
 A problem is said at its file's path below the root, its line and its column,
 then its source line, with carets under what it is about; a recipe's, at the
@@ -496,6 +524,35 @@ signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
 provider that it ran on, as `pumpkin reap --help` says,
 and prints its outcome.json, then says how the run ended, as `pumpkin wait`
 does.";
+
+const LOCK_ABOUT: &str = "\
+Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
+lock line, `# pumpkin lock: <resolver> <argument>...`, in the comment right
+above its line `FROM scratch AS <stage>`, up to the blank line that ends it: an
+`ADD` for each file that the resolver prints, pinned by its SHA-256. The
+resolver runs online, in the image of the recipe up to the one later `RUN` that
+mounts the stage, built on the machine's Docker engine with the inputs that the
+task's images give the recipe: its context, mounts, args and named contexts,
+which are built first. `apt <package>...` pins what apt fetches to install the
+packages, and the archive's indexes that apt reads, so that the stage is a
+mirror of that part of the archive.";
+
+const LOCK_NOTES: &str = "\
+Examples:
+  pumpkin lock tasks/bench/task.star tasks/bench/verifier/Dockerfile apt
+  pumpkin lock tasks/bench/task.star tasks/bench/agent/Dockerfile apt --arg model=m
+
+Exit status:
+  0  The stage is written.
+  1  The task has problems; its images give the recipe different inputs; the
+     recipe has no such fetch stage; or a build, the resolver or the write
+     failed; or another error.
+  2  A usage error.
+Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
+why. The task is checked as `pumpkin check` checks it, and the stage read,
+before the configuration is read and the engine reached. The builds' output
+goes to the standard error. The image the resolver runs in is tagged in
+pumpkin/lock, where a later lock finds it.";
 
 const HELP_NOTES: &str = "\
 Examples:
@@ -662,6 +719,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
         Parsed::Check(check) => Command::Check(check),
         Parsed::Fmt(fmt) => Command::Fmt(fmt),
         Parsed::Build(build) => Command::Build(build),
+        Parsed::Lock(lock) => Command::Lock(lock),
         Parsed::Help { topic } => return help_of(&mut cli, topic.as_deref()).map_err(refusal),
     })
 }
