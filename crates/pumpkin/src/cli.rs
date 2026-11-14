@@ -2,12 +2,12 @@
 //! command is a struct whose fields are its operands and flags, which clap's parser, usage lines,
 //! help and errors all read. `-h` or `--help` before `--` asks for the help of the command the
 //! line names, which `pumpkin help` also prints, as it does the topics, such as [`CONFIG`]; `-V`
-//! or `--version` before the command, for the build ([`runtime::BUILD`]).
+//! or `--version` before the command, for the build ([`runtime::BUILD`]). The commands that are
+//! rarely needed ([`RARE`]) are listed apart.
 
 use std::ffi::OsString;
 use std::iter;
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::PathBuf;
 
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
@@ -22,12 +22,6 @@ use crate::star::Entry;
     about = "\
 Run workflows: in each run, an agent works in a sandbox, and judges score what
 it submits.",
-    after_help = "\
-Topics:
-  config  The machine's configuration, pumpkin.toml
-
-`pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
-does, and `pumpkin help <topic>` a topic.",
     disable_help_flag = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -59,6 +53,12 @@ the run's id once it has started.")]
     #[command(long_about = "Wait until a run has ended, then print its outcome.json.")]
     #[command(after_help = WAIT_NOTES)]
     Wait(Wait),
+    #[command(about = "Stop a run, and remove what it left")]
+    #[command(long_about = "\
+Stop a run, wait until it has ended, remove what it left, and print its
+outcome.json.")]
+    #[command(after_help = CANCEL_NOTES)]
+    Cancel(Cancel),
     #[command(about = "Print the help of a command or a topic")]
     #[command(long_about = "\
 Print the help of a command or a topic, or `pumpkin --help` without one.")]
@@ -68,23 +68,38 @@ Print the help of a command or a topic, or `pumpkin --help` without one.")]
         #[arg(help = "A command, or a topic: `config`, the machine's configuration.")]
         topic: Option<String>,
     },
-    #[command(about = "Build a task's images, and print its workflow's IR")]
+    #[command(
+        hide = true,
+        about = "Build a task's images, and print its workflow's IR"
+    )]
     #[command(long_about = "\
 Build a task: check its source as `pumpkin check` does, then build each image
 that it declares on the machine's Docker engine, and print the IR of its
 workflow, which names each image by its ID.")]
     #[command(after_help = BUILD_NOTES)]
     Build(Build),
+    #[command(hide = true, about = "Remove what the runs that have ended left")]
+    #[command(long_about = "\
+Remove what each run in --runs that has ended, or is lost, left, and print the
+id of each run that left something.")]
+    #[command(after_help = REAP_NOTES)]
+    Reap(Reap),
 }
+
+/// The commands that are rarely needed, which `pumpkin --help` lists after the others. Each is
+/// hidden from clap's list of commands.
+const RARE: [&str; 2] = ["build", "reap"];
 
 /// What a command line asks for.
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
+    Cancel(Cancel),
+    Reap(Reap),
     Check(Check),
     Fmt(Fmt),
     Build(Build),
-    /// Help, for the standard output.
+    /// Help, or the version, for the standard output.
     Print(String),
 }
 
@@ -140,7 +155,7 @@ impl FromArgMatches for TaskArgs {
 }
 
 /// A value of `pumpkin`'s, a path or a name, that must be UTF-8; if it isn't, the problem says
-/// so, then `why`, such as `: name one that is`.
+/// so, then `why`, such as `, as every id is: name an id`.
 fn utf8(why: &'static str) -> impl TypedValueParser<Value = String> {
     OsStringValueParser::new().try_map(move |value| {
         value
@@ -149,12 +164,24 @@ fn utf8(why: &'static str) -> impl TypedValueParser<Value = String> {
     })
 }
 
+/// Why a path that `run` is given must be UTF-8, and what to do.
+const RECORDED: &str = ", as a run's record keeps each path that `run` is given: name one that is";
+
+/// Why a path that another command is given must be UTF-8, and what to do.
+const NAMED_NEXT: &str = ", as the commands that `pumpkin` says to run next name it: name one \
+                          that is";
+
+/// Why the `--runs` of a command that reads runs must be UTF-8, and what to do.
+const RUNS_NAMED_NEXT: &str = ", as the commands that `pumpkin` says to run next name it: name \
+                               a directory with a UTF-8 path";
+
 /// A task's entry, as `pumpkin check` takes it ([`Entry::parse`]).
 fn entry() -> impl TypedValueParser<Value = Entry> {
-    utf8(": name one that is").try_map(Entry::parse)
+    utf8(NAMED_NEXT).try_map(Entry::parse)
 }
 
-/// What `pumpkin run` is asked for, as `pumpkin run --help` says.
+/// What `pumpkin run` is asked for, as `pumpkin run --help` says. Its paths are UTF-8, so that
+/// a run's record keeps them, and a command that names them names the same files.
 #[derive(Args)]
 pub(crate) struct Run {
     #[arg(value_name = "entry", value_parser = entry())]
@@ -162,32 +189,20 @@ pub(crate) struct Run {
     pub(crate) entry: Entry,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
-    #[arg(
-        long,
-        value_name = "dir",
-        help = "\
+    #[arg(long, value_name = "dir", value_parser = utf8(RECORDED), help = "\
 The directory runs are recorded in, each in <dir>/<id>.
-Default: $HOME/.local/share/pumpkin/runs"
-    )]
-    pub(crate) runs: Option<PathBuf>,
-    #[arg(
-        long,
-        value_name = "file",
-        help = "\
+Default: $HOME/.local/share/pumpkin/runs")]
+    pub(crate) runs: Option<String>,
+    #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = "\
 The machine's configuration; see `pumpkin help config`.
-Default: $HOME/.config/pumpkin/pumpkin.toml"
-    )]
-    pub(crate) config: Option<PathBuf>,
-    #[arg(
-        long,
-        value_name = "path",
-        help = "\
+Default: $HOME/.config/pumpkin/pumpkin.toml")]
+    pub(crate) config: Option<String>,
+    #[arg(long, value_name = "path", value_parser = utf8(RECORDED), help = "\
 The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
 builds it.
 Default: the one beside this pumpkin, where `cargo xtask install` puts
-one"
-    )]
-    pub(crate) sandboxd: Option<PathBuf>,
+one")]
+    pub(crate) sandboxd: Option<String>,
     #[arg(
         long,
         help = "\
@@ -197,22 +212,74 @@ outcome.json instead of its id."
     pub(crate) wait: bool,
 }
 
-/// What `pumpkin wait` is asked for, as `pumpkin wait --help` says.
+impl Run {
+    /// The path flags it was given, each named as on the command line, with its value, in the
+    /// order its usage lists them.
+    pub(crate) fn given(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        let Self {
+            entry: _,
+            args: _,
+            runs,
+            config,
+            sandboxd,
+            wait: _,
+        } = self;
+        let flags = [
+            ("--runs", runs),
+            ("--config", config),
+            ("--sandboxd", sandboxd),
+        ];
+        (flags.into_iter()).filter_map(|(flag, value)| Some((flag, value.as_deref()?)))
+    }
+}
+
+/// The help of the `<run>` operand.
+const RUN_HELP: &str = "\
+The run: its id; a prefix of its id, or of the 8 hexadecimal digits that
+end it, that no other run in --runs shares; or its record's path, which
+has a `/`.";
+
+/// The help of `--runs` for a command that takes a `<run>`.
+const RUNS_HELP: &str = "\
+The directory that <run> is looked up in.
+Default: $HOME/.local/share/pumpkin/runs";
+
+/// What `pumpkin wait` is asked for, as `pumpkin wait --help` says. Its paths are UTF-8, as
+/// those of `cancel` and `reap` are, so that a command that names them names the same
+/// files.
 #[derive(Args)]
 pub(crate) struct Wait {
-    #[arg(value_name = "run", value_parser = run_name(), help = "\
-The run: its id; a prefix of its id, or of the 8 hexadecimal digits
-that end it, that no other run in --runs shares; or its record's path,
-which has a `/`.")]
+    #[arg(value_name = "run", value_parser = run_name(), help = RUN_HELP)]
     pub(crate) run: RunName,
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
+    pub(crate) runs: Option<String>,
+}
+
+/// What `pumpkin cancel` is asked for, as `pumpkin cancel --help` says.
+#[derive(Args)]
+pub(crate) struct Cancel {
+    #[arg(value_name = "run", value_parser = run_name(), help = RUN_HELP)]
+    pub(crate) run: RunName,
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
+    pub(crate) runs: Option<String>,
     #[arg(
         long,
-        value_name = "dir",
         help = "\
-The directory that <run> is looked up in.
-Default: $HOME/.local/share/pumpkin/runs"
+End the run's driver at once, by SIGKILL, rather than stop the run by
+SIGTERM; the run is then lost, and recorded as failed. A create that the
+driver had given up on may still make a sandbox after `cancel` has
+ended, which `pumpkin reap` removes."
     )]
-    pub(crate) runs: Option<PathBuf>,
+    pub(crate) force: bool,
+}
+
+/// What `pumpkin reap` is asked for, as `pumpkin reap --help` says.
+#[derive(Args)]
+pub(crate) struct Reap {
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
+The directory of the runs to reap.
+Default: $HOME/.local/share/pumpkin/runs")]
+    pub(crate) runs: Option<String>,
 }
 
 /// What `pumpkin check` is asked for, as `pumpkin check --help` says.
@@ -230,7 +297,7 @@ nearest directory, at or above the entry's, that holds PUMPKIN.star.")]
 #[derive(Args)]
 pub(crate) struct Fmt {
     /// The files and directories to format, as given; none for the working directory.
-    #[arg(value_name = "path", value_parser = utf8(": name one that is"), help = "\
+    #[arg(value_name = "path", value_parser = utf8(NAMED_NEXT), help = "\
 A `.star` file, or a directory, each `.star` file below which is
 formatted, but those whose name, or that of a directory on the way to
 them, starts with `.`, and those that a symbolic link leads to.
@@ -259,24 +326,28 @@ pub(crate) struct Build {
     pub(crate) entry: Entry,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
-    #[arg(long, value_name = "file", help = BUILD_CONFIG)]
-    pub(crate) config: Option<PathBuf>,
+    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = BUILD_CONFIG)]
+    pub(crate) config: Option<String>,
 }
 
-/// A run, as `wait`'s `<run>` names it.
+/// A run, as a command's `<run>` names it.
 #[derive(Clone)]
 pub(crate) enum RunName {
     /// By its record's path, which has a `/`.
-    Record(PathBuf),
+    Record(String),
     /// By its id, or a prefix of its id or of its random digits, among the runs in `--runs`.
     Prefix(String),
 }
 
-/// The run that a `<run>` names, which is UTF-8 unless it is a path.
-fn run_name() -> impl clap::builder::TypedValueParser<Value = RunName> {
+/// The run that a `<run>` names, which is UTF-8, as every id is, and as the commands that
+/// `pumpkin` says to run next name a record.
+fn run_name() -> impl TypedValueParser<Value = RunName> {
     OsStringValueParser::new().try_map(|run| {
         if run.as_bytes().contains(&b'/') {
-            return Ok(RunName::Record(run.into()));
+            return run.into_string().map(RunName::Record).map_err(|_| {
+                "it isn't UTF-8, as the commands that `pumpkin` says to run next name it: name a \
+                 record with a UTF-8 path"
+            });
         }
         run.into_string().map(RunName::Prefix).map_err(|_| {
             "it isn't UTF-8, as every id is: name an id, a prefix of one, or a record's path, \
@@ -295,7 +366,8 @@ Exit status:
   1  The task has problems, each said at its place; or another error.
   2  A usage error.
 Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-why. On success, `check` prints nothing.
+why, and an exit of 1 then with the command that checks the task again, its
+entry's path made absolute. On success, `check` prints nothing.
 
 A problem is said at its file's path below the root, its line and its column,
 then its source line, with carets under what it is about; a recipe's, at the
@@ -331,7 +403,8 @@ Exit status:
      checked, all the same.
   2  A usage error.
 Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-why. On success, `fmt` prints nothing.
+why, and an exit of 1 then with the command that formats the files that
+failed, their paths made absolute. On success, `fmt` prints nothing.
 
 `fmt` runs the formatter beside `pumpkin`, where `cargo xtask install` puts it,
 which reads no configuration, so that every `.star` file is written alike.";
@@ -348,6 +421,12 @@ Exit status:
 With --wait, `run` exits as `pumpkin wait` does once the run has started. Every
 exit but 0 ends with a `pumpkin:` line on the standard error, which says why.
 
+Every ending of a run ends with the command that runs it again: `pumpkin run`
+of the task's entry, with the args and the flags that started it, their paths
+made absolute. It builds the task as its source is then. A run takes no seed:
+its id's random digits, and the grants by which its sandboxes reach it, are
+fresh in every run, so that no two runs share them.
+
 The task is checked, and the configuration read, before the machine's Docker
 engine is reached, warning if that engine runs as root; the task's images are
 built there, and the run runs there. A driver process that `run` starts does all
@@ -358,9 +437,15 @@ too; after it, the run goes on without `run`, and `pumpkin wait` follows it.
 The run outlives a logout unless its engine stops then, as rootless Docker does
 without `loginctl enable-linger`, or logind kills the session's processes
 (KillUserProcesses): then only a run under the user's manager outlives it, so
-enable lingering and start `run` under `systemd-run --user --scope`. Killing the
-driver leaves the run's containers, labelled pumpkin.run=<id>, its socket
-directory in the temporary directory, and its record without an outcome.json.";
+enable lingering and start `run` under `systemd-run --user --scope`.
+
+`pumpkin cancel` stops the run by SIGTERM to the driver, whose pid is in the
+record's driver.pid, as SIGINT and SIGHUP do too: the run removes its
+sandboxes, and its outcome.json says which signal interrupted it. A signal
+ignored as `run` starts stays ignored. SIGKILL to the driver leaves the run
+lost, with its sandboxes, which `pumpkin cancel` removes: its containers,
+labelled pumpkin.run=<id>, and its socket directories in the record's sockets/,
+which `cancel` removes too.";
 
 const WAIT_NOTES: &str = "\
 Examples:
@@ -371,17 +456,37 @@ Examples:
 Exit status:
   0  The run finished with a score.
   3  The run finished without one.
-  1  The run failed, or was lost as its driver ended without an outcome.json; or
-     another error.
+  1  The run failed, was interrupted, or was lost as its driver ended without
+     an outcome.json, which `pumpkin cancel` then records; or another error.
   2  A usage error.
-Once the run has ended, `wait` ends with a `pumpkin:` line on the standard error
-that says how, and where its record is; any other exit but 0 ends with one that
-says why.
+Once the run has ended, `wait` says on the standard error how it ended, and
+where its record is, then the command that runs it again, as `pumpkin run
+--help` says, and of a lost run, the commands that remove what it left; any
+other exit but 0 ends with a `pumpkin:` line that says why.
 If the final judge returned no result, its standard error is shown first, or,
 if it is long, named.
 
-Ending `pumpkin wait` doesn't stop the run. A record made before records were
-locked has no driver.pid, and is refused.";
+Ending `pumpkin wait` doesn't stop the run: `pumpkin cancel` does.";
+
+const CANCEL_NOTES: &str = "\
+Examples:
+  pumpkin cancel 126a
+  pumpkin cancel --force 126a
+
+Exit status:
+  0  The run has ended, and nothing that it left remains.
+  1  An error.
+  2  A usage error.
+  3  The run has ended, but a provider of it can't be reached, so what it left
+     there may remain.
+
+A live run's driver, whose pid is in the record's driver.pid, gets SIGTERM, and
+the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
+`pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
+signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
+provider that it ran on, as `pumpkin reap --help` says,
+and prints its outcome.json, then says how the run ended, as `pumpkin wait`
+does.";
 
 const HELP_NOTES: &str = "\
 Examples:
@@ -401,8 +506,9 @@ Exit status:
      or another error.
   2  A usage error.
 Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-why. The standard output holds only the IR, as a run's record keeps it in
-ir.json; the builds' output goes to the standard error.
+why, and an exit of 1 then with the command that builds the task again, its
+paths made absolute. The standard output holds only the IR, as a run's record
+keeps it in ir.json; the builds' output goes to the standard error.
 
 Every problem that `check` finds is said before the configuration is read, and
 so before the engine is reached and any image is built. An image is
@@ -416,6 +522,31 @@ build's `docker build` wrote is said at once when it ends, as `make
 --output-sync` says a job's, then that it ended. A failed build is said at the
 image() call that declares its image; once one has failed, no other starts but
 those started with it, and each that runs is waited for, and said if it fails.";
+
+const REAP_NOTES: &str = "\
+Examples:
+  pumpkin reap
+  pumpkin reap --runs runs
+
+Exit status:
+  0  Nothing that a run which has ended left remains.
+  1  A run can't be reaped, which `reap` says, or another error; it reaps the
+     others all the same.
+  2  A usage error.
+  3  Only that a provider of a run, which `reap` names, can't be reached, as
+     when its Docker context is gone, so what the run left there may remain.
+
+Of each run whose driver has ended, `reap` deletes the sandboxes of the run that
+remain on each provider that it ran on, such as one that a create given up at
+its deadline made: on the Docker engine of the context that the record's
+provider.json names, the containers labelled pumpkin.run=<id>. It removes the
+run's socket directories, in the record's sockets/, and a lost run's record it
+marks failed, as its driver ended without an outcome.json. It leaves a live run
+to its driver: `pumpkin cancel` stops one.
+
+Each sandbox that `reap` removes it notes in the record's reaps.jsonl, with the
+time; and each that the record holds undeleted, but that its provider no longer
+lists, it says, and notes there as gone.";
 
 /// `pumpkin help config`, the machine's configuration.
 const CONFIG: &str = "\
@@ -461,7 +592,7 @@ pub(crate) struct Refusal {
 ///
 /// # Errors
 ///
-/// Fails with the first usage problem of `args`, unless they ask for help.
+/// Fails with the first usage problem of `args`, unless they ask for help or the version.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut cli = command();
@@ -499,41 +630,51 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
             None => refusal(error.format(&mut cli)),
         }
     })?;
-    match parsed {
-        Parsed::Run(run) => Ok(Command::Run(run)),
-        Parsed::Wait(wait) => Ok(Command::Wait(wait)),
-        Parsed::Check(check) => Ok(Command::Check(check)),
-        Parsed::Fmt(fmt) => Ok(Command::Fmt(fmt)),
-        Parsed::Build(build) => Ok(Command::Build(build)),
-        Parsed::Help { topic: None } => Ok(Command::Print(help(&mut cli, None))),
-        Parsed::Help { topic: Some(topic) } if topic == "config" => {
-            Ok(Command::Print(CONFIG.to_owned()))
-        }
-        Parsed::Help { topic: Some(topic) } if cli.find_subcommand(&topic).is_some() => {
-            Ok(Command::Print(help(&mut cli, Some(&topic))))
-        }
-        Parsed::Help { topic: Some(topic) } => {
-            let commands: Vec<String> = (cli.get_subcommands())
-                .map(|command| format!("`{}`", command.get_name()))
-                .collect();
-            let problem = format!(
-                "there is no help for `{topic}`: expected a command ({}) or a topic (`config`)",
-                commands.join(", ")
-            );
-            // Found in `help`, which the line names, so the error shows that command's usage.
-            let error = match named
-                .as_deref()
-                .and_then(|name| cli.find_subcommand_mut(name))
-            {
-                Some(command) => command.error(ErrorKind::InvalidValue, problem),
-                None => cli.error(ErrorKind::InvalidValue, problem),
-            };
-            Err(refusal(error))
-        }
-    }
+    Ok(match parsed {
+        Parsed::Run(run) => Command::Run(run),
+        Parsed::Wait(wait) => Command::Wait(wait),
+        Parsed::Cancel(cancel) => Command::Cancel(cancel),
+        Parsed::Reap(reap) => Command::Reap(reap),
+        Parsed::Check(check) => Command::Check(check),
+        Parsed::Fmt(fmt) => Command::Fmt(fmt),
+        Parsed::Build(build) => Command::Build(build),
+        Parsed::Help { topic } => return help_of(&mut cli, topic.as_deref()).map_err(refusal),
+    })
 }
 
-/// `pumpkin`, with `-h` and `--help` listed last in each command's help.
+/// `pumpkin help <topic>`: a command's help, a topic, or `pumpkin --help` without one.
+fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap::Error> {
+    let Some(topic) = topic else {
+        return Ok(Command::Print(help(cli, None)));
+    };
+    if topic == "config" {
+        return Ok(Command::Print(CONFIG.to_owned()));
+    }
+    let names: Vec<String> = (cli.get_subcommands())
+        .filter(|command| listed(command))
+        .map(|command| format!("`{}`", command.get_name()))
+        .collect();
+    if names.iter().any(|name| name.trim_matches('`') == topic) {
+        return Ok(Command::Print(help(cli, Some(topic))));
+    }
+    let problem = format!(
+        "there is no help for `{topic}`: expected a command ({}) or a topic (`config`)",
+        names.join(", ")
+    );
+    // Found in `help`, so the error shows that command's usage.
+    Err(match cli.find_subcommand_mut("help") {
+        Some(command) => command.error(ErrorKind::InvalidValue, problem),
+        None => cli.error(ErrorKind::InvalidValue, problem),
+    })
+}
+
+/// Whether a help lists `command`: those that clap's list doesn't hide, and the rare ones.
+fn listed(command: &clap::Command) -> bool {
+    !command.is_hide_set() || RARE.contains(&command.get_name())
+}
+
+/// `pumpkin`, with `-h` and `--help` listed last in each command's help, and after its options
+/// the commands that are rarely needed ([`RARE`]) and the topics.
 fn command() -> clap::Command {
     // No command has a help flag of clap's, so a usage error ends without clap's pointer to
     // it, and `pumpkin help <command>` is said instead; `parse` answers `-h` and `--help`, and
@@ -544,9 +685,37 @@ fn command() -> clap::Command {
     let version = version
         .action(ArgAction::SetTrue)
         .help("Print the version.");
-    Parsed::command()
+    let cli = Parsed::command()
         .arg(version)
-        .arg(help.display_order(usize::MAX))
+        .arg(help.display_order(usize::MAX));
+    let width = (cli.get_subcommands())
+        .filter(|command| listed(command))
+        .map(|command| command.get_name().len())
+        .max()
+        .unwrap_or_default();
+    let rare: Vec<String> = (cli.get_subcommands())
+        .filter(|command| RARE.contains(&command.get_name()))
+        .map(|command| {
+            let about = command.get_about().map(ToString::to_string);
+            format!(
+                "  {:width$}  {}\n",
+                command.get_name(),
+                about.unwrap_or_default()
+            )
+        })
+        .collect();
+    let rare = rare.concat();
+    cli.after_help(format!(
+        "\
+Rarely needed:
+{rare}
+Topics:
+  {:width$}  The machine's configuration, pumpkin.toml
+
+`pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
+does, and `pumpkin help <topic>` a topic.",
+        "config"
+    ))
 }
 
 /// The help of the command of `cli` that `name` names, or of `pumpkin` if it names none.

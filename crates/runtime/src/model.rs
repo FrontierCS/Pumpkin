@@ -12,6 +12,8 @@ use schema::ir::Name;
 use schema::workflow::Workflow;
 use stdx::{Deadline, unpoisoned};
 
+use crate::Stopped;
+
 /// The agent's model route, as the run serves it: the route that closes its requests, and the
 /// upstream that they reach.
 pub(super) struct Served {
@@ -160,7 +162,7 @@ impl Served {
     pub(super) fn upstream_held(
         &self,
         finalized_first: bool,
-        outcome: &Result<Outcome, String>,
+        outcome: &Result<Outcome, Stopped>,
     ) -> Result<(), String> {
         // A finalize locks the selection, and so the score, which a refusal heard after it can't
         // change.
@@ -196,7 +198,7 @@ impl Served {
 
 /// Whether `outcome` is one where the agent's exit ended the work phase, with no submission
 /// finalized.
-fn exited_unfinalized(outcome: &Result<Outcome, String>) -> bool {
+fn exited_unfinalized(outcome: &Result<Outcome, Stopped>) -> bool {
     let Ok(Outcome { work_end, verdict }) = outcome else {
         return false;
     };

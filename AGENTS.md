@@ -20,8 +20,8 @@
   the sharing that needs it; express single ownership in the types (`&mut`, an owned handle)
 - NEVER catch a panic outside tests: a panic is a bug, and it ends the whole process, since what
   it leaves behind can't be trusted; a binary that runs threads installs `stdx::abort_on_panic`
-- NEVER write `unsafe`, which the workspace forbids: make a system call `std` lacks through
-  `rustix`
+- NEVER write `unsafe`, which the workspace denies, with `stdx::signal::catch` its one expected
+  use: make a system call `std` lacks through `rustix`
 
 Before writing Rust, read `docs/dev/style.md`; before writing tests, `docs/dev/testing.md`;
 before writing docs, comments, commit messages or PR texts, `docs/dev/writing.md`.

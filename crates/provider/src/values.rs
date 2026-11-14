@@ -160,6 +160,9 @@ impl From<String> for SandboxdRef {
 #[derive(Debug)]
 pub struct Created {
     pub id: SandboxId,
+    /// What the provider made for the sandbox beside it, which its delete deletes, for the run's
+    /// record, in a form of its own, as [`Ready::report`] is; `null` if nothing.
+    pub report: Value,
 }
 
 /// The id a provider gave a sandbox, such as a container's.

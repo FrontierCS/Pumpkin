@@ -413,6 +413,32 @@ impl Session {
         }
     }
 
+    /// Kills `process`'s group ([`ToSandbox::Kill`]), whose exit then arrives as any other's.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `sandboxd` can't kill it, if `by` passes first, or if the session ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `process` was started on another session.
+    pub fn kill(&mut self, process: Process, by: Deadline) -> io::Result<()> {
+        let Process { session, stream } = process;
+        if session != self.id {
+            unreachable!(
+                "the command on stream {stream} was killed on a session other than the one it was \
+                 started on, though `kill`'s contract requires that one"
+            )
+        }
+        self.shared.request(
+            |request| ToSandbox::Kill {
+                stream: request,
+                command: stream,
+            },
+            by,
+        )
+    }
+
     /// Kills every process in the sandbox but `sandboxd`, so that nothing collected afterwards
     /// changes, and returns once they are gone.
     ///

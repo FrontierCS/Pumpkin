@@ -1,9 +1,9 @@
 //! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
 //! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
 //! includes the model route of a workflow that has one reaching a stand-in model provider;
-//! `wait`; `check`; `fmt`; `build`; and `driver`, for the process that drives each run, which
-//! `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts beside
-//! the tests' own. The tests on Docker are ignored, and write the context they reach
+//! `wait`; `cancel`; `reap`; `check`; `fmt`; `build`; and `driver`, for the process that
+//! drives each run, which `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts
+//! beside the tests' own. The tests on Docker are ignored, and write the context they reach
 //! ([`test_support::docker_context`]) into the configuration that they give `run` and `build`.
 
 #![expect(
@@ -20,13 +20,16 @@
 use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs::Permissions;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::time::Duration;
 use std::{fs, iter, thread};
 
+use docker::{Docker, Reached};
+use engine::{ContextName, Engine};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
@@ -34,9 +37,11 @@ use tempfile::TempDir;
 use test_support::{BUSYBOX, WORKFLOW, files};
 
 mod build;
+mod cancel;
 mod check;
 mod driver;
 mod fmt;
+mod reap;
 mod run;
 mod wait;
 
@@ -58,7 +63,11 @@ impl Scratch {
             .prefix(&format!("pumpkin-{name}-"))
             .tempdir()
             .unwrap();
-        let scratch = Self(dir.path().to_owned(), dir);
+        // `run` refuses a runs directory below one that its group may write, which the umask, or
+        // a setgid temporary directory, could make this one, and names records by their
+        // canonical path.
+        fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
+        let scratch = Self(fs::canonicalize(dir.path()).unwrap(), dir);
         install(&scratch, ".pumpkin/bin");
         scratch
     }
@@ -293,14 +302,16 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// The files of `record`, a run's, its run log's note on the upstream that served its model
-/// route and its record of how each model request was answered, if it has a run log, what the
-/// agent's `out` held of a model's answer, if anything, what the driver wrote to `driver.log`,
-/// if anything, its `outcome.json`, and whether `stdout` is that.
+/// The files of `record`, a run's, each sandbox's `sandbox.json` and console it holds, its run
+/// log's note on the upstream that served its model route and its record of how each model
+/// request was answered, if it has a run log, what the agent's `out` held of a model's answer, if
+/// anything, what the driver wrote to `driver.log`, if anything, its `outcome.json`, and whether
+/// `stdout` is that.
 fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
     let mut lines = vec![format!("record: {}", files(record).join(", "))];
+    lines.extend(sandboxes(record));
     // A run that didn't start has no run log.
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
     for line in log.lines() {
@@ -330,6 +341,25 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     lines
 }
 
+/// What `record`, a run's, keeps of its sandboxes, as [`test_support::sandboxes`] shows it, with
+/// each container's ID, which Docker makes anew each run, as `<container>`.
+fn sandboxes(record: &Path) -> Vec<String> {
+    let container = |line: String| {
+        let Some((before, after)) = line.split_once(r#""id":""#) else {
+            return line;
+        };
+        let hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+        let id = after.split('"').next().unwrap();
+        if id.len() == 64 && id.bytes().all(hex) {
+            format!(r#"{before}"id":"<container>{}"#, &after[64..])
+        } else {
+            line
+        }
+    };
+    let lines = test_support::sandboxes(record).into_iter();
+    lines.map(container).collect()
+}
+
 /// What `look` returns once it returns something, tried every 100 ms for a minute.
 fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
     for _ in 0..600 {
@@ -339,6 +369,72 @@ fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("nothing came in a minute");
+}
+
+/// How `child` ended, waited for a minute at most, and what it printed: its standard output,
+/// and `said` and then the rest of its standard error, from `stderr`.
+fn ended(mut child: Child, mut stderr: impl Read, mut said: String) -> Output {
+    let status = poll(|| child.try_wait().unwrap());
+    stderr.read_to_string(&mut said).unwrap();
+    let mut stdout = Vec::new();
+    (child.stdout.take().unwrap().read_to_end(&mut stdout)).unwrap();
+    Output {
+        status,
+        stdout,
+        stderr: said.into_bytes(),
+    }
+}
+
+/// Whether the process `pid` runs: a zombie has ended.
+fn alive(pid: i64) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z "))
+}
+
+/// Writes the record `id` in `scratch`'s `runs`, as `pumpkin run --runs runs` leaves it, with
+/// `driver.pid` unless `pid` is false, and `outcome` as its `outcome.json`, if it has one.
+fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) {
+    let args = [
+        "--runs".to_owned(),
+        scratch.0.join("runs").display().to_string(),
+        scratch.0.join("task.star").display().to_string(),
+    ];
+    scratch.write(
+        &format!("runs/{id}/record.json"),
+        &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+    );
+    if pid {
+        scratch.write(&format!("runs/{id}/driver.pid"), "4242\n");
+    }
+    if let Some(outcome) = outcome {
+        scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
+    }
+}
+
+/// Writes the record `id` in `scratch`'s `runs` as [`write_record`] does, with `outcome`, of a
+/// run on provider `local`, of the Docker context `gone`, and a stand-in `docker` in `scratch`'s
+/// `bin` that has no such context, which says so as Docker's command line does; returns a `PATH`
+/// that finds it.
+fn write_gone(scratch: &Scratch, id: &str, outcome: Option<Value>) -> String {
+    let docker = "#!/bin/sh\necho 'context \"gone\": context not found' >&2\nexit 1\n";
+    write_on(scratch, id, "gone", outcome, docker)
+}
+
+/// Writes the record `id` in `scratch`'s `runs` as [`write_record`] does, with `outcome`, of a
+/// run on provider `local`, of the Docker context `context`, and `docker`, a script, as the
+/// stand-in `docker` in `scratch`'s `bin`; returns a `PATH` that finds it.
+fn write_on(
+    scratch: &Scratch,
+    id: &str,
+    context: &str,
+    outcome: Option<Value>,
+    docker: &str,
+) -> String {
+    write_record(scratch, id, true, outcome);
+    let ready = json!({ "report": { "context": context } });
+    let provided = json!({ "providers": { "local": ready } });
+    scratch.write(&format!("runs/{id}/provider.json"), &provided);
+    scratch.write_executable("bin/docker", docker.as_bytes());
+    format!("{}:/usr/bin:/bin", scratch.0.join("bin").display())
 }
 
 /// Builds the images of the task `task`, which `write_task` wrote, on the engine that `config`
@@ -382,6 +478,17 @@ fn signal(name: &str, target: i64) -> bool {
 /// The table of a configuration that names `context` as the one that reaches the engine.
 fn docker_table(context: &str) -> String {
     format!("[docker]\ncontext = \"{context}\"\n")
+}
+
+/// The engine of the Docker context `context`.
+fn engine(context: &str) -> Engine {
+    let context = ContextName::try_from(context.to_owned()).unwrap();
+    Engine::connect(context).unwrap()
+}
+
+/// The containers of the Docker context `context`, as a reap reaches them.
+fn containers(context: &str) -> Reached {
+    Docker::reach(ContextName::try_from(context.to_owned()).unwrap()).unwrap()
 }
 
 /// Makes `scratch`'s directory `dir`, and links `pumpkin` there; returns the link's path.
@@ -510,6 +617,25 @@ esac
         run.process_group(0);
         run
     }
+}
+
+/// `command`, in a process group of its own, started by a shell that runs `setup`, such as
+/// `umask 002`, then executes `command` in its place, which so inherits what `setup` set.
+fn through_shell(command: &Command, setup: &str) -> Command {
+    let mut shell = stdx::process::command("/bin/sh", Environment::Inherited);
+    shell.args(["-c", &format!("{setup} && exec \"$@\""), "sh"]);
+    shell.arg(command.get_program()).args(command.get_args());
+    for (name, value) in command.get_envs() {
+        match value {
+            Some(value) => shell.env(name, value),
+            None => shell.env_remove(name),
+        };
+    }
+    if let Some(dir) = command.get_current_dir() {
+        shell.current_dir(dir);
+    }
+    shell.process_group(0);
+    shell
 }
 
 /// Fails the test if its thread ignores or blocks SIGINT or SIGTERM: the tests stand for a

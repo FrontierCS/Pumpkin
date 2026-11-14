@@ -3,8 +3,9 @@
 //! runtime serves.
 //!
 //! [`Run::prepare`] begins the record of a placed workflow, and [`Run::execute`] runs it to
-//! its outcome, one thread driving the core as [`Core`] says, while each judge call runs on a
-//! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
+//! its outcome, or until a signal interrupts it ([`Stopped::Interrupted`]), one thread driving
+//! the core as [`Core`] says, while each judge call runs on a thread of its own, the `judge`
+//! module's. Between the core's ticks, the driving thread waits
 //! on one inbox of the run's [`Host`], into which the agent's session hands what it reads, and
 //! each judge call's thread its reports. Its sandboxes start on one path, the `sandbox`
 //! module's, which ends a start once its sandbox has ended, and the agent's is the `agent`
@@ -18,13 +19,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread::{self, Scope};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fs, io, mem};
 
 use decision::{Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, lasts};
 use gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
-use provider::{Provider, RunTag, SandboxId, UnixTime};
-use route::{Answer, Serving};
+use provider::{Provider, RunTag, UnixTime};
+use route::Serving;
+use schema::ir::Name;
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{JudgeCall, Placed, Workflow};
 use serde_json::json;
@@ -32,6 +34,7 @@ use stdx::{Context, Deadline};
 
 mod agent;
 mod host;
+mod interruption;
 mod judge;
 mod log;
 mod model;
@@ -41,12 +44,25 @@ mod sandbox;
 use agent::Agent;
 use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
+pub use interruption::{Signal, Stopped};
 use judge::{Deadlines, Message, Report};
-use log::Log;
+use log::{Entry, Log};
 use model::Served;
-pub use record::{BUILD, Build, Ending, Record};
+pub use record::{BUILD, Build, Ending, Reaped, Record, ir_json, minted, named, new_id};
 use record::{Lock, Payloads};
 use sandbox::{Published, Sandboxes, Which};
+
+/// The longest the loop waits on its inbox before it looks for an interruption again.
+// A stop that comes a twentieth of a second late goes unnoticed by the person who asked for it,
+// and the loop wakes for it at most 20 times a second.
+const LOOK: Duration = Duration::from_millis(50);
+
+/// What a run's record keeps of how the run was made.
+#[derive(Clone, Copy)]
+pub struct Recorded<'a> {
+    /// The arguments of the `pumpkin run` that started the run.
+    pub args: &'a [String],
+}
 
 /// A run, prepared on its host, `H`: its workflow placed, and its record begun.
 #[derive(Debug)]
@@ -55,32 +71,33 @@ pub struct Run<'h, H> {
     placed: Placed,
     /// The agent's model route, as the run serves it, if it has one.
     served: Option<Served>,
-    id: String,
+    id: RunTag,
     dir: PathBuf,
     /// Held until `outcome.json` is written: see [`Lock`].
     lock: Lock,
 }
 
 impl<'h, H: Host> Run<'h, H> {
-    /// Makes the record of `placed`'s run in `runs`, on `host`, which then executes it: `runs` is
-    /// created if need be, and the record holds its IR in `ir.json`. The run's id holds `now`,
-    /// the time by the caller's clock. The agent's model route, if it has one, is served as
-    /// `serving` says; a workflow whose route is not served is refused before any record is made.
+    /// Makes the record of `placed`'s run in `runs`, made if need be, on `host`, named by `id`
+    /// ([`new_id`]), which then executes it; keeps what was `recorded`, and the IR in `ir.json`.
+    /// The agent's model route, if it has one, is served as `serving` says.
     ///
     /// # Errors
     ///
-    /// Fails if the workflow is refused, if `now` is before 1970, or if the record can't be
-    /// written.
+    /// Fails, before any record is made, if the agent's route is not served; or if `runs` isn't
+    /// safe from other users, `id` is taken, or the record can't be written.
     pub fn prepare(
         host: &'h H,
         placed: Placed,
         runs: &Path,
-        now: SystemTime,
+        id: RunTag,
         serving: Option<Serving>,
+        recorded: Recorded<'h>,
     ) -> Result<Self, String> {
+        let Recorded { args } = recorded;
         let served = Served::new(placed.workflow(), serving)?;
-        let (id, dir, lock) = record::create(host, runs, now)?;
-        record::write_json(host, &dir, "ir.json", &json!(placed.workflow().ir()))?;
+        let (dir, lock) = record::create(host, runs, id.as_str(), args)?;
+        record::write_ir(host, &dir, placed.workflow())?;
         Ok(Self {
             host,
             placed,
@@ -93,7 +110,7 @@ impl<'h, H: Host> Run<'h, H> {
 
     /// The run's id, which names its record, and is the run tag its sandboxes carry.
     pub fn id(&self) -> &str {
-        &self.id
+        self.id.as_str()
     }
 
     /// The run's record.
@@ -101,21 +118,21 @@ impl<'h, H: Host> Run<'h, H> {
         &self.dir
     }
 
-    /// Runs the workflow on its host and `provider`, with `sandboxd`, a static binary, in every
-    /// sandbox, calling `started` once what they run is published, before the clock starts;
-    /// records how it ended in `outcome.json`, and deletes what `provider` still lists of it.
+    /// Runs the workflow on `provider`, by its name, with the static `sandboxd` in each sandbox,
+    /// calling `started` once that is published. Records its end in `outcome.json`, and deletes
+    /// what the provider lists of it.
     ///
     /// # Errors
     ///
-    /// Fails if the run can't be set up, recorded or cleaned up, if `started` fails, if it was
-    /// still going at its hard end ([`lasts`]), or if the model provider refused the route's key
-    /// before a final submission was accepted, or failed the agent's last request without one.
+    /// Stops once a signal comes ([`Stopped::Interrupted`]); fails if it can't be set up, recorded
+    /// or cleaned up, if `started` fails, past its hard end ([`lasts`]), or if the model provider
+    /// refused the route's key before a finalize, or failed the agent's last request as it exited.
     pub fn execute(
         self,
-        provider: &dyn Provider,
+        provider: (&Name, &dyn Provider),
         sandboxd: &Path,
         started: impl FnOnce() -> Result<(), String>,
-    ) -> Result<Outcome, String> {
+    ) -> Result<Outcome, Stopped> {
         let outcome = self.run_on(provider, sandboxd, started);
         let recorded = match &outcome {
             Ok(outcome) => {
@@ -123,7 +140,10 @@ impl<'h, H: Host> Run<'h, H> {
                 recorded["state"] = "finished".into();
                 recorded
             }
-            Err(reason) => json!({ "state": "failed", "reason": reason }),
+            Err(Stopped::Failed(reason)) => json!({ "state": "failed", "reason": reason }),
+            Err(Stopped::Interrupted(signal)) => {
+                json!({ "state": "interrupted", "signal": signal.name() })
+            }
         };
         let written = record::write_json(self.host, &self.dir, "outcome.json", &recorded);
         drop(self.lock);
@@ -131,22 +151,34 @@ impl<'h, H: Host> Run<'h, H> {
     }
 
     /// Records what `provider` declared and publishes what the run's sandboxes run, calls
-    /// `started`, then starts the run's clock on its host and drives the run, keeping its log,
-    /// deletes what the provider still lists of it, and syncs the log.
+    /// `started` unless a signal has come first, then starts the run's clock on its host and
+    /// drives the run, keeping its log, deletes what the provider still lists of it, and syncs
+    /// the log.
     fn run_on(
         &self,
-        provider: &dyn Provider,
+        (name, provider): (&Name, &dyn Provider),
         sandboxd: &Path,
         started: impl FnOnce() -> Result<(), String>,
-    ) -> Result<Outcome, String> {
+    ) -> Result<Outcome, Stopped> {
         let host = self.host;
-        record::write_json(host, &self.dir, "provider.json", &json!(provider.ready()))?;
-        let published = Published::create(provider, &self.placed, sandboxd, &self.tag())?;
+        let declared = record::provided(name, provider);
+        record::write_json(host, &self.dir, "provider.json", &declared)?;
+        let published = Published::create((name, provider), &self.placed, sandboxd, &self.dir)?;
+        // A run interrupted as it publishes never starts, so nothing tells of a start that the
+        // signal then undoes.
+        interruption::check()?;
         started()?;
         let clock = host.start();
         let unix = UnixTime::of(clock.unix())?;
         let inbox = clock.inbox();
-        let sandboxes = Sandboxes::new(published, self.tag(), &self.placed);
+        let sandboxes = Sandboxes::new(
+            published,
+            self.id.clone(),
+            &self.placed,
+            &self.dir,
+            host,
+            inbox.sender(),
+        );
         let log = Log::create(host, clock.clone(), &self.dir)?;
         let mut runtime = Runtime {
             placed: &self.placed,
@@ -175,38 +207,46 @@ impl<'h, H: Host> Run<'h, H> {
             served.upstream_held(runtime.finalized_first, &outcome)
         });
         let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
+        let outcome = failed_also(outcome, runtime.settle());
         let noted = match &outcome {
-            Ok(_) => Ok(()),
-            Err(reason) => (runtime.log).note(&format!("the run failed: {reason}")),
+            // An interruption is noted as the loop heeds it (`Runtime::drive`).
+            Ok(_) | Err(Stopped::Interrupted(_)) => Ok(()),
+            Err(failed @ Stopped::Failed(_)) => runtime.log.note(&format!("the run {failed}")),
         };
         // The log's last records may have led to no act, and so be unsynced: they last before
         // `outcome.json` says the run has ended, or the run fails.
         let synced = runtime.log.sync();
         failed_also(failed_also(outcome, noted), synced)
     }
-
-    /// The tag its sandboxes carry: its id.
-    fn tag(&self) -> RunTag {
-        match RunTag::try_from(self.id.clone()) {
-            Ok(tag) => tag,
-            // A run tag built from a time and a number, which couldn't fail, would be a `pub`
-            // item of the schema for this one caller.
-            Err(error) => unreachable!(
-                "run {}'s id is no run tag, though it is a UTC time's digits and `-`, then \
-                 lowercase hexadecimal digits (`record::create`), all of which a run tag allows, \
-                 and starts with a digit: {error}",
-                self.id
-            ),
-        }
-    }
 }
 
 /// `outcome`, failed also for `then`'s error, if it has one: both reasons are kept.
-fn failed_also<T>(outcome: Result<T, String>, then: Result<(), String>) -> Result<T, String> {
+fn failed_also<T, E: Failure>(outcome: Result<T, E>, then: Result<(), String>) -> Result<T, E> {
     match (outcome, then) {
         (outcome, Ok(())) => outcome,
-        (Ok(_), Err(error)) => Err(error),
-        (Err(reason), Err(error)) => Err(format!("{reason}; {error}")),
+        (Ok(_), Err(error)) => Err(E::from(error)),
+        (Err(stopped), Err(error)) => Err(stopped.and(&error)),
+    }
+}
+
+/// Why something stopped, which a later failure joins ([`failed_also`]).
+trait Failure: From<String> {
+    /// Why it stopped, failed also for `error`.
+    fn and(self, error: &str) -> Self;
+}
+
+impl Failure for String {
+    fn and(self, error: &str) -> Self {
+        format!("{self}; {error}")
+    }
+}
+
+impl Failure for Stopped {
+    fn and(self, error: &str) -> Self {
+        Self::Failed(match self {
+            Self::Failed(reason) => format!("{reason}; {error}"),
+            Self::Interrupted(signal) => format!("{} interrupted the run; {error}", signal.name()),
+        })
     }
 }
 
@@ -297,7 +337,7 @@ struct Runtime<'r, H: Host> {
     /// The run's record.
     dir: &'r Path,
     /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
-    sandboxes: &'r Sandboxes<'r>,
+    sandboxes: &'r Sandboxes<'r, H>,
     clock: H::Clock,
     /// The run's hard end, as each of its sandboxes' creates takes it
     /// ([`Create::hard_end`](provider::Create::hard_end)).
@@ -326,9 +366,9 @@ struct Runtime<'r, H: Host> {
     held: Option<Input>,
 }
 
-/// What reaches the loop through its inbox, each at the time it reached the host
-/// ([`Input::reached`]), by which the core decides on it, however long the loop takes to get to
-/// it.
+/// What reaches the loop through its inbox: what the core decides on, each at the time it reached
+/// the host ([`Input::reached`]), however long the loop takes to get to it, and what the run log
+/// alone takes, which the loop writes as it gets to it.
 enum Input {
     /// What the agent's session's reader handed over ([`Registration::accept`]), when it did: at
     /// most the op in flight, as the session holds one, the model requests in flight, its
@@ -336,15 +376,13 @@ enum Input {
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
     Agent(Duration, Arrival),
-    /// A note on a model request of the agent's, for the run log alone, from the thread that
-    /// answers it.
-    Model(String),
-    /// How the route answered a model request of the agent's, by its number, for the run log
-    /// alone, from the thread that answered it.
-    ModelAnswered(u64, Answer),
     /// A judge call's report, from its thread, or from the loop for a call whose thread didn't
-    /// start: at most its command's start and end, a note, and its last report.
+    /// start: at most its command's start and end, and its last report.
     Judge(Report),
+    /// A record for the run log alone, from the thread that observed it: a note, such as a judge
+    /// call's or one on a model request from the thread that answers it; how the route answered a
+    /// model request; or a sandbox's delete.
+    Logged(Entry),
 }
 
 impl Input {
@@ -355,9 +393,7 @@ impl Input {
     fn reached(&self) -> Option<Duration> {
         match self {
             Self::Agent(at, _) | Self::Judge(Report::Event(at, _)) => Some(*at),
-            Self::Model(_)
-            | Self::ModelAnswered(..)
-            | Self::Judge(Report::Note(_) | Report::Undeleted(_)) => None,
+            Self::Judge(Report::Undeleted(_)) | Self::Logged(_) => None,
         }
     }
 }
@@ -368,30 +404,48 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 
     /// Drives the run from its start, `unix` after the Unix epoch, until the core finishes or
-    /// abandons it, and waits for its judge calls' threads, stopping those still running; then
-    /// gives the core what is left in the inbox ([`Runtime::drain`]).
-    fn drive(&mut self, unix: UnixTime) -> Result<Outcome, String> {
+    /// abandons it, or a signal interrupts it, and waits for its judge calls' threads, stopping
+    /// those still running; then, once the core has ended, gives it what is left in the inbox
+    /// ([`Runtime::drain`]), and else logs what the run log alone takes of it
+    /// ([`Runtime::settle`]).
+    fn drive(&mut self, unix: UnixTime) -> Result<Outcome, Stopped> {
         let (mut core, actions) = Core::start(self.placed);
-        self.log.start(self.workflow(), unix, &actions)?;
+        self.log
+            .start(self.workflow(), unix, self.hard_end(), &actions)?;
         if let Some(served) = self.served {
             self.log.note(served.started())?;
         }
         // Judge calls' threads borrow the run's workflow and sandboxes, and the scope ends once
         // each has, so that no sandbox starts after the run's end, and the drain takes all they
-        // reported.
+        // reported. A stop waits so for a call whose provider's create is under way, which
+        // nothing cuts short but its own deadline: a sandbox that a create made after the sweep's
+        // list would outlive the run, until its hard end, so the create's return, and the start's
+        // delete of what it made, come before the sweep.
         let end = thread::scope(|scope| {
-            let end = self.turns(scope, &mut core, actions);
+            let end = match self.turns(scope, &mut core, actions) {
+                // As the loop heeds it, so that the record of each sandbox's end after it tells
+                // how long the stop took.
+                Err(interrupted @ Stopped::Interrupted(_)) => {
+                    let noted = self.log.note(&format!("the run {interrupted}"));
+                    failed_also(Err(interrupted), noted)
+                }
+                end => end,
+            };
             self.stop_jobs();
             // The route ended with the work phase, at the agent's teardown, unless the run ended
             // first: this ends it then. The scope's end still waits on its exchanges, within the
             // upstream's bounds and the responses' deadlines.
             self.end_route();
             end
-        })?;
-        // Only the core's end drains the inbox: after a failure of the runtime's own, such as a
-        // record it couldn't write, the core may still be taking ops, and would decide on ones
-        // that nothing acts on.
-        failed_also(end, self.drain(&mut core))
+        });
+        // Only the core's end drains the inbox into the core: after a failure of the runtime's
+        // own, such as a record it couldn't write, or an interruption, the core may still be
+        // taking ops, and would decide on ones that nothing acts on; the run log still takes
+        // what the judge calls noted and deleted as they stopped.
+        match end {
+            Ok(end) => failed_also(end.map_err(Stopped::Failed), self.drain(&mut core)),
+            Err(stopped) => failed_also(Err(stopped), self.settle()),
+        }
     }
 
     /// Performs `actions`, the core's, then feeds the core each event and performs what it
@@ -402,7 +456,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         core: &mut Core<'_>,
         mut actions: Vec<Action>,
-    ) -> Result<Result<Outcome, String>, String> {
+    ) -> Result<Result<Outcome, String>, Stopped> {
         loop {
             if let Some(end) = self.perform(scope, core, actions)? {
                 return Ok(end);
@@ -447,29 +501,38 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     /// what reached the host before its time comes before it, and the tick before what reached
     /// the host at or after it. The wait ends at the tick's time, which arrivals the core doesn't
     /// wait on, handled as they come, don't move. The agent's model requests are answered on
-    /// threads of `scope`.
+    /// threads of `scope`. Stops, with nothing more taken, once a signal has come.
     fn next_event<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
-    ) -> Result<(Duration, Event), String> {
+    ) -> Result<(Duration, Event), Stopped> {
+        interruption::check()?;
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
         let due = core.tick_due();
         loop {
-            let input = self.held.take().or_else(|| self.inbox.wait(due));
+            let input = self.held.take().or_else(|| {
+                // Waited in slices, so that a signal ends the wait within `LOOK`.
+                let slice = due.min(self.clock.now().saturating_add(LOOK));
+                self.inbox.wait(slice)
+            });
+            // Before what arrived is taken, so that the core takes nothing once a signal has come.
+            interruption::check()?;
             let Some(input) = input else {
+                if self.clock.now() < due {
+                    continue;
+                }
                 return Ok((self.clock.now(), Event::Tick));
             };
             // Once the tick's time has come, what reaches the host is stamped at or after it, so
             // taking what came first ends, however much the agent sends that the core doesn't
             // wait on. What reached the host before that time is in the inbox by then, but for an
-            // input whose sender was preempted between stamping and sending it, and a model
-            // request's note, which carries its request's time but is sent as its thread
-            // forwards the request: either may come after the tick, an event then counting at
-            // the tick's time, as the core's clock doesn't go back. Each due tick ends a phase
-            // or the run, so the input held goes on after it.
+            // input whose sender was preempted between stamping and sending it, which may come
+            // after the tick, an event then counting at the tick's time, as the core's clock
+            // doesn't go back. Each due tick ends a phase or the run, so the input held goes on
+            // after it.
             if input.reached().is_some_and(|reached| reached >= due) {
                 self.held = Some(input);
                 return Ok((self.clock.now(), Event::Tick));
@@ -484,8 +547,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     /// the host ([`Input::reached`]). The core learns of none of these: an op whose payload the
     /// gateway refused, which is refused by the core's next act ([`Runtime::answers_due`]) and
     /// goes to the run log; a model request, answered on a thread of `scope`
-    /// ([`Runtime::model_request`]); and a note on one, or how it was answered, which go to the
-    /// run log.
+    /// ([`Runtime::model_request`]); and what is for the run log alone ([`Input::Logged`]).
     fn arrived<'s>(
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
@@ -494,11 +556,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<Option<(Duration, Event)>, String> {
         let (at, arrival) = match input {
             Input::Agent(at, arrival) => (at, arrival),
-            Input::Model(note) => return self.log.note(&note).map(|()| None),
-            Input::ModelAnswered(number, answer) => {
-                return self.log.model_answered(number, &answer).map(|()| None);
-            }
-            Input::Judge(report) => return self.report(report),
+            Input::Judge(report) => return Self::report(report),
+            Input::Logged(entry) => return self.log.entry(entry).map(|()| None),
         };
         // Ops are taken as usual even once the agent's session has closed: the core has ended
         // the work phase, or the run, by then, so it refuses each, and the run log notes that
@@ -574,10 +633,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 // for. Both reports come before the answer's end, and so before what the agent
                 // does next.
                 let noted = |note| {
-                    let _ = reports.send(Input::Model(note));
+                    let _ = reports.send(Input::Logged(Entry::Note(note)));
                 };
                 let answered = |answer| {
-                    let _ = reports.send(Input::ModelAnswered(number, answer));
+                    let answered = Entry::ModelAnswered(number, answer);
+                    let _ = reports.send(Input::Logged(answered));
                 };
                 served.serve(number, incoming, allowed, by, noted, answered);
             });
@@ -593,12 +653,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 
     /// The event that `report`, a judge call's, brings the core, if it has one, at the time the
-    /// call's thread observed it; a note goes to the run log at that time. A sandbox that
-    /// couldn't be deleted fails the run.
-    fn report(&mut self, report: Report) -> Result<Option<(Duration, Event)>, String> {
+    /// call's thread observed it. A sandbox that couldn't be deleted fails the run.
+    fn report(report: Report) -> Result<Option<(Duration, Event)>, String> {
         match report {
             Report::Event(at, event) => Ok(Some((at, event))),
-            Report::Note(note) => self.log.note(&note).map(|()| None),
             Report::Undeleted(reason) => Err(reason),
         }
     }
@@ -899,24 +957,27 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed. A
-    /// failure to write the record, or to delete the sandbox, is returned once both have been
-    /// tried, joined if both fail.
+    /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed,
+    /// keeping its console, or noting why it wasn't kept, and logs the delete. A failure
+    /// to write the record, or to delete the sandbox, is returned once each has been tried, joined
+    /// if more than one fails.
     fn tear_down_agent(&mut self) -> Result<(), String> {
         let Some(mut agent) = self.agent.take() else {
             let note = "the agent's sandbox never started: nothing was collected";
             return self.log.note(note);
         };
         let collected = self.collect_agent(&mut agent);
-        let deleted = agent.delete(self.sandboxes);
-        failed_also(collected, deleted)
+        let (logged, deleted) = agent.delete(self.sandboxes);
+        let noted = (logged.into_iter()).try_for_each(|entry| self.log.entry(entry));
+        failed_also(failed_also(collected, noted), deleted)
     }
 
     /// Freezes the agent's sandbox and collects what it holds into the record's `agent`, by the
     /// teardown's end, and notes in the run log what was collected and what failed.
     fn collect_agent(&mut self, agent: &mut Agent) -> Result<(), String> {
+        // Its `sandbox.json` is there already, as the agent's create wrote it.
         let dir = self.dir.join("agent");
-        fs::create_dir(&dir).context(dir.display())?;
+        fs::create_dir_all(&dir).context(dir.display())?;
         let by = deadline(&self.clock, self.teardown_end());
         let mut notes = agent.freeze_and_collect(&dir, by);
         let collected = record::collected(&dir);
@@ -924,14 +985,32 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         notes.iter().try_for_each(|note| self.log.note(note))
     }
 
-    /// Deletes every sandbox the run's provider still lists of it, and notes which.
+    /// Deletes every sandbox that the run's provider still lists of it, and notes each console the
+    /// sweep didn't keep.
     fn sweep(&mut self) -> Result<(), String> {
-        let deleted = self.sandboxes.sweep()?;
-        if deleted.is_empty() {
-            return Ok(());
+        let (unkept, swept) = self.sandboxes.sweep();
+        let noted = unkept.iter().try_for_each(|unkept| self.log.note(unkept));
+        failed_also(swept, noted)
+    }
+
+    /// Logs what is in the inbox for the run log alone ([`Input::Logged`]), once the core has
+    /// taken all it will: after a stop short of the core's end, what the judge calls noted and
+    /// deleted as they stopped, whose events the core no longer takes; after the sweep, what it
+    /// deleted. A call's sandbox that couldn't be deleted fails the run, once the rest is logged.
+    fn settle(&mut self) -> Result<(), String> {
+        let mut failures = Vec::new();
+        while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
+            let logged = match input {
+                Input::Logged(entry) => self.log.entry(entry),
+                Input::Judge(Report::Undeleted(reason)) => Err(reason),
+                Input::Agent(..) | Input::Judge(Report::Event(..)) => Ok(()),
+            };
+            failures.extend(logged.err());
         }
-        let ids: Vec<&str> = deleted.iter().map(SandboxId::as_str).collect();
-        let note = format!("deleted the sandboxes the run left: {}", ids.join(", "));
-        self.log.note(&note)
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 }

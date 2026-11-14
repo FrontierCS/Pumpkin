@@ -92,8 +92,9 @@ fn refusals() {
                    or another error.
                 2  A usage error.
               Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-              why. The standard output holds only the IR, as a run's record keeps it in
-              ir.json; the builds' output goes to the standard error.
+              why, and an exit of 1 then with the command that builds the task again, its
+              paths made absolute. The standard output holds only the IR, as a run's record
+              keeps it in ir.json; the builds' output goes to the standard error.
 
               Every problem that `check` finds is said before the configuration is read, and
               so before the engine is reached and any image is built. An image is
@@ -123,12 +124,15 @@ fn refusals() {
                   |                            ^
                 the IR's /roles/0/needs/cpu_millis
             pumpkin: tasks/broken/task.star: the task has 3 problems
+            pumpkin: to build it again: pumpkin build --arg model=model-a <scratch>/tasks/broken/task.star
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/bench/task.star --arg model=model-a
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
+            pumpkin: to build it again: pumpkin build --arg model=model-a <scratch>/tasks/bench/task.star
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/bench/task.star --config absent.toml --arg model=model-a
             exit status: Some(1)
             pumpkin: the configuration absent.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
+            pumpkin: to build it again: pumpkin build --arg model=model-a --config <scratch>/absent.toml <scratch>/tasks/bench/task.star
             $ pumpkin build
             exit status: Some(2)
             error: the following required arguments were not provided:
@@ -219,7 +223,7 @@ fn builds_on_docker() {
     lines.push(format!("the workflow parses: {}", workflow.is_ok()));
     lines.push(format!(
         "printed as a record keeps it: {}",
-        workflow.is_ok_and(|workflow| ir == format!("{:#}\n", serde_json::json!(workflow.ir())))
+        workflow.is_ok_and(|workflow| ir == runtime::ir_json(&workflow))
     ));
     lines.push("printed:".to_owned());
     lines.extend(shown.lines().map(|line| format!("  {line}")));
@@ -460,6 +464,7 @@ fn builds_on_docker() {
                 in `_judge()`, called at lib/bench.star:80:9
                 in `bench_task()`, called at tasks/failing/task.star:5:1
             pumpkin: tasks/failing/task.star: the task has 2 problems
+            pumpkin: to build it again: pumpkin build --arg model=model-a --config <scratch>/pumpkin.toml <scratch>/tasks/failing/task.star
             printed nothing: true
             $ pumpkin build nested/tasks/bench/task.star --arg model=model-a --config pumpkin.toml
             exit status: Some(0)
@@ -540,6 +545,7 @@ fn variants_on_docker() {
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/bench/task.star:5:1
             pumpkin: tasks/bench/task.star: the task has 1 problem
+            pumpkin: to build it again: pumpkin build --arg base=busybox:1.37 --arg model=model-a --config <scratch>/pumpkin.toml <scratch>/tasks/bench/task.star
             printed nothing: true"#]],
     );
 }

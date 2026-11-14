@@ -17,8 +17,9 @@ use schema::sandbox::{
 use schema::workflow::{self, Workflow};
 use stdx::{Context, Deadline};
 
+use super::log::Entry;
 use super::sandbox::{PUMPKIN, Sandboxes, Started, Which, collect, launch};
-use super::{Clock, Input};
+use super::{Clock, Host, Input};
 
 /// The agent's sandbox, from when it starts until it is deleted.
 pub(super) struct Agent {
@@ -36,7 +37,7 @@ impl Agent {
     /// ([`Sandboxes::start`]). Returns the sandbox, if it started, and what came of it:
     /// [`Event::AgentStarted`] or [`Event::AgentFailed`].
     pub(super) fn start(
-        sandboxes: &Sandboxes<'_>,
+        sandboxes: &Sandboxes<'_, impl Host>,
         workflow: &Workflow,
         by: Deadline,
         hard_end: UnixTime,
@@ -118,7 +119,10 @@ impl Agent {
     }
 
     /// Ends the agent's sandbox, with whatever still runs in it, by [`Sandboxes::delete`].
-    pub(super) fn delete(self, sandboxes: &Sandboxes<'_>) -> Result<(), String> {
+    pub(super) fn delete(
+        self,
+        sandboxes: &Sandboxes<'_, impl Host>,
+    ) -> (Vec<Entry>, Result<(), String>) {
         sandboxes.delete(self.sandbox)
     }
 }

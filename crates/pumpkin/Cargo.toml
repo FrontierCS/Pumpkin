@@ -22,7 +22,7 @@ schema = { path = "../schema" }
 stdx = { path = "../stdx" }
 clap.workspace = true
 libc.workspace = true
-rustix = { workspace = true, features = ["process", "stdio", "thread"] }
+rustix = { workspace = true, features = ["fs", "process", "stdio", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

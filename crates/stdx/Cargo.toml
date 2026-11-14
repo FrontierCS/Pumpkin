@@ -9,6 +9,7 @@ publish.workspace = true
 test = false
 
 [dependencies]
+libc.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]

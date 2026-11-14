@@ -7,19 +7,20 @@
 //!   "actions": [a, ...]}`, with the actions the core decided on it, which it took at `o`, when
 //!   the runtime observed it: what the agent's session handed over as it reached the host, a
 //!   judge call's events as its thread saw them, so `o` may be before an earlier record's `t`.
-//!   The first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u"}`,
-//!   observed at 0, `u` nanoseconds after the Unix epoch by the driving machine's clock;
-//! - one that no core decides on: an `op_refused` ([`Log::refused`]) or a `model_answered`
-//!   ([`Log::model_answered`]), `{"seq": n, "at_ns": "t", "event": e, "actions": []}`, or a
-//!   note, `{"seq": n, "at_ns": "t", "note": s}`, such as why the run failed.
+//!   The first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u",
+//!   "hard_end_ns": "h"}`, observed at 0, `u` nanoseconds after the Unix epoch by the driving
+//!   machine's clock, whose hard end is `h` after it;
+//! - one that no core decides on: an `op_refused` ([`Log::refused`]) or an [`Entry`], `{"seq": n,
+//!   "at_ns": "t", "event": e, "actions": []}`, or a note, `{"seq": n, "at_ns": "t", "note": s}`,
+//!   such as why the run failed.
 //!
 //! `seq` counts records from 0. Each event and action is an object whose `kind` is its name in
 //! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
 //! by their names in the workflow, jobs and ops by their numbers, payloads by size and digest,
 //! and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
-//! anything longer. A status's job, a number the agent gave, is a decimal string too. A judge
-//! call's `start_judge` names the agent's grant it was made under, or `null` for the pattern's
-//! score. A reply is the [`OpReply`](schema::sandbox::op::OpReply) sent.
+//! anything longer; a status's job, a number the agent gave, is a decimal string too.
+//! `start_judge` names the agent's grant of the call, or `null` for the score. A reply is the
+//! [`OpReply`](schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -27,17 +28,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Event, Failure, JobId, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict,
-    WorkEnd,
+    Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
 use route::Answer;
 use schema::workflow::{JudgeCall, Workflow};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stdx::Context;
 
+use super::sandbox::Deleted;
 use super::{Clock, Durable, Host, record};
 
 /// The run log, open for appending: each record's `at_ns` is when the log wrote it, by the run's
@@ -78,15 +78,20 @@ impl<'h, H: Host> Log<'h, H> {
         })
     }
 
-    /// Appends the record of the run's start, observed at 0, `unix` after the Unix epoch, with the
-    /// core's first `actions`.
+    /// Appends the record of the run's start, observed at 0, `unix` after the Unix epoch, whose
+    /// hard end is `hard_end` after it, with the core's first `actions`.
     pub(super) fn start(
         &mut self,
         workflow: &Workflow,
         unix: UnixTime,
+        hard_end: Duration,
         actions: &[Action],
     ) -> Result<(), String> {
-        let event = json!({ "kind": "run_started", "unix_ns": nanos(unix.since_epoch()) });
+        let event = json!({
+            "kind": "run_started",
+            "unix_ns": nanos(unix.since_epoch()),
+            "hard_end_ns": nanos(hard_end),
+        });
         self.decided(workflow, Duration::ZERO, event, actions)
     }
 
@@ -126,7 +131,7 @@ impl<'h, H: Host> Log<'h, H> {
     /// "answer": a}`, with `"request_id": i` if the upstream named its id for the request, where
     /// `u` is the upstream's status, or `null` if no response came, and `a` the [`Answer`]'s kind,
     /// with a refusal's or a bar's status and message, but never a body.
-    pub(super) fn model_answered(&mut self, request: u64, answer: &Answer) -> Result<(), String> {
+    fn model_answered(&mut self, request: u64, answer: &Answer) -> Result<(), String> {
         let (upstream_status, request_id, answer) = match answer {
             Answer::Forwarded { status, request_id } => {
                 (Some(*status), request_id, json!({ "kind": "forwarded" }))
@@ -158,6 +163,27 @@ impl<'h, H: Host> Log<'h, H> {
             event["request_id"] = json!(request_id);
         }
         self.told(event)
+    }
+
+    /// Appends `entry`, as [`Entry`] says.
+    pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
+        match entry {
+            Entry::Note(note) => self.note(&note),
+            Entry::ModelAnswered(request, answer) => self.model_answered(request, &answer),
+            Entry::Deleted(deleted) => {
+                let Deleted {
+                    sandbox,
+                    provider,
+                    id,
+                } = deleted;
+                self.told(json!({
+                    "kind": "sandbox_deleted",
+                    "sandbox": sandbox,
+                    "provider": provider,
+                    "id": id.as_str(),
+                }))
+            }
+        }
     }
 
     /// Appends the record of `event`, an event of the core's observed at `observed`, and the
@@ -213,8 +239,24 @@ impl<'h, H: Host> Log<'h, H> {
     }
 }
 
+/// A record of the run log that no core decides on, which the thread that observed it hands the
+/// loop, and the loop writes as it takes it, at that time ([`Log`]).
+pub(super) enum Entry {
+    /// A note ([`Log::note`]).
+    Note(String),
+    /// How the route answered a model request of the agent's, by its number
+    /// ([`Log::model_answered`]).
+    ModelAnswered(u64, Answer),
+    /// A sandbox's delete, which ended it: `{"kind": "sandbox_deleted", "sandbox": n, "provider":
+    /// p, "id": i}`, where `n` is its name within the run, `agent` or `job-<n>`, or `null` for one
+    /// that no start of the run recorded, which the run's end found left. Every sandbox's end is
+    /// one, on every path, a stop short of the core's end included, after which the log keeps the
+    /// notes and deletes of the run's judge calls, but no event of theirs.
+    Deleted(Deleted),
+}
+
 /// `duration` in nanoseconds, as the log gives times and durations.
-fn nanos(duration: Duration) -> String {
+pub(super) fn nanos(duration: Duration) -> String {
     // A decimal string, since a reader that reads JSON numbers as doubles rounds integers past
     // 2^53, and a time since the Unix epoch in nanoseconds is past 2^53.
     u64::try_from(duration.as_nanos())
@@ -279,9 +321,9 @@ fn request_json(request: &Request) -> Value {
 /// The JSON form of an action.
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
-        Action::StartAgent => json!({ "kind": ActionKind::StartAgent }),
+        Action::StartAgent => json!({ "kind": "start_agent" }),
         Action::Reply { op, reply } => {
-            json!({ "kind": ActionKind::Reply, "op": op.0, "reply": reply })
+            json!({ "kind": "reply", "op": op.0, "reply": reply })
         }
         Action::StartJudge {
             job,
@@ -289,7 +331,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             payload,
             timeout,
         } => json!({
-            "kind": ActionKind::StartJudge,
+            "kind": "start_judge",
             "job": job.0,
             "grant": match call {
                 JudgeCall::Grant(grant) => Some(workflow.judge_grant(*grant).name.as_str()),
@@ -298,76 +340,13 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             "payload": payload_json(payload),
             "timeout_ns": nanos(*timeout),
         }),
-        Action::StopJudge { job } => json!({ "kind": ActionKind::StopJudge, "job": job.0 }),
-        Action::TearDownAgent => json!({ "kind": ActionKind::TearDownAgent }),
+        Action::StopJudge { job } => json!({ "kind": "stop_judge", "job": job.0 }),
+        Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),
         Action::Finish { outcome } => {
-            json!({ "kind": ActionKind::Finish, "outcome": outcome_json(outcome) })
+            json!({ "kind": "finish", "outcome": outcome_json(outcome) })
         }
-        Action::Abandon => json!({ "kind": ActionKind::Abandon }),
+        Action::Abandon => json!({ "kind": "abandon" }),
     }
-}
-
-/// The kind of an action, as the run log names it ([`action_json`]).
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ActionKind {
-    StartAgent,
-    Reply,
-    StartJudge,
-    StopJudge,
-    TearDownAgent,
-    Finish,
-    Abandon,
-}
-
-/// A record of the run log, as [`final_judge`] reads it: its actions' kinds, jobs and grants.
-// Structs, whose unread fields serde_json skips without nesting into them: a judge's result nested
-// past its limit, which a `Value` or an internally tagged enum would refuse, doesn't stop the read.
-#[derive(Deserialize)]
-struct Logged {
-    #[serde(default)]
-    actions: Vec<LoggedAction>,
-}
-
-/// An action, as [`Logged`] reads it.
-#[derive(Deserialize)]
-struct LoggedAction {
-    kind: ActionKind,
-    job: Option<u64>,
-    grant: Option<String>,
-}
-
-/// The final judge's job: the one that the run log of the record in `dir` names in its
-/// `start_judge` without a grant.
-///
-/// # Errors
-///
-/// Fails if the log can't be read, has a line that is no record of it, or names no such job.
-pub(super) fn final_judge(dir: &Path) -> Result<JobId, String> {
-    let path = dir.join("log.jsonl");
-    let log = File::open(&path).context(path.display())?;
-    for (index, line) in BufReader::new(log).lines().enumerate() {
-        let line = line.context(path.display())?;
-        let logged: Logged = serde_json::from_str(&line).context(format_args!(
-            "{}, line {}",
-            path.display(),
-            index + 1
-        ))?;
-        for action in logged.actions {
-            if let LoggedAction {
-                kind: ActionKind::StartJudge,
-                job: Some(job),
-                grant: None,
-            } = action
-            {
-                return Ok(JobId(job));
-            }
-        }
-    }
-    Err(format!(
-        "{} names no final judge: expected a `start_judge` without a grant",
-        path.display()
-    ))
 }
 
 /// The JSON form of an outcome: `{"score": s, "work_end": w, "verdict": v}`, where the score
@@ -422,4 +401,62 @@ fn failure_json(failure: &Failure) -> Value {
 fn payload_json(payload: &PayloadRef) -> Value {
     let PayloadRef { size, digest } = payload;
     json!({ "size": size, "digest": digest.as_str() })
+}
+
+/// Takes each record of the run log of the record in `dir` in turn, by `take`; false if there is
+/// no log. A last line without its newline, one being written or that a crash cut short, is left
+/// out.
+///
+/// # Errors
+///
+/// Fails if the log can't be read, or a whole line of it isn't JSON, which no log that a run
+/// wrote holds.
+fn records(dir: &Path, mut take: impl FnMut(&Value)) -> Result<bool, String> {
+    let path = dir.join("log.jsonl");
+    let log = match File::open(&path) {
+        Ok(log) => log,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context(path.display()),
+    };
+    let mut log = BufReader::new(log);
+    let mut line = Vec::new();
+    for number in 1.. {
+        line.clear();
+        log.read_until(b'\n', &mut line).context(path.display())?;
+        let Some(whole) = line.strip_suffix(b"\n") else {
+            break;
+        };
+        let record: Value = serde_json::from_slice(whole)
+            .context(format_args!("{}, line {number}", path.display()))?;
+        take(&record);
+    }
+    Ok(true)
+}
+
+/// The final judge's job: the one that the run log of the record in `dir` names in its
+/// `start_judge` without a grant.
+///
+/// # Errors
+///
+/// Fails as [`records`] does, or if the log names no such job.
+pub(super) fn final_judge(dir: &Path) -> Result<u64, String> {
+    let mut job = None;
+    let logged = records(dir, |record| {
+        let actions = record["actions"].as_array().into_iter().flatten();
+        let mut started = actions.filter(|action| action["kind"] == "start_judge");
+        let started = started.find(|action| action["grant"].is_null());
+        job = job.or_else(|| started?["job"].as_u64());
+    })?;
+    let path = dir.join("log.jsonl");
+    match (logged, job) {
+        (_, Some(job)) => Ok(job),
+        (false, None) => Err(format!(
+            "{} doesn't exist: expected a run's log",
+            path.display()
+        )),
+        (true, None) => Err(format!(
+            "{} names no final judge: expected a `start_judge` without a grant",
+            path.display()
+        )),
+    }
 }

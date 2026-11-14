@@ -13,7 +13,7 @@
 //! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
 //! On the engine, it creates only containers, labelled with their run's [`RunTag`] for
-//! [`Provider::list`], and their anonymous volumes, and pulls no image. It needs an engine that
+//! [`Sweep::list`], and their anonymous volumes, and pulls no image. It needs an engine that
 //! enforces every limit that a container has.
 
 use std::collections::BTreeMap;
@@ -27,7 +27,7 @@ use engine::{
 };
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Role, RunTag,
-    SandboxId, SandboxdRef,
+    SandboxId, SandboxdRef, Sweep,
 };
 use schema::ir::{Image, MILLIS_PER_CPU, Name, Resources};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
@@ -131,9 +131,48 @@ impl<'e> Docker<'e> {
         })
     }
 
+    /// Reaches the engine through `context`, as [`Engine::reach`] does, for a sweep of a run's
+    /// containers alone: whether the engine is fit to run on is not checked.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the context can't be read, or the engine can't be reached through it, saying
+    /// what to do.
+    pub fn reach(context: ContextName) -> Result<Reached, String> {
+        Engine::reach(&context)?;
+        Ok(Reached { context })
+    }
+
     /// The context `docker` reaches the engine through.
     fn context(&self) -> &'e ContextName {
         &self.engine.report().context
+    }
+}
+
+/// The Docker engine a context reaches, unchecked for running on, which can only sweep a run's
+/// containers ([`Docker::reach`]). Its commands are bounded as [`Engine`]'s are.
+#[derive(Debug)]
+pub struct Reached {
+    context: ContextName,
+}
+
+impl Sweep for Reached {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+        delete(&self.context, run, ids)
+    }
+
+    fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+        of_run(&self.context, run)
+    }
+}
+
+impl Sweep for Docker<'_> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+        delete(self.context(), run, ids)
+    }
+
+    fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+        of_run(self.context(), run)
     }
 }
 
@@ -168,14 +207,6 @@ impl Provider for Docker<'_> {
     // A container reaches the host only through the socket mounted into it.
     fn meeting(&self) -> Meeting<'_> {
         Meeting::Local(self)
-    }
-
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
-        delete(self.context(), run, ids)
-    }
-
-    fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
-        of_run(self.context(), run)
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -220,6 +251,7 @@ impl Creator<SocketDial> for Docker<'_> {
         // A container is all a create makes.
         Ok(Created {
             id: SandboxId::from(id),
+            report: serde_json::Value::Null,
         })
     }
 }

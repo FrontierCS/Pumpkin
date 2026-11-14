@@ -21,7 +21,8 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 xflags = "0.3.2"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Denied, not forbidden, so that `stdx`'s one signal helper can expect it.
+unsafe_code = "deny"
 unreachable_pub = "warn"
 
 [workspace.lints.rustdoc]

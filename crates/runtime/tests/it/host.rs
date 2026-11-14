@@ -51,6 +51,9 @@ struct State {
     slow: Option<SlowSync>,
     /// The record whose sync fails, until it does.
     failed: Option<u64>,
+    /// The name of the file of which a sync fails, and how many of its syncs come first, until
+    /// it does.
+    failed_file: Option<(&'static str, u32)>,
     /// The inbox the clock made first, the loop's, as a run makes it as it starts its clock.
     first: Option<Arc<dyn Fill>>,
 }
@@ -81,6 +84,7 @@ impl SimHost {
             late: None,
             slow: None,
             failed: None,
+            failed_file: None,
             first: None,
         };
         Self {
@@ -102,6 +106,13 @@ impl SimHost {
     /// The host, whose first sync of the run log that makes `record` last fails.
     pub(crate) fn failed_sync(self, record: u64) -> Self {
         stdx::unpoisoned(self.state.lock()).failed = Some(record);
+        self
+    }
+
+    /// The host, whose sync of a file named `name`, after `before` syncs of files of that name,
+    /// fails.
+    pub(crate) fn failed_sync_of(self, name: &'static str, before: u32) -> Self {
+        stdx::unpoisoned(self.state.lock()).failed_file = Some((name, before));
         self
     }
 
@@ -136,7 +147,21 @@ impl Host for SimHost {
         let lasts = |record: u64| last.is_some_and(|last| last >= record);
         let mut state = stdx::unpoisoned(self.state.lock());
         let slow = state.slow.take_if(|slow| lasts(slow.record));
-        let failed = state.failed.take_if(|record| lasts(*record)).is_some();
+        let named = |name: &str| path.file_name() == Some(name.as_ref());
+        let file = match &mut state.failed_file {
+            Some((name, 0)) => named(name),
+            Some((name, before)) => {
+                if named(name) {
+                    *before -= 1;
+                }
+                false
+            }
+            None => false,
+        };
+        if file {
+            state.failed_file = None;
+        }
+        let failed = state.failed.take_if(|record| lasts(*record)).is_some() || file;
         let first = state.first.clone();
         // Without the lock, so that the run's other threads read the clock as they hand the loop
         // its inputs.

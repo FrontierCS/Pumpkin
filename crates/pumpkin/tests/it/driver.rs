@@ -4,34 +4,21 @@
 //! Docker is ignored, as the Docker provider's tests are.
 
 use std::fs::{self, File, TryLockError};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Output, Stdio};
+use std::process::{Output, Stdio};
+use std::time::Duration;
 
-use docker::Docker;
-use engine::{ContextName, Engine};
+use docker::Reached;
 use expect_test::expect;
-use provider::{Provider as _, RunTag};
+use provider::{RunTag, Sweep as _};
+use serde_json::Value;
 use test_support::{docker_context, sandboxd};
 
 use super::{
-    Scratch, StandIn, Step, build_first, check, docker_table, invocation, poll, ran, record,
-    report, signal, workflow,
+    Scratch, StandIn, Step, alive, build_first, check, containers, docker_table, ended, engine,
+    files, invocation, poll, ran, record, report, sandboxes, signal, through_shell, workflow,
 };
-
-/// How `child` ended, waited for a minute at most, and what it printed: its standard output,
-/// and `said` and then the rest of its standard error, from `stderr`.
-fn ended(mut child: Child, mut stderr: impl Read, mut said: String) -> Output {
-    let status = poll(|| child.try_wait().unwrap());
-    stderr.read_to_string(&mut said).unwrap();
-    let mut stdout = Vec::new();
-    (child.stdout.take().unwrap().read_to_end(&mut stdout)).unwrap();
-    Output {
-        status,
-        stdout,
-        stderr: said.into_bytes(),
-    }
-}
 
 /// `pumpkin wait` for the run that `output`, `pumpkin run`'s in `scratch`, named, once its
 /// driver, `driver`, has ended, and let go of the record ([`unlocked`]), as [`report`] shows it,
@@ -56,9 +43,10 @@ enum Whom {
 }
 
 /// Holds the driver of a `pumpkin run` in a scratch directory of its own, `name`, at `at`, then
-/// sends `signal_name` to `whom`, and shows what becomes of `run`, that the driver ends, and,
-/// if it made the run's record, what `wait` finds of it.
-fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str) -> String {
+/// sends `signal_name` to `whom`, then lets the driver go on if `released`, and shows what
+/// becomes of `run`, that the driver ends, and, if it made the run's record, what `wait` finds of
+/// it.
+fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str, released: bool) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
     stand_in.hold(at);
@@ -74,6 +62,9 @@ fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str) -> String {
         Whom::Both => -pid,
     };
     assert!(signal(signal_name, target), "the process to signal is gone");
+    if released {
+        stand_in.release(at);
+    }
     // Before `run`'s output is read to its end, which a driver that lives on would hold off.
     poll(|| Some(()).filter(|()| !alive(driver)));
     let stderr = child.stderr.take().unwrap();
@@ -132,18 +123,23 @@ fn does_not_start() {
     let mut steps = vec![Step::from(stand_in.run("lacking/task.star", &[]))];
     steps.push(Step::Ran(unlogged("unlogged")));
     steps.push(Step::Ran(unbuilt("unbuilt")));
-    // The driver is held before it makes the record, at `context`, or after, at `image`.
-    for (at, whom, signal) in [
-        ("context", Whom::Driver, "KILL"),
-        ("context", Whom::Run, "KILL"),
-        ("context", Whom::Run, "TERM"),
-        ("context", Whom::Both, "INT"),
-        ("image", Whom::Driver, "KILL"),
-        ("image", Whom::Run, "TERM"),
-        ("image", Whom::Both, "INT"),
+    for (at, whom, signal, released) in [
+        ("context", Whom::Driver, "KILL", false),
+        ("context", Whom::Driver, "TERM", false),
+        ("context", Whom::Run, "KILL", false),
+        ("context", Whom::Run, "TERM", false),
+        ("context", Whom::Both, "INT", false),
+        // While it builds the task's images, before any record is made.
+        ("lookup", Whom::Driver, "KILL", false),
+        ("lookup", Whom::Run, "TERM", false),
+        ("lookup", Whom::Both, "INT", false),
+        ("image", Whom::Driver, "KILL", false),
+        ("image", Whom::Driver, "TERM", true),
+        ("image", Whom::Run, "TERM", false),
+        ("image", Whom::Both, "INT", false),
     ] {
         let name = format!("unstarted-{at}-{}", steps.len());
-        steps.push(Step::Ran(unstarted(&name, at, whom, signal)));
+        steps.push(Step::Ran(unstarted(&name, at, whom, signal, released)));
     }
     check(
         &scratch,
@@ -155,6 +151,7 @@ fn does_not_start() {
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> failed: publishing role `agent`'s image failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
             outcome.json: {"reason":"publishing role `agent`'s image failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
             printed outcome.json: true
@@ -162,6 +159,7 @@ fn does_not_start() {
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             record: driver.pid, ir.json, outcome.json, provider.json, record.json
             outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}
             printed outcome.json: true
@@ -174,10 +172,15 @@ fn does_not_start() {
                 1 | IMAGE = image("Dockerfile")
                   |         ^^^^^^^^^^^^^^^^^^^
             pumpkin: unbuilt/task.star: the task has 1 problem
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
             a record was made: false
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
+            the driver is gone, and made no record: true
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: the driver ended before the run started, by signal: 15 (SIGTERM)
             the driver is gone, and made no record: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 9
@@ -190,14 +193,43 @@ fn does_not_start() {
             the driver is gone, and made no record: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
+            pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
+            the driver is gone, and made no record: true
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            ended by signal: 15
+            the driver is gone, and made no record: true
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            ended by signal: 2
+            the driver is gone, and made no record: true
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
             outcome.json: none
             printed the id alone: false
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: run <id> records into <scratch>/runs/<id>
+            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+            outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            printed outcome.json: true
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(1)
+            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 15
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -205,7 +237,10 @@ fn does_not_start() {
             printed the id alone: false
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 2
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -213,7 +248,10 @@ fn does_not_start() {
             printed the id alone: false
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>"#]],
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]],
     );
 }
 
@@ -305,7 +343,9 @@ fn detaches() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> started: `pumpkin wait <id>` follows it
+            pumpkin: run <id> started
+            pumpkin: to follow it: pumpkin wait --runs <scratch>/runs <id>
+            pumpkin: to stop it: pumpkin cancel --runs <scratch>/runs <id>
             outcome.json: none
             printed the id alone: true
             the driver runs, leading a session of its own: true
@@ -313,6 +353,7 @@ fn detaches() {
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
@@ -327,6 +368,7 @@ fn detaches() {
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
@@ -339,15 +381,134 @@ fn detaches() {
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: """#]],
     );
 }
 
+/// What becomes of a run that `run` started in a scratch directory of its own, `name`, with
+/// SIGHUP ignored if `ignoring`, once its driver, held at `create`, has been sent `signals`, each
+/// as `kill --signal` names it, and let go on if `released`: which of SIGHUP, SIGINT and SIGTERM
+/// the driver catches and ignores as it is held; then, once it has ended, what `wait` finds of
+/// the run, and what the driver wrote to `driver.log`.
+fn signaled(name: &str, ignoring: bool, signals: &[&str], released: bool) -> String {
+    let scratch = Scratch::new(name);
+    let stand_in = StandIn::new(&scratch);
+    stand_in.hold("create");
+    let mut run = stand_in.run("stand-in/task.star", &[]);
+    if ignoring {
+        // As `nohup` starts a program.
+        run = through_shell(&run, "trap '' HUP");
+    }
+    let output = run.output().unwrap();
+    let driver = stand_in.held("create");
+    let mut lines = vec![format!("the driver {}", dispositions(driver))];
+    for name in signals {
+        assert!(signal(name, driver), "the driver is gone");
+    }
+    if released {
+        stand_in.release("create");
+    }
+    lines.push(wait_once_ended(&scratch, &output, driver));
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    let (id, dir) = record(&stderr).unwrap();
+    let log = fs::read_to_string(scratch.0.join(dir).join("driver.log")).unwrap();
+    lines.push(format!("driver.log: {:?}", log.replace(id, "<id>")));
+    let text = lines.join("\n");
+    text.replace(&scratch.0.display().to_string(), "<scratch>")
+}
+
+/// Which of SIGHUP, SIGINT and SIGTERM the process `pid` catches, and which it ignores.
+fn dispositions(pid: i64) -> String {
+    let (caught, ignored) = masks(pid).unwrap();
+    let names = |mask: u64| {
+        let signals = [
+            (libc::SIGHUP, "HUP"),
+            (libc::SIGINT, "INT"),
+            (libc::SIGTERM, "TERM"),
+        ];
+        let set = signals.iter().filter(|(number, _)| has(mask, *number));
+        let names: Vec<&str> = set.map(|(_, name)| *name).collect();
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(" ")
+        }
+    };
+    format!("catches {}; ignores {}", names(caught), names(ignored))
+}
+
+/// The masks of the signals that the process `pid` catches and ignores, as its `status` gives
+/// them, if it runs.
+fn masks(pid: i64) -> Option<(u64, u64)> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let mask = |field: &str| {
+        let line = status
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .unwrap();
+        u64::from_str_radix(line.trim(), 16).unwrap()
+    };
+    Some((mask("SigCgt:"), mask("SigIgn:")))
+}
+
+/// Whether `mask`, a signal mask as `/proc` gives one, holds signal `number`.
+fn has(mask: u64, number: libc::c_int) -> bool {
+    mask >> (number - 1) & 1 == 1
+}
+
+#[test]
+fn signaled_after_the_start() {
+    let scratch = Scratch::new("signaled");
+    let steps = [
+        signaled("signaled-term", false, &["TERM"], true),
+        signaled("signaled-hup", false, &["HUP"], true),
+        signaled("signaled-int-twice", false, &["INT", "INT"], true),
+        signaled("signaled-ignoring", true, &["HUP", "TERM"], true),
+    ];
+    check(
+        &scratch,
+        steps.map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            the driver catches HUP INT TERM; ignores none
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(1)
+            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            driver.log: "pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n"
+            the driver catches HUP INT TERM; ignores none
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(1)
+            pumpkin: run <id> was interrupted by SIGHUP; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            printed outcome.json: {"signal":"SIGHUP","state":"interrupted"}
+            driver.log: "pumpkin: run <id> was interrupted by SIGHUP; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n"
+            the driver catches HUP INT TERM; ignores none
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(1)
+            pumpkin: run <id> was interrupted by SIGINT; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            printed outcome.json: {"signal":"SIGINT","state":"interrupted"}
+            driver.log: "pumpkin: run <id> was interrupted by SIGINT; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n"
+            the driver catches INT TERM; ignores HUP
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(1)
+            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            driver.log: "pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n""#]],
+    );
+}
+
 /// What a test on Docker leaves behind, to remove once it is over, however it ends: for each
-/// run recorded in `runs` its driver, its containers and its socket directory.
+/// run recorded in `runs` its driver and its containers; its socket directory goes with the
+/// scratch directory, as its record does.
 struct Cleanup<'a> {
-    provider: &'a Docker<'a>,
+    containers: &'a Reached,
     runs: PathBuf,
 }
 
@@ -363,13 +524,12 @@ impl Drop for Cleanup<'_> {
             if let Some(driver) = live_driver(&entry.path()) {
                 let _ = signal("KILL", driver);
             }
-            let _ = fs::remove_dir_all(std::env::temp_dir().join(format!("pumpkin-{id}")));
             let Ok(tag) = RunTag::try_from(id) else {
                 continue;
             };
-            if let Ok(listed) = self.provider.list(&tag) {
+            if let Ok(listed) = self.containers.list(&tag) {
                 let ids: Vec<_> = listed.into_iter().map(|listed| listed.id).collect();
-                let _ = self.provider.delete(&tag, &ids);
+                let _ = self.containers.delete(&tag, &ids);
             }
         }
     }
@@ -399,57 +559,189 @@ fn session(pid: i64) -> Option<i64> {
     Some(after.split_whitespace().nth(3).unwrap().parse().unwrap())
 }
 
-/// Whether the process `pid` runs: a zombie has ended.
-fn alive(pid: i64) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z "))
-}
-
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the run's steps and their snapshot"
+)]
 fn lost_on_docker() {
     let scratch = Scratch::new("lost");
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
-    let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
+    let engine = engine(&context);
+    let containers = containers(&context);
     scratch.write_task("sleeps", &workflow("", &["sleep", "300"]));
     scratch.write("pumpkin.toml", &docker_table(&context));
     build_first(&scratch, "sleeps", "pumpkin.toml");
-    let docker = Docker::connect(&engine).unwrap();
     let _cleanup = Cleanup {
-        provider: &docker,
+        containers: &containers,
         runs: scratch.0.join("runs"),
     };
+    let temp = scratch.0.join("tmp");
+    fs::create_dir(&temp).unwrap();
     let mut run = scratch.pumpkin(&["run", "sleeps/task.star", "--sandboxd", &sandboxd]);
     run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
+    run.env("TMPDIR", &temp);
     let invoked = invocation(&run);
     let output = run.output().unwrap();
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
     let (id, dir) = record(&stderr).unwrap();
     let tag = RunTag::try_from(id.to_owned()).unwrap();
-    // Once a sandbox is listed, the run's `docker` children have run, and none may hold the
-    // record's lock, which `unlocked` waits for no process to hold.
-    poll(|| Some(()).filter(|()| !docker.list(&tag).unwrap().is_empty()));
-    let driver = live_driver(&scratch.0.join(dir)).unwrap();
+    let record = scratch.0.join(dir);
+    let created = record.join("agent/sandbox.json");
+    poll(|| Some(()).filter(|()| created.exists()));
+    let listed = containers.list(&tag).unwrap();
+    let agent = listed[0].id.as_str().to_owned();
+    let driver = live_driver(&record).unwrap();
     assert!(signal("KILL", driver), "the driver is gone");
-    unlocked(&scratch.0.join(dir));
+    unlocked(&record);
     let rootful = !engine.report().security.rootless;
-    let killed = report(invoked, &output, &scratch.0, rootful);
-    let wait = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
-    let shown = [(&sandboxd[..], "<sandboxd>"), (id, "<id>")];
+    let mut killed = vec![report(invoked, &output, &scratch.0, rootful)];
+    killed.extend(sandboxes(&record));
+    // By name alone, as the agent's socket goes once the agent connects, which the kill may
+    // come before or after.
+    let sockets = fs::read_dir(scratch.0.join(dir).join("sockets")).unwrap();
+    let mut sockets: Vec<_> = sockets.map(|entry| entry.unwrap().file_name()).collect();
+    sockets.sort();
+    killed.push(format!("its socket directories: {sockets:?}"));
+    killed.push(format!("its temporary directory holds: {:?}", files(&temp)));
+    let mut steps = vec![killed.join("\n")];
+    let pumpkin = |args: &[&str]| ran(scratch.pumpkin(args), &scratch.0, false);
+    steps.push(pumpkin(&["wait", id, "--runs", "runs"]));
+    steps.push(pumpkin(&["cancel", id, "--runs", "runs"]));
+    // The image that the run built, which its IR names.
+    let ir = fs::read_to_string(record.join("ir.json")).unwrap();
+    let ir: serde_json::Value = serde_json::from_str(&ir).unwrap();
+    let image = ir["roles"][0]["image"].as_str().unwrap();
+    let mut create = test_support::docker();
+    create.args([
+        "create",
+        "--label",
+        &format!("pumpkin.run={id}"),
+        image,
+        "true",
+    ]);
+    let created = create.output().unwrap();
+    assert!(created.status.success(), "{created:?}");
+    let unstarted = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+    steps.push(pumpkin(&["reap", "--runs", "runs"]));
+    let left = containers.list(&tag).unwrap().len();
+    steps.push(format!("containers left: {left}"));
+    let shown = [
+        (&sandboxd[..], "<sandboxd>"),
+        (id, "<id>"),
+        (&agent[..], "<the agent's container>"),
+        (&unstarted[..], "<the unstarted container>"),
+    ];
     check(
         &scratch,
-        [Step::Ran(killed), Step::from(wait)],
+        steps.into_iter().map(Step::Ran),
         false,
         &shown,
         &expect![[r#"
-            $ pumpkin run sleeps/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+            $ TMPDIR=<scratch>/tmp pumpkin run sleeps/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> started: `pumpkin wait <id>` follows it
+            pumpkin: run <id> started
+            pumpkin: to follow it: pumpkin wait --runs <scratch>/runs <id>
+            pumpkin: to stop it: pumpkin cancel --runs <scratch>/runs <id>
             outcome.json: none
             printed the id alone: true
+            the agent's sandbox, agent/sandbox.json: {"id":"<container>","provider":"docker","report":null}
+            its socket directories: ["agent"]
+            its temporary directory holds: []
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>"#]],
+            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
+            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
+            $ pumpkin cancel <id> --runs runs
+            exit status: Some(0)
+            pumpkin: run <id> left 1 sandbox on provider `docker`, now removed: <the agent's container>
+            pumpkin: run <id> left its socket directory, now removed: <scratch>/runs/<id>/sockets
+            pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
+            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
+            $ pumpkin reap --runs runs
+            exit status: Some(0)
+            pumpkin: run <id> left 1 sandbox on provider `docker`, now removed: <the unstarted container>
+            printed:
+              <id>
+            containers left: 0"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn signaled_on_docker() {
+    let scratch = Scratch::new("signaled-docker");
+    let sandboxd = sandboxd().to_str().unwrap().to_owned();
+    let context = docker_context();
+    let containers = containers(&context);
+    let ir = workflow("", &["sleep", "300"]);
+    let deadline = ir["roles"][0]["runtime"]["agent"]["deadline_seconds"].as_u64();
+    let deadline = Duration::from_secs(deadline.unwrap());
+    scratch.write_task("sleeps", &ir);
+    scratch.write("pumpkin.toml", &docker_table(&context));
+    build_first(&scratch, "sleeps", "pumpkin.toml");
+    let _cleanup = Cleanup {
+        containers: &containers,
+        runs: scratch.0.join("runs"),
+    };
+    let mut run = scratch.pumpkin(&["run", "sleeps/task.star", "--sandboxd", &sandboxd]);
+    run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
+    let output = run.output().unwrap();
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    let (id, dir) = record(&stderr).unwrap();
+    let record = scratch.0.join(dir);
+    let log = || fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
+    poll(|| Some(()).filter(|()| log().contains(r#""kind":"agent_started""#)));
+    let driver = live_driver(&record).unwrap();
+    assert!(signal("TERM", driver), "the driver is gone");
+    // So that `wait` finds the run ended, rather than follow it for as long as its end takes.
+    unlocked(&record);
+    let wait = ran(
+        scratch.pumpkin(&["wait", id, "--runs", "runs"]),
+        &scratch.0,
+        false,
+    );
+    // The deletes of the sandboxes the stop left follow the stop's note.
+    let log = log();
+    let records = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap());
+    let last = records
+        .rev()
+        .find(|record| record["note"].is_string())
+        .unwrap();
+    let at = Duration::from_nanos(last["at_ns"].as_str().unwrap().parse().unwrap());
+    let tag = RunTag::try_from(id.to_owned()).unwrap();
+    let sockets = record.join("sockets");
+    let lines = [
+        wait,
+        format!("the run log's last note: {}", last["note"]),
+        format!("it came before the deadline: {}", at < deadline),
+        format!("containers left: {}", containers.list(&tag).unwrap().len()),
+        format!("socket directory left: {}", sockets.exists()),
+    ];
+    let shown = [(id, "<id>"), (&sandboxd[..], "<sandboxd>")];
+    check(
+        &scratch,
+        lines.map(Step::Ran),
+        false,
+        &shown,
+        &expect![[r#"
+            $ pumpkin wait <id> --runs runs
+            exit status: Some(1)
+            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            the run log's last note: "the run was interrupted by SIGTERM"
+            it came before the deadline: true
+            containers left: 0
+            socket directory left: false"#]],
     );
 }

@@ -5,9 +5,9 @@
 //! is tested here; a provider's own tests cover only what its platform adds, and the tests of
 //! `sandboxd` that need a real sandbox, which run on Docker.
 //!
-//! Where a contract lets providers differ, as [`Provider::list`]'s lets one leave out an ended
-//! sandbox that it has freed itself, the suite shows what the contract fixes, by what the
-//! subject's platform holds ([`Subject::held`]), so the outcomes stay the same.
+//! Where a contract lets providers differ, as [`Sweep::list`](provider::Sweep::list)'s lets one
+//! leave out an ended sandbox that it has freed itself, the suite shows what the contract fixes,
+//! by what the subject's platform holds ([`Subject::held`]), so the outcomes stay the same.
 
 #![expect(
     clippy::print_stderr,
@@ -27,8 +27,8 @@ use provider::{
     Console, Create, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
     UnixTime,
 };
-use schema::ir::{AbsolutePath, Image, Name, Resources, User};
-use schema::sandbox::{RelativePath, file_mode};
+use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
+use schema::sandbox::{Launch, RelativePath, file_mode};
 use stdx::{Context, Deadline};
 use tempfile::TempDir;
 
@@ -116,6 +116,9 @@ pub fn check(subjects: &[(&str, &dyn Subject)]) {
         listed: []
         deleting that namesake as its own run's: done
         deleting it again, and an id no sandbox has: done
+        killed: its command exited: Signal(9)
+        then a command: started
+        deleting it: done
         mute: listed: ["mute (ended)"]
         deleting it: done
         stalled: accepted and set up by its startup
@@ -160,6 +163,7 @@ fn run(name: &str, subject: &dyn Subject) -> String {
     let mute = suite.connect().publish_sandboxd(&mute).unwrap();
     let broken = suite.connect().publish_sandboxd(&broken).unwrap();
     lines.extend(lifecycle(&mut suite, &image, &sandboxd, &theirs));
+    lines.extend(kills(&mut suite, &image, &sandboxd));
     lines.extend(exits(&mut suite, &image, &mute));
     lines.extend(stalls(&mut suite, &image, &sandboxd));
     lines.extend(fails(&mut suite, &image, &broken));
@@ -234,6 +238,46 @@ fn lifecycle(
         ),
     ]);
     lines
+}
+
+/// A sandbox whose command is killed: its exit arrives, by the signal, and the sandbox still
+/// starts commands, as a kill ends one command, not the sandbox.
+fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
+    let (id, started) = suite.start("killed", image, sandboxd);
+    let (mut session, arrivals) = started.unwrap();
+    let by = || Deadline::after(suite.startup());
+    let process = session.start(sleep(), by()).unwrap();
+    session.kill(process, by()).unwrap();
+    let exited = match arrivals.recv_timeout(suite.startup()).unwrap() {
+        Arrival::Exited {
+            process: exited,
+            status,
+        } if exited == process => format!("{status:?}"),
+        other => format!("{other:?}"),
+    };
+    let next = match session.start(sleep(), by()) {
+        Ok(_) => "started".to_owned(),
+        Err(error) => error.to_string(),
+    };
+    vec![
+        format!("killed: its command exited: {exited}"),
+        format!("then a command: {next}"),
+        format!("deleting it: {}", suite.delete_ours(&[id])),
+    ]
+}
+
+/// How to start `sleep 60` in a suite's sandbox, as the role's commands start: in its home, with
+/// its output in its log.
+fn sleep() -> Launch {
+    let path = |path: &str| AbsolutePath::try_from(path.to_owned()).unwrap();
+    Launch {
+        argv: Argv::try_from(vec!["sleep".to_owned(), "60".to_owned()]).unwrap(),
+        env: Env::default(),
+        cwd: path("/pumpkin/home"),
+        stdin: None,
+        stdout: path("/pumpkin/log/sleep.stdout"),
+        stderr: path("/pumpkin/log/sleep.stderr"),
+    }
 }
 
 /// A sandbox whose `sandboxd` exits without dialing: by its startup the run's lists find it
@@ -512,7 +556,7 @@ impl<'a> Suite<'a> {
 
     /// Whether deleting `ids` as `run`'s, one of the suite's two runs, is done, or fails, and
     /// then which of `ids` its error names; then those of `ids` whose sandboxes the platform held
-    /// before the delete and, against [`Provider::delete`]'s contract, still
+    /// before the delete and, against [`Sweep::delete`](provider::Sweep::delete)'s contract, still
     /// holds after it, of `run`, or no longer holds, of the other run, each [named](Self::named).
     fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> String {
         let runs = [&self.run, &self.other];
@@ -548,7 +592,7 @@ impl<'a> Suite<'a> {
     /// list finds, or that the suite hasn't deleted, [named](Self::named), marked ended if the
     /// list says so, or if it leaves the sandbox out once the platform no longer holds it, and
     /// marked left out if it leaves it out while the platform holds it, which
-    /// [`Provider::list`] forbids; then any other sandbox the list finds.
+    /// [`Sweep::list`](provider::Sweep::list) forbids; then any other sandbox the list finds.
     fn listed(&self) -> String {
         let listed = self.connect().list(&self.run).unwrap();
         let held = self.subject.held(&self.run);

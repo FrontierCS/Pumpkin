@@ -25,7 +25,9 @@ use docker::Docker;
 use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
-use provider::{Create, Created, Creator, Listed, Provider, Role, RunTag, SandboxId, UnixTime};
+use provider::{
+    Create, Created, Creator, Listed, Provider, Role, RunTag, SandboxId, Sweep, UnixTime,
+};
 use recipe::Given;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use schema::sandbox::frame::MAX_MESSAGE_BYTES;
@@ -116,7 +118,7 @@ impl Fixture {
     ) -> Result<Started, String> {
         let run = &create.run;
         let by = startup();
-        let Created { id } = provider().create(create, dial)?;
+        let Created { id, report: _ } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
         // Nothing stops the start: its sandbox dials, or its create fails.
         let accepted = registration.accept(by, ops, model, sender, |arrival| arrival, || false);
@@ -827,7 +829,7 @@ fn console() {
             let published =
                 fixture.publish(&fixture.run, "stand-in", &stand_in, &image(), false, false);
             let (create, dial, _) = published.unwrap();
-            let Created { id } = provider().create(&create, dial).unwrap();
+            let Created { id, report: _ } = provider().create(&create, dial).unwrap();
             // Docker finishes writing a container's log before it marks the container stopped,
             // which `docker wait` waits for, so the console then holds all the stand-in printed.
             run(&["wait", id.as_str()]);

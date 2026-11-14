@@ -172,7 +172,9 @@ impl Session {
             ToSandbox::Data { stream } => self.puts.data(&self.sender, stream, body),
             ToSandbox::End { stream } => self.puts.end(&self.sender, stream),
             ToSandbox::Start { stream, launch } => self.commands.start(stream, &launch),
-
+            ToSandbox::Kill { stream, command } => {
+                self.sender.reply(stream, self.commands.kill(command))
+            }
             ToSandbox::Freeze { stream } => {
                 let commands = self.commands.clone();
                 self.aside("freeze", move |sender| {

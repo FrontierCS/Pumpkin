@@ -1,5 +1,6 @@
-//! The interface every provider implements, [`Provider`], and the create of its sandboxes, by how
-//! they meet the gateway ([`Meeting`]). The values they take and return are this crate's, such as
+//! The interface every provider implements, [`Provider`], the part of it that finds and
+//! deletes a run's sandboxes, [`Sweep`], and the create of its sandboxes, by how they meet the
+//! gateway ([`Meeting`]). The values they take and return are this crate's, such as
 //! [`Create`], the IR's [`Image`], and the sandbox protocol's dial ([`SocketDial`]).
 
 use std::path::Path;
@@ -13,36 +14,11 @@ pub use values::{
 
 mod values;
 
-/// A provider that a run has connected to, and the one way the run acts on it.
+/// What a sweep of a run's sandboxes needs of a provider: to list and delete them.
 ///
-/// It publishes what sandboxes run, and creates, lists, reads and deletes sandboxes; a sandbox's
-/// session doesn't pass through it. Each call returns within a bound: a [create](Creator::create) by
-/// the deadline it is given, any other by one the provider's doc states. No call's outcome rests
-/// on anything an earlier call left in the instance, only on what it is given and what the
-/// platform holds: so another instance, connected to the same platform, may make any call in its
-/// place, and a sandbox outlives the instance that created it.
-pub trait Provider: Send + Sync {
-    /// What the provider declared when the run connected to it.
-    fn ready(&self) -> &Ready;
-
-    /// Publishes `image`, a role's, so that this provider's sandboxes can run it.
-    ///
-    /// # Errors
-    ///
-    /// Fails if it can't be published, such as an image the provider can't reach.
-    fn publish_image(&self, image: &Image) -> Result<ImageRef, String>;
-
-    /// Publishes the static `sandboxd` binary at `path`, which a role's user can execute, so that
-    /// this provider's sandboxes can run it.
-    ///
-    /// # Errors
-    ///
-    /// Fails if it can't be published, such as a path that names no file.
-    fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String>;
-
-    /// How its sandboxes meet the gateway, with the create that takes what each is given to.
-    fn meeting(&self) -> Meeting<'_>;
-
+/// An instance may implement it alone, reached for a sweep without being fit to run on; its
+/// calls are bounded, and rest only on what the platform holds, as [`Provider`]'s are.
+pub trait Sweep {
     /// Deletes the sandboxes of `run` that `ids` name, running or not, and returns once each has
     /// ended and been freed: nothing runs in it, and the platform no longer holds it. An id of
     /// no sandbox, as of one deleted already, counts as deleted.
@@ -64,6 +40,37 @@ pub trait Provider: Send + Sync {
     ///
     /// Fails if the provider can't list them.
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String>;
+}
+
+/// A provider that a run has connected to, and the one way the run acts on it.
+///
+/// It publishes what sandboxes run, and creates, lists, reads and deletes sandboxes; a sandbox's
+/// session doesn't pass through it. Each call returns within a bound: a [create](Creator::create) by
+/// the deadline it is given, any other by one the provider's doc states. No call's outcome rests
+/// on anything an earlier call left in the instance, only on what it is given and what the
+/// platform holds: so another instance, connected to the same platform, may make any call in its
+/// place, and a sandbox outlives the instance that created it.
+pub trait Provider: Sweep + Send + Sync {
+    /// What the provider declared when the run connected to it.
+    fn ready(&self) -> &Ready;
+
+    /// Publishes `image`, a role's, so that this provider's sandboxes can run it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it can't be published, such as an image the provider can't reach.
+    fn publish_image(&self, image: &Image) -> Result<ImageRef, String>;
+
+    /// Publishes the static `sandboxd` binary at `path`, which a role's user can execute, so that
+    /// this provider's sandboxes can run it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it can't be published, such as a path that names no file.
+    fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String>;
+
+    /// How its sandboxes meet the gateway, with the create that takes what each is given to.
+    fn meeting(&self) -> Meeting<'_>;
 
     /// Reads what sandbox `id` of `run` has printed, its [`Console`].
     ///
@@ -92,6 +99,6 @@ pub trait Creator<D, C = Created>: Sync {
     /// # Errors
     ///
     /// Fails if it can't be created or started by `create.by`, deleting what it made or saying
-    /// what is left; [`list`](Provider::list) finds what it can't name once the platform holds it.
+    /// what is left; [`list`](Sweep::list) finds what it can't name once the platform holds it.
     fn create(&self, create: &Create, dial: D) -> Result<C, String>;
 }

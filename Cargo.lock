@@ -412,6 +412,7 @@ dependencies = [
  "gateway",
  "provider",
  "route",
+ "rustix",
  "schema",
  "serde",
  "serde_json",
@@ -569,6 +570,7 @@ name = "stdx"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "libc",
  "rustix",
  "tempfile",
 ]
