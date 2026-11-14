@@ -2,25 +2,32 @@
 
 The rules for Pumpkin's rustdoc, comments, commit messages and pull request texts.
 
-- WRITE rustdoc beside the code, and each rule or invariant once, at its home (the type, the
-  constructor, or the protocol's module doc); every other doc links to it, or names it for
-  symbol search, as `ARCHITECTURE.md` does, and never restates it
-- WRITE rustdoc as the item's contract, in the fewest sentences: what it does, its errors and
-  its panics; never how it works
-- WRITE a module doc that says what the module is for and links to where its rules live
-- WRITE no doc on a test: its name and its snapshot say what it pins; a why that a reader can't
-  see, such as a timing margin or a setup someone would delete, is a `//` comment of a line or
-  two at the line it explains
-- WRITE a doc on a test helper only for a contract its callers need, in a sentence or two
-- WRITE the why of a state in a comment at that code, never in rustdoc, and nothing else in a
-  comment: no restated behaviour of a tool or a library, no history, no precedent or allusion to
-  another project, no claim that nothing checks a thing, no hedges or filler; say each idea once
-- NEVER restate what a name, a type or a signature says
-- KEEP a module doc within 25 lines and an item's within 9, and a test without one, as
-  `cargo xtask ci` checks
-- CUT a doc or a comment that breaks these rules, or shorten it to its one load-bearing
-  sentence; don't reword it at length
-- PREFER a type, a constructor check, an assertion, or a test that pins a format, to prose
+- WRITE a doc only where the name, the type and the signature leave a caller room to go wrong:
+  a unit, a precondition, who owns what, an invariant, a case left unspecified. A private item
+  has none by default, and a test has none: a `//` of a line or two, only for a why
+- WRITE a doc as the contract, in plain sentences: what the caller gets and must give, never how
+  it works. Write `# Errors` and `# Panics` only for a condition the caller can act on
+- KEEP a comment to the code it sits by: say the condition, never which callers, roles or
+  features reach it, and never what another module does
+- WRITE each rule once, at its home. Elsewhere, name it only where a reader would otherwise
+  break it
+- WRITE a why as a `//` at the line it explains: the failure it prevents, where a number comes
+  from, the alternative turned down
+- CITE what shaped a design: name the project, paper or document, and link it (code by a
+  permalink at a full commit SHA)
+- WRITE a module doc for the module's model and what it leaves to others, never a tour of its
+  items
+- TREAT help text (clap, xflags) and `schema::ir` docs as interface
+- PREFER a type, a check or a test to prose
+- NEVER write history or hedges
+- CHANGE, in a commit about something else, only the docs and comments of the code it changes
+- KEEP `ARCHITECTURE.md` to what changes slowly, as
+  [rust-analyzer's](https://github.com/rust-lang/rust-analyzer/blob/55effabb762bbd0a21c5af530ea447bd6772881d/docs/book/src/contributing/architecture.md)
+  does: a bird's-eye view, the entry points, a code map giving each crate's purpose, key types
+  and boundary invariants, and the cross-cutting concerns. Name things there, never link them
+- `cargo xtask ci` checks the rest: doc lengths, no doc on a test, doc form (first paragraph,
+  punctuation, backticks, links), `# Panics` on a public function that can panic, no `TODO`,
+  `FIXME`, `XXX` or code commented out
 - WRITE commit subjects in lowercase imperative, with bodies that explain what and why to a
   reader without other context
 - LIST schema changes in the pull request description
