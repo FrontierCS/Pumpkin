@@ -32,10 +32,9 @@ use decision::{
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, Name, Resources, Sha256Digest};
-use schema::provider::Class;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
-use schema::workflow::{JudgeCall, Workflow};
+use schema::workflow::{Class, JudgeCall, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 

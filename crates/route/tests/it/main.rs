@@ -12,28 +12,24 @@ use std::collections::BTreeMap;
 use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, IncomingModelRequest, Listener};
+use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
 use route::{Key, Route, Upstream, UpstreamUrl};
-use schema::ir::ModelName;
-use schema::sandbox::{FromSandbox, ToSandbox, frame};
+use schema::ir::{ModelName, Name};
+use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
+use test_support::HUNG;
 use test_support::http::read_request;
 
 mod upstream;
 
 /// A request as its client sends it: method, path, headers and body.
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
-
-/// How long the owner waits for a request, and its answers for the sandbox to take them: only a
-/// test that hangs waits this long, so no outcome rests on it.
-const HUNG: Duration = Duration::from_secs(60);
 
 /// Each of `names`, which goes upstream under its own name.
 fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
@@ -70,12 +66,13 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     fs::write(&key, "sk-test-0123\n").unwrap();
     let url = UpstreamUrl::try_from(format!("http://{address}/v1/responses")).unwrap();
     let upstream = Upstream::new(url, Key::read(&key).unwrap());
-    let socket = dir.join("gateway.sock");
-    let listener = Listener::bind(socket.clone()).unwrap();
+    // Its sockets fit in a socket's address by this path to their directory.
+    let (_sockets, registration, socket) = meeting(&dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None));
     let (sender, arrivals) = mpsc::channel();
-    let accepted = listener.accept(Deadline::after(HUNG), None, true, sender, |arrival| arrival);
+    let by = Deadline::after(HUNG);
+    let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
     let session = accepted.unwrap();
     let sent: Vec<Option<String>> = cases
         .iter()
@@ -114,11 +111,24 @@ fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
     }
 }
 
-/// Sends each request in turn, waiting for its response's end before the next, and returns
-/// what it heard back for each: the status, the headers, the body, and whether it was cut short.
-/// It tells `parts`, if any, of each part of a body as it hears it.
+/// The sockets of a run's sandboxes, made in `dir`, the registration of the agent's socket, and
+/// that socket's path.
+fn meeting(dir: &Path) -> (Sockets, Registration, PathBuf) {
+    let sockets = Sockets::create(dir.join("sockets")).unwrap();
+    let name = Name::try_from("agent".to_owned()).unwrap();
+    let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+    (sockets, registration, dir.join(SOCKET_NAME))
+}
+
+/// Opens a session at `socket` with a hello, then sends each request in turn, waiting for its
+/// response's end before the next, and returns what it heard back for each: the status, the
+/// headers, the body, and whether it was cut short. It tells `parts`, if any, of each part of a
+/// body as it hears it.
 fn fake_sandbox(socket: &Path, requests: Vec<Request>, parts: Option<&Sender<()>>) -> Vec<String> {
     let mut connection = UnixStream::connect(socket).unwrap();
+    frame::write(&mut connection, &Hello { grant: None }, &[]).unwrap();
+    let (reply, _) = frame::read::<HelloReply>(&mut connection).unwrap().unwrap();
+    assert_eq!(reply, HelloReply::Accepted, "the answer to the hello");
     let mut heard = Vec::new();
     for (request, (method, path, headers, body)) in (0..).zip(requests) {
         let open = FromSandbox::ModelRequest {

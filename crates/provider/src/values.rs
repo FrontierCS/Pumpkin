@@ -1,4 +1,4 @@
-//! The values that a run and its providers exchange through `provider::Provider`.
+//! The values that a run and its providers exchange through [`Provider`](crate::Provider).
 //!
 //! A provider declares what holds while a run is connected to it ([`Ready`]), among it the
 //! [`Class`]es of sandbox it creates, creates the sandboxes the run asks for ([`Create`]), and
@@ -6,13 +6,12 @@
 //! provider lists the run's sandboxes, whatever made them.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroU64;
-use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use schema::ir::{Name, Resources, User};
+use schema::workflow::Class;
 use serde::Serialize;
 use serde_json::Value;
-
-use crate::ir::{Image, Name, Resources, User};
 
 /// What a provider declares when a run connects to it, which holds while the run is connected.
 #[derive(Debug, Serialize)]
@@ -21,18 +20,6 @@ pub struct Ready {
     pub report: Value,
     /// The classes of sandbox it creates, by name.
     pub classes: BTreeMap<Name, Class>,
-}
-
-/// A class of sandbox that a provider creates, such as a size of machine, and what a run may
-/// rely on of its sandboxes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct Class {
-    /// The most a role whose sandboxes are of the class may ask for of each resource, so a role
-    /// fits the class if it asks for no more.
-    pub resources: Resources,
-    /// The most seconds a sandbox's start takes, from the start of its create until its
-    /// `sandboxd` has dialed and its session is set up.
-    pub startup_seconds: NonZeroU64,
 }
 
 /// The tag that every sandbox of a run carries: an ASCII letter or digit, then any of ASCII
@@ -71,25 +58,59 @@ impl TryFrom<String> for RunTag {
     }
 }
 
-/// A sandbox to create for a role, whose first process is `sandboxd`, dialing
-/// [`dial`](Self::dial), under the [sandbox's rules](crate::sandbox).
+/// A sandbox to create for a role, whose supervisor is `sandboxd`, meeting the gateway as its
+/// provider's [`Meeting`](crate::Meeting) says, under the [sandbox's rules](schema::sandbox).
 #[derive(Debug)]
 pub struct Create {
     /// The run the sandbox belongs to, which tags it.
     pub run: RunTag,
+    /// The sandbox's name, which no other sandbox of its run has, though another run's may: a
+    /// key a provider may know it by on its platform, beside the id it gives it.
+    pub name: Name,
     pub role: Role,
-    /// The role's image, as this provider's publish gave it.
-    pub image: Published,
-    /// The static `sandboxd`, as this provider's publish gave it.
-    pub sandboxd: Published,
+    pub image: ImageRef,
+    pub sandboxd: SandboxdRef,
     /// Whether the role's commands make ops: if so, the sandbox has `sandboxctl` at
-    /// [`SANDBOXCTL_PATH`](crate::sandbox::SANDBOXCTL_PATH) and its `sandboxd` serves ops; if
-    /// not, it is [passive](crate::sandbox).
+    /// [`SANDBOXCTL_PATH`](schema::sandbox::SANDBOXCTL_PATH) and its `sandboxd` serves ops; if
+    /// not, it is [passive](schema::sandbox).
     pub ops: bool,
     /// Whether the sandbox's `sandboxd` serves the model endpoint, at
-    /// [`MODEL_PORT`](crate::sandbox::MODEL_PORT), as a role with a model route needs.
+    /// [`MODEL_PORT`](schema::sandbox::MODEL_PORT), as a role with a model route needs.
     pub model: bool,
-    pub dial: Dial,
+    /// The run's hard end, by this host's clock, which bounds how long the sandbox runs should
+    /// the run's driver die ([`Creator::create`](crate::Creator::create)).
+    pub hard_end: UnixTime,
+    /// When the run stops waiting for the sandbox to start, by this host's clock, at most the
+    /// hard end: the create's deadline ([`Creator::create`](crate::Creator::create)).
+    pub by: UnixTime,
+}
+
+/// A time by a machine's clock, as the time since the Unix epoch, never before it: apart from
+/// the times since a run's start, which are [`Duration`]s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnixTime(Duration);
+
+impl UnixTime {
+    /// `time`, a time by the machine's clock.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `time` is before the Unix epoch, which is the clock's error.
+    pub fn of(time: SystemTime) -> Result<Self, String> {
+        let since = time.duration_since(UNIX_EPOCH);
+        let since = since.map_err(|_| "the clock reads before 1970-01-01: set the system clock");
+        Ok(Self(since?))
+    }
+
+    pub const fn since_epoch(self) -> Duration {
+        self.0
+    }
+
+    /// The time `duration` after it, or the latest one if that is past what a `Duration` holds.
+    #[must_use]
+    pub const fn saturating_add(self, duration: Duration) -> Self {
+        Self(self.0.saturating_add(duration))
+    }
 }
 
 /// A role as a provider sees it: its name, which the provider labels its sandboxes with, its
@@ -101,45 +122,39 @@ pub struct Role {
     pub resources: Resources,
 }
 
-/// What a run's sandboxes run that this host has, which a provider publishes.
-#[derive(Debug)]
-pub enum Local {
-    /// A role's image, as the workflow names it.
-    Role { image: Image },
-    /// The static `sandboxd` binary, which a role's user can execute.
-    Sandboxd { path: PathBuf },
-}
-
-/// What a provider's publish made of a [`Local`], for its creates to name: a reference that
-/// only that provider reads, such as an image's digest in its registry.
+/// What a provider's `publish_image` made of a role's image, for the role's creates to name: a
+/// reference that only that provider reads, such as the image's digest in its registry.
 #[derive(Clone, Debug)]
-pub struct Published(String);
+pub struct ImageRef(String);
 
-impl Published {
+impl ImageRef {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl From<String> for Published {
+impl From<String> for ImageRef {
     fn from(reference: String) -> Self {
         Self(reference)
     }
 }
 
-/// What a sandbox's `sandboxd` dials to reach the gateway, which accepts it there.
-#[derive(Debug)]
-pub enum Dial {
-    /// The Unix socket at [`SOCKET_NAME`] in `dir`, a directory that the provider shows this
-    /// sandbox alone. Its parent must be private to the gateway's user, since the socket takes
-    /// the first connection, whoever makes it; the role's user needs to traverse only `dir`.
-    /// Unix socket paths are short, so keep it short too. `sandboxd` dials once, as it starts, so
-    /// the gateway listens there before the create.
-    Socket { dir: PathBuf },
+/// What a provider's `publish_sandboxd` made of the static `sandboxd`, for every create to name:
+/// a reference that only that provider reads, such as where it keeps a copy.
+#[derive(Clone, Debug)]
+pub struct SandboxdRef(String);
+
+impl SandboxdRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// The name of a [`Dial::Socket`]'s socket in its directory.
-pub const SOCKET_NAME: &str = "s";
+impl From<String> for SandboxdRef {
+    fn from(reference: String) -> Self {
+        Self(reference)
+    }
+}
 
 /// The sandbox a create made.
 #[derive(Debug)]
@@ -167,6 +182,9 @@ impl From<String> for SandboxId {
 #[derive(Debug)]
 pub struct Listed {
     pub id: SandboxId,
+    /// Whether the sandbox has ended: its `sandboxd` has exited, or its provider has stopped
+    /// it, so it will never dial or serve a session again.
+    pub ended: bool,
 }
 
 /// The end of what a sandbox printed as it ran, as its provider keeps it, for diagnostics

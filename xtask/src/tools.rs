@@ -5,20 +5,17 @@ use crate::{Cargo, Result};
 /// A tool that cargo installs and runs as a subcommand.
 #[derive(Clone, Copy)]
 pub(crate) struct Tool {
-    krate: &'static str,
-    /// `cargo-<subcommand>`, which also begins the line `--version` prints.
+    /// The crate, `cargo-<subcommand>`, which also begins the line `--version` prints.
     binary: &'static str,
     version: &'static str,
 }
 
 pub(crate) const NEXTEST: Tool = Tool {
-    krate: "cargo-nextest",
     binary: "cargo-nextest",
     version: "0.9.151",
 };
 
 pub(crate) const MUTANTS: Tool = Tool {
-    krate: "cargo-mutants",
     binary: "cargo-mutants",
     version: "27.1.0",
 };
@@ -28,17 +25,13 @@ const TOOLS: [Tool; 2] = [NEXTEST, MUTANTS];
 /// Installs each of [`TOOLS`] that cargo doesn't run at its version, into cargo's install root.
 pub(crate) fn install(cargo: &Cargo) -> Result<()> {
     for tool in TOOLS {
-        let Tool {
-            krate,
-            binary,
-            version,
-        } = tool;
+        let Tool { binary, version } = tool;
         if installed(cargo, tool).as_deref() == Some(version) {
             println!("xtask: {binary} {version} is installed");
             continue;
         }
         cargo
-            .cmd(&["install", "--locked", &format!("{krate}@{version}")])
+            .cmd(&["install", "--locked", &format!("{binary}@{version}")])
             .run()?;
     }
     Ok(())
@@ -46,9 +39,7 @@ pub(crate) fn install(cargo: &Cargo) -> Result<()> {
 
 /// Fails unless cargo runs `tool` at its version, saying how to install it.
 pub(crate) fn require(cargo: &Cargo, tool: Tool) -> Result<()> {
-    let Tool {
-        binary, version, ..
-    } = tool;
+    let Tool { binary, version } = tool;
     let wrong = match installed(cargo, tool) {
         Some(found) if found == version => return Ok(()),
         Some(found) => format!("{binary} is at {found}, not at {version}"),

@@ -2,11 +2,10 @@
 //! `sandboxctl`, the shim through which callers in the sandbox make ops ([`ctl`]). [`flags`]
 //! holds `sandboxd`'s grammar, as `sandboxd --help` prints it.
 //!
-//! It connects to the gateway at its Unix socket and serves the session
-//! ([`schema::sandbox`]) until the gateway closes it: it writes the trees it is put,
-//! starts commands and reports their exits, freezes the sandbox, and sends the trees it is
-//! asked to collect. When the session ends it kills its commands and exits, which
-//! stops a sandbox whose first process it is.
+//! It meets the gateway, at a Unix socket of the sandbox's own, opens the session
+//! ([`schema::sandbox`]) with its hello, and serves it until the gateway closes it:
+//! it puts and collects trees, starts commands and reports their exits, and freezes the sandbox.
+//! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! With `--ops`, it also serves [ops], which it carries to the session's owner; without it,
 //! nothing in its sandbox can make one. With `--model`, it also serves the [model] endpoint, whose
@@ -16,9 +15,8 @@
 //! kills every other process in the sandbox. Run as any other process, as in tests, it kills
 //! only the process groups of the commands still running.
 //!
-//! It runs as the role's user from the start and needs no privileges: everything it does,
-//! the role's own code could do too, so it is no boundary within its sandbox, and where the
-//! role runs the agent's code, that code can shape what it reports. It does make itself
+//! It runs as the role's user from the start and needs no privileges: everything it does, the
+//! role's own code could do too, so it is no boundary within its sandbox. It does make itself
 //! non-dumpable first, so that the role's code can't reach it through `/proc`
 //! ([`sys::make_non_dumpable`] says why).
 
@@ -27,6 +25,8 @@ use std::fmt::Display;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
+
+use crate::session::Gateway;
 
 mod commands;
 mod ctl;
@@ -112,10 +112,6 @@ fn main() -> ExitCode {
     if Path::new(&name).file_name() == Some("sandboxctl".as_ref()) {
         return ctl::main(args);
     }
-    if let Err(error) = sys::make_non_dumpable() {
-        eprintln!("sandboxd: making the process non-dumpable failed: {error}");
-        return ExitCode::FAILURE;
-    }
     let flags::Sandboxd {
         gateway,
         ops,
@@ -133,7 +129,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match session::serve(&gateway, ops, model) {
+    if let Err(error) = sys::make_non_dumpable() {
+        eprintln!("sandboxd: making the process non-dumpable failed: {error}");
+        return ExitCode::FAILURE;
+    }
+    match session::serve(&Gateway::Socket(gateway), ops, model) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sandboxd: {error}");

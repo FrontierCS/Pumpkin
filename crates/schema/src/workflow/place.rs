@@ -5,9 +5,8 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use super::errors::{Errors, Reported};
-use super::{ByRole, ParseErrors, Placed, Sandbox, Workflow};
+use super::{ByRole, Class, ParseErrors, Placed, Sandbox, Workflow};
 use crate::ir::{Name, Resources};
-use crate::provider::Class;
 
 impl Workflow {
     /// Places each role in the smallest of `classes` that fits it: the least memory, then the

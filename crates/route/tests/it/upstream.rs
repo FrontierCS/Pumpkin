@@ -11,12 +11,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, iter, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, IncomingModelRequest, Listener};
+use gateway::{Arrival, IncomingModelRequest};
 use route::{Answer as Told, Key, Route, Upstream, UpstreamUrl};
 use stdx::Deadline;
+use test_support::HUNG;
 use test_support::http::{read_request, write_chunk};
 
-use super::{HUNG, fake_sandbox, models, next_model_request, post};
+use super::{fake_sandbox, meeting, models, next_model_request, post};
 
 /// The key file's text, whose key goes upstream.
 const KEY: &str = "sk-test-0123\n";
@@ -116,14 +117,15 @@ fn check(cases: &[Case], expect: &Expect) {
     let (parts, heard_part) = mpsc::channel();
     let (holds, held) = mpsc::channel();
     let stand_in = thread::spawn(move || serve(&stand_in, answers, &heard_part, &holds));
-    let socket = dir.join("gateway.sock");
-    let listener = Listener::bind(socket.clone()).unwrap();
+    // Its sockets fit in a socket's address by this path to their directory.
+    let (_sockets, registration, socket) = meeting(&dir);
     let requests = (forwarded.iter())
         .flat_map(|case| iter::repeat_n(post(|_| {}), 1 + usize::from(case.then.is_some())))
         .collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts)));
     let (sender, arrivals) = mpsc::channel();
-    let accepted = listener.accept(Deadline::after(HUNG), None, true, sender, |arrival| arrival);
+    let by = Deadline::after(HUNG);
+    let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
     let session = accepted.unwrap();
     let route = Route::new(models(["m-large"]));
     let sent = post(|_| {}).3;

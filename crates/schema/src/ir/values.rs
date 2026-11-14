@@ -1,6 +1,7 @@
 //! Values that deserialization checks, so that each one in an IR or a sandbox protocol message
 //! is well formed.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::{fmt, iter};
 
@@ -12,7 +13,7 @@ macro_rules! checked_string {
         $(#[$attr])*
         #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
-        pub struct $name(String);
+        pub struct $name(Cow<'static, str>);
 
         impl $name {
             pub fn as_str(&self) -> &str {
@@ -25,13 +26,13 @@ macro_rules! checked_string {
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
                 $check(&value)?;
-                Ok(Self(value))
+                Ok(Self(Cow::Owned(value)))
             }
         }
 
         impl From<$name> for String {
             fn from(value: $name) -> Self {
-                value.0
+                value.0.into_owned()
             }
         }
 
@@ -44,8 +45,8 @@ macro_rules! checked_string {
 }
 
 checked_string!(
-    /// The name of a role, slot or grant: 1 to 64 characters from a-z, 0-9, `_` and `-`,
-    /// starting with a letter.
+    /// The name of a role, slot or grant, a class of sandbox, or a sandbox within its run: 1 to
+    /// 64 characters from a-z, 0-9, `_` and `-`, starting with a letter.
     Name,
     check_name
 );
@@ -108,7 +109,7 @@ checked_string!(
 impl JsonPointer {
     /// The pointer to the whole document.
     pub fn root() -> Self {
-        Self(String::new())
+        Self(Cow::Borrowed(""))
     }
 
     /// This pointer with one more reference token, `token`, escaped.
@@ -116,7 +117,7 @@ impl JsonPointer {
     pub fn token(&self, token: impl fmt::Display) -> Self {
         // `~` first, so that the `~` of a `~1` is not escaped again.
         let token = token.to_string().replace('~', "~0").replace('/', "~1");
-        Self(format!("{}/{token}", self.0))
+        Self(Cow::Owned(format!("{}/{token}", self.0)))
     }
 
     /// The value the pointer names in `document`, if there is one. A token names an object's
@@ -135,14 +136,37 @@ impl JsonPointer {
     }
 }
 
+impl Name {
+    /// `name`, a literal that must be a name: in a `const`, as the crate that writes it builds,
+    /// as in `const AGENT: Name = Name::from_static("agent");`.
+    ///
+    /// # Panics
+    ///
+    /// If `name` isn't a name.
+    pub const fn from_static(name: &'static str) -> Self {
+        assert!(is_name(name), "not a name");
+        Self(Cow::Borrowed(name))
+    }
+}
+
+/// Whether `name` is a [`Name`].
+const fn is_name(name: &str) -> bool {
+    let [first, rest @ ..] = name.as_bytes() else {
+        return false;
+    };
+    let mut index = 0;
+    while index < rest.len() {
+        let byte = rest[index];
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-') {
+            return false;
+        }
+        index += 1;
+    }
+    first.is_ascii_lowercase() && name.len() <= 64
+}
+
 fn check_name(name: &str) -> Result<(), String> {
-    let mut chars = name.chars();
-    let valid = name.len() <= 64
-        && chars.next().is_some_and(|first| first.is_ascii_lowercase())
-        && chars.all(|char| {
-            char.is_ascii_lowercase() || char.is_ascii_digit() || char == '_' || char == '-'
-        });
-    if valid {
+    if is_name(name) {
         Ok(())
     } else {
         Err(format!(
@@ -209,26 +233,63 @@ impl From<[u8; 32]> for Sha256Digest {
     /// The digest of SHA-256's 32 bytes, `bytes`: `sha256:` and each byte as two lowercase
     /// hexadecimal digits.
     fn from(bytes: [u8; 32]) -> Self {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut digest = String::from("sha256:");
-        for byte in bytes {
-            digest.push(char::from(HEX[usize::from(byte >> 4)]));
-            digest.push(char::from(HEX[usize::from(byte & 0xf)]));
-        }
-        Self(digest)
+        Self(Cow::Owned(format!("sha256:{}", hex(&bytes))))
     }
 }
 
-/// Whether `path` is one or more `/`-separated components, none of them empty, `.` or `..`.
-fn has_normal_components(path: &str) -> bool {
-    path.split('/')
-        .all(|component| !matches!(component, "" | "." | ".."))
+/// `bytes`, each as two lowercase hexadecimal digits.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    (bytes.iter())
+        .flat_map(|byte| [byte >> 4, byte & 0xf])
+        .map(|nibble| char::from(DIGITS[usize::from(nibble)]))
+        .collect()
+}
+
+/// Whether `path` is a [`RelativePath`]: one or more `/`-separated components, none of them
+/// empty, `.` or `..`, and no NUL byte.
+const fn is_relative_path(path: &[u8]) -> bool {
+    let (mut start, mut index) = (0, 0);
+    while index <= path.len() {
+        if index == path.len() || path[index] == b'/' {
+            let (component, _) = path.split_at(index);
+            let (_, component) = component.split_at(start);
+            if matches!(component, b"" | b"." | b"..") {
+                return false;
+            }
+            start = index + 1;
+        } else if path[index] == 0 {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Whether `path` is an [`AbsolutePath`]: `/`, or `/` and a relative path.
+const fn is_absolute_path(path: &[u8]) -> bool {
+    match path {
+        [b'/'] => true,
+        [b'/', relative @ ..] => is_relative_path(relative),
+        _ => false,
+    }
 }
 
 impl AbsolutePath {
     /// `/`.
     pub fn root() -> Self {
-        Self("/".to_owned())
+        Self(Cow::Borrowed("/"))
+    }
+
+    /// `path`, a literal that must be a normalized absolute path, as
+    /// [`Name::from_static`] takes a name.
+    ///
+    /// # Panics
+    ///
+    /// If `path` isn't one.
+    pub const fn from_static(path: &'static str) -> Self {
+        assert!(is_absolute_path(path.as_bytes()), "not an absolute path");
+        Self(Cow::Borrowed(path))
     }
 
     /// `path` below this one.
@@ -236,7 +297,8 @@ impl AbsolutePath {
     pub fn join(&self, path: &RelativePath) -> Self {
         // Both are normalized, so `path`'s components follow this path's, a `/` between them;
         // only `/` itself ends with one.
-        Self(format!("{}/{}", self.0.trim_end_matches('/'), path.0))
+        let parent = self.0.trim_end_matches('/');
+        Self(Cow::Owned(format!("{parent}/{}", path.0)))
     }
 
     /// Whether `path` is this path or below it.
@@ -246,16 +308,50 @@ impl AbsolutePath {
     }
 }
 
+impl RelativePath {
+    /// `path`, a literal that must be a normalized relative path, as [`Name::from_static`]
+    /// takes a name.
+    ///
+    /// # Panics
+    ///
+    /// If `path` isn't one.
+    pub const fn from_static(path: &'static str) -> Self {
+        assert!(is_relative_path(path.as_bytes()), "not a relative path");
+        Self(Cow::Borrowed(path))
+    }
+
+    /// `path` below this one.
+    #[must_use]
+    pub fn join(&self, path: &Self) -> Self {
+        // Both are normalized, so their components, a `/` between them, are.
+        Self(Cow::Owned(format!("{}/{}", self.0, path.0)))
+    }
+}
+
+impl From<&Name> for RelativePath {
+    /// `name`, one component, as a name holds no `/` and starts with a letter.
+    fn from(name: &Name) -> Self {
+        Self(name.0.clone())
+    }
+}
+
+impl From<u64> for RelativePath {
+    /// `number`'s decimal digits, one component.
+    fn from(number: u64) -> Self {
+        Self(Cow::Owned(number.to_string()))
+    }
+}
+
 impl RolePath {
     /// The path below `/`, which [`AbsolutePath::root`] joins back to this one.
     pub fn relative(&self) -> RelativePath {
         // Normalized and not `/`, so one `/` comes before its components.
-        RelativePath(self.0[1..].to_owned())
+        RelativePath(Cow::Owned(self.0[1..].to_owned()))
     }
 
     /// Whether this path is below `other`.
     pub(crate) fn is_below(&self, other: &Self) -> bool {
-        (self.0.strip_prefix(&other.0)).is_some_and(|rest| rest.starts_with('/'))
+        (self.0.strip_prefix(other.as_str())).is_some_and(|rest| rest.starts_with('/'))
     }
 }
 
@@ -273,8 +369,7 @@ fn check_role_path(path: &str) -> Result<(), String> {
 }
 
 fn check_absolute_path(path: &str) -> Result<(), String> {
-    let normalized = path == "/" || path.strip_prefix('/').is_some_and(has_normal_components);
-    if normalized && !path.contains('\0') {
+    if is_absolute_path(path.as_bytes()) {
         Ok(())
     } else {
         Err(format!(
@@ -286,7 +381,7 @@ fn check_absolute_path(path: &str) -> Result<(), String> {
 }
 
 fn check_relative_path(path: &str) -> Result<(), String> {
-    if has_normal_components(path) && !path.contains('\0') {
+    if is_relative_path(path.as_bytes()) {
         Ok(())
     } else {
         Err(format!(
@@ -438,6 +533,15 @@ pub struct EnvVar {
 }
 
 impl EnvVar {
+    /// `HOME`, set to `home`.
+    pub(crate) fn home(home: &AbsolutePath) -> Self {
+        // `HOME` is a variable's name, and a path holds no NUL byte.
+        Self {
+            name: "HOME".to_owned(),
+            value: home.to_string(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

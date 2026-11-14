@@ -1,16 +1,16 @@
-//! Serving a session: reading what the gateway sends as it arrives, its requests, which
-//! [`files`] and [`commands`](crate::commands) serve, the replies to [ops](crate::ops), and the
-//! responses to [model requests](crate::model). A collect and a freeze, which may last, are
-//! served on threads of their own where one can start, so that the session reads on meanwhile;
-//! any other request is served before the next frame is read.
+//! Serving a session, once the gateway accepts its hello: reading what the gateway sends as it
+//! arrives, its requests, which [`files`] and [`commands`](crate::commands) serve, the replies to
+//! [ops](crate::ops), and the responses to [model requests](crate::model). A collect and a
+//! freeze, which may last, are served on threads of their own where one can start, so that the
+//! session reads on meanwhile; any other request is served before the next frame is read.
 
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{fmt, thread};
 
-use schema::sandbox::{FromSandbox, ToSandbox, frame};
+use schema::sandbox::{FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, ToSandbox, frame};
 use stdx::{Context, unpoisoned};
 
 use crate::commands::Commands;
@@ -18,18 +18,33 @@ use crate::files::{self, Puts};
 use crate::model::{Model, Part};
 use crate::ops::Ops;
 
-/// Connects to the gateway at `socket` and serves the session until the gateway ends it. With
+/// Where `sandboxd` meets its gateway.
+pub(crate) enum Gateway {
+    /// At a Unix socket of the sandbox's own, which identifies the sandbox.
+    Socket(PathBuf),
+}
+
+impl fmt::Display for Gateway {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socket(socket) => socket.display().fmt(f),
+        }
+    }
+}
+
+/// The reading end of a session's connection.
+type Reader = Box<dyn Read>;
+
+/// The writing end of a session's connection.
+type Writer = Box<dyn Write + Send>;
+
+/// Connects to `gateway`, opens the session, and serves it until the gateway ends it. With
 /// `serve_ops`, it also serves ops, and with `serve_model`, the model endpoint, both from before
-/// the first request.
-pub(crate) fn serve(socket: &Path, serve_ops: bool, serve_model: bool) -> Result<(), String> {
-    let stream = UnixStream::connect(socket).context(format_args!(
-        "connecting to the gateway at {} failed",
-        socket.display()
-    ))?;
-    let sender = stream
-        .try_clone()
-        .context("cloning the connection to the gateway failed")?;
-    let sender = Sender(Arc::new(Mutex::new(sender)));
+/// the first request. Fails, with the gateway's reason, if the gateway refuses the session,
+/// having started nothing.
+pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Result<(), String> {
+    let (reader, writer) = meet(gateway)?;
+    let sender = Sender(Arc::new(Mutex::new(writer)));
     let ops = Ops::default();
     if serve_ops {
         ops.serve(sender.clone()).context("serving ops failed")?;
@@ -47,22 +62,75 @@ pub(crate) fn serve(socket: &Path, serve_ops: bool, serve_model: bool) -> Result
         model,
         puts: Puts::default(),
     };
-    let served = session.serve(&mut BufReader::new(stream));
+    let served = session.serve(&mut BufReader::new(reader));
     session.commands.kill_all();
     // The op in flight, the callers waiting their turns and the model requests in flight end as
     // `sandboxd` exits, which closes their connections.
     served.context("the session with the gateway failed")
 }
 
+/// Meets `gateway`, once it connects, or connecting to it, once, and returns the connection's two
+/// ends, the session open.
+fn meet(gateway: &Gateway) -> Result<(Reader, Writer), String> {
+    let connecting = format_args!("connecting to the gateway at {gateway} failed");
+    let opening = format_args!("opening the session with the gateway at {gateway} failed");
+    match gateway {
+        Gateway::Socket(socket) => {
+            let stream = UnixStream::connect(socket).context(connecting)?;
+            open(&mut &stream, &Hello { grant: None }).context(opening)?;
+            halves(stream, UnixStream::try_clone)
+        }
+    }
+}
+
+/// Says `hello` to `peer`, and returns once its answer accepts the session; or why not, saying
+/// what `it`, the peer, did.
+fn open(peer: &mut (impl Read + Write), hello: &Hello) -> Result<(), String> {
+    let late = |error: io::Error| match error.kind() {
+        io::ErrorKind::TimedOut => format!(
+            "it didn't take the hello and answer it within {} s, or by the sandbox's deadline if \
+             sooner: expected the gateway, which answers at once",
+            HELLO_TIMEOUT.as_secs()
+        ),
+        _ => error.to_string(),
+    };
+    frame::write(peer, hello, &[])
+        .map_err(late)
+        .context("sending the hello failed")?;
+    // Unbuffered, as a frame is read to its end and no further, so that the session's reads,
+    // through a buffer of their own, start at the gateway's first request.
+    let answer = frame::read_hello_reply(peer)
+        .map_err(late)
+        .context("reading its answer failed")?;
+    match answer {
+        Some(HelloReply::Accepted) => Ok(()),
+        Some(HelloReply::Refused { message }) => Err(format!("it refused the session: {message}")),
+        None => Err(
+            "it closed the connection before it answered the hello: expected it to accept or \
+             refuse the session"
+                .to_owned(),
+        ),
+    }
+}
+
+/// The two ends of `stream`, a connection to the gateway, the writing one cloned with `clone`.
+fn halves<S: Read + Write + Send + 'static>(
+    stream: S,
+    clone: impl FnOnce(&S) -> io::Result<S>,
+) -> Result<(Reader, Writer), String> {
+    let writer = clone(&stream).context("cloning the connection to the gateway failed")?;
+    Ok((Box::new(stream), Box::new(writer)))
+}
+
 /// Sends frames to the gateway, from the session, from the thread that reports exits, from the
 /// threads that collect and freeze, and from the threads that carry ops and model requests.
 #[derive(Clone)]
-pub(crate) struct Sender(Arc<Mutex<UnixStream>>);
+pub(crate) struct Sender(Arc<Mutex<Writer>>);
 
 impl Sender {
     pub(crate) fn send(&self, message: &FromSandbox, body: &[u8]) -> io::Result<()> {
-        let mut stream = unpoisoned(self.0.lock());
-        frame::write(&mut *stream, message, body)
+        let mut writer = unpoisoned(self.0.lock());
+        frame::write(&mut *writer, message, body)
     }
 
     /// Replies to the request on `stream` with its outcome.
@@ -104,6 +172,7 @@ impl Session {
             ToSandbox::Data { stream } => self.puts.data(&self.sender, stream, body),
             ToSandbox::End { stream } => self.puts.end(&self.sender, stream),
             ToSandbox::Start { stream, launch } => self.commands.start(stream, &launch),
+
             ToSandbox::Freeze { stream } => {
                 let commands = self.commands.clone();
                 self.aside("freeze", move |sender| {

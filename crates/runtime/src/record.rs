@@ -10,7 +10,7 @@
 //! - `record.json`: `{"record_version": "pumpkin.record/v0"}`, the version of the record's
 //!   form ([`RECORD_VERSION`]), written first;
 //! - `ir.json`: the workflow's IR;
-//! - `provider.json`: what the run's provider declared ([`Ready`](schema::provider::Ready));
+//! - `provider.json`: what the run's provider declared ([`Ready`](provider::Ready));
 //! - `log.jsonl`: the run log, which the `log` module lays out;
 //! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256; a refused
 //!   op's bytes aren't kept;

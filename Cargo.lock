@@ -206,6 +206,7 @@ dependencies = [
  "serde_json",
  "stdx",
  "tempfile",
+ "test-support",
 ]
 
 [[package]]
@@ -328,7 +329,10 @@ dependencies = [
 name = "provider"
 version = "0.0.0"
 dependencies = [
+ "expect-test",
  "schema",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -404,8 +408,6 @@ name = "runtime"
 version = "0.0.0"
 dependencies = [
  "decision",
- "docker",
- "engine",
  "expect-test",
  "gateway",
  "provider",
@@ -479,6 +481,7 @@ dependencies = [
  "serde_json",
  "stdx",
  "tempfile",
+ "test-support",
  "xflags",
 ]
 
@@ -566,6 +569,8 @@ name = "stdx"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "rustix",
+ "tempfile",
 ]
 
 [[package]]
@@ -601,7 +606,13 @@ dependencies = [
 name = "test-support"
 version = "0.0.0"
 dependencies = [
+ "expect-test",
+ "gateway",
+ "provider",
+ "schema",
+ "serde_json",
  "stdx",
+ "tempfile",
 ]
 
 [[package]]

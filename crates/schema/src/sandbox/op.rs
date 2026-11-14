@@ -47,6 +47,17 @@ pub enum OpCall {
     Status { job: u64 },
 }
 
+impl OpCall {
+    /// Whether the call takes a payload ([`FromSandbox::Op`](super::FromSandbox::Op)): a judge
+    /// call or a submission does, and no other call.
+    pub fn takes_payload(&self) -> bool {
+        match self {
+            Self::Judge { .. } | Self::Submit { .. } => true,
+            Self::Ops | Self::Status { .. } => false,
+        }
+    }
+}
+
 /// The owner's answer to an op: the reply for the op's kind, or a refusal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

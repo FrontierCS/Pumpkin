@@ -1,8 +1,7 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
 //! workflow, [`WORKFLOW`].
 //! Also placing the workflow's roles in classes of sandbox, the JSON of ops' replies, which
-//! `sandboxctl` prints, the in-sandbox contract, and the run tags that providers find a run's
-//! sandboxes by.
+//! `sandboxctl` prints, the sandbox protocol's hellos, and the in-sandbox contract.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of all
 //! of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
@@ -17,13 +16,13 @@ use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
 use schema::ir;
-use schema::provider::{Class, RunTag};
 use schema::sandbox::op::OpReply;
 use schema::sandbox::{
-    MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdin, command_stdout,
-    evidence_dir, pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
+    Hello, MAX_OP_PAYLOAD_BYTES, RegistrationGrant, RelativePath, command_env, command_stderr,
+    command_stdin, command_stdout, evidence_dir, frame, pumpkin_dir, pumpkin_subdirs, result_file,
+    slot_dir, slot_payload,
 };
-use schema::workflow::Workflow;
+use schema::workflow::{Class, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
@@ -131,6 +130,44 @@ impl Case for Reply {
     }
 }
 
+/// A hello as JSON, which reads as the hello shown and writes back as itself, or is refused.
+struct HelloJson(&'static str);
+
+impl Case for HelloJson {
+    fn outcome(self) -> String {
+        match serde_json::from_str::<Hello>(self.0) {
+            Err(error) => error.to_string(),
+            Ok(hello) => match serde_json::to_string(&hello).unwrap() {
+                json if json == self.0 => format!("{hello:?}"),
+                json => format!("{hello:?}, written back as {json}"),
+            },
+        }
+    }
+}
+
+/// Two grants' digits, and whether the grants are equal.
+struct Grants(&'static str, &'static str);
+
+impl Case for Grants {
+    fn outcome(self) -> String {
+        let grant = |digits: &str| RegistrationGrant::try_from(digits.to_owned()).unwrap();
+        let equal = grant(self.0) == grant(self.1);
+        format!("{} == {}: {equal}", self.0, self.1)
+    }
+}
+
+/// The bytes a peer sent before its connection ended, and what reading a frame of them gives.
+struct Frame(&'static [u8]);
+
+impl Case for Frame {
+    fn outcome(self) -> String {
+        match frame::read::<Value>(&mut &*self.0) {
+            Ok(read) => format!("{:?}: {read:?}", self.0),
+            Err(error) => format!("{:?}: {:?}", self.0, error.kind()),
+        }
+    }
+}
+
 /// A relative path below an absolute one, as a role's commands find a path of the in-sandbox
 /// contract below `pumpkin_dir()`.
 struct Joined(ir::AbsolutePath, RelativePath);
@@ -152,18 +189,6 @@ impl Case for CommandEnv {
     }
 }
 
-/// A run's tag, which parses, or is refused.
-struct Tag(&'static str);
-
-impl Case for Tag {
-    fn outcome(self) -> String {
-        match RunTag::try_from(self.0.to_owned()) {
-            Ok(tag) => format!("`{}` parsed", tag.as_str()),
-            Err(error) => error,
-        }
-    }
-}
-
 #[test]
 fn placement() {
     let mut larger = fixture();
@@ -179,32 +204,6 @@ fn placement() {
             agent's starts take at most 30s, train_judge's starts take at most 30s, final_judge's starts take at most 30s
             /roles/0/needs: `agent` fits no class of sandbox, as `large` offers 16000 thousandths of a CPU, fewer than its 16001; `small` offers 8000 thousandths of a CPU, fewer than its 16001: ask for no more than a class offers
             /roles/2/needs: `final_judge` fits no class of sandbox, as `large` offers 68719476736 bytes of memory, fewer than its 68719476737; `small` offers 2147483648 bytes of memory, fewer than its 68719476737: ask for no more than a class offers"#]],
-    );
-}
-
-#[test]
-fn run_tags() {
-    check(
-        [
-            Tag("20261105-122057-9802092b"),
-            Tag("pk-4242-cleanup-other"),
-            Tag("selftest.v2_a"),
-            Tag(""),
-            // `docker` trims a filter's value, so this tag would find another run's sandboxes.
-            Tag("pk-run "),
-            Tag("pk/run"),
-            Tag("-pk"),
-            Tag(".pk"),
-        ],
-        &expect![[r#"
-            `20261105-122057-9802092b` parsed
-            `pk-4242-cleanup-other` parsed
-            `selftest.v2_a` parsed
-            the run tag is empty: use only ASCII letters, digits, `_`, `.` and `-`, at least one
-            the run tag `pk-run ` holds ` `: use only ASCII letters, digits, `_`, `.` and `-`
-            the run tag `pk/run` holds `/`: use only ASCII letters, digits, `_`, `.` and `-`
-            the run tag `-pk` starts with `-`: start it with an ASCII letter or digit
-            the run tag `.pk` starts with `.`: start it with an ASCII letter or digit"#]],
     );
 }
 
@@ -256,6 +255,60 @@ fn op_replies() {
             a job that hasn't ended has no result: give it none of `returned`, `scored` and `failure`
             a completed job has a result: give it `returned` and `scored`, and no `failure`
             an errored job has no result: give it `failure`, and neither `returned` nor `scored`"#]],
+    );
+}
+
+#[test]
+fn hellos() {
+    check(
+        [
+            HelloJson(r#"{"version":0}"#),
+            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":0,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
+            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddee"}"#),
+            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff00"}"#),
+            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeefg"}"#),
+        ],
+        &expect![[r#"
+            Hello { grant: None }
+            Hello { grant: Some(RegistrationGrant(..)) }
+            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox"#]],
+    );
+    check(
+        [
+            Grants(
+                "00112233445566778899aabbccddeeff",
+                "00112233445566778899aabbccddeeff",
+            ),
+            Grants(
+                "00112233445566778899aabbccddeeff",
+                "10112233445566778899aabbccddeeff",
+            ),
+            Grants(
+                "00112233445566778899aabbccddeeff",
+                "00112233445566778899aabbccddeefe",
+            ),
+            Grants(
+                "00112233445566778899aabbccddeeff",
+                "01102233445566778899aabbccddeeff",
+            ),
+        ],
+        &expect![[r#"
+            00112233445566778899aabbccddeeff == 00112233445566778899aabbccddeeff: true
+            00112233445566778899aabbccddeeff == 10112233445566778899aabbccddeeff: false
+            00112233445566778899aabbccddeeff == 00112233445566778899aabbccddeefe: false
+            00112233445566778899aabbccddeeff == 01102233445566778899aabbccddeeff: false"#]],
+    );
+    // A connection that ends between frames ends the session; one that ends within a frame's
+    // length is cut.
+    check(
+        [Frame(b""), Frame(b"\0\0")],
+        &expect![[r#"
+        []: None
+        [0, 0]: UnexpectedEof"#]],
     );
 }
 

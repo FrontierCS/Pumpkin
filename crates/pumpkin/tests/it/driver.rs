@@ -11,8 +11,7 @@ use std::process::{Child, Output, Stdio};
 use docker::Docker;
 use engine::{ContextName, Engine};
 use expect_test::expect;
-use provider::Provider as _;
-use schema::provider::RunTag;
+use provider::{Provider as _, RunTag};
 use test_support::{docker_context, sandboxd};
 
 use super::{
@@ -155,9 +154,9 @@ fn does_not_start() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: publishing what the run's sandboxes run failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing what the run's sandboxes run failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
             printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)

@@ -11,10 +11,13 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use serde::Serialize;
+
 use crate::ir::{
-    Command, Dir, File, Image, JsonPointer, ModelRoute, Name, Resources, ResultSpec, Slot, User,
+    Command, Dir, File, Image, JsonPointer, ModelRoute, Name, Resources, ResultSpec, User,
     WorkflowName,
 };
+use crate::sandbox::OpPayloadLimit;
 
 mod errors;
 mod parse;
@@ -116,7 +119,7 @@ impl Workflow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placed {
     workflow: Workflow,
-    /// Each role's class's [`startup_seconds`](crate::provider::Class::startup_seconds).
+    /// Each role's class's [`startup_seconds`](Class::startup_seconds).
     startups: ByRole<Duration>,
 }
 
@@ -129,6 +132,18 @@ impl Placed {
     pub fn startup(&self, role: RoleId) -> Duration {
         *self.startups.get(role)
     }
+}
+
+/// A class of sandbox that a provider creates, such as a size of machine, and what a run may
+/// rely on of its sandboxes, which a role is placed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Class {
+    /// The most a role whose sandboxes are of the class may ask for of each resource, so a role
+    /// fits the class if it asks for no more.
+    pub resources: Resources,
+    /// The most seconds a sandbox's start takes, from the start of its create until its
+    /// `sandboxd` has met the gateway and its session is set up.
+    pub startup_seconds: NonZeroU64,
 }
 
 /// A role of any kind, by its place among the IR's roles.
@@ -221,6 +236,26 @@ pub struct Judge {
     pub slots: Vec<Slot>,
     /// See [`ir::JudgeRuntime::result`](crate::ir::JudgeRuntime::result).
     pub result: ResultSpec,
+}
+
+/// A judge's slot; see [`ir::Slot`](crate::ir::Slot).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slot {
+    pub name: Name,
+    /// At most [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), as parsing checks.
+    pub(crate) max_bytes: NonZeroU64,
+}
+
+impl Slot {
+    /// See [`ir::Slot::max_bytes`](crate::ir::Slot::max_bytes).
+    pub fn max_bytes(&self) -> NonZeroU64 {
+        self.max_bytes
+    }
+
+    /// The op payload limit of a session whose payloads the slot takes: its `max_bytes`.
+    pub fn payload_limit(&self) -> OpPayloadLimit {
+        OpPayloadLimit(self.max_bytes.get())
+    }
 }
 
 /// A judge grant of the agent's.

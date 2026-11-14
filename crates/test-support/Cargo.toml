@@ -10,7 +10,13 @@ test = false
 doctest = false
 
 [dependencies]
+gateway = { path = "../gateway" }
+provider = { path = "../provider" }
+schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+expect-test.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

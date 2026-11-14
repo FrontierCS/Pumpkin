@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use super::errors::{Errors, Reported};
 use super::{
-    Agent, Judge, JudgeGrant, JudgeId, ParseErrors, RoleId, Sandbox, Score, SlotId, SubmitGrant,
-    Workflow,
+    Agent, Judge, JudgeGrant, JudgeId, ParseErrors, RoleId, Sandbox, Score, Slot, SlotId,
+    SubmitGrant, Workflow,
 };
 use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::MAX_OP_PAYLOAD_BYTES;
@@ -230,9 +230,17 @@ impl<'ir> Parser<'ir> {
                 );
             }
         }
+        // A slot over the limit is kept, so that the calls that name it resolve, and reported,
+        // so that no parsed workflow holds it.
+        let slots = (slots.iter())
+            .map(|ir::Slot { name, max_bytes }| Slot {
+                name: name.clone(),
+                max_bytes: *max_bytes,
+            })
+            .collect();
         let judge = Judge {
             command: command.clone(),
-            slots: slots.clone(),
+            slots,
             result: result.clone(),
         };
         self.judges.insert(role, judge);

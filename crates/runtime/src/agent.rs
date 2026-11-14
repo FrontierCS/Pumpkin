@@ -7,6 +7,7 @@ use std::sync::mpsc::Sender;
 
 use decision::Event;
 use gateway::{IncomingOp, Process, Put, RefusedOp, Session};
+use provider::UnixTime;
 use schema::ir::{AbsolutePath, Dir, File, Mode};
 use schema::sandbox::op::OpReply;
 use schema::sandbox::{
@@ -16,7 +17,7 @@ use schema::sandbox::{
 use schema::workflow::{self, Workflow};
 use stdx::{Context, Deadline};
 
-use super::sandbox::{PUMPKIN, Sandboxes, Started, collect, launch};
+use super::sandbox::{PUMPKIN, Sandboxes, Started, Which, collect, launch};
 use super::{Clock, Input};
 
 /// The agent's sandbox, from when it starts until it is deleted.
@@ -28,25 +29,25 @@ pub(super) struct Agent {
 }
 
 impl Agent {
-    /// Starts the agent's sandbox, whose session takes its ops, and its model requests if
-    /// `model`, puts its directories, files and standard input there ([`put`]), then starts its
-    /// command, all by `by`, its session's arrivals sent on `inbox`, each at the time `clock`
-    /// reads as the session's reader hands it over. Returns the sandbox, if it started, and what
-    /// came of it: [`Event::AgentStarted`] or [`Event::AgentFailed`].
+    /// Starts the agent's sandbox, whose session takes its ops, and its model requests if it has
+    /// a model route, puts its directories, files and standard input there ([`put`]), then starts
+    /// its command, all by `by`, its session's arrivals sent on `inbox`, each at the time `clock`
+    /// reads as the session's reader hands it over, its create given `hard_end`
+    /// ([`Sandboxes::start`]). Returns the sandbox, if it started, and what came of it:
+    /// [`Event::AgentStarted`] or [`Event::AgentFailed`].
     pub(super) fn start(
         sandboxes: &Sandboxes<'_>,
         workflow: &Workflow,
-        model: bool,
         by: Deadline,
+        hard_end: UnixTime,
         inbox: Sender<Input>,
         clock: impl Clock,
     ) -> (Option<Self>, Event) {
         let agent = workflow.agent();
         let ops = Some(op_payload_limit(workflow));
-        let sandbox = workflow.sandbox(agent.role);
         // Stamped as the reader hands it over, which is when it reached the host.
         let wrap = move |arrival| Input::Agent(clock.now(), arrival);
-        let started = sandboxes.start("agent", sandbox, ops, model, by, inbox, wrap);
+        let started = sandboxes.start(Which::Agent, ops, by, hard_end, inbox, wrap);
         let mut sandbox = match started {
             Ok(sandbox) => sandbox,
             Err(error) => {
@@ -160,7 +161,7 @@ fn put(
 /// and of the score's slot, which caps its submissions.
 fn op_payload_limit(workflow: &Workflow) -> OpPayloadLimit {
     let slots = workflow.judge_grants().map(|(_, grant)| grant.slot);
-    let max_bytes = |slot| workflow.slot(slot).max_bytes.get();
+    let max_bytes = |slot| workflow.slot(slot).max_bytes().get();
     let score = max_bytes(workflow.score().slot);
     let bytes = slots.map(max_bytes).fold(score, u64::max);
     // A parsed slot type carrying the bound would reshape `Workflow::slot` and
