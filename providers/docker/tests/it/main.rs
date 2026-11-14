@@ -274,7 +274,7 @@ fn reached() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let context = ContextName::try_from(test_support::docker_context())?;
-        Engine::connect(context)
+        Engine::connect(context, &engine_dir())
     })
 }
 
@@ -282,6 +282,12 @@ fn reached() -> &'static Result<Engine, String> {
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
     PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, None))
+}
+
+/// The directory of what the tests' engine writes on this machine, which every run of the tests
+/// shares, as a machine's runs share their workspace's.
+fn engine_dir() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("docker")
 }
 
 /// The engine the tests reach Docker through.

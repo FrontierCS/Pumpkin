@@ -198,7 +198,7 @@ fn builds_on_docker() {
     scratch.write("tasks/failing/judge/Dockerfile", &failing);
     let context = docker_context();
     scratch.write("pumpkin.toml", &machine(&context));
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     let rootful = !engine.report().security.rootless;
     let build = |entry: &str| {
         let mut command = scratch.pumpkin(&["build", entry, "--arg", "model=model-a"]);
@@ -494,7 +494,7 @@ fn variants_on_docker() {
     write_variants(&scratch, &label);
     let context = docker_context();
     scratch.write("pumpkin.toml", &machine(&context));
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     let rootful = !engine.report().security.rootless;
     let build = |args: &[&str]| {
         let mut command = scratch.pumpkin(&["build", "tasks/bench/task.star"]);

@@ -6,7 +6,9 @@
 //! task's source, which [`star`] reads, and lints it, and `build` builds its images and prints its
 //! IR. `fmt` formats `.star` files, and `check` lints them, with the formatter beside `pumpkin`
 //! ([`style`]), and [`lock`] writes a recipe's fetch stage. What a command says of an ending or a
-//! refusal ends with the commands to run next, as [`next`] makes them.
+//! refusal ends with the commands to run next, as [`next`] makes them. All that it writes on this
+//! machine, but what a command names, as `--runs` does, goes in the workspace's directory of it
+//! ([`Workspace`]).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -29,6 +31,7 @@ use sandboxd::Sandboxd;
 use schema::ir::Name;
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use stdx::Context;
+use workspace::Workspace;
 
 mod cli;
 mod config;
@@ -38,6 +41,7 @@ mod next;
 mod sandboxd;
 mod star;
 mod style;
+mod workspace;
 
 /// The most bytes of a final judge's standard error that a run's ending shows ([`end`]): one
 /// that holds more is named, and not shown.
@@ -902,17 +906,16 @@ fn escaped(text: &str) -> String {
     shown
 }
 
-/// `$HOME/.local/share/pumpkin/runs`; failing if it isn't UTF-8, as the commands that `pumpkin`
-/// says to run next name it.
+/// The workspace's runs directory ([`Workspace::runs`]); failing if it isn't UTF-8, as the
+/// commands that `pumpkin` says to run next name it.
 fn default_runs() -> Result<String, String> {
-    let home = home("name a directory with `--runs`")?;
-    let runs = home.join(".local/share/pumpkin/runs");
-    runs.into_os_string().into_string().map_err(|_| {
+    let runs = Workspace::find()?.runs();
+    runs.into_os_string().into_string().map_err(|runs| {
         format!(
-            "HOME `{}` isn't UTF-8, as the runs directory below it is named in the commands that \
-             `pumpkin` says to run next: set it to a UTF-8 path, or name a UTF-8 directory with \
-             `--runs`",
-            home.display()
+            "the workspace's runs directory {} isn't UTF-8, as the commands that `pumpkin` says \
+             to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory \
+             with `--runs`",
+            Path::new(&runs).display()
         )
     })
 }
@@ -1039,10 +1042,11 @@ fn counted<C: Copy + fmt::Display + PartialEq + From<u8>>(count: C, noun: &str) 
     }
 }
 
-/// The Docker engine that `context` reaches, reported. A rootful engine is announced, since its
-/// `docker` group is root-equivalent.
+/// The Docker engine that `context` reaches, reported, which writes in the workspace's directory
+/// of it ([`Workspace::docker`]). A rootful engine is announced, since its `docker` group is
+/// root-equivalent.
 fn engine(context: ContextName) -> Result<Engine, String> {
-    let engine = Engine::connect(context)?;
+    let engine = Engine::connect(context, &Workspace::find()?.docker())?;
     let report = engine.report();
     if !report.security.rootless {
         say(format_args!(

@@ -231,7 +231,7 @@ impl Engine {
         if let Some(built) = self.tagged(&tag)? {
             return Ok(Started::Found(built));
         }
-        let scratch = make_scratch("build")?;
+        let scratch = make_scratch(&self.dir, "build")?;
         match self.start_in(scratch.path(), &inputs, recipe, given, repository) {
             Ok((child, recipe, tag)) => Ok(Started::Building(Building {
                 child,
@@ -405,20 +405,22 @@ impl Building {
     }
 }
 
-/// A directory of its own in the system's temporary directory for one `task`, made with bits
-/// 0700: named by `task`, this process and a random word, so that each that a process that has
-/// ended made is removed then ([`sweep`]).
+/// A directory of its own in `dir` for one `task`, made with bits 0700, making `dir` if it is
+/// missing: named by `task`, this process and a random word, so that each that a process that
+/// has ended made is removed then ([`sweep`]).
 // A process killed during its task leaves this directory, with what the task put there, such as
 // a build's stage, a copy of the whole context, behind, until another process makes one.
-fn make_scratch(task: &str) -> Result<TempDir, String> {
+fn make_scratch(dir: &Path, task: &str) -> Result<TempDir, String> {
+    fs::create_dir_all(dir).context(dir.display())?;
     let scratch = tempfile::Builder::new()
         .prefix(&format!("pumpkin-{task}-{}-", std::process::id()))
         .permissions(Permissions::from_mode(0o700))
-        .tempdir()
+        .tempdir_in(dir)
         .map_err(|error| {
             format!(
-                "a directory for the {task} can't be made in the system's temporary directory: \
-                 {error}: let this user make one there"
+                "a directory for the {task} can't be made in {}: {error}: let this user make one \
+                 there",
+                dir.display()
             )
         })?;
     sweep(scratch.path());
@@ -534,6 +536,9 @@ fn start_untagged(
     let file = File::create(&output).context(output.display())?;
     let errors = file.try_clone().context(output.display())?;
     let mut command = docker_command(&engine.report.context, build);
+    // Buildx keeps a state of its own, the builds' references and this machine's ID among it, in
+    // the engine's directory, rather than in Docker's configuration.
+    command.env("BUILDX_CONFIG", engine.dir.join("buildx"));
     // In this process's group, so that the terminal's interrupt reaches it too: a session that
     // BuildKit cancels once its client is gone.
     let started = (command.stdin(Stdio::null()).stdout(file).stderr(errors)).spawn();

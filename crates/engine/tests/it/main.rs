@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use engine::{BuildContext, Built, ContextName, Engine, Recipe, Report};
@@ -45,8 +45,14 @@ fn connected() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let context = ContextName::try_from(test_support::docker_context())?;
-        Engine::connect(context)
+        Engine::connect(context, &engine_dir())
     })
+}
+
+/// The directory of what the tests' engine writes on this machine, which every run of the tests
+/// shares, as a machine's runs share their workspace's.
+fn engine_dir() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("docker")
 }
 
 /// The engine the tests reach Docker through.
@@ -91,7 +97,7 @@ fn report() {
     ];
     for name in ["pumpkin-missing", "--help"] {
         let context = ContextName::try_from(name.to_owned()).unwrap();
-        let refused = Engine::connect(context).unwrap_err();
+        let refused = Engine::connect(context, &engine_dir()).unwrap_err();
         let (wrong, _) = refused.split_once(": ").unwrap();
         let (_, todo) = refused.rsplit_once(": ").unwrap();
         lines.push(format!("{wrong}: …: {todo}"));
@@ -111,7 +117,7 @@ fn report() {
 // even once the image's tag has moved to another. A context that can't name its inputs is
 // refused before anything is built, and so is a repository that Docker can't tag, whose tag
 // pins the digest's text of a build given nothing. A build removes what a build of a process
-// that has ended left in the system's temporary directory, but not a running one's.
+// that has ended left in the engine's directory, but not a running one's.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 #[expect(
@@ -127,7 +133,7 @@ fn builds() {
             // What a build made for a process that has ended, whose ID is never one, and for one
             // that runs, the first.
             let pid_max = fs::read_to_string("/proc/sys/kernel/pid_max").unwrap();
-            let left = |pid: &str| std::env::temp_dir().join(format!("pumpkin-build-{pid}-0"));
+            let left = |pid: &str| engine_dir().join(format!("pumpkin-build-{pid}-0"));
             let (ended, running) = (left(pid_max.trim()), left("1"));
             for dir in [&ended, &running] {
                 fs::create_dir_all(dir.join("context")).unwrap();

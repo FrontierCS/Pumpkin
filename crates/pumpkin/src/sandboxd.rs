@@ -27,12 +27,7 @@ impl Sandboxd {
             checked.map_err(|wrong| format!("the sandboxd {} {wrong}", path.display()))?;
             return Ok(Self(path));
         }
-        let pumpkin = std::env::current_exe().map_err(|error| {
-            format!(
-                "this `pumpkin`'s executable can't be found ({error}): name a static sandboxd \
-                 with `--sandboxd`"
-            )
-        })?;
+        let pumpkin = crate::workspace::exe("name a static sandboxd with `--sandboxd`")?;
         let path = pumpkin.with_file_name("sandboxd");
         let replace = "`cargo xtask install` installs `pumpkin` beside a static one, or name \
                        one with `--sandboxd`";

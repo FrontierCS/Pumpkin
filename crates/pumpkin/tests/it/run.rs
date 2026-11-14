@@ -109,7 +109,9 @@ fn usage() {
             exit status: Some(0)
             printed:
               Run workflows: in each run, an agent works in a sandbox, and judges score what
-              it submits.
+              it submits. It keeps what it writes in the .pumpkin directory that it is in: the
+              runs' records, but where --runs names another directory, and what its builds and
+              providers keep.
 
               Usage: pumpkin <command>
 
@@ -157,7 +159,7 @@ fn usage() {
 
                     --runs <dir>
                         The directory runs are recorded in, each in <dir>/<id>.
-                        Default: $HOME/.local/share/pumpkin/runs
+                        Default: runs/ in the .pumpkin directory that this pumpkin is in
 
                     --config <file>
                         The machine's configuration; see `pumpkin help config`.
@@ -237,7 +239,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory that <run> is looked up in.
-                        Default: $HOME/.local/share/pumpkin/runs
+                        Default: runs/ in the .pumpkin directory that this pumpkin is in
 
                 -h, --help
                         Print this help.
@@ -278,7 +280,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory that <run> is looked up in.
-                        Default: $HOME/.local/share/pumpkin/runs
+                        Default: runs/ in the .pumpkin directory that this pumpkin is in
 
                     --force
                         End the run's driver at once, by SIGKILL, rather than stop the run by
@@ -318,7 +320,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory of the runs to reap.
-                        Default: $HOME/.local/share/pumpkin/runs
+                        Default: runs/ in the .pumpkin directory that this pumpkin is in
 
                 -h, --help
                         Print this help.
@@ -432,7 +434,9 @@ fn usage() {
             $ pumpkin
             exit status: Some(2)
             Run workflows: in each run, an agent works in a sandbox, and judges score what
-            it submits.
+            it submits. It keeps what it writes in the .pumpkin directory that it is in: the
+            runs' records, but where --runs names another directory, and what its builds and
+            providers keep.
 
             Usage: pumpkin <command>
 
@@ -572,9 +576,10 @@ fn unrunnable() {
     fs::set_permissions(scratch.0.join("private"), Permissions::from_mode(0o750)).unwrap();
     scratch.write_executable("script", b"#!/bin/sh\n");
     // Links to `pumpkin`: one alone, and one beside a `sandboxd` that is `pumpkin` too, linked
-    // dynamically.
+    // dynamically, both in no `.pumpkin`, and one in a workspace whose path isn't UTF-8.
     let (alone, checkout) = (scratch.0.join("alone"), scratch.0.join("checkout"));
-    for dir in [&alone, &checkout] {
+    let unnamed = scratch.0.join(OsStr::from_bytes(b"\xff/.pumpkin/pinned"));
+    for dir in [&alone, &checkout, &unnamed] {
         fs::create_dir_all(dir).unwrap();
         fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
     }
@@ -591,6 +596,8 @@ fn unrunnable() {
         let args = [&["run", "workflow/task.star"], &runs[..]].concat();
         scratch.program(dir.join("pumpkin"), &args)
     };
+    let outside = |args: &[&str]| scratch.program(alone.join("pumpkin"), args);
+    let not_utf8 = |args: &[&str]| scratch.program(unnamed.join("pumpkin"), args);
     let mut unset = scratch.pumpkin(&["run", "workflow/task.star", "--sandboxd", "sandboxd"]);
     unset.env_remove("HOME");
     let commands = [
@@ -602,6 +609,12 @@ fn unrunnable() {
         run("workflow/task.star", &["--sandboxd", "script"]),
         beside(&alone),
         beside(&checkout),
+        outside(&["run", "workflow/task.star", "--sandboxd", "sandboxd"]),
+        outside(&["wait", "6a"]),
+        not_utf8(&["run", "workflow/task.star", "--sandboxd", "sandboxd"]),
+        not_utf8(&["wait", "6a"]),
+        not_utf8(&["cancel", "6a"]),
+        not_utf8(&["reap"]),
         unset,
     ];
     check(
@@ -639,9 +652,27 @@ fn unrunnable() {
             $ <scratch>/checkout/pumpkin run workflow/task.star --runs runs
             exit status: Some(1)
             pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
+            $ <scratch>/alone/pumpkin run workflow/task.star --sandboxd sandboxd
+            exit status: Some(1)
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            $ <scratch>/alone/pumpkin wait 6a
+            exit status: Some(1)
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            $ <scratch>/�/.pumpkin/pinned/pumpkin run workflow/task.star --sandboxd sandboxd
+            exit status: Some(1)
+            pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`
+            $ <scratch>/�/.pumpkin/pinned/pumpkin wait 6a
+            exit status: Some(1)
+            pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`
+            $ <scratch>/�/.pumpkin/pinned/pumpkin cancel 6a
+            exit status: Some(1)
+            pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`
+            $ <scratch>/�/.pumpkin/pinned/pumpkin reap
+            exit status: Some(1)
+            pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`
             $ env --unset=HOME pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
-            pumpkin: HOME is unset or empty: set it, or name a directory with `--runs`"#]],
+            pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`"#]],
     );
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
@@ -1448,7 +1479,7 @@ fn runs_on_docker() {
     let scratch = Scratch::new("docker");
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     let upstream = Upstream::start();
     write_asks(&scratch, &context, &upstream.address);
     scratch.write("home/.config/pumpkin/pumpkin.toml", &machine(&context));
@@ -1512,10 +1543,10 @@ fn runs_on_docker() {
             printed outcome.json: true
             $ DOCKER_CONFIG=<docker config> HOME=<scratch>/home pumpkin run exits/task.star --sandboxd <sandboxd> --wait
             exit status: Some(3)
-            pumpkin: run <id> records into <scratch>/home/.local/share/pumpkin/runs/<id>
+            pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
             pumpkin: run <id> started
-            pumpkin: following run <id>, recorded in <scratch>/home/.local/share/pumpkin/runs/<id>: ending `pumpkin run` does not stop it
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/home/.local/share/pumpkin/runs/<id>
+            pumpkin: following run <id>, recorded in <scratch>/.pumpkin/runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/.pumpkin/runs/<id>
             pumpkin: to run it again: pumpkin run --sandboxd <sandboxd> <scratch>/exits/task.star
             record: agent/console.txt, agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local","report":null}
@@ -1665,7 +1696,7 @@ fn leases_on_docker() {
     let scratch = Scratch::new("leases");
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     let script = LEASING_AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
     let mut ir = workflow("", &["/workspace/agent"]);
     let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": script });
@@ -1773,7 +1804,7 @@ fn judge_leases_on_docker() {
     let scratch = Scratch::new("isolation");
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     let agent = format!(
         "#!/bin/sh\nprintf '%s\\n' '{PROGRAM}' > /workspace/program\n\
          {SANDBOXCTL_PATH} submit submit /workspace/program --finalize\n"
@@ -1847,7 +1878,7 @@ fn ops_on_docker() {
     let scratch = Scratch::new("ops");
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     scratch.write_task("ops", &ops_workflow());
     scratch.write("pumpkin.toml", &machine(&context));
     build_first(&scratch, "ops", "pumpkin.toml");

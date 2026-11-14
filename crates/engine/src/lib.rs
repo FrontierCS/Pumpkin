@@ -5,11 +5,12 @@
 //! operator names ([`ContextName`]), which nothing in the environment overrides, and reports it
 //! ([`Report`]). It builds images ([`Engine::build`]) and writes a recipe's fetch stage
 //! ([`Engine::lock`]); [`confinement`] confines a role's container wherever a provider's sandbox
-//! is one. Outside the engine, it writes only in the system's temporary directory. It needs Docker
-//! 28.0 or later, rootful or rootless ([`Security::rootless`]).
+//! is one. Outside the engine, it writes only in the directory it is given. It needs Docker 28.0
+//! or later, rootful or rootless ([`Security::rootless`]).
 
 use std::ffi::OsStr;
 use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 use std::time::Duration;
 use std::{fmt, io};
@@ -88,6 +89,8 @@ impl TryFrom<String> for ContextName {
 #[derive(Debug)]
 pub struct Engine {
     report: Report,
+    /// The directory on this machine that [`connect`](Self::connect) was given.
+    dir: PathBuf,
 }
 
 /// The engine, as `docker` describes it before anything starts.
@@ -147,12 +150,14 @@ struct ClientInfoJson {
 }
 
 impl Engine {
-    /// Reaches the engine through `context`, and reports it.
+    /// Reaches the engine through `context`, and reports it. What it writes on this machine goes
+    /// in `dir`, made once a build needs it: a directory of its own for each while it runs, and
+    /// Buildx's state, in `buildx`.
     ///
     /// # Errors
     ///
     /// Fails, saying what to do, if the engine can't be reached or read.
-    pub fn connect(context: ContextName) -> Result<Self, String> {
+    pub fn connect(context: ContextName, dir: &Path) -> Result<Self, String> {
         let Reach { endpoint, info } = reach(&context)?;
         let InfoJson {
             security_options,
@@ -175,7 +180,10 @@ impl Engine {
             kernel: kernel_version,
             os: operating_system,
         };
-        Ok(Self { report })
+        Ok(Self {
+            report,
+            dir: dir.to_owned(),
+        })
     }
 
     /// Reaches the engine through `context`, as [`connect`](Self::connect) does, but checks
