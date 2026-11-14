@@ -44,7 +44,7 @@ pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 use judge::{Deadlines, Message, Report};
 use log::Log;
 use model::Served;
-pub use record::{Ending, Record};
+pub use record::{BUILD, Build, Ending, Record};
 use record::{Lock, Payloads};
 use sandbox::{Published, Sandboxes, Which};
 

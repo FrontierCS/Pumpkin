@@ -7,8 +7,8 @@
 //! - `driver.pid`: the pid of the process that drives the run, locked by it until the run's last
 //!   write: see [`Lock`] for the rule that makes the record's state readable;
 //! - `driver.log`: what the driver wrote to its standard output and error once the run started;
-//! - `record.json`: `{"record_version": "pumpkin.record/v0"}`, the version of the record's
-//!   form ([`RECORD_VERSION`]), written first;
+//! - `record.json`, written first: the version of the record's form ([`RECORD_VERSION`]) and the
+//!   build that made it ([`BUILD`]);
 //! - `ir.json`: the workflow's IR;
 //! - `provider.json`: what the run's provider declared ([`Ready`](provider::Ready));
 //! - `log.jsonl`: the run log, which the `log` module lays out;
@@ -24,6 +24,7 @@
 //!   the run log's JSON form of an outcome (`log::outcome_json`); or
 //!   `{"state": "failed", "reason": r}`.
 
+use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,17 +33,79 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use decision::{JobId, PayloadRef};
 use schema::ir::Sha256Digest;
 use schema::sandbox::{command_stderr, log_dir, out_dir};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use stdx::Context;
 
 use super::{Durable, Host, log};
 
-/// The version of the record's form, which a record's `record.json` holds, named as the IR's
-/// version is ([`IrVersion`](schema::ir::IrVersion)): a reader is to check it before it
-/// reads the rest. Once records are kept, a change to their form, a new file included, takes a
-/// new version.
+/// The version of the record's form, named as the IR's version is
+/// ([`IrVersion`](schema::ir::IrVersion)), which a reader checks before it reads the rest: a
+/// change to the form, a new file included, takes a new version. A record's `record.json` is
+/// `{"record_version": v, "pumpkin": p}`: this version, and the build that made it ([`BUILD`]),
+/// `{"version": v, "commit": c}`, with `c` `{"hash": h, "date": d}` or `null`.
 const RECORD_VERSION: &str = "pumpkin.record/v0";
+
+/// This build of Pumpkin, which `pumpkin --version` prints, and each record names. Its version
+/// is the workspace's, which each of Pumpkin's crates takes.
+pub const BUILD: Build = Build {
+    version: env!("CARGO_PKG_VERSION"),
+    commit: commit(env!("PUMPKIN_COMMIT_HASH"), env!("PUMPKIN_COMMIT_DATE")),
+};
+
+/// A build of Pumpkin: its version, and the commit it was built from.
+///
+/// A build has a commit if it was made in a git checkout of Pumpkin's repository. It is shown
+/// as its version alone, `0.0.0`, or with the commit's first 9 hexadecimal digits and its date,
+/// `0.0.0 (0f3a2b1c9 2026-11-08)`.
+#[derive(Clone, Copy, Debug)]
+pub struct Build {
+    version: &'static str,
+    commit: Option<Commit>,
+}
+
+/// A commit of Pumpkin's repository.
+#[derive(Clone, Copy, Debug)]
+struct Commit {
+    /// Its hash, in hexadecimal digits.
+    hash: &'static str,
+    /// The day it was committed, as `YYYY-MM-DD`.
+    date: &'static str,
+}
+
+/// The commit whose `hash` and `date` the build script found, or none if it gives both empty.
+const fn commit(hash: &'static str, date: &'static str) -> Option<Commit> {
+    // A constant that fails this fails to compile.
+    assert!(
+        hash.is_empty() == date.is_empty(),
+        "the build script sets the commit's hash and date on every build, each empty if and only \
+         if it found no commit"
+    );
+    if hash.is_empty() {
+        None
+    } else {
+        Some(Commit { hash, date })
+    }
+}
+
+impl Build {
+    /// Its JSON form in `record.json`.
+    fn json(self) -> Value {
+        let Self { version, commit } = self;
+        let commit = commit.map(|Commit { hash, date }| json!({ "hash": hash, "date": date }));
+        json!({ "version": version, "commit": commit })
+    }
+}
+
+impl fmt::Display for Build {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { version, commit } = self;
+        match commit {
+            Some(Commit { hash, date }) => write!(f, "{version} ({hash:.9} {date})"),
+            None => f.write_str(version),
+        }
+    }
+}
 
 /// The lock on a record's `driver.pid`, an exclusive `flock` held until it is dropped, by the
 /// process that drives the run.
@@ -101,7 +164,7 @@ fn fill(host: &impl Host, partial: &Path, dir: &Path, runs: &Path) -> Result<Loc
         host,
         partial,
         "record.json",
-        &json!({ "record_version": RECORD_VERSION }),
+        &json!({ "record_version": RECORD_VERSION, "pumpkin": BUILD.json() }),
     )?;
     let log = partial.join("driver.log");
     File::create(&log).context(log.display())?;

@@ -22,6 +22,7 @@ use runtime::{Run, System};
 use schema::ir::{self, ModelName, Name};
 use schema::workflow::{Placed, Workflow};
 use serde_json::Value;
+use stdx::process::Environment;
 use tempfile::TempDir;
 use test_support::{WORKFLOW, files};
 
@@ -57,8 +58,8 @@ impl Drop for Runs {
 /// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its
 /// own, with an upstream that serves each model it names, if it names any, and checks what
 /// becomes of each: whether the run is prepared, named by its id, or how it is refused; and its
-/// record, if it has one: its name, its files, and what they hold. Each is [placed](placed) on
-/// the simulated provider.
+/// record, if it has one: its name, its files, and what they hold, with the build it names shown
+/// as `<this build>`. Each is [placed](placed) on the simulated provider.
 fn check(
     cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
     expect: &Expect,
@@ -109,7 +110,10 @@ fn check(
             serde_json::from_slice(&fs::read(record.join("ir.json")).unwrap()).unwrap();
         lines.push(format!("ir.json is the IR: {}", kept == value));
         let version = fs::read_to_string(record.join("record.json")).unwrap();
-        lines.push(format!("record.json: {}", compact(&version)));
+        let mut version: Value = serde_json::from_str(&version).unwrap();
+        // Each record here is this build's, which names the commit it was built from.
+        version["pumpkin"] = "<this build>".into();
+        lines.push(format!("record.json: {version}"));
         let outcome = record.join("outcome.json");
         if outcome.exists() {
             let outcome = fs::read_to_string(outcome).unwrap();
@@ -144,6 +148,42 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
 }
 
 #[test]
+fn build() {
+    let version = env!("CARGO_PKG_VERSION");
+    // The build script's rule: the tree is a git checkout of Pumpkin's repository if its root
+    // holds `.git`.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if root.join(".git").exists() {
+        // A checkout, as ci always runs in: the commit HEAD is at, as git gives it. A commit
+        // since the build moves HEAD, whose ref the build script watches, so cargo builds again
+        // before it runs this.
+        // Not git's own variables, such as the `GIT_DIR` that `git rebase --exec` sets.
+        let mut git = stdx::process::command("git", Environment::Only(&["PATH", "HOME"]));
+        git.arg("-C").arg(&root);
+        let output = git
+            .args(["log", "--max-count=1", "--date=short", "--format=%H %cd"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git names HEAD's commit");
+        let text = String::from_utf8(output.stdout).unwrap();
+        let (hash, date) = text.trim().split_once(' ').unwrap();
+        let named = format!("{version} ({} {date})", &hash[..9]);
+        assert_eq!(
+            runtime::BUILD.to_string(),
+            named,
+            "the build names HEAD's commit"
+        );
+    } else {
+        // No checkout, as cargo-mutants' copy of the tree or a source archive: no commit.
+        assert_eq!(
+            runtime::BUILD.to_string(),
+            version,
+            "the build names no commit"
+        );
+    }
+}
+
+#[test]
 fn prepare() {
     let ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     let mut no_route = ir.clone();
@@ -168,7 +208,7 @@ fn prepare() {
             driver.pid holds this process's id: true
             20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
-            record.json: {"record_version":"pumpkin.record/v0"}
+            record.json: {"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one; runs directory made: false
             refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows; runs directory made: false
             prepared, named by its id: true
@@ -176,13 +216,13 @@ fn prepare() {
             driver.pid holds this process's id: true
             20251231-235959-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
-            record.json: {"record_version":"pumpkin.record/v0"}
+            record.json: {"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
             21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
-            record.json: {"record_version":"pumpkin.record/v0"}
+            record.json: {"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false"#]],
     );
 }
