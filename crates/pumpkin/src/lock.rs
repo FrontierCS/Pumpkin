@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use crate::{cli, config_path, configured_engine, star, task_problems};
+use crate::{Reader, cli, config_path, configured_engine, star, task_problems};
 
 /// Writes the fetch stage that `flags` name, of the recipe that the task's images give the
 /// inputs it is built with, reading the configuration only once the task is checked and the
@@ -15,7 +15,7 @@ pub(crate) fn lock(flags: cli::Lock) -> Result<ExitCode, String> {
         args: cli::TaskArgs(args),
         config,
     } = flags;
-    let reach = || configured_engine(&config_path(config)?);
+    let reach = || configured_engine(&config_path(config)?, Reader::Operator);
     match star::lock(&entry, &args, &recipe, &stage, reach)? {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(problems) => Err(task_problems(&entry, &problems)),

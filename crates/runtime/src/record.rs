@@ -658,6 +658,22 @@ impl Record {
         })
     }
 
+    /// Whether the run's own end finished it, with every sandbox that the record holds deleted,
+    /// so that a reap would find of it only what a create that gave up made after the end's
+    /// sweep, which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
+    ///
+    /// # Errors
+    ///
+    /// Fails if `outcome.json` is not one this build knows, or a sandbox's `sandbox.json`, or
+    /// `reaps.jsonl`, can't be read.
+    pub fn ended_clean(&self) -> Result<bool, String> {
+        let finished = match self.ended()? {
+            Some(Ending::Scored { .. } | Ending::Unscored(_) | Ending::NoResult { .. }) => true,
+            Some(Ending::Failed(_) | Ending::Interrupted(_) | Ending::Lost) | None => false,
+        };
+        Ok(finished && self.undeleted()?.is_empty())
+    }
+
     /// Each sandbox that the record holds without a delete that succeeded, the agent's and each
     /// job's, by its provider's name, but those that an earlier reap removed ([`REAPS`]).
     fn undeleted(&self) -> Result<Vec<(Name, SandboxId)>, String> {

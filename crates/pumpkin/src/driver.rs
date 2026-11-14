@@ -9,7 +9,8 @@
 //! environment or the pipe.
 //!
 //! The driver's first argument is `run`'s process ID, its second the run's id, which `run` mints
-//! ([`runtime::new_id`]), and the rest are `run`'s own: the driver also builds the task's images. Its standard output is a pipe
+//! ([`runtime::new_id`]), its third who reads what it says ([`crate::Reader`]), and the rest are
+//! `run`'s own: the driver also builds the task's images. Its standard output is a pipe
 //! to `run`, which carries at most two lines: the run's id once its record is locked
 //! ([`locked`]), then [`STARTED`] once the run has started ([`announce`]). Before the second,
 //! the driver withdraws the kernel's signal and leaves `run`'s session, so no signal aimed at
@@ -53,13 +54,17 @@ pub(crate) enum Handoff {
 }
 
 impl Driver {
-    /// Starts the driver of the run `id`, which takes this process's ID and `id`, then parses
-    /// `args` as `pumpkin run`'s.
+    /// Starts the driver of the run `id`, which takes this process's ID, `id` and `reader`, then
+    /// parses `args` as `pumpkin run`'s.
     ///
     /// # Errors
     ///
     /// Fails if the pipe can't be made, or the driver started.
-    pub(crate) fn spawn(id: &RunTag, args: &[OsString]) -> Result<Self, String> {
+    pub(crate) fn spawn(
+        id: &RunTag,
+        reader: crate::Reader,
+        args: &[OsString],
+    ) -> Result<Self, String> {
         let (pipe, output) = io::pipe().context("making the driver's pipe failed")?;
         // `pumpkin` itself, even if its file is replaced meanwhile.
         let mut command = stdx::process::command("/proc/self/exe", Environment::Inherited);
@@ -67,6 +72,7 @@ impl Driver {
             .arg0(OsStr::from_bytes(ARGV0.to_bytes()))
             .arg(std::process::id().to_string())
             .arg(id.as_str())
+            .arg(reader.word())
             .args(args)
             .stdin(Stdio::null())
             .stdout(output);

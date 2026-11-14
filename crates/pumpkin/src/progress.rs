@@ -40,6 +40,12 @@ pub(crate) struct Listing {
 
 /// A run as `ls` lists it.
 pub(crate) enum Listed {
+    /// A job on the controller that builds the run, which `pumpkin run` asked for at `asked`,
+    /// since the Unix epoch.
+    Building { asked: Option<Duration> },
+    /// A job on the controller that has ended, whose run has no record in the controller's runs
+    /// directory.
+    Unstarted,
     /// A run whose record is begun.
     Run(Box<Run>),
 }
@@ -64,9 +70,28 @@ impl Listed {
         })))
     }
 
+    /// Whether the run is live, or its job builds it.
+    pub(crate) fn live(&self) -> bool {
+        match self {
+            Self::Run(run) => run.ending.is_none(),
+            Self::Building { .. } => true,
+            Self::Unstarted => false,
+        }
+    }
+
+    /// Whether the run has ended with an `outcome.json`, which no later look changes.
+    pub(crate) fn ended(&self) -> bool {
+        match self {
+            Self::Run(run) => !matches!(run.ending, None | Some(Ending::Lost)),
+            Self::Building { .. } | Self::Unstarted => false,
+        }
+    }
+
     /// The state that `ls` counts the run in.
     fn state(&self) -> State {
         match self {
+            Self::Building { .. } => State::Building,
+            Self::Unstarted => State::Unstarted,
             Self::Run(run) => match &run.ending {
                 None => State::Running,
                 Some(Ending::Scored { .. } | Ending::Unscored(_) | Ending::NoResult { .. }) => {
@@ -83,21 +108,25 @@ impl Listed {
 /// A run's state, as `ls` names it, in the order in which its totals list them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum State {
+    Building,
     Running,
     Finished,
     Failed,
     Interrupted,
     Lost,
+    Unstarted,
 }
 
 impl State {
     fn name(self) -> &'static str {
         match self {
+            Self::Building => "building",
             Self::Running => "running",
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
             Self::Lost => "lost",
+            Self::Unstarted => "unstarted",
         }
     }
 }
@@ -174,7 +203,9 @@ impl Totals {
     /// Counts `listed`.
     fn add(&mut self, listed: &Listed) {
         *self.states.entry(listed.state()).or_default() += 1;
-        let Listed::Run(run) = listed;
+        let Listed::Run(run) = listed else {
+            return;
+        };
         if let Some(Ending::Unscored(_) | Ending::NoResult { .. }) = run.ending {
             self.unscored += 1;
         }
@@ -233,7 +264,19 @@ fn line(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String 
     let state = listed.state().name();
     let since =
         |asked: &Option<Duration>| asked.map(|asked| column_span(now.saturating_sub(asked)));
-    let Listed::Run(run) = listed;
+    let run = match listed {
+        Listed::Building { asked } => {
+            return column(state, since(asked).as_deref().unwrap_or("-"), "", "-", "-");
+        }
+        Listed::Unstarted => {
+            let why = format!(
+                "-: its job ended before the run started: to see why: {}",
+                next::of_run("wait", runs, id)
+            );
+            return column(state, "-", "", "-", &why);
+        }
+        Listed::Run(run) => run,
+    };
     let task = run.task.as_deref().unwrap_or("-");
     let usd = match run.progress.as_ref().map(cost) {
         None | Some(None) => "-".to_owned(),
@@ -274,7 +317,9 @@ fn line(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String 
 /// of a live run, one for each judge call of a grant and each lease that hasn't ended.
 fn under(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String {
     let mut lines = String::new();
-    let Listed::Run(run) = listed;
+    let Listed::Run(run) = listed else {
+        return lines;
+    };
     let (None, Some(progress)) = (&run.ending, &run.progress) else {
         return lines;
     };

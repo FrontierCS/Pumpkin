@@ -1,0 +1,862 @@
+//! `controller`, the controller's own side of the controller target: a job, which writes its
+//! configuration from the controller's settings, the instance's metadata and what the client
+//! sent, and runs its command; and the boot, which reaps. Each runs as the
+//! controller's user would, with a home and a runtime directory of the scratch directory's, on
+//! a stand-in `aws` for the controller's settings ([`AWS`]), a stand-in `curl` for the instance
+//! metadata service, a stand-in `df`, and the stand-in `docker` ([`StandIn`]). And the client's
+//! side: what it refuses before it reaches a controller, and what it sends one, and where.
+
+use std::fs::{self, File, Permissions};
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, SystemTime};
+
+use expect_test::{Expect, expect};
+use serde_json::json;
+use stdx::Utc;
+use stdx::process::Environment;
+
+use super::{
+    EC2, LOCAL, MODAL, Scratch, StandIn, docker_table, install, invocation, report, workflow,
+};
+
+/// The controller's settings, as the module renders its SSM parameter: the engine, the provider
+/// `aws` of kind `ec2`, and the `images` of the provider `gpus` of kind `modal`.
+fn parameter() -> String {
+    let images = MODAL
+        .lines()
+        .find(|line| line.starts_with("images"))
+        .unwrap();
+    format!(
+        "{}\n{EC2}\n[providers.gpus.modal]\n{images}\n",
+        docker_table("default")
+    )
+}
+
+/// The Modal provider that the client sends, as its `[controller.modal]` gives it.
+const SENT_MODAL: &str = r#"[modal]
+profile = "alice"
+classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
+"#;
+
+/// The stand-in `aws`, which answers `--version`, and `ssm get-parameter` with what
+/// `parameter.json` beside it holds ([`write_parameter`]), fails any other call, and notes each
+/// call in `calls` beside it, its command and then its arguments, a line each, and the call
+/// ended by an empty line.
+const AWS: &str = r#"#!/bin/sh
+{ echo aws; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
+case "$*" in
+    --version) echo aws-cli/2.38.1 Python/3.14.6 Linux/7.0.0 exe/x86_64.stand-in ;;
+    *" ssm get-parameter "*) cat "${0%/*}/parameter.json" ;;
+    *) echo "the stand-in aws answers only \`--version\` and \`ssm get-parameter\`" >&2; exit 1 ;;
+esac
+"#;
+
+/// Writes the controller's settings, `text`, as the stand-in `aws` gives them ([`AWS`]).
+fn write_parameter(scratch: &Scratch, text: &str) {
+    let parameter = json!({ "Parameter": { "Name": "/pumpkin-alice/settings", "Type": "String", "Value": text } });
+    scratch.write("bin/parameter.json", &parameter);
+}
+
+/// The stand-in `curl`, which answers as the instance metadata service of an instance whose
+/// private IPv4 address is 172.31.5.6 and whose public one is 198.51.100.9, and notes each call
+/// in `calls` beside it, as [`AWS`] does.
+const CURL: &str = r#"#!/bin/sh
+{ echo curl; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
+for url; do :; done
+case $url in
+    */api/token) echo stand-in-token ;;
+    */meta-data/local-ipv4) echo 172.31.5.6 ;;
+    */meta-data/public-ipv4) echo 198.51.100.9 ;;
+    *) echo "curl: (22) The requested URL returned error: 404" >&2; exit 22 ;;
+esac
+"#;
+
+/// The stand-in `df`, which says that the disk is of the size and has as much available, in
+/// bytes, as `disk` beside it says, then, if `disk.next` is there, takes it as `disk`; and notes
+/// each call in `calls`, as [`CURL`] does.
+const DF: &str = r#"#!/bin/sh
+{ echo df; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
+echo '1B-blocks Avail'
+cat "${0%/*}/disk"
+[ ! -e "${0%/*}/disk.next" ] || mv "${0%/*}/disk.next" "${0%/*}/disk"
+"#;
+
+/// The id of a run `days` ago, as `pumpkin run` mints one, with `random` as its random digits.
+fn id_ago(days: u64, random: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let then = now.checked_sub(Duration::from_hours(days * 24)).unwrap();
+    let Utc {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    } = Utc::from_unix(then.as_secs());
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}-{random}")
+}
+
+/// An image's ID, of 64 of `digit`.
+fn image(digit: char) -> String {
+    format!("sha256:{}", digit.to_string().repeat(64))
+}
+
+/// Sets `scratch`, which holds the stand-in `docker` ([`StandIn`]), up as the controller: the
+/// other stand-ins in `bin`, the controller user's home in `home`, with the `pumpkin` of
+/// [`PINNED`] built in its one workspace, and its runtime directory in `run`, with the module's
+/// parameter, and a disk that is half used.
+fn set_up(scratch: &Scratch) {
+    scratch.write_executable("bin/aws", AWS.as_bytes());
+    scratch.write_executable("bin/curl", CURL.as_bytes());
+    scratch.write_executable("bin/df", DF.as_bytes());
+    scratch.write("bin/disk", "1000 500\n");
+    write_parameter(scratch, &parameter());
+    install(scratch, &format!("home/.pumpkin/{PINNED}/bin"), &[]);
+    fs::create_dir_all(scratch.0.join("run")).unwrap();
+}
+
+/// The `pumpkin` that [`set_up`] built on the controller.
+fn controllers(scratch: &Scratch) -> PathBuf {
+    scratch
+        .0
+        .join(format!("home/.pumpkin/{PINNED}/bin/pumpkin"))
+}
+
+/// `pumpkin` with `args`, as the controller's user runs it in a unit of its own.
+fn on_controller(scratch: &Scratch, args: &[&str]) -> Command {
+    let mut command = scratch.program(controllers(scratch), args);
+    command
+        .env("HOME", scratch.0.join("home"))
+        .env("XDG_RUNTIME_DIR", scratch.0.join("run"))
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", scratch.0.join("bin").display()),
+        );
+    command
+}
+
+/// Writes what the client sends with job `id`: what it sends of its configuration, `config`, the
+/// key of upstream `gateway`, and, if `modal`, its Modal configuration file.
+fn send(scratch: &Scratch, id: &str, config: &str, modal: bool) {
+    let sent = format!("run/pumpkin/{id}");
+    scratch.write(&format!("{sent}/config.toml"), config);
+    scratch.write(&format!("{sent}/gateway.key"), "sk-stand-in\n");
+    if modal {
+        scratch.write(
+            &format!("{sent}/modal.toml"),
+            "[pumpkin]\ntoken_id = \"ak-x\"\n",
+        );
+    }
+    fs::set_permissions(scratch.0.join(sent), Permissions::from_mode(0o700)).unwrap();
+}
+
+/// The upstreams that the client sends, each `key_file` a file it sends beside them.
+const UPSTREAMS: &str = r#"[upstreams.gateway]
+url = "https://gateway.example/v1"
+key_file = "gateway.key"
+models = [{ name = "model-a", upstream_name = "provider/model-a" }]
+"#;
+
+/// What the stand-ins noted, `calls`, `aws`'s, `curl`'s and `df`'s, each taken.
+fn noted(scratch: &Scratch) -> Vec<String> {
+    let taken = |file: &str| {
+        let path = scratch.0.join(file);
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let _ = fs::remove_file(path);
+        text
+    };
+    let calls = taken("bin/calls");
+    let calls =
+        (calls.split_terminator("\n\n")).map(|call| call.lines().collect::<Vec<_>>().join(" "));
+    calls.collect()
+}
+
+/// Checks `text`, with the scratch directory as `<scratch>`, against `expect`.
+fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect) {
+    let mut text = text.replace(scratch.0.to_str().unwrap(), "<scratch>");
+    for (value, name) in shown {
+        text = text.replace(value, name);
+    }
+    // How long this machine has been up, which the controller's health says of the stand-in.
+    let lines = text.lines().map(|line| match line.split_once("`: up ") {
+        Some((before, after)) => {
+            let rest = after.split_once(',').map_or("", |(_, rest)| rest);
+            format!("{before}`: up <t>,{rest}")
+        }
+        None => line.to_owned(),
+    });
+    expect.assert_eq(&lines.collect::<Vec<String>>().join("\n"));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the configuration's snapshot"
+)]
+fn job() {
+    let scratch = Scratch::new("controller-job");
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let modal = MODAL.replace("dials_from = \"203.0.113.7\"\n", "");
+    let parameter = format!("{}\n{EC2}\n{modal}", docker_table("default"));
+    write_parameter(&scratch, &parameter);
+    let id = id_ago(0, "0b000001");
+    send(&scratch, &id, &format!("{UPSTREAMS}\n{SENT_MODAL}"), true);
+    let mut job = on_controller(
+        &scratch,
+        &[
+            "controller",
+            "job",
+            &id,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--",
+            "build",
+            "stand-in/task.star",
+        ],
+    );
+    // As its unit's `StandardOutput=` does.
+    fs::create_dir_all(scratch.0.join(format!("home/builds/{id}"))).unwrap();
+    let out = scratch.0.join(format!("home/builds/{id}/out"));
+    job.stdout(File::create(&out).unwrap());
+    let invoked = invocation(&job);
+    let mut lines = vec![report(invoked, &job.output().unwrap(), &scratch.0, false)];
+    let ir = fs::read_to_string(&out).unwrap();
+    lines.push(format!("out names the image: {}", ir.contains(&image('0'))));
+    let current = fs::read_link(scratch.0.join("home/current-pumpkin")).unwrap();
+    lines.push(format!(
+        "current-pumpkin is this pumpkin: {}",
+        current == controllers(&scratch)
+    ));
+    let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
+    lines.push(format!("pumpkin.toml:\n{}", config.unwrap()));
+    lines.extend(noted(&scratch));
+    let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
+    let config: toml::Table = toml::from_str(&config.unwrap()).unwrap();
+    let providers: Vec<&String> = config["providers"].as_table().unwrap().keys().collect();
+    lines.push(format!("the providers: {providers:?}"));
+    let shown = [(id.as_str(), "<id>")];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &shown,
+        &expect![[r#"
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(0)
+            out names the image: true
+            current-pumpkin is this pumpkin: true
+            pumpkin.toml:
+            [docker]
+            context = "default"
+
+            [gateway]
+            private = "172.31.5.6:0"
+
+            [providers.aws.ec2]
+            region = "us-west-1"
+
+            [providers.aws.ec2.classes.agent]
+            memory_mib = 262144
+            template = "lt-0aaaaaaaaaaaaaaaa"
+            vcpus = 32
+            version = 7
+
+            [providers.aws.ec2.classes.judge]
+            memory_mib = 16384
+            template = "lt-0bbbbbbbbbbbbbbbb"
+            vcpus = 8
+            version = 2
+
+            [providers.aws.ec2.repositories]
+            roles = "pumpkin/roles"
+            sandboxd = "pumpkin/sandboxd"
+
+            [providers.aws.ec2.timer]
+            group = "pumpkin"
+            role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer"
+
+            [providers.gpus.modal]
+            config = "<scratch>/run/pumpkin/<id>/modal.toml"
+            dials_from = "198.51.100.9"
+            profile = "alice"
+
+            [providers.gpus.modal.classes.a100]
+            cpu_millis = 8000
+            gpu = "A100-80GB"
+            gpu_model = "NVIDIA A100-SXM4-80GB"
+            memory_bytes = 68719476736
+            startup_seconds = 1800
+
+            [providers.gpus.modal.images]
+            region = "us-west-1"
+            repository = "pumpkin/roles"
+            role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull"
+
+            [upstreams.gateway]
+            key_file = "<scratch>/run/pumpkin/<id>/gateway.key"
+            url = "https://gateway.example/v1"
+
+            [[upstreams.gateway.models]]
+            name = "model-a"
+            upstream_name = "provider/model-a"
+
+            aws --version
+            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+            curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
+            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
+            the providers: ["aws", "gpus"]"#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn job_refusals() {
+    let scratch = Scratch::new("controller-job-refusals");
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let id = id_ago(0, "0b000004");
+    let job = |scratch: &Scratch| {
+        on_controller(
+            scratch,
+            &[
+                "controller",
+                "job",
+                &id,
+                "--region",
+                "us-west-1",
+                "--parameter",
+                "/pumpkin-alice/settings",
+                "--",
+                "build",
+                "stand-in/task.star",
+            ],
+        )
+    };
+    let mut lines = Vec::new();
+    let cases = [
+        (
+            "a parameter with [gateway]",
+            format!("{}\n[gateway]\nprivate = \"10.0.0.1:0\"\n", parameter()),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter with no Modal provider",
+            format!("{}\n{EC2}", docker_table("default")),
+            format!("{UPSTREAMS}\n{SENT_MODAL}"),
+        ),
+        (
+            "a sent [docker]",
+            parameter(),
+            format!("{UPSTREAMS}\n[docker]\ncontext = \"elsewhere\"\n"),
+        ),
+        (
+            "a key_file that names a path",
+            parameter(),
+            UPSTREAMS.replace("\"gateway.key\"", "\"/etc/shadow\""),
+        ),
+    ];
+    for (case, parameter, sent) in cases {
+        write_parameter(&scratch, &parameter);
+        send(&scratch, &id, &sent, false);
+        let mut job = job(&scratch);
+        lines.push(format!("{case}:"));
+        let invoked = invocation(&job);
+        lines.push(report(invoked, &job.output().unwrap(), &scratch.0, false));
+    }
+    let mut unset = job(&scratch);
+    unset.env_remove("XDG_RUNTIME_DIR");
+    let invoked = invocation(&unset);
+    lines.push(report(invoked, &unset.output().unwrap(), &scratch.0, false));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            a parameter with [gateway]:
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `[gateway]`, which each job sets: remove it from them
+            a parameter with no Modal provider:
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, name no Modal provider, whose `images` the client's `[controller.modal]` needs: apply `deploy/aws`, whose settings name one
+            a sent [docker]:
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: what the run sent, config.toml, is refused: TOML parse error at line 6, column 2
+              |
+            6 | [docker]
+              |  ^^^^^^
+            unknown field `docker`, expected `upstreams` or `modal`
+            a key_file that names a path:
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: what the run sent gives upstream `gateway` no `key_file` that names a file it sent: send each key as a file of its own
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it"#]],
+    );
+}
+
+// The controller's boot, as its unit runs it, with root's runtime directory: it records each
+// run whose driver ended without an outcome as failed, once it has removed what the run left on
+// a provider that it reaches, `local`, or said that what it left on one that it can't, `aws`,
+// ends by the run's hard end; and leaves a run that ended clean.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the records and the snapshot"
+)]
+fn boot() {
+    let scratch = Scratch::new("controller-boot");
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let home = scratch.0.join("home");
+    let (clean, local, lost) = (
+        id_ago(2, "0b000007"),
+        id_ago(1, "0b000005"),
+        id_ago(1, "0b000008"),
+    );
+    let runs = [
+        (&clean, "local", docker_table("default") + LOCAL, true),
+        (&local, "local", docker_table("default") + LOCAL, false),
+        (
+            &lost,
+            "aws",
+            format!("{}\n{EC2}", docker_table("default")),
+            false,
+        ),
+    ];
+    for (run, provider, config, ended) in runs {
+        let path = home.join(format!("jobs/{run}/pumpkin.toml"));
+        scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), &config);
+        let record = format!("home/.pumpkin/runs/{run}");
+        let args = ["--config".to_owned(), path.display().to_string()];
+        scratch.write(
+            &format!("{record}/record.json"),
+            &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+        );
+        scratch.write(&format!("{record}/driver.pid"), "4242\n");
+        let ir = json!({ "roles": [{ "name": "agent", "image": image('a') }] });
+        scratch.write(&format!("{record}/ir.json"), &ir);
+        let report = match provider {
+            "local" => json!({ "context": "default" }),
+            _ => json!({ "region": "us-west-1" }),
+        };
+        scratch.write(
+            &format!("{record}/provider.json"),
+            &json!({ "providers": { provider: { "report": report } } }),
+        );
+        let mut sandbox =
+            json!({ "provider": provider, "id": format!("sandbox-{run}"), "report": {} });
+        if ended {
+            sandbox["delete"] = json!({ "state": "deleted" });
+            scratch.write(
+                &format!("{record}/outcome.json"),
+                r#"{"state": "finished"}"#,
+            );
+        }
+        scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
+    }
+    send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
+    let mut boot = on_controller(&scratch, &["controller", "boot"]);
+    // As its unit has it: systemd's `/run/user/%U` names root's, the system manager's user's.
+    boot.env("XDG_RUNTIME_DIR", scratch.0.join("root-run"));
+    let invoked = invocation(&boot);
+    let mut lines = vec![report(invoked, &boot.output().unwrap(), &scratch.0, false)];
+    lines.extend(noted(&scratch));
+    for run in [&clean, &local, &lost] {
+        let outcome = format!("home/.pumpkin/runs/{run}/outcome.json");
+        let outcome = fs::read_to_string(scratch.0.join(outcome)).unwrap();
+        lines.push(format!("{run}'s outcome.json: {outcome}"));
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[
+            (clean.as_str(), "<clean>"),
+            (local.as_str(), "<local>"),
+            (lost.as_str(), "<lost>"),
+        ],
+        &expect![[r#"
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/root-run pumpkin controller boot
+            exit status: Some(0)
+            pumpkin: run <local>'s sandbox sandbox-<local> on provider `local`, which its record holds undeleted, isn't listed there now: it has ended since, or the provider is reached elsewhere than the run reached it, as when the configuration that ran the run, or the Docker context, has moved to another region, profile or engine since; if so, put it back as it was when the run ran, and reap again: pumpkin reap
+            pumpkin: run <local> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
+            pumpkin: run <lost> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            printed:
+              <local>
+              <lost>
+            aws --version
+            aws --no-cli-pager --output json --region us-west-1 sts get-caller-identity
+            <clean>'s outcome.json: {"state": "finished"}
+            <local>'s outcome.json: {
+              "reason": "its driver ended without an outcome",
+              "state": "failed"
+            }
+
+            <lost>'s outcome.json: {
+              "reason": "its driver ended without an outcome",
+              "state": "failed"
+            }"#]],
+    );
+}
+
+/// The commit of Pumpkin that the client's repository pins.
+const PINNED: &str = "1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8";
+
+/// The controller's instance, which carries the tag of controller `alice`.
+const INSTANCE: &str = "i-0c00000000000a11c";
+
+/// The shared connections of the client's workspace to controller `alice`, below the scratch
+/// directory.
+const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
+
+/// The client's key, of its upstream `gateway`.
+const KEY: &str = "sk-client-stand-in";
+
+/// The stand-in `ssh` to the controller, of a shared master that answers: `-O check` succeeds,
+/// and any other call notes its arguments in `argv`, a line each, then runs its command as the
+/// controller's user, in `home`, with runtime directory `run`.
+const SSH: &str = r#"#!/bin/sh
+dir=${0%/*}
+printf '%s\n' "$@" >> "$dir/argv"
+while :; do
+    case $1 in
+        -O) exit 0 ;;
+        -F|-i|-o|-E|-l) shift 2 ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+shift
+cd "$dir/../home" || exit 255
+export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
+exec sh -c "$*"
+"#;
+
+/// The stand-in `systemd-run`, which notes its arguments in `argv` beside it, as [`SSH`] does,
+/// and runs nothing.
+const SYSTEMD_RUN: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/argv\"\n";
+
+/// Sets `scratch` up as the client and its controller: in `bin`, the stand-ins for `aws`
+/// ([`AWS`]), `ssh` ([`SSH`]), `systemd-run` ([`SYSTEMD_RUN`]) and the Session Manager plugin;
+/// the controller user's home, `home`, and runtime directory, `run`; the client's home, `client`,
+/// whose configuration names controller `alice`, beside its upstream, whose key is [`KEY`]; and
+/// its task's repository, `repo`, pinning Pumpkin [`PINNED`], with the `pumpkin` of it that
+/// `./pumpkin` builds in the repository's workspace, and the bundle of it that it keeps, and the
+/// task `stand-in`. Returns the client's environment.
+fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
+    for (name, script) in [
+        ("aws", AWS),
+        ("ssh", SSH),
+        ("systemd-run", SYSTEMD_RUN),
+        ("session-manager-plugin", ""),
+    ] {
+        scratch.write_executable(&format!("bin/{name}"), script.as_bytes());
+    }
+    for dir in ["home", "run"] {
+        fs::create_dir_all(scratch.0.join(dir)).unwrap();
+    }
+    install(scratch, &format!("repo/.pumpkin/{PINNED}/bin"), &[]);
+    let config = format!(
+        "[controller]\nname = \"alice\"\nregion = \"us-west-1\"\n\n{}",
+        UPSTREAMS.replace("\"gateway.key\"", "\"gateway-key\"")
+    );
+    scratch.write("client/.config/pumpkin/pumpkin.toml", &config);
+    scratch.write("client/.config/pumpkin/gateway-key", KEY);
+    // Not git's own variables, such as the `GIT_DIR` that `git rebase --exec` exports, which
+    // would point `git init` at another repository.
+    let git = stdx::process::command("git", Environment::Only(&["HOME", "PATH"]))
+        .args(["init", "--quiet", "repo"])
+        .current_dir(&scratch.0)
+        .status();
+    assert!(git.unwrap().success());
+    scratch.write_task_in("repo", "stand-in", &workflow(&image('0'), &["true"]));
+    // The consumer entry, which the job would run, as the stand-in `systemd-run` runs nothing.
+    scratch.write_executable("repo/pumpkin", b"#!/bin/sh\n");
+    scratch.write(
+        "repo/.pumpkinversion",
+        &format!("controller-candidate {PINNED}\n"),
+    );
+    scratch.write("repo/.pumpkin/.gitignore", "*\n");
+    // A file of the repository's that the task doesn't reach, as another task's data.
+    scratch.write("repo/other/data", "another task's\n");
+    scratch.write(
+        &format!("repo/.pumpkin/{PINNED}/pumpkin.bundle"),
+        "a bundle of Pumpkin\n",
+    );
+    let path = format!("{}:/usr/bin:/bin", scratch.0.join("bin").display());
+    [
+        (
+            "HOME".to_owned(),
+            scratch.0.join("client").display().to_string(),
+        ),
+        ("PATH".to_owned(), path),
+    ]
+}
+
+/// `pumpkin` with `args`, as the client runs it, in its task's repository, as its `./pumpkin`
+/// built it there.
+fn on_client(scratch: &Scratch, environment: &[(String, String); 2], args: &[&str]) -> Command {
+    let pumpkin = scratch
+        .0
+        .join(format!("repo/.pumpkin/{PINNED}/bin/pumpkin"));
+    let mut command = scratch.program(pumpkin, args);
+    command
+        .current_dir(scratch.0.join("repo"))
+        .envs(environment.iter().map(|(name, value)| (name, value)));
+    command
+}
+
+/// The files below `dir`, each with its mode, sorted; or that there is none.
+fn modes(dir: &Path) -> String {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return "gone".to_owned();
+    };
+    let mut files: Vec<String> = entries
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let mode = entry.metadata().unwrap().permissions().mode() & 0o7777;
+            format!("{} {mode:o}", entry.file_name().display())
+        })
+        .collect();
+    files.sort();
+    files.join(", ")
+}
+
+/// `dir` with its mode, then [`modes`] of what it holds.
+fn mode_and_modes(dir: &Path) -> String {
+    let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+    format!("{mode:o}: {}", modes(dir))
+}
+
+/// Sets `scratch` up as [`set_up_client`] does, then has the client start a job of the task
+/// `stand-in` on its controller, over a shared master that answers, as a later command finds one
+/// that an earlier opened: its first command makes this machine's key and the workspace's shared
+/// connections, and finds no controller, as the stand-in `aws` describes none; the test then
+/// notes the controller's instance and the master's socket there, and `pumpkin run` sends the
+/// task. Returns the client's environment, the job's id and how the run ended.
+fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
+    let client = set_up_client(scratch);
+    let first = on_client(scratch, &client, &["ls"]).output().unwrap();
+    assert!(!first.status.success(), "{first:?}");
+    fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
+    // As `ssh` makes a master's socket, which only its user may reach.
+    let socket = scratch.0.join(SHARED).join("0");
+    fs::write(&socket, "").unwrap();
+    fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
+    let mut run = on_client(scratch, &client, &["run", "stand-in/task.star"]);
+    let invoked = invocation(&run);
+    let ran = run.output().unwrap();
+    let id = String::from_utf8(ran.stdout.clone()).unwrap();
+    let id = id.trim().to_owned();
+    let ran = report(invoked, &ran, &scratch.0, false).replace(&id, "<id>");
+    (client, id, ran)
+}
+
+// The client's keys reach the controller on standard input alone: no argument of a command that
+// the client runs, or that it runs on the controller, holds one, nor does a file in the
+// workspace, while the job's directory in tmpfs does.
+#[test]
+fn keys_on_standard_input() {
+    let scratch = Scratch::new("controller-keys");
+    let (_, id, ran) = started_job(&scratch);
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    let sent = fs::read_to_string(scratch.0.join(format!("run/pumpkin/{id}/gateway.key")));
+    let held = stdx::process::command("grep", Environment::Only(&["PATH"]))
+        .args(["--recursive", "--files-with-matches", "--fixed-strings"])
+        .arg(format!("--exclude-dir={PINNED}"))
+        .args(["--", KEY])
+        .arg(scratch.0.join("repo/.pumpkin"))
+        .output()
+        .unwrap();
+    let held = String::from_utf8(held.stdout).unwrap();
+    let lines = [
+        ran,
+        format!("an argument holds the key: {}", argv.contains(KEY)),
+        format!(
+            "ssh ran on the controller: {}",
+            argv.contains("set -o errexit")
+        ),
+        format!(
+            "the job's directory holds the key: {}",
+            sent.unwrap() == KEY
+        ),
+        format!(
+            "files in the workspace that hold the key: {}",
+            if held.is_empty() { "none" } else { &held }
+        ),
+    ];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: sending the task's tree, 1.9 KiB in 5 files, to controller `alice`
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        an argument holds the key: false
+        ssh ran on the controller: true
+        the job's directory holds the key: true
+        files in the workspace that hold the key: none"#]],
+    );
+}
+
+// The modes of what the client keeps, of this machine's key and of the workspace's shared
+// connections, and of the job's directory in tmpfs, which holds what it was sent: none that
+// another user may read but a public key.
+#[test]
+fn modes_of_what_the_client_keeps() {
+    let scratch = Scratch::new("controller-modes");
+    let (_, id, _) = started_job(&scratch);
+    let lines = [
+        format!(
+            "this machine's key: {}",
+            mode_and_modes(&scratch.0.join("client/.config/pumpkin/ssh"))
+        ),
+        format!(
+            "the shared connections: {}",
+            mode_and_modes(&scratch.0.join(SHARED))
+        ),
+        format!(
+            "the jobs' directories in tmpfs: {}",
+            mode_and_modes(&scratch.0.join("run/pumpkin")).replace(&id, "<id>")
+        ),
+        format!(
+            "the job's directory in tmpfs: {}",
+            mode_and_modes(&scratch.0.join(format!("run/pumpkin/{id}")))
+        ),
+    ];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        this machine's key: 700: key 600, key.pub 644
+        the shared connections: 700: 0 600, 0-0 600, lock 600, send-repo-stand-in_task.star 600
+        the jobs' directories in tmpfs: 700: <id> 700
+        the job's directory in tmpfs: 700: config.toml 600, gateway.key 600"#]],
+    );
+}
+
+// What the client refuses before it reaches its controller, and so makes no call for: a
+// configuration that names `[controller]` beside `[providers]`, `--runs`, a task whose root is
+// above its repository, a Pumpkin built without its bundle, and a machine without the Session
+// Manager plugin.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn target_refusals() {
+    let scratch = Scratch::new("controller-target-refusals");
+    let client = set_up_client(&scratch);
+    let mut lines = Vec::new();
+    let config = scratch.0.join("client/.config/pumpkin/pumpkin.toml");
+    let both = format!(
+        "{}\n[providers.local.docker]\n",
+        fs::read_to_string(&config).unwrap()
+    );
+    scratch.write("both.toml", &both);
+    let mut refused = on_client(
+        &scratch,
+        &client,
+        &["run", "stand-in/task.star", "--config", "../both.toml"],
+    );
+    let invoked = invocation(&refused);
+    lines.push(report(
+        invoked,
+        &refused.output().unwrap(),
+        &scratch.0,
+        false,
+    ));
+    let mut runs = on_client(
+        &scratch,
+        &client,
+        &["run", "stand-in/task.star", "--runs", "runs"],
+    );
+    let invoked = invocation(&runs);
+    lines.push(report(invoked, &runs.output().unwrap(), &scratch.0, false));
+    // The task's root above the repository that holds it, which alone is sent.
+    let (marker, above) = (
+        scratch.0.join("repo/PUMPKIN.star"),
+        scratch.0.join("PUMPKIN.star"),
+    );
+    fs::rename(&marker, &above).unwrap();
+    let mut outside = on_client(&scratch, &client, &["run", "stand-in/task.star"]);
+    let invoked = invocation(&outside);
+    lines.push(report(
+        invoked,
+        &outside.output().unwrap(),
+        &scratch.0,
+        false,
+    ));
+    fs::rename(&above, &marker).unwrap();
+    let bundle = scratch
+        .0
+        .join(format!("repo/.pumpkin/{PINNED}/pumpkin.bundle"));
+    fs::remove_file(bundle).unwrap();
+    let mut unbundled = on_client(&scratch, &client, &["run", "stand-in/task.star"]);
+    let invoked = invocation(&unbundled);
+    lines.push(report(
+        invoked,
+        &unbundled.output().unwrap(),
+        &scratch.0,
+        false,
+    ));
+    fs::remove_file(scratch.0.join("bin/session-manager-plugin")).unwrap();
+    let mut unplugged = on_client(&scratch, &client, &["ls"]);
+    let invoked = invocation(&unplugged);
+    lines.push(report(
+        invoked,
+        &unplugged.output().unwrap(),
+        &scratch.0,
+        false,
+    ));
+    let calls = fs::read_to_string(scratch.0.join("bin/calls")).unwrap_or_default();
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap_or_default();
+    lines.push(format!(
+        "calls of aws and ssh: {}",
+        calls.lines().count() + argv.lines().count()
+    ));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../both.toml
+        exit status: Some(1)
+        pumpkin: ../both.toml: it names `[controller]` beside `[providers]`: a machine's runs go either to its controller or to its own providers, so keep `[controller]`, beside `[upstreams]`, or remove it
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --runs runs
+        exit status: Some(1)
+        pumpkin: `--runs` names this machine's, but its configuration sends runs to controller `alice`: leave it out
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: stand-in/task.star: the task's root, <scratch>, is above its git repository, <scratch>/repo, which is all that a run on the controller is sent: put the root's `PUMPKIN.star` in the repository
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8/pumpkin.bundle isn't there, which the controller builds Pumpkin 1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 from: build it here with `./pumpkin --version`, after removing <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 if it was built without one
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin ls
+        exit status: Some(1)
+        pumpkin: the Session Manager plugin, `session-manager-plugin`, isn't on PATH, and `aws ssm start-session` needs it to reach the controller: install it, as AWS's Session Manager docs say
+        calls of aws and ssh: 0"#]],
+    );
+}

@@ -7,7 +7,9 @@
 //! a workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
 //! [`serving`](Upstreams::serving) picks the one that serves each entry of a route. [`Config`]
 //! and the types it holds say what each key means; every key is required, but for `gateway`'s,
-//! `upstreams` and `docker.cpus`, and any other refused.
+//! `upstreams` and `docker.cpus`, and any other refused. A machine whose runs go to the person's controller has
+//! `[controller]` instead of `[docker]`, `[providers]` and `[gateway]`, beside its upstreams
+//! ([`Client`]), so where its runs go has one home.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -30,6 +32,22 @@ pub(crate) struct Config {
     pub(crate) upstreams: Upstreams,
 }
 
+/// The configuration of a machine whose runs go to the person's controller, which `run` and
+/// `build` send what of it each job needs.
+pub(crate) struct Client {
+    pub(crate) controller: Controller,
+    /// The `[upstreams]` tables as the file holds them.
+    upstreams: toml::Table,
+    /// The file's directory, which each `key_file` is below unless absolute.
+    dir: PathBuf,
+}
+
+/// What a configuration file holds: a machine's, or a client's of its controller.
+enum Target {
+    Machine(Config),
+    Controller(Client),
+}
+
 /// The configuration as its file holds it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +59,32 @@ struct Tables {
     /// Empty if absent.
     #[serde(default)]
     upstreams: Upstreams,
+    controller: Option<Controller>,
+}
+
+/// The person's controller, which `deploy/aws` made, and to which the machine's runs go.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Controller {
+    /// The `name` that the module was applied with.
+    pub(crate) name: crate::controller::Name,
+    /// The region it was applied in.
+    pub(crate) region: aws::Region,
+    /// The Modal provider that its jobs may place roles on, if any.
+    pub(crate) modal: Option<ClientModal>,
+}
+
+/// The Modal provider of a client's jobs: the settings of a provider of kind
+/// [`modal`](Kind::Modal) but `images`, which the controller's settings give, and `dials_from`,
+/// which each job sets ([`crate::job`]), so its `profile` and `classes` are checked there.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClientModal {
+    /// Modal's configuration file, which each job is sent, below the configuration's directory
+    /// unless absolute; if absent, `$HOME/.modal.toml`, sent only if it is there.
+    config: Option<PathBuf>,
+    profile: String,
+    classes: toml::Table,
 }
 
 /// The machine's Docker engine, which every provider of kind [`docker`](Kind::Docker) runs its
@@ -300,8 +344,8 @@ fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayA
 ///
 /// # Errors
 ///
-/// Fails if the file can't be read, or, naming the file, if it isn't a machine's configuration.
-/// A TOML error is `toml`'s own, with the line it points at.
+/// Fails if the file can't be read, or, naming the file, if it isn't a machine's configuration,
+/// as one that names `[controller]`. A TOML error is `toml`'s own, with the line it points at.
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
     let text = fs::read_to_string(path).map_err(|error| {
         format!(
@@ -317,9 +361,54 @@ pub(crate) fn read(path: &Path) -> Result<Config, String> {
 ///
 /// # Errors
 ///
-/// Fails, naming the file, if `text` isn't a machine's configuration. A TOML error is `toml`'s
-/// own, with the line it points at.
+/// Fails, naming the file, if `text` isn't a machine's configuration, as one that names
+/// `[controller]`. A TOML error is `toml`'s own, with the line it points at.
 pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
+    match target(path, text)? {
+        Target::Machine(config) => Ok(config),
+        Target::Controller(_) => Err(format!(
+            "{}: it names `[controller]`, and so no Docker engine of this machine's: name a \
+             configuration with `[docker]` with `--config`",
+            path.display()
+        )),
+    }
+}
+
+/// The client's configuration at `config`, or the default one, if it parses as one that names
+/// `[controller]`; `None` if it can't be read, as when there is none, or names no
+/// `[controller]`.
+///
+/// # Errors
+///
+/// Fails, naming the file, if it names `[controller]` but isn't a client's configuration.
+pub(crate) fn client(config: Option<&str>) -> Result<Option<Client>, String> {
+    let path = match config {
+        Some(config) => PathBuf::from(config),
+        // Without `HOME` there is no default one to send runs anywhere.
+        None => match crate::default_config() {
+            Ok(path) => path,
+            Err(_) => return Ok(None),
+        },
+    };
+    // What can't be read is left to the command that reads it, which says why.
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    match target(&path, &text) {
+        Ok(Target::Controller(client)) => Ok(Some(client)),
+        Ok(Target::Machine(_)) => Ok(None),
+        Err(error) => {
+            let raw = toml::from_str::<toml::Table>(&text);
+            if raw.is_ok_and(|raw| raw.contains_key("controller")) {
+                return Err(error);
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// What `text`, the file at `path`, holds.
+fn target(path: &Path, text: &str) -> Result<Target, String> {
     // `toml` ends its message, which quotes the line, with a newline of its own.
     let parsed = toml::from_str(text);
     let Tables {
@@ -327,6 +416,7 @@ pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
         providers,
         gateway,
         mut upstreams,
+        controller,
     } = parsed
         .map_err(|error| error.to_string().trim_end().to_owned())
         .context(path.display())?;
@@ -335,24 +425,122 @@ pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     // configuration and its keys move together, and no variable of the environment changes
     // which file a key is in. A file that was read has a parent: `""` for a bare file name.
     let dir = path.parent().unwrap_or(Path::new(""));
+    if let Some(mut controller) = controller {
+        let beside: Vec<&str> = [
+            ("`[docker]`", docker.is_some()),
+            ("`[providers]`", providers.is_some()),
+            ("`[gateway]`", gateway.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(table, given)| given.then_some(table))
+        .collect();
+        if !beside.is_empty() {
+            return Err(format!(
+                "{}: it names `[controller]` beside {}: a machine's runs go either to its \
+                 controller or to its own providers, so keep `[controller]`, beside \
+                 `[upstreams]`, or remove it",
+                path.display(),
+                beside.join(" and ")
+            ));
+        }
+        if let Some(modal) = &mut controller.modal {
+            modal.config = modal.config.take().map(|config| dir.join(config));
+        }
+        let mut raw: toml::Table = toml::from_str(text).context(path.display())?;
+        let upstreams = match raw.remove("upstreams") {
+            Some(toml::Value::Table(upstreams)) => upstreams,
+            _ => toml::Table::new(),
+        };
+        return Ok(Target::Controller(Client {
+            controller,
+            upstreams,
+            dir: dir.to_owned(),
+        }));
+    }
     for upstream in upstreams.0.values_mut() {
         upstream.key_file = dir.join(&upstream.key_file);
     }
     let missing = |table: &str| {
         format!(
-            "{}: `[{table}]` is missing: name it, as `pumpkin help config` says",
+            "{}: `[{table}]` is missing: name it, or `[controller]`, as `pumpkin help config` \
+             says",
             path.display()
         )
     };
     let docker = docker.ok_or_else(|| missing("docker"))?;
     let providers = providers.ok_or_else(|| missing("providers.<name>.<kind>"))?;
     let providers = Providers::new(providers).context(path.display())?;
-    Ok(Config {
+    Ok(Target::Machine(Config {
         docker,
         providers,
         gateway: gateway.unwrap_or_default(),
         upstreams,
-    })
+    }))
+}
+
+impl Client {
+    /// What a job is sent of the configuration, as TOML: the `[upstreams]` tables, each
+    /// `key_file` a file sent beside it, `<upstream>.key`, and the Modal provider's `profile` and
+    /// `classes`, in `[modal]`, if it names one; and the key file, below the configuration's
+    /// directory unless absolute, that each such name stands for.
+    pub(crate) fn sent(&self) -> Result<(String, Vec<(String, PathBuf)>), String> {
+        let mut upstreams = self.upstreams.clone();
+        let mut keys = Vec::new();
+        for (name, upstream) in &mut upstreams {
+            let key = upstream
+                .get("key_file")
+                .and_then(toml::Value::as_str)
+                .map(|key| self.dir.join(key));
+            if let (Some(table), Some(key)) = (upstream.as_table_mut(), key) {
+                let file = format!("{name}.key");
+                table.insert("key_file".to_owned(), file.clone().into());
+                keys.push((file, key));
+            }
+        }
+        let mut sent = toml::Table::from_iter([("upstreams".to_owned(), upstreams.into())]);
+        if let Some(ClientModal {
+            config: _,
+            profile,
+            classes,
+        }) = &self.controller.modal
+        {
+            let modal = toml::Table::from_iter([
+                ("profile".to_owned(), profile.clone().into()),
+                ("classes".to_owned(), classes.clone().into()),
+            ]);
+            sent.insert("modal".to_owned(), modal.into());
+        }
+        let text = toml::to_string(&sent)
+            .map_err(|error| format!("writing what the job is sent: {error}"))?;
+        Ok((text, keys))
+    }
+
+    /// What Modal's configuration file holds that a job, `cancel` and `reap` are sent, if one
+    /// is: with a Modal provider, its `config`, or `$HOME/.modal.toml` if it is there.
+    pub(crate) fn modal_file(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(modal) = &self.controller.modal else {
+            return Ok(None);
+        };
+        let path = if let Some(config) = &modal.config {
+            config.clone()
+        } else {
+            let home =
+                crate::home("name Modal's configuration file in `[controller.modal] config`")?;
+            let default = home.join(".modal.toml");
+            if !default.try_exists().context(default.display())? {
+                return Ok(None);
+            }
+            default
+        };
+        let read = fs::read(&path).map_err(|error| {
+            format!(
+                "Modal's configuration file {} can't be read ({error}): put it there, or name \
+                 another in `[controller.modal] config`",
+                path.display()
+            )
+        })?;
+        Ok(Some(read))
+    }
 }
 
 /// Checks that no model of `upstreams` is listed twice.

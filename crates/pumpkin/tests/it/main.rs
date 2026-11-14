@@ -2,10 +2,10 @@
 //! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
 //! includes the model route of a workflow that has one reaching a stand-in model provider; `ls`,
 //! with a run's first steps, which it follows; `wait`; `cancel`; `reap`; `check`; `fmt`; `build`;
-//! `lock`; and `driver`, for the process that drives each run, which `run` starts. `fmt` runs the
-//! formatter beside `pumpkin`, which `cargo xtask ci` puts beside the tests' own. The tests on
-//! Docker are ignored, and write the context they reach ([`test_support::docker_context`]) into the
-//! configuration that they give `run` and `build`.
+//! `lock`; `controller`, the controller's own side; and `driver`, for the process that drives each
+//! run, which `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts
+//! beside the tests' own. The tests on Docker are ignored, and write the context they reach
+//! ([`test_support::docker_context`]) into the configuration that they give `run` and `build`.
 
 #![expect(
     clippy::unwrap_used,
@@ -41,6 +41,7 @@ use test_support::{BUSYBOX, WORKFLOW, files};
 mod build;
 mod cancel;
 mod check;
+mod controller;
 mod driver;
 mod fmt;
 mod lock;
@@ -283,7 +284,7 @@ fn invocation(command: &Command) -> String {
     });
     let set: String = set.collect();
     let program = command.get_program().to_string_lossy();
-    // As `Scratch::pumpkin` runs it.
+    // As `Scratch::pumpkin` runs it, or one that a `./pumpkin` built in its workspace.
     let program = if program.contains("/.pumpkin/") && program.ends_with("/bin/pumpkin") {
         Cow::Borrowed("pumpkin")
     } else {
@@ -397,11 +398,18 @@ fn steady_outcome(mut outcome: Value) -> Value {
     outcome
 }
 
-/// The id and the record of the run that `stderr`, `pumpkin`'s, says it records, if it does.
+/// The id and the record of the run that `stderr`, `pumpkin`'s, says it records, or, of a run on
+/// a controller, that it copied here, if it does.
 fn record(stderr: &str) -> Option<(&str, &str)> {
     (stderr.lines()).find_map(|line| {
-        line.strip_prefix("pumpkin: run ")?
-            .split_once(" records into ")
+        let line = line.strip_prefix("pumpkin: ")?;
+        if let Some(line) = line.strip_prefix("run ") {
+            return line.split_once(" records into ");
+        }
+        let (id, from) = line
+            .strip_prefix("copying run ")?
+            .split_once("'s record from ")?;
+        Some((id, from.split_once(" to ")?.1))
     })
 }
 
