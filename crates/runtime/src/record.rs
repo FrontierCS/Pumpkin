@@ -12,8 +12,8 @@
 //! - `provider.json`: the providers that the roles are placed on, and where each is ([`provided`]);
 //! - `log.jsonl`: the run log, which the `log` module lays out;
 //! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256;
-//! - `agent/` and `jobs/<n>/`, for the sandbox of the agent and of job `n`'s judge call, once
-//!   created: its `sandbox.json` ([`write_sandbox`]), its
+//! - `agent/`, `jobs/<n>/` and `leases/<n>/`, for the sandbox of the agent, of job `n`'s judge
+//!   call and of lease `n`'s runner, once created: its `sandbox.json` ([`write_sandbox`]), its
 //!   `console.txt` as the run deleted it ([`write_console`]), and its `out` and `log` as far as
 //!   collected, but a result over [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
 //! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
@@ -1171,9 +1171,47 @@ impl<'h, H: Host> Payloads<'h, H> {
         }
     }
 
+    /// The payload whose reference is `payload`, as [`Payloads::store`] stored it.
+    pub(super) fn stored(&self, payload: &PayloadRef) -> Stored {
+        Stored {
+            path: self.path(&payload.digest),
+            reference: payload.clone(),
+        }
+    }
+
     /// Where the payload whose digest is `digest` is stored.
-    pub(super) fn path(&self, digest: &Sha256Digest) -> PathBuf {
+    fn path(&self, digest: &Sha256Digest) -> PathBuf {
         self.dir.join(digest.hex())
+    }
+}
+
+/// A payload in `payloads/`, which [`Stored::read`] reads back.
+pub(super) struct Stored {
+    path: PathBuf,
+    reference: PayloadRef,
+}
+
+impl Stored {
+    /// The payload's bytes.
+    ///
+    /// # Errors
+    ///
+    /// Fails if its file can't be read, or holds bytes of another size or SHA-256 than the
+    /// payload's.
+    pub(super) fn read(&self) -> Result<Vec<u8>, String> {
+        let bytes = fs::read(&self.path).context(self.path.display())?;
+        let read = reference(&bytes);
+        if read != self.reference {
+            let (PayloadRef { size, digest }, expected) = (read, &self.reference);
+            return Err(format!(
+                "{} holds {size} bytes of digest {}: expected the payload's {} bytes of digest {}",
+                self.path.display(),
+                digest.as_str(),
+                expected.size,
+                expected.digest.as_str()
+            ));
+        }
+        Ok(bytes)
     }
 }
 

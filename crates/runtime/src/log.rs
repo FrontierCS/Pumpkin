@@ -16,10 +16,12 @@
 //!
 //! `seq` counts records from 0. Each event and action is an object whose `kind` is its name in
 //! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
-//! by their names in the workflow, jobs and ops by their numbers, payloads by size and digest,
-//! and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
-//! anything longer; a status's job, a number the agent gave, is a decimal string too.
-//! `start_judge` names the agent's grant of the call, or `null` for the score. A reply is the
+//! by their names in the workflow, jobs, ops and leases by their numbers, payloads by size and
+//! digest, and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
+//! anything longer; a status's job, a number the agent gave, is a decimal string too. A `caller`
+//! or `holder` is as [`caller_json`] gives it. `start_judge` names the agent's grant of the call,
+//! or `null` for the score, `start_lease` the lease's grant; a `transfer` gives its paths, and
+//! its `transfer_ended` its sizes, never what it moved. A reply is the
 //! [`OpReply`](schema::sandbox::op::OpReply) sent.
 
 use std::fs::{File, OpenOptions};
@@ -28,7 +30,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict, WorkEnd,
+    Action, Caller, Direction, Event, Failure, JudgeResult, Outcome, PayloadRef, Request,
+    Submission, Verdict, WorkEnd,
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
@@ -257,10 +260,10 @@ pub(super) enum Entry {
     /// none, or couldn't tell, has none.
     Gpus(Name, Vec<GpuModel>),
     /// A sandbox's delete, which ended it: `{"kind": "sandbox_deleted", "sandbox": n, "provider":
-    /// p, "id": i}`, where `n` is its name within the run, `agent` or `job-<n>`, or `null` for one
-    /// that no start of the run recorded, which the run's end found left. Every sandbox's end is
-    /// one, on every path, a stop short of the core's end included, after which the log keeps the
-    /// notes and deletes of the run's judge calls, but no event of theirs.
+    /// p, "id": i}`, where `n` is its name within the run, `agent`, `job-<n>` or `lease-<n>`, or
+    /// `null` for one that no start of the run recorded, which the run's end found left. Every
+    /// sandbox's end is one, on every path, a stop short of the core's end included, after which
+    /// the log keeps the notes and deletes of the run's children, but no event of theirs.
     Deleted(Deleted),
 }
 
@@ -279,9 +282,14 @@ fn event_json(event: &Event) -> Value {
         Event::AgentStarted => json!({ "kind": "agent_started" }),
         Event::AgentExited { status } => json!({ "kind": "agent_exited", "status": status }),
         Event::AgentFailed { reason } => json!({ "kind": "agent_failed", "reason": reason }),
-        Event::OpArrived { op, request } => json!({
+        Event::OpArrived {
+            op,
+            caller,
+            request,
+        } => json!({
             "kind": "op_arrived",
             "op": op.0,
+            "caller": caller_json(*caller),
             "request": request_json(request),
         }),
         Event::JudgeStarted { job } => json!({ "kind": "judge_started", "job": job.0 }),
@@ -299,6 +307,35 @@ fn event_json(event: &Event) -> Value {
         },
         Event::JudgeFailed { job, reason } => {
             json!({ "kind": "judge_failed", "job": job.0, "reason": reason })
+        }
+        Event::LeaseReady { lease } => json!({ "kind": "lease_ready", "lease": lease.0 }),
+        Event::CommandEnded {
+            lease,
+            command,
+            end,
+            stdout,
+            stderr,
+        } => json!({
+            "kind": "command_ended",
+            "lease": lease.0,
+            "command": command,
+            "end": end,
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
+        Event::TransferEnded {
+            lease,
+            transfer,
+            end,
+        } => json!({
+            "kind": "transfer_ended",
+            "lease": lease.0,
+            "transfer": transfer,
+            "end": end,
+        }),
+        Event::LeaseEnded { lease } => json!({ "kind": "lease_ended", "lease": lease.0 }),
+        Event::LeaseFailed { lease, reason } => {
+            json!({ "kind": "lease_failed", "lease": lease.0, "reason": reason })
         }
         Event::Tick => json!({ "kind": "tick" }),
     }
@@ -324,10 +361,56 @@ fn request_json(request: &Request) -> Value {
         }),
         // A decimal string, as a time is, since the agent may give any number, past 2^53 too.
         Request::Status { job } => json!({ "kind": "status", "job": job.to_string() }),
+        Request::LeaseOpen {
+            grant,
+            instance_seconds,
+        } => json!({
+            "kind": "lease_open",
+            "grant": grant.as_str(),
+            "instance_seconds": instance_seconds,
+        }),
+        Request::LeaseRun {
+            lease,
+            argv,
+            timeout_seconds,
+        } => json!({
+            "kind": "lease_run",
+            "lease": lease,
+            "argv": argv,
+            "timeout_seconds": timeout_seconds,
+        }),
+        Request::LeasePut {
+            lease,
+            tree,
+            to,
+            replace,
+        } => json!({
+            "kind": "lease_put",
+            "lease": lease,
+            "tree": tree,
+            "to": to,
+            "replace": replace,
+        }),
+        Request::LeaseGet { lease, from, to } => json!({
+            "kind": "lease_get",
+            "lease": lease,
+            "from": from,
+            "to": to,
+        }),
+        Request::LeaseStatus { lease } => json!({ "kind": "lease_status", "lease": lease }),
+        Request::LeaseClose { lease } => json!({ "kind": "lease_close", "lease": lease }),
+    }
+}
+
+/// The JSON form of an op's caller, or a lease's holder: its sandbox's name in the run, `agent`.
+fn caller_json(caller: Caller) -> String {
+    match caller {
+        Caller::Agent => "agent".to_owned(),
     }
 }
 
 /// The JSON form of an action.
+#[expect(clippy::too_many_lines, reason = "one arm per action")]
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
         Action::StartAgent => json!({ "kind": "start_agent" }),
@@ -350,6 +433,55 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             "timeout_ns": nanos(*timeout),
         }),
         Action::StopJudge { job } => json!({ "kind": "stop_judge", "job": job.0 }),
+        Action::StartLease {
+            lease,
+            holder,
+            grant,
+            instance,
+            start_by,
+        } => json!({
+            "kind": "start_lease",
+            "lease": lease.0,
+            "holder": caller_json(*holder),
+            "grant": workflow.lease_grant(*grant).name.as_str(),
+            "instance": instance,
+            "start_by_ns": nanos(*start_by),
+        }),
+        Action::RunCommand {
+            lease,
+            command,
+            argv,
+            timeout,
+        } => json!({
+            "kind": "run_command",
+            "lease": lease.0,
+            "command": command,
+            "argv": argv,
+            "timeout_ns": timeout.map(nanos),
+        }),
+        Action::Transfer {
+            lease,
+            holder: _,
+            transfer,
+            direction,
+            max_bytes,
+        } => {
+            let (direction, from, to) = match direction {
+                Direction::Put { tree, to, replace } if *replace => ("replace", tree, to),
+                Direction::Put { tree, to, .. } => ("put", tree, to),
+                Direction::Get { from, to } => ("get", from, to),
+            };
+            json!({
+                "kind": "transfer",
+                "lease": lease.0,
+                "transfer": transfer,
+                "direction": direction,
+                "from": from,
+                "to": to,
+                "max_bytes": max_bytes,
+            })
+        }
+        Action::CloseLease { lease } => json!({ "kind": "close_lease", "lease": lease.0 }),
         Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),
         Action::Finish { outcome } => {
             json!({ "kind": "finish", "outcome": outcome_json(outcome) })

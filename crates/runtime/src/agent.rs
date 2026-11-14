@@ -6,19 +6,18 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 
 use decision::Event;
-use gateway::{IncomingOp, Process, Put, RefusedOp, Session};
+use gateway::{IncomingOp, Process, Put, RefusedOp, Session, Trees};
 use provider::UnixTime;
-use schema::ir::{AbsolutePath, Dir, File, Mode};
+use schema::ir::{AbsolutePath, Dir, File};
 use schema::sandbox::op::OpReply;
 use schema::sandbox::{
-    ExitStatus, Launch, OpPayloadLimit, RelativePath, command_stdin, file_mode, log_dir, out_dir,
-    pumpkin_dir,
+    ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{self, Workflow};
 use stdx::{Context, Deadline};
 
 use super::log::Entry;
-use super::sandbox::{PUMPKIN, Sandboxes, Started, Which, collect, launch};
+use super::sandbox::{Sandboxes, Started, Which, collect, launch};
 use super::{Clock, Host, Input};
 
 /// The agent's sandbox, from when it starts until it is deleted.
@@ -97,6 +96,11 @@ impl Agent {
         self.sandbox.session.reply(op, reply, by)
     }
 
+    /// The trees of the agent's sandbox, which a lease's thread moves to and from its runner.
+    pub(super) fn trees(&self) -> Trees {
+        self.sandbox.session.trees()
+    }
+
     /// Refuses `refused`, which the agent's session handed out, by `by`.
     pub(super) fn refuse(&mut self, refused: RefusedOp, by: Deadline) -> io::Result<()> {
         self.sandbox.session.refuse(refused, by)
@@ -111,7 +115,7 @@ impl Agent {
             failures.push(format!("freezing the agent's sandbox failed: {error}"));
         }
         for part in [out_dir(), log_dir()] {
-            if let Err(error) = collect(session, &part, dir, PUMPKIN, by) {
+            if let Err(error) = collect(session, &part, dir, by) {
                 failures.push(format!("the agent's {part} is incomplete: {error}"));
             }
         }
@@ -134,30 +138,23 @@ fn put(
     agent: &workflow::Agent,
     by: Deadline,
 ) -> Result<Option<AbsolutePath>, String> {
-    let dirs: Vec<(RelativePath, Mode)> = (agent.dirs.iter())
-        .map(|Dir { path, mode }| (path.relative(), *mode))
-        .collect();
-    let files: Vec<(RelativePath, Mode, &[u8])> = (agent.files.iter())
-        .map(|file| {
-            let File {
-                path,
-                mode,
-                content,
-            } = file;
-            (path.relative(), *mode, content.as_bytes())
-        })
-        .collect();
-    let dirs = dirs.iter().map(|(path, mode)| Put::Dir(path, *mode));
-    let files = (files.iter()).map(|(path, mode, content)| Put::File(path, *mode, content));
-    let puts: Vec<Put<'_>> = dirs.chain(files).collect();
-    (session.put(&AbsolutePath::root(), &puts, by))
+    let dirs = (agent.dirs.iter()).map(|Dir { path, mode }| Put::Dir(path.relative(), *mode));
+    let files = (agent.files.iter()).map(|file| {
+        let File {
+            path,
+            mode,
+            content,
+        } = file;
+        Put::File(path.relative(), *mode, content.as_bytes())
+    });
+    (session.put(&AbsolutePath::root(), dirs.chain(files), by))
         .context("the agent's files can't be put below `/`")?;
     let Some(text) = &agent.stdin else {
         return Ok(None);
     };
     let stdin = command_stdin();
-    let put = [Put::File(&stdin, file_mode(), text.as_bytes())];
-    (session.put(&pumpkin_dir(), &put, by)).context("the agent's standard input can't be put")?;
+    let put = [Put::File(stdin.clone(), file_mode(), text.as_bytes())];
+    (session.put(&pumpkin_dir(), put, by)).context("the agent's standard input can't be put")?;
     Ok(Some(pumpkin_dir().join(&stdin)))
 }
 
@@ -165,17 +162,7 @@ fn put(
 /// and of the score's slot, which caps its submissions.
 fn op_payload_limit(workflow: &Workflow) -> OpPayloadLimit {
     let slots = workflow.judge_grants().map(|(_, grant)| grant.slot);
-    let max_bytes = |slot| workflow.slot(slot).max_bytes().get();
-    let score = max_bytes(workflow.score().slot);
-    let bytes = slots.map(max_bytes).fold(score, u64::max);
-    // A parsed slot type carrying the bound would reshape `Workflow::slot` and
-    // `workflow::Judge::slots`, both `pub`, and the decision core's reads of them.
-    let Ok(limit) = OpPayloadLimit::try_from(bytes) else {
-        unreachable!(
-            "the agent's largest slot holds {bytes} bytes, over the op payload cap, though these \
-             are judges' slots, and `Workflow::parse` refuses any whose `max_bytes` is over \
-             `MAX_OP_PAYLOAD_BYTES`"
-        )
-    };
-    limit
+    let limit = |slot| workflow.slot(slot).payload_limit();
+    let score = limit(workflow.score().slot);
+    slots.map(limit).fold(score, OpPayloadLimit::max)
 }

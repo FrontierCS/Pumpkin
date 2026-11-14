@@ -10,12 +10,13 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use schema::ir::{AbsolutePath, Mode};
+use schema::ir::AbsolutePath;
 use schema::sandbox::frame::MAX_BODY_BYTES;
-use schema::sandbox::tree::{self, Limits};
-use schema::sandbox::{Entry, FromSandbox, RelativePath};
+use schema::sandbox::tree::{self, Limits, Modes};
+use schema::sandbox::{Entry, FromSandbox, RelativePath, Root, tree_mode};
 use stdx::Context;
 
 use crate::session::Sender;
@@ -29,19 +30,26 @@ pub(crate) struct Puts {
 }
 
 impl Puts {
-    /// Begins putting a tree in `dir` on `stream`, creating `dir` if need be.
+    /// Begins putting a tree in `dir` on `stream`, made as `root` says, with its parents.
     pub(crate) fn begin(
         &mut self,
         sender: &Sender,
         stream: u32,
         dir: &AbsolutePath,
+        root: Root,
     ) -> io::Result<()> {
         if self.trees.contains_key(&stream) {
             return Err(protocol_error(stream, "is already putting a tree"));
         }
-        match fs::create_dir_all(dir.as_str()).context(dir) {
+        let path = Path::new(dir.as_str());
+        let created = match root {
+            Root::Kept => fs::create_dir_all(path),
+            Root::New => create_new(path),
+            Root::Replaced => remove(path).and_then(|()| create_new(path)),
+        };
+        match created.context(dir) {
             Ok(()) => {
-                let tree = tree::Writer::new(dir.as_str().into(), Limits::NONE);
+                let tree = tree::Writer::new(dir.as_str().into(), Limits::NONE, Modes::Exact);
                 self.trees.insert(stream, Some(tree));
                 Ok(())
             }
@@ -52,15 +60,9 @@ impl Puts {
         }
     }
 
-    /// Writes an entry of the tree being put on `stream`, with `mode` ([`tree::Writer::entry`]).
-    pub(crate) fn entry(
-        &mut self,
-        sender: &Sender,
-        stream: u32,
-        entry: &Entry,
-        mode: Mode,
-    ) -> io::Result<()> {
-        self.write(sender, stream, |tree| tree.entry(entry, Some(mode)))
+    /// Writes an entry of the tree being put on `stream` ([`tree::Writer::entry`]).
+    pub(crate) fn entry(&mut self, sender: &Sender, stream: u32, entry: &Entry) -> io::Result<()> {
+        self.write(sender, stream, |tree| tree.entry(entry))
     }
 
     /// Writes bytes of the current file of the tree being put on `stream`
@@ -102,6 +104,26 @@ impl Puts {
                 sender.reply(stream, outcome)
             }
         }
+    }
+}
+
+/// Creates the directory `path` below its parents, which it creates if need be, failing if it
+/// exists.
+fn create_new(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) => fs::create_dir_all(parent).and_then(|()| fs::create_dir(path)),
+        // `/`, which exists.
+        None => fs::create_dir(path),
+    }
+}
+
+/// Removes whatever is at `path`, if anything is: a directory with all it holds.
+fn remove(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -160,12 +182,17 @@ fn list(
         })?;
         let full_path = root.join(path.as_str());
         let metadata = fs::symlink_metadata(&full_path).context(full_path.display())?;
+        let mode = tree_mode(metadata.permissions().mode());
         if metadata.is_dir() {
-            entries.push((full_path, Entry::Dir { path: path.clone() }));
+            let entry = Entry::Dir {
+                path: path.clone(),
+                mode,
+            };
+            entries.push((full_path, entry));
             list(root, Some(&path), entries)?;
         } else if metadata.is_file() {
             let size = metadata.len();
-            entries.push((full_path, Entry::File { path, size }));
+            entries.push((full_path, Entry::File { path, size, mode }));
         } else {
             return Err(format!(
                 "{} is neither a directory nor a regular file: collect only those",

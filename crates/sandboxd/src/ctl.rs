@@ -7,13 +7,14 @@
 //! one op over it, as [`crate::ops`] describes.
 
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU64;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::ExitCode;
 use std::{fs, io};
 
-use schema::ir::Name;
+use schema::ir::{AbsolutePath, Argv, Name};
 use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use schema::sandbox::{CONTROL_SOCKET, frame};
 use stdx::Context;
@@ -45,8 +46,9 @@ mod flags {
         src "./src/ctl.rs"
 
         /// Makes an op through the sandbox's sandboxd, and prints the reply as one line of
-        /// JSON, whose `kind` names it: `ops`, `judge`, `submit`, `status` or `refused`. Exits
-        /// with 0, with 2 for the status of a job that ended with no score, and with 1 for a refused op.
+        /// JSON, whose `kind` names it: `ops`, `judge`, `submit`, `status`, `lease`,
+        /// `lease_status` or `refused`. Exits with 0, with 2 for the status of a job that ended
+        /// with no score, and with 1 for a refused op.
         /// Reports any other error on standard error, with nothing printed, and exits with 1.
         cmd sandboxctl {
             /// Prints this sandbox's limits: the time left to work, its CPU and memory, and
@@ -76,6 +78,31 @@ mod flags {
                 /// The job's number, as its judge call returned it.
                 required job: OsString
             }
+
+            /// Leases a runner of a lease grant, and drives it, each op answered at once, one
+            /// command or copy at a time: `open <grant>` opens a lease, whose runner lasts as its
+            /// grant lets it; `run <lease> [--timeout <seconds>] -- <program> [<arg>...]` runs a
+            /// command in its runner, until the timeout or the lease's end; `put <lease> <tree>
+            /// <to>` copies the directory <tree> here to <to> in the runner, and `get <lease>
+            /// <from> <to>` the runner's <from> to <to> here; `status <lease>` shows the lease, how
+            /// its last command or copy ended, and what is left; `close <lease>` ends it. A lease
+            /// is named by the number `open` returned.
+            cmd lease {
+                /// `open`, `run`, `put`, `get`, `status` or `close`, then its arguments. A copied
+                /// tree's root becomes <to>, which must not exist unless a put replaces it, a path
+                /// in the runner given whole, from `/`; a copy keeps the permission bits of each
+                /// file and directory, and gives a directory's owner all three; a copy counts as a
+                /// command.
+                repeated args: OsString
+                /// With `run`, the most seconds the command may run, at most what the lease has
+                /// left.
+                optional --timeout seconds: OsString
+                /// With `open`, the seconds the lease lasts once its runner is ready, at most what
+                /// its grant lets a lease last.
+                optional --seconds seconds: OsString
+                /// With `put`, removes whatever is at <to> in the runner first.
+                optional --replace
+            }
         }
     }
     // generated start
@@ -92,6 +119,7 @@ mod flags {
         Judge(Judge),
         Submit(Submit),
         Status(Status),
+        Lease(Lease),
     }
 
     #[derive(Debug)]
@@ -114,6 +142,15 @@ mod flags {
     #[derive(Debug)]
     pub struct Status {
         pub job: OsString,
+    }
+
+    #[derive(Debug)]
+    pub struct Lease {
+        pub args: Vec<OsString>,
+
+        pub timeout: Option<OsString>,
+        pub seconds: Option<OsString>,
+        pub replace: bool,
     }
 
     impl Sandboxctl {
@@ -171,7 +208,11 @@ pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
 /// The exit code that `reply` gives, as `sandboxctl --help` lists them ([`flags`]).
 fn exit_code(reply: &OpReply) -> u8 {
     match reply {
-        OpReply::Ops(_) | OpReply::Judge(_) | OpReply::Submit(_) => 0,
+        OpReply::Ops(_)
+        | OpReply::Judge(_)
+        | OpReply::Submit(_)
+        | OpReply::Lease(_)
+        | OpReply::LeaseStatus(_) => 0,
         OpReply::Status(StatusReply { state, .. }) => match state {
             JobState::Queued | JobState::Running | JobState::Completed { scored: true, .. } => 0,
             JobState::Completed { scored: false, .. } | JobState::Errored { .. } => 2,
@@ -223,7 +264,128 @@ fn parse(flags: flags::Sandboxctl) -> Result<(OpCall, Vec<u8>), String> {
                 })?;
             Ok((OpCall::Status { job }, Vec::new()))
         }
+        flags::SandboxctlCmd::Lease(flags::Lease {
+            args,
+            timeout,
+            seconds,
+            replace,
+        }) => Ok((
+            lease(&args, (timeout.as_deref(), seconds.as_deref(), replace))?,
+            Vec::new(),
+        )),
     }
+}
+
+/// The lease op that `args`, its verb and the verb's arguments, ask for, with `timeout`, given
+/// for `run` alone, `seconds`, for `open` alone, and `replace`, for `put` alone.
+fn lease(
+    args: &[OsString],
+    (timeout, seconds, replace): (Option<&OsStr>, Option<&OsStr>, bool),
+) -> Result<OpCall, String> {
+    let text = |arg: &OsStr| {
+        (arg.to_str().map(str::to_owned)).ok_or_else(|| {
+            format!(
+                "`{}` is not UTF-8: give each argument as UTF-8",
+                arg.display()
+            )
+        })
+    };
+    let args: Vec<String> = args.iter().map(|arg| text(arg)).collect::<Result<_, _>>()?;
+    let number = |lease: &str| {
+        lease.parse().map_err(|_| {
+            format!("`{lease}` is not a lease: name one by the number `lease open` returned")
+        })
+    };
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let call = match (&words[..], timeout, seconds, replace) {
+        (["open", grant], None, _, false) => OpCall::LeaseOpen {
+            grant: Name::try_from((*grant).to_owned())?,
+            instance_seconds: seconds
+                .map(|seconds| whole(seconds, "a lease's time"))
+                .transpose()?,
+        },
+        (["run", lease, command @ ..], _, None, false) if !command.is_empty() => OpCall::LeaseRun {
+            lease: number(lease)?,
+            argv: Argv::try_from(
+                command
+                    .iter()
+                    .map(|&arg| arg.to_owned())
+                    .collect::<Vec<_>>(),
+            )?,
+            timeout_seconds: timeout
+                .map(|timeout| whole(timeout, "a timeout"))
+                .transpose()?,
+        },
+        (["put", lease, tree, to], None, None, _) => OpCall::LeasePut {
+            lease: number(lease)?,
+            tree: here(tree)?,
+            to: there(to)?,
+            replace,
+        },
+        (["get", lease, from, to], None, None, false) => OpCall::LeaseGet {
+            lease: number(lease)?,
+            from: there(from)?,
+            to: here(to)?,
+        },
+        (["status", lease], None, None, false) => OpCall::LeaseStatus {
+            lease: number(lease)?,
+        },
+        (["close", lease], None, None, false) => OpCall::LeaseClose {
+            lease: number(lease)?,
+        },
+        _ => {
+            return Err(format!(
+                "`lease {}` is no lease op: give `open <grant> [--seconds <seconds>]`, `run \
+                 <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `put <lease> <tree> \
+                 <to> [--replace]`, `get <lease> <from> <to>`, `status <lease>` or `close \
+                 <lease>`",
+                args.join(" ")
+            ));
+        }
+    };
+    Ok(call)
+}
+
+/// `path`, a path in this sandbox, whole: from the current directory, unless it is whole
+/// already, and with each `..` taking the component before it away, as the path need not exist.
+fn here(path: &str) -> Result<AbsolutePath, String> {
+    let whole = std::path::absolute(path).map_err(|error| format!("{path}: {error}"))?;
+    let mut parts = Vec::new();
+    for part in whole.components() {
+        match part {
+            Component::Normal(part) => {
+                let part = part.to_str().ok_or_else(|| {
+                    format!("{path} is not UTF-8 as a whole path: give one that is")
+                })?;
+                parts.push(part);
+            }
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+        }
+    }
+    AbsolutePath::try_from(format!("/{}", parts.join("/")))
+}
+
+/// `path`, a path in a lease's runner, given whole, as no directory there is current here.
+fn there(path: &str) -> Result<AbsolutePath, String> {
+    if !path.starts_with('/') {
+        return Err(format!(
+            "`{path}` is a path in the runner, which needs a whole one: start it with `/`"
+        ));
+    }
+    AbsolutePath::try_from(path.to_owned())
+}
+
+/// The seconds that `seconds`, `what` they are, gives, a positive whole number.
+fn whole(seconds: &OsStr, what: &str) -> Result<NonZeroU64, String> {
+    (seconds.to_str().and_then(|seconds| seconds.parse().ok())).ok_or_else(|| {
+        format!(
+            "`{}` is not {what}: give a whole number of seconds, 1 or more",
+            seconds.display()
+        )
+    })
 }
 
 fn parse_grant(grant: &OsStr) -> Result<Name, String> {

@@ -689,7 +689,7 @@ fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
     let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
     let file = RelativePath::try_from("big".to_owned()).unwrap();
     let bytes = vec![0; 8 << 20];
-    session.put(&dir, &[Put::File(&file, file_mode(), &bytes)], by)
+    session.put(&dir, [Put::File(file, file_mode(), &bytes)], by)
 }
 
 /// Freezes the sandbox, whose answer carries an op, answers the op by a deadline that has
@@ -737,13 +737,16 @@ fn entry(stream: u32, entry: Value) -> (Value, Vec<u8>) {
 }
 
 fn dir(stream: u32, path: &str) -> (Value, Vec<u8>) {
-    entry(stream, json!({ "kind": "dir", "path": path }))
+    entry(
+        stream,
+        json!({ "kind": "dir", "path": path, "mode": "0755" }),
+    )
 }
 
 fn file(stream: u32, path: &str, size: u64) -> (Value, Vec<u8>) {
     entry(
         stream,
-        json!({ "kind": "file", "path": path, "size": size }),
+        json!({ "kind": "file", "path": path, "size": size, "mode": "0644" }),
     )
 }
 
@@ -841,6 +844,10 @@ fn reply(kind: &str, stream: u32) -> (Value, Vec<u8>) {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn sandbox_answers() {
     check(
         fakes(
@@ -856,6 +863,11 @@ fn sandbox_answers() {
                 (collect, |s| vec![file(s, "/etc/x", 0)]),
                 (collect, |s| {
                     vec![entry(s, json!({ "kind": "link", "path": "a" }))]
+                }),
+                // No mode a tree keeps has a set-ID or sticky bit.
+                (collect, |s| {
+                    let setuid = json!({ "kind": "file", "path": "f", "size": 0, "mode": "04755" });
+                    vec![entry(s, setuid)]
                 }),
                 // A malformed tree ends the session, which the sandbox leaves open, stalling, so
                 // that the gateway's end comes first; a tree that passes a limit fails only its
@@ -902,6 +914,7 @@ fn sandbox_answers() {
             ConnectionAborted: the session failed: `../escape` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte; arrived []
             ConnectionAborted: the session failed: `/etc/x` is not a normalized relative path: use `/`-separated components, none of them empty, `.` or `..`, and no NUL byte; arrived []
             ConnectionAborted: the session failed: unknown variant `link`, expected `dir` or `file`; arrived []
+            ConnectionAborted: the session failed: `04755` is not a mode: write `0` and three octal digits, such as `0644`; arrived []
             ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/a/a: No such file or directory (os error 2); arrived []
             ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: No such file or directory (os error 2); arrived []
             ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: Not a directory (os error 20); arrived ["a="]

@@ -8,14 +8,14 @@
 //! judges with is known to be a [`Judge`]. Ids are only valid for the workflow that issued them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    Command, CpuFlag, CpuModel, Dir, File, Gpu, Image, JsonPointer, ModelRoute, Name, Needs,
-    ResultSpec, User, WorkflowName,
+    AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
+    Name, Needs, ResultSpec, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -33,7 +33,9 @@ pub struct Workflow {
     roles: Vec<Sandbox>,
     agent: Agent,
     judges: BTreeMap<RoleId, Judge>,
+    runners: BTreeMap<RoleId, Runner>,
     judge_grants: Vec<JudgeGrant>,
+    lease_grants: Vec<LeaseGrant>,
     submit_grant: SubmitGrant,
     score: Score,
 }
@@ -55,6 +57,10 @@ impl Workflow {
 
     pub fn judge(&self, id: JudgeId) -> &Judge {
         &self.judges[&id.0]
+    }
+
+    pub fn runner(&self, id: RunnerId) -> &Runner {
+        &self.runners[&id.0]
     }
 
     /// The sandbox of any role.
@@ -93,6 +99,15 @@ impl Workflow {
 
     pub fn judge_grant(&self, id: JudgeGrantId) -> &JudgeGrant {
         &self.judge_grants[id.0]
+    }
+
+    /// The agent's lease grants, in the IR's order.
+    pub fn lease_grants(&self) -> impl Iterator<Item = (LeaseGrantId, &LeaseGrant)> {
+        (self.lease_grants.iter().enumerate()).map(|(index, grant)| (LeaseGrantId(index), grant))
+    }
+
+    pub fn lease_grant(&self, id: LeaseGrantId) -> &LeaseGrant {
+        &self.lease_grants[id.0]
     }
 
     /// The agent's one submit grant.
@@ -270,6 +285,16 @@ impl JudgeId {
     }
 }
 
+/// A runner role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunnerId(RoleId);
+
+impl RunnerId {
+    pub fn role(self) -> RoleId {
+        self.0
+    }
+}
+
 /// A value for each role of the workflow that made it, by the role's id
 /// ([`Workflow::by_role`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -298,6 +323,9 @@ impl SlotId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JudgeGrantId(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LeaseGrantId(usize);
 
 /// What a judge call is made under: one of the agent's judge grants, or the workflow's
 /// [`Score`].
@@ -401,6 +429,42 @@ impl JudgeGrant {
     /// a [`Duration`].
     pub fn call_timeout(&self) -> Duration {
         Duration::from_secs(self.call_timeout_seconds.get())
+    }
+}
+
+/// A runner role; see [`ir::RunnerRuntime`](crate::ir::RunnerRuntime).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Runner {
+    pub cwd: AbsolutePath,
+    pub env: Env,
+}
+
+/// A lease grant of the agent's; see [`ir::LeaseGrant`](crate::ir::LeaseGrant).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseGrant {
+    pub name: Name,
+    /// The role that holds it: the agent.
+    pub holder: RoleId,
+    /// The runner, which no other lease grant names, and whose image is no judge's.
+    pub runner: RunnerId,
+    pub instances: NonZeroU32,
+    pub instance_seconds: NonZeroU64,
+    pub cumulative_seconds: Option<NonZeroU64>,
+    pub commands: Option<NonZeroU64>,
+    pub transfer_bytes: NonZeroU64,
+}
+
+impl LeaseGrant {
+    /// [`ir::LeaseGrant::instance_seconds`](crate::ir::LeaseGrant::instance_seconds), as a
+    /// [`Duration`].
+    pub fn instance(&self) -> Duration {
+        Duration::from_secs(self.instance_seconds.get())
+    }
+
+    /// [`ir::LeaseGrant::cumulative_seconds`](crate::ir::LeaseGrant::cumulative_seconds), as a
+    /// [`Duration`].
+    pub fn cumulative(&self) -> Option<Duration> {
+        (self.cumulative_seconds).map(|seconds| Duration::from_secs(seconds.get()))
     }
 }
 

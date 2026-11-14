@@ -3,8 +3,8 @@
 //! Also placing the workflow's roles on providers, in classes of sandbox, the JSON of ops'
 //! replies, which `sandboxctl` prints, the sandbox protocol's hellos, and the in-sandbox contract.
 //!
-//! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of all
-//! of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
+//! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of
+//! all of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
 
 #![expect(
     clippy::unwrap_used,
@@ -16,11 +16,14 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use expect_test::{Expect, expect};
 use schema::ir;
-use schema::sandbox::op::OpReply;
+use schema::sandbox::op::{
+    self, CommandEnd, CommandStatus, LeaseRemaining, LeaseState, LeaseStatusReply, OpReply,
+    TransferEnd, TransferStatus,
+};
 use schema::sandbox::{
-    Hello, MAX_OP_PAYLOAD_BYTES, RegistrationGrant, RelativePath, command_env, command_stderr,
-    command_stdin, command_stdout, evidence_dir, frame, pumpkin_dir, pumpkin_subdirs, result_file,
-    slot_dir, slot_payload,
+    ExitStatus, Hello, MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath,
+    ToSandbox, command_env, command_stderr, command_stdin, command_stdout, evidence_dir, frame,
+    pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
 };
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use serde_json::{Value, json};
@@ -396,6 +399,10 @@ fn prices() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the replies and the snapshot"
+)]
 fn op_replies() {
     check(
         [
@@ -418,8 +425,36 @@ fn op_replies() {
             Reply(
                 r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
             ),
+            Reply(
+                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"invalid_result","message":"the score at `/raw_score` is not a number: write a number there, or null"},"remaining":{"calls":96,"seconds":0}}"#,
+            ),
+            Reply(r#"{"kind":"submit","state":"stored","remaining_seconds":120}"#),
             Reply(r#"{"kind":"submit","state":"accepted","remaining_seconds":60}"#),
             Reply(r#"{"kind":"refused","message":"`train` has no calls left: it allows 100"}"#),
+            Reply(
+                r#"{"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":null}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":40,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":31}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":140,"busy_seconds":79,"idle_seconds":47,"failure":null,"last":{"kind":"command","command":1,"end":{"exited":{"code":0}},"stdout":"GPU 0\n","stderr":""},"remaining":{"instances":1,"instance_seconds":800,"cumulative_seconds":null,"commands":null}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":1,"state":"expired","elapsed_seconds":930,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":2,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":0,"commands":null}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":41,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"transfer","transfer":1,"end":null},"remaining":{"instances":1,"instance_seconds":898,"cumulative_seconds":1198,"commands":30}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":42,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"transfer","transfer":1,"end":{"moved":{"entries":12,"bytes":40960}}},"remaining":{"instances":1,"instance_seconds":897,"cumulative_seconds":1197,"commands":30}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":43,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"transfer","transfer":2,"end":{"failed":"putting the tree at /work/repo in the runner failed: /work/repo: File exists (os error 17): the tree's root becomes /work/repo, which must not exist"}},"remaining":{"instances":1,"instance_seconds":896,"cumulative_seconds":1196,"commands":29}}"#,
+            ),
+            Reply(
+                r#"{"kind":"lease_status","lease":2,"state":"failed","elapsed_seconds":61,"busy_seconds":0,"idle_seconds":0,"failure":"the runner's sandbox didn't start: ResourceExhaustedError","last":null,"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":null,"commands":null}}"#,
+            ),
             Reply(
                 r#"{"kind":"status","job":1,"state":"running","returned":{},"remaining":{"calls":null,"seconds":null}}"#,
             ),
@@ -438,11 +473,112 @@ fn op_replies() {
             Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}), scored: true }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
             Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}), scored: false }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
             Status(StatusReply { job: 3, state: Errored { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
+            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: InvalidResult, message: "the score at `/raw_score` is not a number: write a number there, or null" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
+            Submit(SubmitReply { state: Stored, remaining_seconds: 120 })
             Submit(SubmitReply { state: Accepted, remaining_seconds: 60 })
             Refused { message: "`train` has no calls left: it allows 100" }
+            Lease(LeaseReply { lease: 0, remaining: LeaseRemaining { instances: 1, instance_seconds: 900, cumulative_seconds: Some(1200), commands: None } })
+            LeaseStatus(LeaseStatusReply { lease: 0, state: Running, elapsed_seconds: 40, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Command(CommandStatus { command: 0, end: None, stdout: "", stderr: "" })), remaining: LeaseRemaining { instances: 1, instance_seconds: 899, cumulative_seconds: Some(1199), commands: Some(31) } })
+            LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 140, busy_seconds: 79, idle_seconds: 47, failure: None, last: Some(Command(CommandStatus { command: 1, end: Some(Exited(Code(0))), stdout: "GPU 0\n", stderr: "" })), remaining: LeaseRemaining { instances: 1, instance_seconds: 800, cumulative_seconds: None, commands: None } })
+            LeaseStatus(LeaseStatusReply { lease: 1, state: Expired, elapsed_seconds: 930, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Command(CommandStatus { command: 2, end: Some(TimedOut), stdout: "", stderr: "" })), remaining: LeaseRemaining { instances: 2, instance_seconds: 0, cumulative_seconds: Some(0), commands: None } })
+            LeaseStatus(LeaseStatusReply { lease: 0, state: Running, elapsed_seconds: 41, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 1, end: None })), remaining: LeaseRemaining { instances: 1, instance_seconds: 898, cumulative_seconds: Some(1198), commands: Some(30) } })
+            LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 42, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 1, end: Some(Moved { entries: 12, bytes: 40960 }) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 897, cumulative_seconds: Some(1197), commands: Some(30) } })
+            LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 43, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 2, end: Some(Failed("putting the tree at /work/repo in the runner failed: /work/repo: File exists (os error 17): the tree's root becomes /work/repo, which must not exist")) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 896, cumulative_seconds: Some(1196), commands: Some(29) } })
+            LeaseStatus(LeaseStatusReply { lease: 2, state: Failed, elapsed_seconds: 61, busy_seconds: 0, idle_seconds: 0, failure: Some("the runner's sandbox didn't start: ResourceExhaustedError"), last: None, remaining: LeaseRemaining { instances: 2, instance_seconds: 0, cumulative_seconds: None, commands: None } })
             a job that hasn't ended has no result: give it none of `returned`, `scored` and `failure`
             a completed job has a result: give it `returned` and `scored`, and no `failure`
             an errored job has no result: give it `failure`, and neither `returned` nor `scored`"#]],
+    );
+}
+
+/// An output's end, as a lease's status gives it ([`op::output_tail`]): how many characters it
+/// keeps, and how many bytes they take as JSON writes them.
+struct Tail(&'static str, Vec<u8>);
+
+impl Case for Tail {
+    fn outcome(self) -> String {
+        let Self(name, output) = self;
+        let tail = op::output_tail(&output);
+        let json = serde_json::to_string(&tail).unwrap().len() - 2;
+        format!(
+            "{name}: {} characters, {json} bytes as JSON",
+            tail.chars().count()
+        )
+    }
+}
+
+/// A lease's status with every field at its largest, `last` as given, in a reply's frame: how
+/// many bytes the frame's message takes, or why it can't be written.
+struct Largest(op::Last);
+
+impl Case for Largest {
+    fn outcome(self) -> String {
+        let reason = "\u{1}".repeat(op::REASON_BYTES);
+        let status = LeaseStatusReply {
+            lease: u64::MAX,
+            state: LeaseState::Starting,
+            elapsed_seconds: u64::MAX,
+            busy_seconds: u64::MAX,
+            idle_seconds: u64::MAX,
+            failure: Some(reason),
+            last: Some(self.0),
+            remaining: LeaseRemaining {
+                instances: u32::MAX,
+                instance_seconds: u64::MAX,
+                cumulative_seconds: Some(u64::MAX),
+                commands: Some(u64::MAX),
+            },
+        };
+        let message = ToSandbox::OpReply {
+            op: u32::MAX,
+            reply: OpReply::LeaseStatus(status),
+        };
+        match frame::write(&mut Vec::new(), &message, &[]) {
+            Ok(()) => format!("{} bytes", serde_json::to_vec(&message).unwrap().len()),
+            Err(error) => error.to_string(),
+        }
+    }
+}
+
+#[test]
+fn lease_status_bound() {
+    let worst = || op::output_tail(&vec![1; 2 * op::OUTPUT_TAIL_BYTES]);
+    check(
+        [
+            Tail("text", b"x".repeat(2 * op::OUTPUT_TAIL_BYTES)),
+            Tail("short", b"GPU 0\n".to_vec()),
+            Tail("control bytes", vec![1; 2 * op::OUTPUT_TAIL_BYTES]),
+            Tail("quotes", b"\"".repeat(2 * op::OUTPUT_TAIL_BYTES)),
+            Tail("invalid UTF-8", vec![0xff; 2 * op::OUTPUT_TAIL_BYTES]),
+            Tail(
+                "a character cut",
+                format!("{}x", "é".repeat(op::OUTPUT_TAIL_BYTES)).into_bytes(),
+            ),
+        ],
+        &expect![[r#"
+            text: 21504 characters, 21504 bytes as JSON
+            short: 6 characters, 7 bytes as JSON
+            control bytes: 3584 characters, 21504 bytes as JSON
+            quotes: 10752 characters, 21504 bytes as JSON
+            invalid UTF-8: 7168 characters, 21504 bytes as JSON
+            a character cut: 10752 characters, 21503 bytes as JSON"#]],
+    );
+    check(
+        [
+            Largest(op::Last::Command(CommandStatus {
+                command: u64::MAX,
+                end: Some(CommandEnd::Exited(ExitStatus::Signal(i32::MIN))),
+                stdout: worst(),
+                stderr: worst(),
+            })),
+            Largest(op::Last::Transfer(TransferStatus {
+                transfer: u64::MAX,
+                end: Some(TransferEnd::Failed("\u{1}".repeat(op::REASON_BYTES))),
+            })),
+        ],
+        &expect![[r#"
+            61951 bytes
+            37333 bytes"#]],
     );
 }
 
@@ -574,6 +710,7 @@ fn checked_values() {
             fixture_with("/name", json!("example task")),
             fixture_with(&format!("{agent}/name"), json!("Agent")),
             fixture_with(&format!("{agent}/name"), json!("bad\nname")),
+            fixture_with(&format!("{agent}/name"), json!("../escaped")),
             fixture_with(&format!("{agent}/image"), json!(format!("sha256:{HEX}"))),
             fixture_with(&format!("{agent}/image"), json!("ubuntu:24.04")),
             fixture_with(&format!("{command}/cwd"), json!("workspace")),
@@ -604,6 +741,7 @@ fn checked_values() {
             `example task` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
             `Agent` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             `bad\nname` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
+            `../escaped` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             parsed
             `ubuntu:24.04` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`
             `workspace` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
@@ -730,10 +868,94 @@ fn broken_references() {
         &expect![[r#"
             /roles/3/name: `train_judge` also names /roles/1: give each a unique name
             /roles/2/runtime/judge/slots/1/name: `payload` also names /roles/2/runtime/judge/slots/0: give each a unique name
-            /roles/0/grants/2/judge/name: `train` also names /roles/0/grants/0/judge: give each a unique name
             /roles/0/grants/0/judge/role: no role is named `ghost`: name one listed in `roles`
             /roles/0/grants/2/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
+            /roles/0/grants/2/judge/name: `train` also names /roles/0/grants/0/judge: give each a unique name
             /score/role: `agent` is an agent: name a judge"#]],
+    );
+}
+
+/// [`WORKFLOW`] with a runner, `gpu`, of an image of its own, that the agent leases under grant
+/// `gpu`, before its submit grant.
+fn leasing() -> Value {
+    let mut ir = fixture();
+    let mut runner = ir["roles"][1].clone();
+    runner["name"] = json!("gpu");
+    runner["image"] = json!(format!("sha256:{}", "3".repeat(64)));
+    runner["runtime"] = json!({ "runner": { "cwd": "/work", "env": ["CUDA=1"] } });
+    ir["roles"].as_array_mut().unwrap().push(runner);
+    let grant = json!({ "lease": {
+        "name": "gpu", "role": "gpu", "instances": 2, "instance_seconds": 900,
+        "cumulative_seconds": 1200, "commands": 32, "transfer_bytes": 1_048_576,
+    } });
+    ir["roles"][0]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, grant);
+    ir
+}
+
+#[test]
+fn broken_leases() {
+    let mut ir = leasing();
+    ir["roles"][3]["egress"] = ir["roles"][0]["egress"].clone();
+    ir["roles"][3]["grants"] = json!([{ "submit": { "name": "resubmit" } }]);
+    let mut judged = leasing();
+    judged["roles"][0]["grants"][1]["lease"]["role"] = json!("train_judge");
+    let mut twice = leasing();
+    let mut again = twice["roles"][0]["grants"][1].clone();
+    again["lease"]["name"] = json!("again");
+    twice["roles"][0]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .push(again);
+    let mut unleased = leasing();
+    unleased["roles"][0]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    let mut judge_image = leasing();
+    judge_image["roles"][3]["image"] = judge_image["roles"][2]["image"].clone();
+    let mut ghost = leasing();
+    ghost["roles"][0]["grants"][1]["lease"]["role"] = json!("ghost");
+    let mut scored = leasing();
+    scored["score"]["role"] = json!("gpu");
+    let mut agent = leasing();
+    agent["roles"][0]["grants"][1]["lease"]["role"] = json!("agent");
+    let mut huge = leasing();
+    huge["roles"][0]["grants"][1]["lease"]["transfer_bytes"] = json!(MAX_TRANSFER_BYTES + 1);
+    let mut most = leasing();
+    most["roles"][0]["grants"][1]["lease"]["transfer_bytes"] = json!(MAX_TRANSFER_BYTES);
+    check(
+        [
+            leasing(),
+            ir,
+            judged,
+            twice,
+            unleased,
+            judge_image,
+            ghost,
+            scored,
+            agent,
+            huge,
+            most,
+        ],
+        &expect![[r#"
+            parsed
+            /roles/3/egress/model: `gpu` is a runner, and only the agent has a model route: remove it
+            /roles/3/grants: `gpu` is a runner, and runners hold no grants: remove them
+            /roles/0/grants/1/lease/role: `train_judge` is a judge: name a runner
+            /roles/3: `gpu` is a runner that no lease grant names: name it from one
+            /roles/0/grants/3/lease/role: `gpu` is named by `agent`'s lease grant `gpu` and `agent`'s `again`: name each runner from one grant
+            /roles/3: `gpu` is a runner that no lease grant names: name it from one
+            /roles/0/grants/1/lease/role: `gpu` runs judge `train_judge`'s image, example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge has
+            /roles/0/grants/1/lease/role: no role is named `ghost`: name one listed in `roles`
+            /roles/3: `gpu` is a runner that no lease grant names: name it from one
+            /score/role: `gpu` is a runner: name a judge
+            /roles/0/grants/1/lease/role: `agent` is an agent: name a runner
+            /roles/3: `gpu` is a runner that no lease grant names: name it from one
+            /roles/0/grants/1/lease/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
+            parsed"#]],
     );
 }
 

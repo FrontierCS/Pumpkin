@@ -204,12 +204,10 @@ impl Session {
     /// the session itself failed.
     fn handle(&mut self, message: ToSandbox, body: &[u8]) -> io::Result<()> {
         match message {
-            ToSandbox::Put { stream, dir } => self.puts.begin(&self.sender, stream, &dir),
-            ToSandbox::Entry {
-                stream,
-                entry,
-                mode,
-            } => self.puts.entry(&self.sender, stream, &entry, mode),
+            ToSandbox::Put { stream, dir, root } => {
+                self.puts.begin(&self.sender, stream, &dir, root)
+            }
+            ToSandbox::Entry { stream, entry } => self.puts.entry(&self.sender, stream, &entry),
             ToSandbox::Data { stream } => self.puts.data(&self.sender, stream, body),
             ToSandbox::End { stream } => self.puts.end(&self.sender, stream),
             ToSandbox::Start { stream, launch } => self.commands.start(stream, &launch),

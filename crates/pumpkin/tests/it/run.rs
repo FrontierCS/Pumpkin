@@ -18,12 +18,12 @@ use expect_test::{Expect, expect};
 use provider::{RunTag, Sweep as _};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
-use test_support::{WORKFLOW, docker_context, sandboxd, standard_outputs};
+use test_support::{WORKFLOW, docker_context, files, sandboxd, standard_outputs};
 
 use super::{
-    LOCAL, PUMPKIN, Scratch, StandIn, Step, build_first, check, containers, cpu_list, docker_table,
-    engine, invocation, ledger, machine, machine_cores, machine_cpus, ran, record, report,
-    siblings, through_shell, with_room, workflow,
+    LOCAL, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first, check, containers, cpu_list,
+    docker_table, engine, invocation, ledger, machine, machine_cores, machine_cpus, ran, record,
+    report, siblings, through_shell, with_room, workflow,
 };
 
 #[test]
@@ -1606,6 +1606,125 @@ fn ops_workflow() -> Value {
         judge["slots"][0]["max_bytes"] = json!(max_bytes);
     }
     ir
+}
+
+/// What the agent of the run that leases a runner does: opens a lease, waits for its runner, puts
+/// a tree of its own there, runs a command that shows where and how it runs and writes a tree from
+/// the one put, gets that tree back, puts the first again, which fails as its destination exists,
+/// runs one that runs past its timeout, reading the lease's status after each, closes the lease,
+/// shows what it got, and finalizes a submission. Each reply's times stand as `<s>`.
+const LEASING_AGENT: &str = r#"#!/bin/sh
+    printf xxxxxx > /workspace/six
+    mkdir --parents /workspace/src/deep && printf hello > /workspace/src/a && printf deep > /workspace/src/deep/b
+    ctl() {
+        out=$(SANDBOXCTL "$@" 2>&1)
+        echo "sandboxctl $*: exit $?: $out" | sed --regexp-extended 's/"(remaining_seconds|elapsed_seconds|busy_seconds|idle_seconds|instance_seconds|cumulative_seconds)":[0-9]+/"\1":"<s>"/g'
+    }
+    # Waits until lease $1 is ready, then shows its status.
+    ready() {
+        until SANDBOXCTL lease status "$1" | grep -q '"state":"ready"'; do sleep 1; done
+        ctl lease status "$1"
+    }
+    ctl lease open gpu
+    ready 0
+    ctl lease put 0 /workspace/src /work/src
+    ready 0
+    ctl lease run 0 -- sh -c 'echo "in $(pwd) as $(id -u), with CUDA=$CUDA"; echo to stderr >&2; mkdir out; tr a-z A-Z < src/a > out/A; cp --recursive src/deep out/'
+    ready 0
+    ctl lease get 0 /work/out /workspace/got
+    ready 0
+    ctl lease put 0 /workspace/src /work/src
+    ready 0
+    ctl lease run 0 --timeout 1 -- sleep 60
+    ready 0
+    ctl lease close 0
+    echo "got: $(find /workspace/got | sort | tr '\n' ' '), A: $(cat /workspace/got/A), deep/b: $(cat /workspace/got/deep/b)"
+    ctl submit submit /workspace/six --finalize"#;
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
+fn leases_on_docker() {
+    let scratch = Scratch::new("leases");
+    let sandboxd = sandboxd().to_str().unwrap().to_owned();
+    let context = docker_context();
+    let engine = engine(&context);
+    let script = LEASING_AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
+    let mut ir = workflow("", &["/workspace/agent"]);
+    let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": script });
+    let agent = &mut ir["roles"][0]["runtime"]["agent"];
+    agent["files"].as_array_mut().unwrap().push(launcher);
+    let mut runner = ir["roles"][1].clone();
+    runner["name"] = json!("gpu_runner");
+    runner["image"] = json!(RUNNER);
+    runner["runtime"] = json!({ "runner": { "cwd": "/work", "env": ["CUDA=7"] } });
+    ir["roles"].as_array_mut().unwrap().push(runner);
+    let grant = json!({ "lease": {
+        "name": "gpu", "role": "gpu_runner", "instances": 1, "instance_seconds": 120,
+        "commands": 5, "transfer_bytes": 1024,
+    } });
+    ir["roles"][0]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, grant);
+    scratch.write_task("leases", &ir);
+    scratch.write("pumpkin.toml", &machine(&context));
+    build_first(&scratch, "leases", "pumpkin.toml");
+    let mut run = scratch.pumpkin(&["run", "leases/task.star", "--sandboxd", &sandboxd, "--wait"]);
+    run.args(["--config", "pumpkin.toml"]);
+    let output = with_room(&mut run);
+    let rootful = !engine.report().security.rootless;
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    let (id, dir) = record(&stderr).unwrap();
+    let record = scratch.0.join(dir);
+    let mut lines = vec![format!("exit status: {:?}", output.status.code())];
+    let listed = containers(&context).list(&RunTag::try_from(id.to_owned()).unwrap());
+    lines.push(format!("listed once it ended: {:?}", listed.unwrap()));
+    let leases = record.join("leases");
+    lines.push(format!("the lease's record: {}", files(&leases).join(", ")));
+    for command in ["1", "4"] {
+        for stream in ["stdout", "stderr"] {
+            let path = leases.join(format!("0/log/{command}/command.{stream}"));
+            let text = fs::read_to_string(path).unwrap_or_default();
+            lines.push(format!("command {command}'s {stream}: {text:?}"));
+        }
+    }
+    lines.extend(
+        standard_outputs(&record)
+            .into_iter()
+            .take_while(|line| !line.starts_with("job ")),
+    );
+    let shown = [(&sandboxd[..], "<sandboxd>")];
+    check(
+        &scratch,
+        [Step::Ran(lines.join("\n"))],
+        rootful,
+        &shown,
+        &expect![[r#"
+            exit status: Some(0)
+            listed once it ended: []
+            the lease's record: 0/console.txt, 0/log/1/command.stderr, 0/log/1/command.stdout, 0/log/4/command.stderr, 0/log/4/command.stdout, 0/out/, 0/sandbox.json
+            command 1's stdout: "in /work as 65532, with CUDA=7\n"
+            command 1's stderr: "to stderr\n"
+            command 4's stdout: ""
+            command 4's stderr: ""
+            the agent's standard output:
+            sandboxctl lease open gpu: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":5}}
+            sandboxctl lease status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":null,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":5}}
+            sandboxctl lease put 0 /workspace/src /work/src: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":4}}
+            sandboxctl lease status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"transfer","transfer":0,"end":{"moved":{"entries":3,"bytes":9}}},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":4}}
+            sandboxctl lease run 0 -- sh -c echo "in $(pwd) as $(id -u), with CUDA=$CUDA"; echo to stderr >&2; mkdir out; tr a-z A-Z < src/a > out/A; cp --recursive src/deep out/: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":3}}
+            sandboxctl lease status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"command","command":1,"end":{"exited":{"code":0}},"stdout":"in /work as 65532, with CUDA=7\n","stderr":"to stderr\n"},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":3}}
+            sandboxctl lease get 0 /work/out /workspace/got: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":2}}
+            sandboxctl lease status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"transfer","transfer":2,"end":{"moved":{"entries":3,"bytes":9}}},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":2}}
+            sandboxctl lease put 0 /workspace/src /work/src: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":1}}
+            sandboxctl lease status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"transfer","transfer":3,"end":{"failed":"putting the tree at /work/src in the runner failed: /work/src: File exists (os error 17): the tree's root becomes /work/src, which must not exist: give `--replace` to replace it"}},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":1}}
+            sandboxctl lease run 0 --timeout 1 -- sleep 60: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":0}}
+            sandboxctl lease status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"command","command":4,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":0}}
+            sandboxctl lease close 0: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":0}}
+            got: /workspace/got /workspace/got/A /workspace/got/deep /workspace/got/deep/b , A: HELLO, deep/b: deep
+            sandboxctl submit submit /workspace/six --finalize: exit 0: {"kind":"submit","state":"accepted","remaining_seconds":"<s>"}"#]],
+    );
 }
 
 #[test]

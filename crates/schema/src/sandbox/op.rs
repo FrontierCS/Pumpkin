@@ -1,8 +1,7 @@
 //! Ops: the calls a caller in a sandbox makes to the session's owner, and the owner's replies.
 //!
-//! A caller makes an op with `sandboxctl`, which prints the reply's JSON form on one line, the
-//! form an agent reads, which this module is the reference for; `sandboxctl --help` gives the
-//! commands' arguments and exit codes.
+//! A caller makes an op with `sandboxctl`, which prints the reply's JSON form on one line, which
+//! this module is the reference for; `sandboxctl --help` gives the commands' arguments.
 //!
 //! | Command | Call | Reply |
 //! | --- | --- | --- |
@@ -10,26 +9,66 @@
 //! | `sandboxctl judge <grant> <file>` | [`OpCall::Judge`] | [`JudgeReply`] |
 //! | `sandboxctl submit <grant> <file> [--finalize]` | [`OpCall::Submit`] | [`SubmitReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
+//! | `sandboxctl lease open <grant> [--seconds <n>]` | [`OpCall::LeaseOpen`] | [`LeaseReply`] |
+//! | `sandboxctl lease run <lease> [--timeout <s>] -- <argv>…` | [`OpCall::LeaseRun`] | [`LeaseReply`] |
+//! | `sandboxctl lease put <lease> <tree> <to> [--replace]` | [`OpCall::LeasePut`] | [`LeaseReply`] |
+//! | `sandboxctl lease get <lease> <from> <to>` | [`OpCall::LeaseGet`] | [`LeaseReply`] |
+//! | `sandboxctl lease status <lease>` | [`OpCall::LeaseStatus`] | [`LeaseStatusReply`] |
+//! | `sandboxctl lease close <lease>` | [`OpCall::LeaseClose`] | [`LeaseReply`] |
 //!
-//! The owner may refuse any op instead, with [`OpReply::Refused`].
+//! A sandbox's callers take turns ([`super`]): a payload is read from its file in its turn, so
+//! leave the file be until the call returns; a call whose `sandboxctl` has gone by then is dropped.
 //!
-//! A sandbox's callers take turns ([`super`]). A call's payload is read from its file only in its
-//! turn, so leave the file as it is until the call returns; a call whose `sandboxctl` has gone by
-//! its turn is dropped unsent, and any other is carried out even if it is killed meanwhile.
-//!
-//! # JSON
-//!
-//! A reply is an object whose `kind` names it: `ops`, `judge`, `submit`, `status` or
-//! `refused`. Its other fields are its type's, under the same names; a limit or a quota that
-//! doesn't exist is `null`. A status has `returned` and `scored` once its job's judge has given
-//! a result, scored or not, and `failure` only if the job gave no result.
+//! A reply is an object whose `kind` names it: `ops`, `judge`, `submit`, `status`, `lease`,
+//! `lease_status`, or `refused`, as the owner may answer any op ([`OpReply::Refused`]). Its fields are its type's, under the same names; a limit or
+//! a quota that doesn't exist is `null`. A status has `returned` and `scored` once its job's judge
+//! has given a result, scored or not, and `failure` only if the job gave no result.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::ir::{Name, Resources};
+use super::{ExitStatus, frame};
+use crate::ir::{AbsolutePath, Argv, Name, Resources};
+
+/// The most bytes of why a transfer failed, and of why a runner failed, that a lease's status
+/// gives ([`LeaseStatusReply`]).
+pub const REASON_BYTES: usize = 3 << 10;
+
+/// The most bytes that the end of a command's standard output, and of its standard error, take
+/// in a lease's status as JSON writes them, escapes included ([`output_tail`]).
+pub const OUTPUT_TAIL_BYTES: usize = 21 << 10;
+
+// A lease's status, in its reply's frame, holds at most a runner's failure and either a command's
+// two output tails or a transfer's failure. JSON writes each byte of a reason in at most 6, as
+// `\u0000`, and the rest of the frame's message is far under 4 KiB, so the two tails take what is
+// left: 64 KiB - 4 KiB - 2 * 6 * 3 KiB = 2 * 21 KiB.
+const _: () = assert!(6 * REASON_BYTES <= 2 * OUTPUT_TAIL_BYTES);
+const _: () =
+    assert!((4 << 10) + 6 * REASON_BYTES + 2 * OUTPUT_TAIL_BYTES <= frame::MAX_MESSAGE_BYTES);
+
+/// The longest end of `output`, a command's, whose JSON string takes at most
+/// [`OUTPUT_TAIL_BYTES`], as UTF-8 with each invalid sequence replaced.
+pub fn output_tail(output: &[u8]) -> String {
+    // Each byte takes at least one in JSON, so no more than this many can fit.
+    let output = &output[output.len().saturating_sub(OUTPUT_TAIL_BYTES)..];
+    let text = String::from_utf8_lossy(output);
+    let mut taken = 0;
+    let mut start = text.len();
+    for (index, char) in text.char_indices().rev() {
+        taken += match char {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            '\0'..='\u{1f}' => 6,
+            other => other.len_utf8(),
+        };
+        if taken > OUTPUT_TAIL_BYTES {
+            break;
+        }
+        start = index;
+    }
+    text[start..].to_owned()
+}
 
 /// What an op asks of the session's owner, which decides whether the sandbox may ask it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +84,41 @@ pub enum OpCall {
     Submit { grant: Name, finalize: bool },
     /// Asks how job `job`, which an earlier judge call started, is doing.
     Status { job: u64 },
+    /// Opens a lease of the lease grant named `grant`: a runner, which starts in the background,
+    /// and lasts `instance_seconds` from when it is ready, if given, which is at most the grant's
+    /// own; without one, the grant's.
+    LeaseOpen {
+        grant: Name,
+        instance_seconds: Option<NonZeroU64>,
+    },
+    /// Runs `argv` in lease `lease`'s runner, once it is ready and runs no other command, killing
+    /// it once it has run for `timeout_seconds`, if given, which is at most what the lease has
+    /// left; without one, it may run until the lease ends.
+    LeaseRun {
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    },
+    /// Copies the tree in the caller's directory `tree` to `to` in lease `lease`'s runner, once
+    /// it is ready and runs nothing else: the tree's root becomes `to`, which must not exist, or,
+    /// if `replace`, which is removed first, whatever it is.
+    LeasePut {
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+        replace: bool,
+    },
+    /// Copies the tree in lease `lease`'s runner's directory `from` to `to` in the caller's
+    /// sandbox, as [`OpCall::LeasePut`] copies one the other way.
+    LeaseGet {
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    },
+    /// Asks how lease `lease`, which an earlier `lease_open` opened, is doing.
+    LeaseStatus { lease: u64 },
+    /// Closes lease `lease`, ending its runner with whatever runs in it.
+    LeaseClose { lease: u64 },
 }
 
 impl OpCall {
@@ -53,7 +127,14 @@ impl OpCall {
     pub fn takes_payload(&self) -> bool {
         match self {
             Self::Judge { .. } | Self::Submit { .. } => true,
-            Self::Ops | Self::Status { .. } => false,
+            Self::Ops
+            | Self::Status { .. }
+            | Self::LeaseOpen { .. }
+            | Self::LeaseRun { .. }
+            | Self::LeasePut { .. }
+            | Self::LeaseGet { .. }
+            | Self::LeaseStatus { .. }
+            | Self::LeaseClose { .. } => false,
         }
     }
 }
@@ -66,6 +147,8 @@ pub enum OpReply {
     Judge(JudgeReply),
     Submit(SubmitReply),
     Status(StatusReply),
+    Lease(LeaseReply),
+    LeaseStatus(LeaseStatusReply),
     /// The owner refused the op, and did nothing, for the reason given.
     Refused {
         message: String,
@@ -90,6 +173,7 @@ pub struct OpsReply {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Grant {
     Judge(JudgeGrant),
+    Lease(LeaseGrant),
     Submit(SubmitGrant),
 }
 
@@ -104,6 +188,21 @@ pub struct JudgeGrant {
     pub calls: Option<NonZeroU64>,
     pub cumulative_seconds: Option<NonZeroU64>,
     pub call_timeout_seconds: NonZeroU64,
+}
+
+/// A grant that [`OpCall::LeaseOpen`] opens leases of; see
+/// [`ir::LeaseGrant`](crate::ir::LeaseGrant) for its limits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseGrant {
+    pub name: Name,
+    pub instances: NonZeroU32,
+    pub instance_seconds: NonZeroU64,
+    pub cumulative_seconds: Option<NonZeroU64>,
+    pub commands: Option<NonZeroU64>,
+    pub transfer_bytes: NonZeroU64,
+    /// What it has left, as a lease opened now would have its own time whole.
+    pub remaining: LeaseRemaining,
 }
 
 /// A grant that [`OpCall::Submit`] submits to.
@@ -168,9 +267,6 @@ pub struct StatusReply {
 /// Where a job is, with what came of it once it has ended. Its JSON form is the status's
 /// `state`, with `returned` and `scored`, or `failure`, beside it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// A job that ran its judge to a result is `Completed`, scored or not, and one that gave no
-// result is `Errored`, as Inspect AI keeps `Score.unscored()` (a sample with no score) apart
-// from `EvalSample.error` (a sample that halted).
 pub enum JobState {
     /// Accepted; its judge hasn't started.
     Queued,
@@ -213,6 +309,132 @@ pub enum FailureCode {
     JudgeError,
     /// The judge wrote no valid result.
     InvalidResult,
+}
+
+/// The reply to [`OpCall::LeaseOpen`], [`OpCall::LeaseRun`], [`OpCall::LeasePut`],
+/// [`OpCall::LeaseGet`] and [`OpCall::LeaseClose`]: the lease, and what it and its grant have left
+/// now that the op counts against them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseReply {
+    pub lease: u64,
+    pub remaining: LeaseRemaining,
+}
+
+/// What a lease and its grant have left of their limits, each time in whole seconds rounded
+/// down, and `None` for a limit the grant doesn't set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRemaining {
+    /// How many more of the grant's leases may be open now.
+    pub instances: u32,
+    /// The lease's own time left: all of it until its runner is ready, none once it has ended.
+    pub instance_seconds: u64,
+    /// The grant's time left, which each of its leases open at once spends.
+    pub cumulative_seconds: Option<u64>,
+    pub commands: Option<u64>,
+}
+
+/// The reply to [`OpCall::LeaseStatus`]: how a lease is doing, its last command or transfer, and
+/// what it and its grant have left.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseStatusReply {
+    pub lease: u64,
+    pub state: LeaseState,
+    /// The time since it was opened, in whole seconds rounded down, its runner's start included.
+    pub elapsed_seconds: u64,
+    /// Of the time it has been charged for, from its runner's ready until its close, how long a
+    /// command or transfer of its ran, in whole seconds rounded down.
+    pub busy_seconds: u64,
+    /// The rest of the time it has been charged for, likewise.
+    pub idle_seconds: u64,
+    /// Why its runner failed, once it has, as the run and its provider said it, of at most
+    /// [`REASON_BYTES`].
+    pub failure: Option<String>,
+    /// The last command or transfer it ran, once it has run one.
+    pub last: Option<Last>,
+    pub remaining: LeaseRemaining,
+}
+
+/// What a lease ran last: a command or a transfer, whose `kind` says which.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Last {
+    Command(CommandStatus),
+    Transfer(TransferStatus),
+}
+
+/// Where a lease is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseState {
+    /// Its runner is starting.
+    Starting,
+    /// Its runner is ready, and runs none of its commands.
+    Ready,
+    /// Its runner runs a command, or collects what the command wrote, or a tree moves to or from
+    /// it.
+    Running,
+    /// It was closed, or its time ran out, and its runner is being removed, until which it holds
+    /// its instance of its grant's `instances`; then it is `closed` or `expired`.
+    Closing,
+    /// It was closed, as its holder asked or as its holder's work ended.
+    Closed,
+    /// Its time, or its grant's, ran out.
+    Expired,
+    /// Its runner failed to start, as when its provider had no room, or failed as it ran: no
+    /// fault of its holder's, which may open another.
+    Failed,
+}
+
+/// A command that a lease ran, and how it ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandStatus {
+    /// Its number among the lease's commands and transfers, from 0.
+    pub command: u64,
+    /// How it ended; `None` while it runs, and for one that ran when its lease ended.
+    pub end: Option<CommandEnd>,
+    /// The end of what it wrote to its standard output, as [`output_tail`] gives it; empty until
+    /// it has ended.
+    pub stdout: String,
+    /// The same of its standard error.
+    pub stderr: String,
+}
+
+/// A transfer of a tree to or from a lease's runner, and how it ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferStatus {
+    /// Its number among the lease's commands and transfers, from 0.
+    pub transfer: u64,
+    /// How it ended; `None` while it runs, and for one that ran when its lease ended.
+    pub end: Option<TransferEnd>,
+}
+
+/// How a transfer ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferEnd {
+    /// The whole tree arrived at its destination: this many entries, directories included, and
+    /// bytes of files.
+    Moved { entries: u64, bytes: u64 },
+    /// It failed, or was cut short by its lease's end, for this reason, of at most
+    /// [`REASON_BYTES`] in a status: what of the tree arrived before then stays at its destination.
+    Failed(String),
+}
+
+/// How a command that a lease ran ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandEnd {
+    /// It exited, or a signal killed it.
+    Exited(ExitStatus),
+    /// It ran past its timeout, and was killed.
+    TimedOut,
+    /// It didn't start, for the reason its standard error's end gives.
+    Unstarted,
 }
 
 /// The JSON form of a [`StatusReply`], which a status's state checks the rest of.

@@ -9,7 +9,7 @@
 //! a reply names its request's stream, a number the gateway uses once. Files move as trees of
 //! [`Entry`]s, each a directory or a regular file whose bytes follow in `Data` frames, after its
 //! parent's, then an `End`, so no link or special file crosses a session, and every path is a
-//! [`RelativePath`]; a tree the gateway puts gives each entry its [`Mode`].
+//! [`RelativePath`]; each entry keeps its [`Mode`] ([`tree_mode`], [`tree::Writer::entry`]).
 //!
 //! Ops go the other way ([`op`]): [`FromSandbox::Op`] gives a payload's size before its bytes
 //! follow in [`FromSandbox::OpData`], and the gateway answers once ([`ToSandbox::OpReply`]), at
@@ -40,6 +40,13 @@ pub mod tree;
 /// The most bytes an op's payload may hold. `sandboxd` refuses a longer payload before it
 /// opens the op, and no session's [`OpPayloadLimit`] is higher.
 pub const MAX_OP_PAYLOAD_BYTES: u64 = 64 << 20;
+
+/// The most bytes of files a transfer of a tree between two sandboxes may move, which bounds
+/// what the host holds of it on its disk as it moves it
+/// ([`transfer_bytes`](crate::ir::LeaseGrant::transfer_bytes)).
+// As much as a sandbox's `/pumpkin` holds, which bounds every tree the host collects into a run's
+// record.
+pub const MAX_TRANSFER_BYTES: u64 = PUMPKIN_BYTES;
 
 /// The most bytes an op's payload may hold in a session that takes ops, which the gateway
 /// accepts it with: at most [`MAX_OP_PAYLOAD_BYTES`].
@@ -446,17 +453,16 @@ pub enum HelloReply {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToSandbox {
-    /// Writes a tree into `dir`, creating `dir` and its missing parents. The tree's entries
-    /// follow on the same stream, and `sandboxd` replies once: when the tree has been written,
-    /// or at the first failure.
-    Put { stream: u32, dir: AbsolutePath },
-    /// An entry of the tree being put, made with `mode` exactly, whatever `sandboxd`'s umask: a
-    /// directory that exists already is kept as it is.
-    Entry {
+    /// Writes a tree into `dir`, made as `root` says. The tree's entries follow on the same
+    /// stream, and `sandboxd` replies once: when the tree has been written, or at the first
+    /// failure.
+    Put {
         stream: u32,
-        entry: Entry,
-        mode: Mode,
+        dir: AbsolutePath,
+        root: Root,
     },
+    /// An entry of the tree being put ([`tree::Writer::entry`]).
+    Entry { stream: u32, entry: Entry },
     /// Bytes of the file being put, in the frame's body.
     Data { stream: u32 },
     /// The end of the tree being put.
@@ -552,14 +558,40 @@ pub struct Launch {
     pub stderr: AbsolutePath,
 }
 
-/// A part of a tree.
+/// How a put makes the directory it writes its tree into, with any of its parents missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Root {
+    /// Made unless it exists, which is kept as it is.
+    Kept,
+    /// Made new: the put fails if it exists.
+    New,
+    /// Made new, whatever was there removed first.
+    Replaced,
+}
+
+/// A part of a tree, with its `mode`, as [`tree_mode`] keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Entry {
     /// A directory, which may be empty.
-    Dir { path: RelativePath },
+    Dir { path: RelativePath, mode: Mode },
     /// A regular file of `size` bytes, which follow in `Data` frames.
-    File { path: RelativePath, size: u64 },
+    File {
+        path: RelativePath,
+        size: u64,
+        mode: Mode,
+    },
+}
+
+/// The mode a tree keeps of an entry whose `st_mode` is `st_mode`: its permission bits.
+///
+/// Read, write and execute, for its owner, its group and others, mean the same where the
+/// receiving side's user owns the entry, as it owns all it writes. Ownership, and the
+/// set-user-ID, set-group-ID and sticky bits, which a sender could plant to its receiver's harm,
+/// never cross.
+pub fn tree_mode(st_mode: u32) -> Mode {
+    Mode::new((st_mode & 0o777) as u16)
 }
 
 /// How a command ended.

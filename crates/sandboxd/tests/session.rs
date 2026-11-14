@@ -29,7 +29,7 @@ use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
 use schema::sandbox::frame::MAX_BODY_BYTES;
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RelativePath,
+    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RelativePath, Root,
     SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, frame,
 };
 use serde_json::{Value, json};
@@ -102,7 +102,7 @@ impl Sandbox {
         session
             .put(
                 &absolute(&root),
-                &dirs.each_ref().map(|dir| Put::Dir(dir, dir_mode())),
+                dirs.map(|dir| Put::Dir(dir, dir_mode())),
                 hung(),
             )
             .unwrap();
@@ -201,6 +201,13 @@ impl Sandbox {
         text.to_string()
             .replace(self.root.to_str().unwrap(), "$ROOT")
     }
+}
+
+/// This process's umask, as Linux shows it.
+fn umask() -> u32 {
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let line = status.lines().find_map(|line| line.strip_prefix("Umask:"));
+    u32::from_str_radix(line.unwrap().trim(), 8).unwrap()
 }
 
 /// A `PATH` on which the `nvidia-smi` that runs is the shell script `script`, in `bin` in `root`.
@@ -375,10 +382,10 @@ fn judging(sandbox: &mut Sandbox) -> Vec<String> {
     let raw = pattern(2 * MAX_BODY_BYTES + 12345);
     let root = absolute(&sandbox.root);
     let put = [
-        Put::Dir(&slot, dir_mode()),
-        Put::File(&payload, file_mode(), &raw),
+        Put::Dir(slot, dir_mode()),
+        Put::File(payload, file_mode(), &raw),
     ];
-    sandbox.session.put(&root, &put, hung()).unwrap();
+    sandbox.session.put(&root, put, hung()).unwrap();
     let script = r#"
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
@@ -398,25 +405,36 @@ fn judging(sandbox: &mut Sandbox) -> Vec<String> {
     lines
 }
 
+// A tree keeps each entry's permission bits both ways, the host's within its umask, but that a
+// directory's owner always has all three, and never a set-ID or sticky bit: so the receiver can
+// always remove what it got, and a put can replace a tree that it put with a read-only directory.
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn modes_and_stdin() {
     check(
         Meeting::Socket,
         |sandbox| {
             let mode = |mode: &str| Mode::try_from(mode.to_owned()).unwrap();
-            let paths = ["home", "in/tools", "in/tools/tool", "in/prompt"].map(relative);
+            let dir = |path, mode_: &str| Put::Dir(relative(path), mode(mode_));
+            let file = |path, mode_: &str, bytes| Put::File(relative(path), mode(mode_), bytes);
             let put = [
-                Put::Dir(&paths[0], mode("0700")),
-                Put::Dir(&paths[1], mode("0777")),
-                Put::File(&paths[2], mode("0750"), b"#!/bin/sh\nwc --lines\n"),
-                Put::File(&paths[3], mode("0666"), b"line one\nline two\n"),
+                dir("home", "0700"),
+                dir("in/tools", "0555"),
+                file("in/tools/tool", "0755", b"#!/bin/sh\nwc --lines\n"),
+                dir("in/private", "0700"),
+                file("in/private/key", "0600", b"k"),
+                file("in/prompt", "0444", b"line one\nline two\n"),
+                dir("in/open", "0777"),
+                file("in/open/shared", "0666", b"s"),
             ];
             sandbox
                 .session
-                .put(&absolute(&sandbox.root), &put, hung())
+                .put(&absolute(&sandbox.root), put, hung())
                 .unwrap();
-            let script = "cd .. && stat --format='%a %n' home in/tools in/tools/tool in/prompt; \
-                          in/tools/tool";
+            let script = "cd .. && stat --format='%a %n' home in/tools in/tools/tool in/private \
+                          in/private/key in/prompt in/open in/open/shared && \
+                          chmod 4755 in/tools/tool && \
+                          chmod 1700 in/private && mkdir --mode=0500 in/shut && in/tools/tool";
             let mut launch = sandbox.sh(script, &[]);
             launch.stdin = Some(sandbox.at("in/prompt"));
             let command = sandbox.session.start(launch, hung()).unwrap();
@@ -427,6 +445,38 @@ fn modes_and_stdin() {
             let started = sandbox.session.start(missing, hung()).map(|_| ());
             lines.push(format!("missing stdin: {}", show_error(sandbox, started)));
             lines.extend(sandbox.collect("log").unwrap());
+            sandbox.collect("in").unwrap();
+            let collected = sandbox.root.join("collected/in");
+            for path in [
+                "tools",
+                "tools/tool",
+                "private",
+                "private/key",
+                "prompt",
+                "shut",
+            ] {
+                let metadata = fs::metadata(collected.join(path)).unwrap();
+                let mode = metadata.permissions().mode() & 0o7777;
+                lines.push(format!("collected {path}: {mode:o}"));
+            }
+            // The host writes within its umask, whatever it is.
+            let umask = umask();
+            for (path, put) in [("open", 0o777), ("open/shared", 0o666)] {
+                let metadata = fs::metadata(collected.join(path)).unwrap();
+                let within = metadata.permissions().mode() & 0o7777 == put & !umask;
+                lines.push(format!(
+                    "collected {path}: {put:o} within the umask: {within}"
+                ));
+            }
+            let removed = fs::remove_dir_all(&collected);
+            lines.push(format!("the collected tree removed: {removed:?}"));
+            let trees = sandbox.session.trees();
+            let again = [Put::File(relative("again"), mode("0644"), b"")];
+            let replaced = trees.put(&sandbox.at("in/tools"), Root::Replaced, again, hung());
+            let held: Vec<_> = (fs::read_dir(sandbox.root.join("in/tools")).unwrap())
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            lines.push(format!("in/tools replaced: {replaced:?}, holds {held:?}"));
             lines
         },
         &expect![[r#"
@@ -434,10 +484,24 @@ fn modes_and_stdin() {
             missing stdin: $ROOT/in/missing: No such file or directory (os error 2)
             log/1.stderr: 
             log/1.stdout: 755 home
-            777 in/tools
-            750 in/tools/tool
-            666 in/prompt
+            755 in/tools
+            755 in/tools/tool
+            700 in/private
+            600 in/private/key
+            444 in/prompt
+            777 in/open
+            666 in/open/shared
             2
+            collected tools: 755
+            collected tools/tool: 755
+            collected private: 700
+            collected private/key: 600
+            collected prompt: 444
+            collected shut: 700
+            collected open: 777 within the umask: true
+            collected open/shared: 666 within the umask: true
+            the collected tree removed: Ok(())
+            in/tools replaced: Ok(()), holds ["again"]
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -598,12 +662,10 @@ fn refusals() {
             lines.push(format!("missing program by name, 1000 times: {failures:?}"));
             let file = relative("in/file");
             let twice = [
-                Put::File(&file, file_mode(), b"first"),
-                Put::File(&file, file_mode(), b"second"),
+                Put::File(file.clone(), file_mode(), b"first"),
+                Put::File(file, file_mode(), b"second"),
             ];
-            let put = sandbox
-                .session
-                .put(&absolute(&sandbox.root), &twice, hung());
+            let put = sandbox.session.put(&absolute(&sandbox.root), twice, hung());
             lines.push(format!("same file twice: {}", show_error(sandbox, put)));
             std::os::unix::fs::symlink("/etc/passwd", sandbox.root.join("out/link")).unwrap();
             lines.push(format!("link: {}", sandbox.collect("out").unwrap_err()));
@@ -629,6 +691,54 @@ fn refusals() {
 
 fn show_error(sandbox: &Sandbox, outcome: io::Result<()>) -> String {
     sandbox.show(&outcome.unwrap_err())
+}
+
+#[test]
+fn new_roots() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            let trees = sandbox.session.trees();
+            let root = absolute(&sandbox.root.join("in/fresh/tree"));
+            let put = || [Put::Dir(relative("a"), dir_mode())];
+            let first = thread::scope(|scope| {
+                let put = scope.spawn(|| trees.put(&root, Root::New, put(), hung()));
+                put.join().unwrap()
+            });
+            first.unwrap();
+            let made = sandbox.root.join("in/fresh/tree/a").is_dir();
+            let again = trees.put(&root, Root::New, put(), hung());
+            let mut lines = vec![
+                format!("put, its parents made: {made}"),
+                format!("put again: {}", show_error(sandbox, again)),
+            ];
+            let other = || [Put::Dir(relative("b"), dir_mode())];
+            let file = sandbox.root.join("in/file");
+            fs::write(&file, "x").unwrap();
+            for at in [
+                root.clone(),
+                absolute(&file),
+                absolute(&sandbox.root.join("in/none")),
+            ] {
+                trees.put(&at, Root::Replaced, other(), hung()).unwrap();
+                let held: Vec<_> = (fs::read_dir(at.as_str()).unwrap())
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect();
+                let at = at.as_str().replace(sandbox.root.to_str().unwrap(), "$ROOT");
+                lines.push(format!("replaced {at}: holds {held:?}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            put, its parents made: true
+            put again: $ROOT/in/fresh/tree: File exists (os error 17)
+            replaced $ROOT/in/fresh/tree: holds ["b"]
+            replaced $ROOT/in/file: holds ["b"]
+            replaced $ROOT/in/none: holds ["b"]
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
 }
 
 #[test]
@@ -738,7 +848,7 @@ fn reading_while_collecting() {
         },
         &expect![[r#"
             the put, while the collect is held: sent
-            the collect: File { path: RelativePath("tree"), size: 4194304 }, intact: true
+            the collect: File { path: RelativePath("tree"), size: 4194304, mode: Mode(436) }, intact: true
             the put: done
             the put's file: intact: true
             the fake gateway's sandboxd: exit status: 0
@@ -758,22 +868,17 @@ fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8]
     let put = ToSandbox::Put {
         stream: 2,
         dir: absolute(&root.join("in")),
+        root: Root::Kept,
     };
     let entry = Entry::File {
         path: relative("put"),
         size: bytes.len() as u64,
+        mode: file_mode(),
     };
     let mut frames = vec![
         (collect, &[][..]),
         (put, &[]),
-        (
-            ToSandbox::Entry {
-                stream: 2,
-                entry,
-                mode: file_mode(),
-            },
-            &[],
-        ),
+        (ToSandbox::Entry { stream: 2, entry }, &[]),
     ];
     let data = bytes.chunks(MAX_BODY_BYTES);
     frames.extend(data.map(|chunk| (ToSandbox::Data { stream: 2 }, chunk)));

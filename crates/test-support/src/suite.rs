@@ -393,7 +393,7 @@ fn put(mut session: Session) -> String {
         vec![0; 4 << 20],
     );
     let home = AbsolutePath::try_from("/pumpkin/home".to_owned()).unwrap();
-    match session.put(&home, &[Put::File(&path, file_mode(), &bytes)], soon()) {
+    match session.put(&home, [Put::File(path, file_mode(), &bytes)], soon()) {
         Ok(()) => "put".to_owned(),
         Err(error) => format!("{:?}: {error}", error.kind()),
     }

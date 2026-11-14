@@ -1,7 +1,8 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (one agent and its judges, with their [`Slot`]s), the
-//! [`Grant`]s each role holds, and the [`Score`], which judges what the agent submits.
+//! A workflow is data: [`Role`]s (one agent, its judges, with their [`Slot`]s, and the runners it
+//! leases), the [`Grant`]s each role holds, and the [`Score`], which judges what the agent
+//! submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -26,16 +27,17 @@ pub use values::{
 /// A workflow.
 ///
 /// A run has two phases. In the work phase, the run starts the agent, which works until it
-/// exits, finalizes a submission or reaches its deadline, and calls the judges its grants name. In
-/// the final phase, which starts once the agent's sandbox and every call it made are gone, the
-/// [`Score`] judge judges the selection: the finalized submission, else the latest one stored.
-/// Only the run, which keeps the submissions, lives through both phases.
+/// exits, finalizes a submission or reaches its deadline, calls the judges its grants name and
+/// leases their runners. In the final phase, which starts once the agent's sandbox and every call
+/// and lease it made are gone, the [`Score`] judge judges the selection: the finalized
+/// submission, else the latest one stored. Only the run, which keeps the submissions, lives
+/// through both phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
     pub ir_version: IrVersion,
     pub name: WorkflowName,
-    /// Exactly one of them has an agent runtime: the agent. The others are judges.
+    /// Exactly one of them has an agent runtime: the agent. The others are judges and runners.
     pub roles: Vec<Role>,
     /// How the selected submission is judged.
     pub score: Score,
@@ -70,8 +72,8 @@ pub struct Role {
     /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The ops the role may use while it works; absent, none. The agent holds judge calls and
-    /// exactly one submit grant; a judge holds none.
+    /// The ops the role may use while it works; absent, none. Only the agent holds any: judge
+    /// calls, leases, and exactly one submit grant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<Grant>,
 }
@@ -142,15 +144,18 @@ pub enum Runtime {
     Agent(AgentRuntime),
     /// A judge, whose command runs once per call in a fresh instance.
     Judge(JudgeRuntime),
+    /// A runner, which runs the commands its lease's holder sends, in a fresh instance for each
+    /// lease ([`LeaseGrant`]).
+    Runner(RunnerRuntime),
 }
 
 /// An agent harness: its directories and files, which the runtime puts in the agent's sandbox
 /// before its command starts, then the command, which reads its standard input's text.
 ///
-/// The runtime makes each of them as the role's user, with its mode exactly, `dirs` first, in
-/// order of their paths, so a directory comes before what it holds: each entry's parent is in
-/// the image or in `dirs`. A file the image has already fails the agent's start, and a directory
-/// it has already is kept as it is. No path is put twice, and none is below a file.
+/// The runtime makes each of them as the role's user, with its mode as a tree gives it, `dirs`
+/// first, in order of their paths, so a directory comes before what it holds: each entry's
+/// parent is in the image or in `dirs`. A file the image has already fails the agent's start, and
+/// a directory it has already is kept as it is. No path is put twice, and none is below a file.
 ///
 /// The agent can read `files`, `stdin` and `env`, and the IR is recorded whole: keep secrets out.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +215,18 @@ pub struct JudgeRuntime {
     pub slots: Vec<Slot>,
     /// What each call writes as its result.
     pub result: ResultSpec,
+}
+
+/// How a runner runs each command its lease's holder sends, as the role's user: as a
+/// [`Command`] would with the holder's argument vector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerRuntime {
+    /// The directory each command starts in.
+    pub cwd: AbsolutePath,
+    /// Variables added to each command's environment, as [`Command::env`]'s are.
+    #[serde(default, skip_serializing_if = "Env::is_empty")]
+    pub env: Env,
 }
 
 /// What a judge call writes as its result: the JSON file at
@@ -284,14 +301,17 @@ pub struct ModelRoute {
 #[serde(rename_all = "snake_case")]
 pub enum Grant {
     Judge(JudgeGrant),
+    Lease(LeaseGrant),
     Submit(SubmitGrant),
 }
 
 impl Grant {
-    /// The name its holder uses the grant by. Unique among the role's grants.
+    /// The name the agent uses the grant by. Unique among the agent's grants.
     pub fn name(&self) -> &Name {
         match self {
-            Self::Judge(JudgeGrant { name, .. }) | Self::Submit(SubmitGrant { name }) => name,
+            Self::Judge(JudgeGrant { name, .. })
+            | Self::Lease(LeaseGrant { name, .. })
+            | Self::Submit(SubmitGrant { name }) => name,
         }
     }
 }
@@ -319,6 +339,34 @@ pub struct JudgeGrant {
     /// The timeout of each call, counted from the start of the judge command. A call also
     /// ends with the grant's cumulative time, or with the work phase, if either comes first.
     pub call_timeout_seconds: NonZeroU64,
+}
+
+/// Leases runners of one role: each lease is a fresh instance of the role, which runs the
+/// commands its holder sends, one at a time, until the holder closes it, its time runs out, or the
+/// work phase ends.
+///
+/// A lease's time runs from when its runner is ready until it ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseGrant {
+    pub name: Name,
+    /// The runner role, which no other lease grant names, and whose image is no judge's.
+    pub role: Name,
+    /// The most leases open at once, each until its runner is gone.
+    pub instances: NonZeroU32,
+    /// The most time each lease may last.
+    pub instance_seconds: NonZeroU64,
+    /// The most time the grant's leases may last in all, each lease open at once counting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_seconds: Option<NonZeroU64>,
+    /// The most commands the grant's leases may run in all, each transfer of a tree to or from
+    /// a lease's runner counting as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<NonZeroU64>,
+    /// The most bytes of files each transfer may move, at most
+    /// [`MAX_TRANSFER_BYTES`](crate::sandbox::MAX_TRANSFER_BYTES): a tree that holds more is
+    /// refused as it is collected.
+    pub transfer_bytes: NonZeroU64,
 }
 
 /// Stores submissions, of which the [`Score`] judges the one selected. A submission may hold as
