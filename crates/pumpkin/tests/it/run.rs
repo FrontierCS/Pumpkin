@@ -459,7 +459,7 @@ fn unrunnable() {
             $ <scratch>/checkout/pumpkin run workflow/task.star --runs runs
             exit status: Some(1)
             pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
-            $ env -u HOME pumpkin run workflow/task.star --sandboxd sandboxd
+            $ env --unset=HOME pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name a directory with `--runs`
             $ HOME= pumpkin run workflow/task.star --sandboxd sandboxd
@@ -616,7 +616,7 @@ fn configurations() {
             $ HOME=<scratch>/home pumpkin run workflow/task.star --sandboxd sandboxd --runs runs
             exit status: Some(1)
             pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
-            $ env -u HOME pumpkin run workflow/task.star --sandboxd sandboxd --runs runs
+            $ env --unset=HOME pumpkin run workflow/task.star --sandboxd sandboxd --runs runs
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config missing.toml
@@ -783,7 +783,7 @@ models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra" }}]
     fs::write(scratch.0.join("conf/key"), "sk-test\n").unwrap();
     let body = r#"{"model": "gpt-6-astra", "store": false, "input": "hi"}"#;
     let ask = format!(
-        "wget -q -O /pumpkin/out/answer --header 'content-type: application/json' \
+        "wget --quiet --output-document=/pumpkin/out/answer --header 'content-type: application/json' \
          --post-data '{body}' http://127.0.0.1:{MODEL_PORT}/responses"
     );
     let mut asks = workflow("", &["sh", "-c", &ask]);

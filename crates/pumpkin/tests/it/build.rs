@@ -107,7 +107,7 @@ fn refusals() {
               --output-sync` says a job's, then that it ended. A failed build is said at the
               image() call that declares its image; once one has failed, no other starts but
               those started with it, and each that runs is waited for, and said if it fails.
-            $ env -u HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
+            $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
             lib/bench.star:78:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does
                 78 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
@@ -123,10 +123,10 @@ fn refusals() {
                   |                            ^
                 the IR's /roles/0/needs/cpu_millis
             pumpkin: tasks/broken/task.star: the task has 3 problems
-            $ env -u HOME PATH=<scratch>/bin pumpkin build tasks/bench/task.star --arg model=model-a
+            $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/bench/task.star --arg model=model-a
             exit status: Some(1)
             pumpkin: HOME is unset or empty: set it, or name the configuration with `--config`
-            $ env -u HOME PATH=<scratch>/bin pumpkin build tasks/bench/task.star --config absent.toml --arg model=model-a
+            $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/bench/task.star --config absent.toml --arg model=model-a
             exit status: Some(1)
             pumpkin: the configuration absent.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
             $ pumpkin build

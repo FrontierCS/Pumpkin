@@ -104,8 +104,8 @@ impl Pin {
             files: _,
         } = self;
         let mut recipe = format!(
-            "FROM {BUSYBOX} AS {name}\nADD --checksum={sha256} {url} {TARBALL}\nRUN tar -x -z -f \
-             {TARBALL} -C /"
+            "FROM {BUSYBOX} AS {name}\nADD --checksum={sha256} {url} {TARBALL}\nRUN tar --extract \
+             --gzip --file {TARBALL} --directory /"
         );
         for (path, _) in &files {
             let _ = write!(recipe, " {dir}/{path}");

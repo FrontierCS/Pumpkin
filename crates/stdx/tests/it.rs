@@ -104,7 +104,7 @@ fn reaped(pid: i32) -> String {
 #[test]
 fn ends() {
     check(
-        "head -c 200000 /dev/zero; head -c 300000 /dev/zero >&2; exit 3",
+        "head --bytes=200000 /dev/zero; head --bytes=300000 /dev/zero >&2; exit 3",
         Caller::Waits(Duration::MAX),
         &expect![[r#"
             exited with exit status: 3, after writing 200000 bytes to its standard output and 300000 to its standard error

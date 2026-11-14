@@ -222,7 +222,7 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 fn invocation(command: &Command) -> String {
     let set = command.get_envs().map(|(name, value)| match value {
         Some(value) => format!("{}={} ", name.display(), value.display()),
-        None => format!("env -u {} ", name.display()),
+        None => format!("env --unset={} ", name.display()),
     });
     // An argument that isn't UTF-8 shows with U+FFFD for each byte that isn't.
     let args = command.get_args().map(|arg| match arg.to_string_lossy() {
@@ -370,11 +370,11 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     ir
 }
 
-/// Sends the signal `name`, as `kill -s` takes it, to `target`: a process ID, or a process
+/// Sends the signal `name`, as `kill --signal` takes it, to `target`: a process ID, or a process
 /// group's, negated; whether there was one to signal.
 fn signal(name: &str, target: i64) -> bool {
     let kill = stdx::process::command("kill", Environment::Inherited)
-        .args(["-s", name, "--", &target.to_string()])
+        .args(["--signal", name, "--", &target.to_string()])
         .status();
     kill.unwrap().success()
 }
@@ -459,7 +459,7 @@ case $1 in
     # `build ... --file <recipe> --iidfile <file> -- <stage>`, which writes the image's ID there.
     build) for arg; do
         case $previous in
-            --file) grep -qF "{BUILDS}" "$arg" || {{ echo "the stand-in creates nothing" >&2; exit 1; }} ;;
+            --file) grep --quiet --fixed-strings "{BUILDS}" "$arg" || {{ echo "the stand-in creates nothing" >&2; exit 1; }} ;;
             --iidfile) echo {built} > "$arg" ;;
         esac
         previous=$arg

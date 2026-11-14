@@ -19,7 +19,7 @@ fn codex() {
         &expect![[r#"
             FROM busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e AS codex-0.167.0
             ADD --checksum=sha256:2dc9aa871abb513c3539d20d025f701faf1974c46ee906bda3a1e1f5026d4434 https://registry.npmjs.org/@openai/codex/-/codex-0.167.0-linux-x64.tgz /harness.tgz
-            RUN tar -x -z -f /harness.tgz -C / package/vendor/x86_64-unknown-linux-musl/bin/codex package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host package/vendor/x86_64-unknown-linux-musl/codex-package.json package/vendor/x86_64-unknown-linux-musl/codex-path/rg
+            RUN tar --extract --gzip --file /harness.tgz --directory / package/vendor/x86_64-unknown-linux-musl/bin/codex package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host package/vendor/x86_64-unknown-linux-musl/codex-package.json package/vendor/x86_64-unknown-linux-musl/codex-path/rg
             FROM busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e AS codex-0.167.0-tree
             COPY --from=codex-0.167.0 /package/vendor/x86_64-unknown-linux-musl/ /out/harness/codex-0.167.0/
             RUN chmod 0444 /out/harness/codex-0.167.0/codex-package.json && chmod 0555 /out/harness /out/harness/codex-0.167.0 /out/harness/codex-0.167.0/bin /out/harness/codex-0.167.0/bin/codex /out/harness/codex-0.167.0/bin/codex-code-mode-host /out/harness/codex-0.167.0/codex-path /out/harness/codex-0.167.0/codex-path/rg
