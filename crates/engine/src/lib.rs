@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Write as _};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,7 @@ use std::{fmt, fs, io};
 use base64::Engine as _;
 use schema::ir::{Image, MILLIS_PER_CPU, Resources, User};
 use schema::sandbox::{PUMPKIN_BYTES, pumpkin_dir};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::Deadline;
 use stdx::process::Environment;
@@ -214,6 +215,11 @@ impl fmt::Debug for Login {
 #[derive(Debug)]
 pub struct Engine {
     report: Report,
+    /// What `docker info` said of the engine's host when [`connect`](Self::connect) reached the
+    /// engine, or why it can't be read.
+    // Read at the connect, but refused only by a caller that needs it ([`Engine::host`]): a build
+    // or a push needs none of it.
+    host: Result<Host, String>,
     /// The directory on this machine that [`connect`](Self::connect) was given.
     dir: PathBuf,
     /// Whether a call has said that it waits for a publish slot, which one says, once.
@@ -260,6 +266,35 @@ pub struct Security {
     pub userns: bool,
 }
 
+/// What `docker info` says of the engine's host and of the limits that the engine enforces on a
+/// container, as it said when [`Engine::connect`] reached the engine: facts that change only as
+/// the engine restarts.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "`docker info` reports whether the engine supports each limit as a boolean"
+)]
+pub struct Host {
+    /// Whether the engine supports memory limits.
+    pub memory_limit: bool,
+    /// Whether the engine supports swap limits.
+    pub swap_limit: bool,
+    /// Whether the engine supports CPU limits.
+    pub cpu_cfs_quota: bool,
+    /// Whether the engine supports confining a container to a set of CPUs.
+    #[serde(rename = "CPUSet")]
+    pub cpu_set: bool,
+    /// Whether the engine supports process limits.
+    pub pids_limit: bool,
+    /// The memory of the engine's host.
+    #[serde(rename = "MemTotal")]
+    pub memory_bytes: NonZeroU64,
+    /// The engine's ID, which it keeps from one start to the next.
+    #[serde(rename = "ID")]
+    pub id: String,
+}
+
 /// What `docker info` prints, as JSON.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -299,12 +334,7 @@ impl Engine {
             operating_system,
             server_version,
             client_info,
-        } = serde_json::from_slice(&info.stdout).map_err(|error| {
-            format!(
-                "the JSON `docker info` printed isn't of the form expected: {error}: use \
-                 Docker's own command line, which prints it"
-            )
-        })?;
+        } = read_info(&info)?;
         check_store(&context, &driver_status.unwrap_or_default())?;
         let platform = platform(&context)?;
         let report = Report {
@@ -319,6 +349,7 @@ impl Engine {
         };
         Ok(Self {
             report,
+            host: read_info(&info),
             dir: dir.to_owned(),
             said_waiting: AtomicBool::new(false),
         })
@@ -338,6 +369,15 @@ impl Engine {
     /// The engine, as it was when [`connect`](Self::connect) reached it.
     pub fn report(&self) -> &Report {
         &self.report
+    }
+
+    /// What `docker info` said of the engine's host when [`connect`](Self::connect) reached it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if what it printed of the host isn't of the form expected.
+    pub fn host(&self) -> Result<&Host, String> {
+        self.host.as_ref().map_err(String::clone)
     }
 
     /// Checks that `image`, the digest of an image's manifest that the engine has, is for
@@ -625,7 +665,7 @@ struct Reach {
     /// The endpoint the context reaches the engine at.
     endpoint: String,
     /// What `docker info` printed, as JSON.
-    info: Output,
+    info: Vec<u8>,
 }
 
 /// Reaches the engine through `context`: reads the context, and asks the engine what it is.
@@ -654,7 +694,20 @@ fn reach(context: &ContextName) -> Result<Reach, String> {
         };
         format!("the Docker engine isn't reachable through context `{name}`: {error}: {todo}")
     })?;
-    Ok(Reach { endpoint, info })
+    Ok(Reach {
+        endpoint,
+        info: info.stdout,
+    })
+}
+
+/// `info`, what `docker info` printed, read as `T`.
+fn read_info<T: DeserializeOwned>(info: &[u8]) -> Result<T, String> {
+    serde_json::from_slice(info).map_err(|error| {
+        format!(
+            "the JSON `docker info` printed isn't of the form expected: {error}: use Docker's \
+             own command line, which prints it"
+        )
+    })
 }
 
 impl Security {
