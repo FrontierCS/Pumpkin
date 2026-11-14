@@ -1361,7 +1361,7 @@ fn ended(mut sandboxd: Child) -> String {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn as_root_with_user() {
     // Kept if the test fails.
     let root = tempfile::Builder::new()

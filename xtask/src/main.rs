@@ -19,9 +19,12 @@ use std::{env, iter};
 use xshell::{Cmd, Shell};
 
 mod diff;
+mod live;
+mod settings;
 mod star;
 mod tidy;
 mod tools;
+mod wait;
 
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -56,13 +59,29 @@ mod flags {
             }
 
             /// Runs the checks every change must pass, in order, and stops at the first that
-            /// fails.
-            cmd ci {
-                /// Runs the tests that need Docker or the static sandboxd, or take minutes, too,
-                /// which are ignored otherwise, against the static sandboxd that `sandboxd`
-                /// builds, through the Docker context `PUMPKIN_DOCKER_CONTEXT` names, or
-                /// `default`.
-                optional --docker
+            /// fails. They reach no Docker engine, network or cloud, and wait on no real clock.
+            cmd ci {}
+
+            /// Runs the checks that reach a real environment, which `ci` leaves out: `docker`, the
+            /// tests that need a Docker engine, the static sandboxd or a server elsewhere, ignored
+            /// otherwise, through the Docker context `PUMPKIN_DOCKER_CONTEXT` names, or
+            /// `default`; `ec2` and `modal`, which cost money, a run of `examples/smoke` on that
+            /// provider through the controller that `~/.config/pumpkin/pumpkin.toml` names, with
+            /// Pumpkin at `HEAD`, built by `./pumpkin` in a task repository below the target
+            /// directory: every probe of a sandbox's confinement must pass, every sandbox be
+            /// deleted, and nothing tagged with the run be left on EC2, EventBridge Scheduler or
+            /// Modal, which `pumpkin cancel` then removes.
+            cmd live {
+                /// `docker`, `ec2` or `modal`.
+                required target: String
+                /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
+                /// the smoke's GPU runner needs.
+                optional --gpu-model model: String
+                /// With `ec2` or `modal`, loses the run once the agent holds a lease of each
+                /// grant, by killing its job on the controller, and checks that each sandbox ends
+                /// by itself by the run's hard end, about 95 minutes after its start, and that
+                /// `pumpkin reap` then removes what is left: about $1 on EC2, $4 on Modal.
+                optional --lost
             }
 
             /// Builds the static sandboxd that every sandbox runs, and beside it the static
@@ -116,6 +135,7 @@ mod flags {
     pub enum XtaskCmd {
         Fmt(Fmt),
         Ci(Ci),
+        Live(Live),
         Sandboxd(Sandboxd),
         Install(Install),
         Mutants(Mutants),
@@ -129,8 +149,15 @@ mod flags {
     }
 
     #[derive(Debug)]
-    pub struct Ci {
-        pub docker: bool,
+    pub struct Ci;
+
+    #[derive(Debug)]
+    pub struct Live {
+        pub target: String,
+
+        pub gpu_model: Option<String>,
+
+        pub lost: bool,
     }
 
     #[derive(Debug)]
@@ -199,7 +226,33 @@ fn try_main() -> Result<()> {
             fmt.run()?;
             Ok(())
         }
-        flags::XtaskCmd::Ci(flags::Ci { docker }) => ci(&cargo, docker),
+        flags::XtaskCmd::Ci(flags::Ci) => ci(&cargo),
+        flags::XtaskCmd::Live(flags::Live {
+            target,
+            gpu_model,
+            lost,
+        }) => {
+            let provider = match target.as_str() {
+                "docker" if lost => {
+                    return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
+                }
+                "docker" => return live::docker(&cargo),
+                "ec2" => settings::Provider::Ec2,
+                "modal" => settings::Provider::Modal,
+                _ => {
+                    return Err(format!(
+                        "`{target}` is no live target: give `docker`, `ec2` or `modal`"
+                    )
+                    .into());
+                }
+            };
+            if gpu_model.is_some() && provider != settings::Provider::Modal {
+                return Err(
+                    "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
+                );
+            }
+            live::smoke(&cargo, provider, gpu_model.as_deref(), lost)
+        }
         flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
             println!("{}", sandboxd(&cargo)?.display());
             Ok(())
@@ -262,9 +315,10 @@ fn root() -> &'static Path {
     root
 }
 
-/// `tests`, a command that runs tests, with the environment that `ci` and `mutants` give every
-/// test: `PATH` with `xtask/poison` first, whose `aws` fails, so that none reaches AWS, then
-/// xtask's own; and `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which
+/// `tests`, a command that runs tests, with the environment that `ci`, `live docker` and
+/// `mutants` give every test: `PATH` with `xtask/poison` first, whose `aws` fails, so that none
+/// reaches AWS, then xtask's own; and `PUMPKIN_BUILDIFIER`, the pinned formatter
+/// ([`star::buildifier`]), which
 /// pumpkin's tests put beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check`
 /// find it.
 fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
@@ -276,12 +330,9 @@ fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
 
 /// Runs the checks every change must pass, in order, and stops at the first that fails: among
 /// them the check of the repository's `.star` files ([`star::check`]), with the formatter beside
-/// the tests' `pumpkin`, which runs it there, and the tests ([`tested`]). With
-/// `docker`, it builds the static `sandboxd` before the tests, names it in `PUMPKIN_SANDBOXD` and
-/// runs the ignored tests too, which are the tests that need Docker; they inherit
-/// `PUMPKIN_DOCKER_CONTEXT`, which names the context they reach Docker through, and get Docker's
-/// own variables set to reach no engine.
-fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
+/// the tests' `pumpkin`, which runs it there, and the tests ([`tested`]) but those ignored, which
+/// `cargo xtask live docker` runs ([`live::docker`]).
+fn ci(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;
     tidy::check(&cargo.sh)?;
@@ -295,32 +346,13 @@ fn ci(cargo: &Cargo, docker: bool) -> Result<()> {
     star::check(&cargo.sh, &pumpkin)?;
     let test = cargo.cmd(&["nextest", "run", "--workspace", "--locked"]);
     let test = tested(cargo, test)?;
-    let test = if docker {
-        let sandboxd = sandboxd(cargo)?;
-        let test = test.args(["--run-ignored", "all"]);
-        // These poison the variables the Docker provider must ignore: passed on to `docker`,
-        // they would steer it to an engine that doesn't exist, or to TLS without certificates,
-        // so the Docker tests fail unless the provider clears `docker`'s environment.
-        let test = test
-            .env("DOCKER_HOST", "unix:///nonexistent/pumpkin-poison.sock")
-            .env("DOCKER_CONTEXT", "pumpkin-poison-no-such-context")
-            .env("DOCKER_TLS_VERIFY", "1");
-        test.env("PUMPKIN_SANDBOXD", &sandboxd)
-    } else {
-        test
-    };
     let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
     let doctests = tested(cargo, doctests)?;
-    let again = if docker {
-        "cargo xtask ci --docker"
-    } else {
-        "cargo xtask ci"
-    };
     // ci checks snapshots, never rewrites them.
     tests(
         test.env_remove("UPDATE_EXPECT"),
         doctests.env_remove("UPDATE_EXPECT"),
-        again,
+        "cargo xtask ci",
     )
 }
 

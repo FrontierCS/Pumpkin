@@ -155,7 +155,7 @@ fn refusals() {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshot"
@@ -493,7 +493,7 @@ fn builds_on_docker() {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn variants_on_docker() {
     let scratch = Scratch::new("build-variants");
     let label = format!("pumpkin.test=variants-{}", std::process::id());

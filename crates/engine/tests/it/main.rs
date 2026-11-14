@@ -80,7 +80,7 @@ fn redact(fixture: &Fixture, message: &str) -> String {
 // `--help`, which `docker context inspect` mustn't take for its own option, which prints its
 // help and succeeds.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn report() {
     let Report {
         context: _,
@@ -126,7 +126,7 @@ fn report() {
 // An image the engine doesn't have is refused, not pulled; and so are an index, of an image for
 // the engine's platform and one for another, and an image for that other platform alone.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn platforms() {
     check(
         "platforms",
@@ -180,7 +180,7 @@ fn platforms() {
 // pins the digest's text of a build given nothing. A build removes what a build of a process
 // that has ended left in the engine's directory, but not a running one's.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshot"
@@ -290,7 +290,7 @@ fn builds() {
 // The engine lists an image that a build made, with the size that `docker image inspect` gives
 // it and the tag of its build's inputs, and once it is removed, lists it no more.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn images() {
     check(
         "images",
@@ -336,7 +336,7 @@ fn images() {
 // are in the build's inputs. One to be mounted where the context holds something, or holds no
 // directory, or at a path with whitespace, is refused before anything is built.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn mounts() {
     check(
         "mounts",
@@ -381,7 +381,7 @@ fn mounts() {
 // holds what was mounted; and it may bind-mount a named context it is given, whose tag is in the
 // inputs too, so another image there gives another tag.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn bind_mounts() {
     check(
         "bind-mounts",
@@ -434,7 +434,7 @@ fn bind_mounts() {
 // other permission bits, as checkouts under other umasks do, have one tag; and the image holds
 // them with those modes, a file its owner may execute still executable.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn modes() {
     check(
         "modes",
@@ -478,7 +478,7 @@ fn modes() {
 // build's time as `SOURCE_DATE_EPOCH`, which would change how Python compiles what it installs.
 // Each image's layers, its base's too, are zstd's, in an OCI manifest.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn reproducible() {
     check(
         "reproducible",

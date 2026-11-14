@@ -513,7 +513,7 @@ fn processes(sandbox: &Started, done: impl Fn(&str) -> bool) -> String {
 // processes behind that freezing kills: one orphaned to `sandboxd`, and one in a session of
 // its own, outside its command's process group.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn judge() {
     check(
         "judge",
@@ -564,7 +564,7 @@ fn judge() {
 // engine's report says, and, seen from the host, the container's log, which `sandboxd` alone
 // writes, and what `docker create` pinned that the daemon or the image would otherwise decide.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn confinement() {
     check(
         "confinement",
@@ -645,7 +645,7 @@ fn confinement() {
 // needs more CPUs than the others leave is refused, naming those that hold them, as is one that
 // needs more than the machine has.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is what each share shows, and the snapshot"
@@ -788,7 +788,7 @@ fn cpu_list(text: &str) -> BTreeSet<u32> {
 // What the provider declares as ready: the engine's report, and its one class, which offers
 // what the host has.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn ready() {
     let mut ready = serde_json::to_value(provider().ready()).unwrap();
     let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
@@ -817,7 +817,7 @@ fn ready() {
 // Deleting what a run's list finds removes its containers' anonymous volumes, and no other
 // run's.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn volumes() {
     check(
         "volumes",
@@ -852,7 +852,7 @@ fn volume(sandbox: &Started) -> String {
 
 // The suite every provider passes ([`test_support::suite`]), on Docker ([`Platform`]).
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn suite() {
     test_support::suite::check(&[("docker", &Platform)]);
 }
@@ -901,7 +901,7 @@ impl Subject for Platform {
 // that runs Docker's `create`, then hangs, and passes every other command to Docker's, makes
 // the create.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn hung_create() {
     if let Some(dir) = env::var_os(STAND_IN) {
         let fixture = Fixture::new("hung-create-caller");
@@ -963,7 +963,7 @@ fn hung_create() {
 // API can't carry, is refused; a container that Docker creates but can't start is removed; an
 // image the engine doesn't have is refused, not pulled.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn failed_start() {
     check(
         "failed",
@@ -1017,7 +1017,7 @@ fn redact(fixture: &Fixture, message: &str) -> String {
 // Once a sandbox's container has stopped, its console holds what its `sandboxd` printed: here a
 // stand-in's, which exits without dialing.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn console() {
     check(
         "console",
@@ -1064,7 +1064,7 @@ const CTL: &str = r#"
 // but the role's user, and `sandboxctl` is read-only, so writing it fails the last command.
 // The sandbox, created to serve ops but not the model endpoint, has no TCP listener.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the script and the snapshot"
@@ -1196,7 +1196,7 @@ fn ops() {
 // with a session of its own, is refused the control socket's directory, since the first made
 // it.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn refused_calls() {
     check(
         "refused",
@@ -1278,7 +1278,7 @@ fn refused_calls() {
 // in its caller's turn, so one replaced by a symbolic link while its caller waits is refused,
 // as `sandboxd` opens no link.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn turns() {
     check(
         "turns",
@@ -1364,7 +1364,7 @@ fn turns() {
 // `HEAD` with a head alone and of `POST` with a body, and a head over the endpoint's bound are
 // refused before they reach the session.
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn model_endpoint() {
     check(
         "model",

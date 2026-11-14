@@ -632,7 +632,7 @@ fn session(pid: i64) -> Option<i64> {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the run's steps and their snapshot"
@@ -753,7 +753,7 @@ fn lost_on_docker() {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn signaled_on_docker() {
     let scratch = Scratch::new("signaled-docker");
     let sandboxd = sandboxd().to_str().unwrap().to_owned();

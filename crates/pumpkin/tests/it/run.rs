@@ -1805,7 +1805,7 @@ impl Upstream {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshot"
@@ -1954,7 +1954,7 @@ fn runs_on_docker() {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the steps and their snapshot"
@@ -2216,7 +2216,7 @@ const LEASING_AGENT: &str = r#"#!/bin/sh
     ctl submit submit /workspace/six --finalize"#;
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn leases_on_docker() {
     let scratch = Scratch::new("leases");
@@ -2325,7 +2325,7 @@ const ISOLATING_JUDGE: &str = r#"
     printf '{"raw_score": %s}' "$score" > /pumpkin/out/result.json"#;
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn judge_leases_on_docker() {
     let scratch = Scratch::new("isolation");
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
@@ -2398,7 +2398,7 @@ fn judge_leases_on_docker() {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn ops_on_docker() {
     let scratch = Scratch::new("ops");

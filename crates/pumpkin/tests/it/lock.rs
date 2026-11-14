@@ -199,7 +199,7 @@ fn refusals() {
 }
 
 #[test]
-#[ignore = "needs Docker and snapshot.ubuntu.com: run cargo xtask ci --docker"]
+#[ignore = "needs Docker and snapshot.ubuntu.com: run cargo xtask live docker"]
 fn locks() {
     let scratch = Scratch::new("lock-locks");
     let label = format!("pumpkin.test=lock-{}", std::process::id());

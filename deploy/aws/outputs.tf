@@ -65,6 +65,8 @@ resource "aws_iam_policy" "client" {
         Action   = ["ssm:TerminateSession", "ssm:ResumeSession"]
         Resource = "${local.arn}:ssm:*:${local.account}:session/$${aws:userid}-*"
       },
+      # A live check's look for a run's timers left behind: Scheduler's list takes no resource.
+      { Effect = "Allow", Action = "scheduler:ListSchedules", Resource = "*" },
     ]
   })
 }

@@ -1,6 +1,7 @@
-- ALWAYS pass the checks before finishing: `cargo xtask ci`, and `cargo xtask ci --docker`,
-  which also runs the tests that need a Docker engine, when a change touches code only those
-  tests reach
+- ALWAYS pass the checks before finishing: `cargo xtask ci`, and `cargo xtask live docker`,
+  the tests that need a Docker engine, when a change touches code only those tests reach
+- RUN `cargo xtask live ec2` and `cargo xtask live modal`, which cost money, at review of a
+  change that only a real provider reaches, as `docs/dev/testing.md` says
 - RUN `cargo xtask install-tools` before the checks, and again when `cargo xtask ci` asks
 - RUN `cargo xtask mutants` at review of a change to the decision core or to the schema's
   refusals, as `docs/dev/testing.md` says
