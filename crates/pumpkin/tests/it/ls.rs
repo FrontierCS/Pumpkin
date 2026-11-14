@@ -439,6 +439,98 @@ fn lists_leases() {
     );
 }
 
+// A log's parts that don't read are left out and said by `ls` and the summary, and the rest of
+// their lines count; a run whose start doesn't read is listed, with no progress.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn says_unread_lines() {
+    let scratch = Scratch::new("says-unread-lines");
+    let id = "20261110-110000-0000000b";
+    let log = [
+        logged(5, json!({ "kind": "agent_started" }), json!([])),
+        logged(10, json!({ "kind": "later" }), json!([])),
+        logged(20, json!({ "kind": "agent_exited" }), json!([])),
+        logged(
+            30,
+            json!({ "kind": "model_answered", "caller": "agent", "upstream_status": "200",
+                "answer": { "kind": "forwarded" } }),
+            json!([]),
+        ),
+        logged(
+            40,
+            json!({ "kind": "tick" }),
+            json!([{ "kind": "tear_down_agent" }, { "kind": "close_lease" }, { "kind": "finish" }]),
+        ),
+    ];
+    let unscored = json!({
+        "state": "finished", "score": null,
+        "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
+    });
+    let dir = write_run(
+        &scratch,
+        id,
+        asked(id, 90),
+        &log,
+        Some(unscored),
+        &lease_places(false),
+    );
+    let mut written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
+    written.push_str("{\"seq\":\n");
+    fs::write(dir.join("log.jsonl"), written).unwrap();
+    let unstarted = "20261110-110000-0000000c";
+    let dir = write_run(
+        &scratch,
+        unstarted,
+        asked(unstarted, 90),
+        &log,
+        Some(json!({ "state": "failed", "reason": "the agent's sandbox didn't start" })),
+        &lease_places(false),
+    );
+    let written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
+    let written = written.replacen("\"unix_ns\"", "\"unix\"", 1);
+    fs::write(dir.join("log.jsonl"), written).unwrap();
+    let steps = [
+        &["ls", "--runs", "runs"][..],
+        &["wait", "--runs", "runs", id],
+        &["wait", "--runs", "runs", unstarted],
+    ]
+    .map(|args| Step::Ran(ran(scratch.pumpkin(args), &scratch.0, false)));
+    check(
+        &scratch,
+        steps,
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin ls --runs runs
+            exit status: Some(0)
+            pumpkin: run 20261110-110000-0000000b: 4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
+            pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`
+            printed:
+              20261110-110000-0000000b finished        40s  -               -  example/lease
+              20261110-110000-0000000c failed            -  -               -  example/lease
+              2 runs: 1 finished (1 without a score), 1 failed
+            $ pumpkin wait --runs runs 20261110-110000-0000000b
+            exit status: Some(3)
+            pumpkin: run 20261110-110000-0000000b started <t> after it was asked for, and ran <t>:
+                 <t> agent on aws/judge, started at <t>; the work phase ended at <t>
+              model: 0 requests
+              sandboxes: 1 on aws/judge, <t> in all, 1 created, all deleted
+              4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
+            pumpkin: run 20261110-110000-0000000b finished without a score: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
+            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            $ pumpkin wait --runs runs 20261110-110000-0000000c
+            exit status: Some(1)
+            pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`
+            pumpkin: run 20261110-110000-0000000c failed: the agent's sandbox didn't start; its record is <scratch>/runs/20261110-110000-0000000c
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
+            printed outcome.json: {"reason":"the agent's sandbox didn't start","state":"failed"}"#]],
+    );
+}
+
 /// Writes the record `id` in `scratch`'s `runs` of a live run of [`lease_task`], priced, whose
 /// log holds `log`, its last record written `ago`; returns `driver.pid`, locked as its driver
 /// does.

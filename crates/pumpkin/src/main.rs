@@ -27,7 +27,7 @@ use ec2::Ec2;
 use engine::{ContextName, Engine};
 use gateway::{Dialer, GrantListener};
 use modal::Modal;
-use provider::{Meeting, Provider, RunTag, SandboxId, Sweep};
+use provider::{Meeting, Provider, RunTag, SandboxId, Sweep, UnixTime};
 use runtime::{BUILD, Ending, Reaped, Record, Recorded, Run, System};
 use rustix::fs::Mode;
 use rustix::process::{Pid, Signal, umask};
@@ -514,10 +514,9 @@ fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The time now, since the Unix epoch, or the epoch itself on a clock that reads before it.
-fn unix_now() -> std::time::Duration {
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
-    now.unwrap_or_default()
+/// The time now, or the Unix epoch itself on a clock that reads before it.
+fn unix_now() -> UnixTime {
+    UnixTime::of(SystemTime::now()).unwrap_or(UnixTime::after_epoch(std::time::Duration::ZERO))
 }
 
 /// Each run in `runs` whose id starts with one of `prefixes`, or every run without any, as `ls`
@@ -1115,13 +1114,20 @@ fn follow(record: &Record, command: &str, runs: Option<&str>) -> Result<ExitCode
 const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
-/// says each of its milestones meanwhile, as its log records it ([`progress::milestones`]).
+/// says each of its milestones meanwhile, as its log records it ([`progress::milestones`]), and,
+/// once, the parts of its log that can't be read, if any ([`progress::unread`]).
 fn followed(record: &Record) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
+    let mut said_unread = false;
     loop {
         // How it ended first, so that the log read after holds every milestone before the end.
         let ending = record.ending()?;
-        if let Some(progress) = record.progress()? {
+        let runtime::Readout { progress, unread } = record.progress()?;
+        if !said_unread && let Some(unread) = progress::unread(&unread) {
+            say(format_args!("run {}: {unread}", record.id()));
+            said_unread = true;
+        }
+        if let Some(progress) = progress {
             for milestone in progress::milestones(&progress) {
                 if said.insert(milestone.clone()) {
                     say(milestone);
@@ -1190,7 +1196,8 @@ fn end(
     match judge_stderr {
         Some(Ok(path)) => show_judge_stderr(path),
         Some(Err(error)) => say(format_args!(
-            "the final judge's standard error can't be found: {error}"
+            "the final judge's standard error can't be found: {}",
+            escaped(error)
         )),
         None => {}
     }

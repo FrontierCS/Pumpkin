@@ -110,8 +110,18 @@ impl UnixTime {
         Ok(Self(since?))
     }
 
+    /// The time `since` after the Unix epoch.
+    pub const fn after_epoch(since: Duration) -> Self {
+        Self(since)
+    }
+
     pub const fn since_epoch(self) -> Duration {
         self.0
+    }
+
+    /// How long after `earlier` it is, or zero if it is before `earlier`, as by a clock set back.
+    pub const fn since(self, earlier: Self) -> Duration {
+        self.0.saturating_sub(earlier.0)
     }
 
     /// The time `duration` after it, or the latest one if that is past what a `Duration` holds.

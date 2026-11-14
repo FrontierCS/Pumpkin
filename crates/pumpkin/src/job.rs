@@ -525,7 +525,7 @@ fn ids(dir: &Path) -> Result<Vec<String>, String> {
 /// of the engine of the configuration at `config` ([`collect`]), sparing what the jobs in `jobs`
 /// hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
-    let cutoff = crate::unix_now().saturating_sub(KEPT);
+    let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
     for repo in fs::read_dir(home.join(TREES)).into_iter().flatten() {
         let repo = repo.context("listing the trees failed")?.path();

@@ -7,10 +7,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use provider::UnixTime;
 use runtime::{
-    CallEnd, CallSpan, Closed, Ending, LeaseCommand, LeaseSpan, Place, Progress, Record, Sandbox,
-    Work,
+    CallEnd, CallSpan, Closed, Direction, Ending, LeaseSpan, Place, Progress, Readout, Record,
+    Sandbox, Unread, Work,
 };
+use schema::sandbox::ExitStatus;
+use schema::sandbox::op::{CommandEnd, TransferEnd};
 use stdx::Utc;
 
 use crate::next;
@@ -26,8 +29,10 @@ const LISTED_FOR: Duration = Duration::from_hours(24);
 
 /// Before when, since the Unix epoch, a run that ended is left out of `ls`, at `now`, given its
 /// `prefixes`: none once a prefix names the runs to list.
-pub(crate) fn listed_since(prefixes: &[String], now: Duration) -> Option<Duration> {
-    prefixes.is_empty().then(|| now.saturating_sub(LISTED_FOR))
+pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<Duration> {
+    prefixes
+        .is_empty()
+        .then(|| now.since_epoch().saturating_sub(LISTED_FOR))
 }
 
 /// What `ls` lists: runs, by id, and the ids of the runs that it leaves out, as they ended before
@@ -62,12 +67,17 @@ pub(crate) struct Run {
 }
 
 impl Listed {
-    /// The run of `record`, which ended as `ending` says, or is live.
+    /// The run of `record`, which ended as `ending` says, or is live; says the parts of its log
+    /// that can't be read ([`unread`]), if any.
     pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, String> {
+        let Readout { progress, unread } = record.progress()?;
+        if let Some(unread) = self::unread(&unread) {
+            crate::say(format_args!("run {}: {unread}", record.id()));
+        }
         Ok(Self::Run(Box::new(Run {
             task: record.task()?,
             ending,
-            progress: record.progress()?,
+            progress,
             asked: runtime::minted(record.id()),
         })))
     }
@@ -137,10 +147,10 @@ impl State {
 }
 
 /// The lines of `ls` of `listing`, its runs by id, so oldest first, and so the live ones, which
-/// started last, nearest the line of totals that follows them, each ending in a newline, at `now`,
-/// since the Unix epoch; then that line, which ends with the command that lists the runs left out,
+/// started last, nearest the line of totals that follows them, each ending in a newline, at `now`;
+/// then that line, which ends with the command that lists the runs left out,
 /// unless there are none; `runs` is their runs directory, as commands name it.
-pub(crate) fn lines(listing: &Listing, now: Duration, runs: Option<&str>) -> String {
+pub(crate) fn lines(listing: &Listing, now: UnixTime, runs: Option<&str>) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
     for (id, listed) in &listing.runs {
@@ -189,6 +199,17 @@ fn prefixes(ids: &BTreeSet<String>) -> Vec<String> {
     vec![common.to_owned()]
 }
 
+/// What a reader of a run's log says of the parts of it that it leaves out, `unread`, if there
+/// are any: how many, and where the first is and why it can't be read.
+pub(crate) fn unread(unread: &[Unread]) -> Option<String> {
+    let first = unread.first()?;
+    Some(format!(
+        "{} of its log can't be read by this pumpkin, the first at {}",
+        crate::counted(unread.len(), "part"),
+        crate::escaped(&first.to_string())
+    ))
+}
+
 /// What the runs that `ls` lists come to.
 #[derive(Default)]
 struct Totals {
@@ -196,8 +217,8 @@ struct Totals {
     states: BTreeMap<State, usize>,
     /// How many finished without a score.
     unscored: usize,
-    /// When the last of the live runs ends at the latest, since the Unix epoch.
-    ends: Option<Duration>,
+    /// When the last of the live runs ends at the latest.
+    ends: Option<UnixTime>,
     /// What the runs' sandboxes cost, in dollars, at their classes' prices, and whether some
     /// lasted in a class without one.
     usd: Option<f64>,
@@ -248,7 +269,7 @@ impl Totals {
             }
         }
         if let Some(ends) = self.ends {
-            let Utc { hour, minute, .. } = Utc::from_unix(ends.as_secs());
+            let Utc { hour, minute, .. } = Utc::from_unix(ends.since_epoch().as_secs());
             let _ = write!(line, "; every live run ends by {hour:02}:{minute:02} UTC");
         }
         line
@@ -262,13 +283,14 @@ fn cost(progress: &Progress) -> Option<(f64, bool)> {
 }
 
 /// The line of `ls` of `listed`, run `id`, at `now`.
-fn line(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String {
+fn line(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
     let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| {
         format!("{id} {state:<11} {time:>7}  {bound:<9} {usd:>7}  {rest}")
     };
     let state = listed.state().name();
-    let since =
-        |asked: &Option<Duration>| asked.map(|asked| column_span(now.saturating_sub(asked)));
+    let since = |asked: &Option<Duration>| {
+        asked.map(|asked| column_span(now.since_epoch().saturating_sub(asked)))
+    };
     let run = match listed {
         Listed::Building { asked } | Listed::Waiting { asked } => {
             return column(state, since(asked).as_deref().unwrap_or("-"), "", "-", "-");
@@ -300,7 +322,7 @@ fn line(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String 
                 task,
             );
         };
-        let at = now.saturating_sub(progress.started);
+        let at = now.since(progress.started);
         let cancel = next::of_run("cancel", runs, id);
         let (name, time, bound, doing) = shown(phase(progress, at), at, &cancel);
         return column(&name, &time, &bound, &usd, &format!("{task}: {doing}"));
@@ -320,7 +342,7 @@ fn line(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String 
 
 /// The lines of `ls` under the line of `listed`, run `id`, at `now`, each ending in a newline:
 /// of a live run, one for each judge call of a grant and each lease that hasn't ended.
-fn under(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String {
+fn under(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
     let mut lines = String::new();
     let Listed::Run(run) = listed else {
         return lines;
@@ -328,7 +350,7 @@ fn under(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String
     let (None, Some(progress)) = (&run.ending, &run.progress) else {
         return lines;
     };
-    let at = now.saturating_sub(progress.started);
+    let at = now.since(progress.started);
     let cancel = next::of_run("cancel", runs, id);
     for child in children(progress, at) {
         let (name, time, bound, doing) = shown(child, at, &cancel);
@@ -645,17 +667,20 @@ fn column_span(span: Duration) -> String {
 /// how long its runner lived and was charged for, and busy, its commands and how it ended, in the
 /// order the core began them, under a call its own model requests; the run's model requests, how
 /// they were answered and the tokens reported; and the sandboxes of each place, how long they
-/// lasted, and how many were deleted. `None` for a run that has no log.
+/// lasted, and how many were deleted; and the parts of its log that can't be read ([`unread`]).
+/// Of a run whose log records no start, only those parts; `None` if there are none.
 pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
-    let Some(progress) = record.progress()? else {
-        return Ok(None);
+    let Readout { progress, unread } = record.progress()?;
+    let unread = self::unread(&unread);
+    let Some(progress) = progress else {
+        return Ok(unread.map(|unread| format!("run {}: {unread}\n", record.id())));
     };
     let ran = span(progress.end.unwrap_or(progress.last));
     let mut summary = match runtime::minted(record.id()) {
         Some(asked) => format!(
             "run {} started {} after it was asked for, and ran {ran}:\n",
             record.id(),
-            span(progress.started.saturating_sub(asked))
+            span(progress.started.since_epoch().saturating_sub(asked))
         ),
         None => format!("run {} ran {ran}:\n", record.id()),
     };
@@ -666,7 +691,7 @@ pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
     }
     match &agent.end {
         Some((at, runtime::AgentEnd::Exited(status))) => {
-            let _ = write!(line, ", {} at {}", exited(status), clock(*at));
+            let _ = write!(line, ", {} at {}", exited(*status), clock(*at));
         }
         Some((at, runtime::AgentEnd::Failed(reason))) => {
             let reason = crate::escaped(reason);
@@ -706,6 +731,9 @@ pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
         let _ = writeln!(summary, "  model: {}", model(&progress.model));
     }
     let _ = writeln!(summary, "  sandboxes: {}", sandboxes(&progress));
+    if let Some(unread) = unread {
+        let _ = writeln!(summary, "  {unread}");
+    }
     Ok(Some(summary))
 }
 
@@ -837,47 +865,42 @@ fn lease_end(lease: &LeaseSpan) -> String {
 
 /// A lease's command or transfer, on one line ([`crate::escaped`]), and how it ended, or that it
 /// runs.
-fn command(command: &LeaseCommand) -> String {
+fn command(work: &Work) -> String {
     let shown = |text: &str, chars| clipped(&crate::escaped(text), chars);
-    let what = match &command.work {
-        Work::Command(argv) => format!("`{}`", shown(&argv.join(" "), COMMAND_SHOWN_CHARS)),
+    let (what, ended) = match work {
+        Work::Command { argv, end } => {
+            let ended = end.map(|end| match end {
+                CommandEnd::TimedOut => "timed out".to_owned(),
+                CommandEnd::Unstarted => "didn't start".to_owned(),
+                CommandEnd::Exited(status) => exited(status),
+            });
+            let what = format!("`{}`", shown(&argv.join(" "), COMMAND_SHOWN_CHARS));
+            (what, ended)
+        }
         Work::Transfer {
             direction,
             from,
             to,
+            end,
         } => {
             let (from, to) = (shown(from, PATH_SHOWN_CHARS), shown(to, PATH_SHOWN_CHARS));
-            // A put with `--replace` is logged as the direction `replace`.
-            match direction.as_str() {
-                "replace" => format!("put {from} to {to}, replacing it"),
-                direction => format!("{direction} {from} to {to}"),
-            }
+            let what = match direction {
+                Direction::Put => format!("put {from} to {to}"),
+                Direction::Replace => format!("put {from} to {to}, replacing it"),
+                Direction::Get => format!("get {from} to {to}"),
+            };
+            let ended = end.as_ref().map(|end| match end {
+                TransferEnd::Moved { entries, bytes } => format!(
+                    "moved {}, {}",
+                    crate::counted(*entries, "entry"),
+                    crate::counted(*bytes, "byte")
+                ),
+                TransferEnd::Failed(reason) => format!("failed: {}", crate::escaped(reason)),
+            });
+            (what, ended)
         }
     };
-    let Some(end) = &command.end else {
-        return format!("{what} running");
-    };
-    let moved = &end["moved"];
-    let ended = match end.as_str() {
-        Some("timed_out") => "timed out".to_owned(),
-        Some("unstarted") => "didn't start".to_owned(),
-        Some(other) => format!("ended {other}"),
-        None if end["exited"].is_object() => exited(&end["exited"]),
-        None if moved.is_object() => match (moved["entries"].as_u64(), moved["bytes"].as_u64()) {
-            (Some(entries), Some(bytes)) => format!(
-                "moved {}, {}",
-                crate::counted(entries, "entry"),
-                crate::counted(bytes, "byte")
-            ),
-            _ => format!("ended {end}"),
-        },
-        None if end["failed"].is_string() => {
-            let reason = end["failed"].as_str().unwrap_or_default();
-            format!("failed: {}", crate::escaped(reason))
-        }
-        None => format!("ended {end}"),
-    };
-    format!("{what} {ended}")
+    format!("{what} {}", ended.as_deref().unwrap_or("running"))
 }
 
 /// The most characters of what a judge returned that a summary shows.
@@ -897,12 +920,11 @@ fn clipped(text: &str, chars: usize) -> String {
     }
 }
 
-/// How an agent's command ended, from its status as the log gives it.
-fn exited(status: &serde_json::Value) -> String {
-    match (status["code"].as_i64(), status["signal"].as_i64()) {
-        (Some(code), _) => format!("exited {code}"),
-        (None, Some(signal)) => format!("ended by signal {signal}"),
-        (None, None) => format!("ended with status {status}"),
+/// How a command ended, from its exit `status`.
+fn exited(status: ExitStatus) -> String {
+    match status {
+        ExitStatus::Code(code) => format!("exited {code}"),
+        ExitStatus::Signal(signal) => format!("ended by signal {signal}"),
     }
 }
 

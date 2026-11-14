@@ -425,7 +425,12 @@ fn reads_model_answers() {
     }
     log.push('\n');
     fs::write(record.join("log.jsonl"), log).unwrap();
-    let progress = Record::open(&record).unwrap().progress().unwrap().unwrap();
+    let progress = Record::open(&record)
+        .unwrap()
+        .progress()
+        .unwrap()
+        .progress
+        .unwrap();
     expect![[r#"
         ModelUse {
             requests: 6,
@@ -518,7 +523,12 @@ fn reads_unended_commands() {
         log.push('\n');
     }
     fs::write(record.join("log.jsonl"), log).unwrap();
-    let progress = Record::open(&record).unwrap().progress().unwrap().unwrap();
+    let progress = Record::open(&record)
+        .unwrap()
+        .progress()
+        .unwrap()
+        .progress
+        .unwrap();
     let sandboxes = progress.sandboxes().into_iter();
     let used = sandboxes.map(|(place, used)| format!("{}: {:?}", place.class, used.charged));
     expect![[r#"
@@ -526,6 +536,50 @@ fn reads_unended_commands() {
         expired: Some((3s, 2s))
         stopped: Some((10s, 9s))"#]]
     .assert_eq(&used.collect::<Vec<_>>().join("\n"));
+}
+
+// Unknown kinds read as nothing, a start without its hard end as no start; a line, event or action
+// that doesn't read is left out and given, and the rest of its line counts.
+#[test]
+fn reads_other_builds_lines() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
+    let later = r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"later","job":0},"actions":[{"kind":"later"}]}"#;
+    let unnumbered =
+        r#"{"seq":2,"at_ns":"2000000000","event":{"kind":"judge_started"},"actions":[]}"#;
+    let killed = r#"{"seq":3,"at_ns":"3000000000","event":{"kind":"command_ended","lease":0,"end":"killed"},"actions":[]}"#;
+    let ungranted = r#"{"seq":4,"at_ns":"4000000000","event":{"kind":"agent_started"},"actions":[{"kind":"start_lease","lease":0},{"kind":"finish"}]}"#;
+    let leased = r#"{"seq":5,"at_ns":"5000000000","event":{"kind":"model_answered","caller":"lease-1","upstream_status":200,"answer":{"kind":"forwarded"}},"actions":[]}"#;
+    let unbounded = r#"{"seq":0,"at_ns":"0","event":{"kind":"run_started","unix_ns":"0"},"actions":[{"kind":"start_agent"}]}"#;
+    let untimed =
+        r#"{"seq":0,"at_ns":"0","event":{"kind":"run_started","hard_end_ns":"0"},"actions":[]}"#;
+    let mut read = Vec::new();
+    let logs = [
+        &[started, later][..],
+        &[unbounded, later],
+        &[started, unnumbered, "{\"seq\":", killed, later],
+        &[started, ungranted, leased],
+        &[untimed, later],
+    ];
+    for lines in logs {
+        let mut log = lines.join("\n");
+        log.push('\n');
+        fs::write(record.join("log.jsonl"), log).unwrap();
+        let readout = Record::open(&record).unwrap().progress().unwrap();
+        let progress = (readout.progress)
+            .map(|progress| (progress.last, progress.agent.sandbox.started, progress.end));
+        read.push(format!("{progress:?} {:?}", readout.unread));
+    }
+    expect![[r#"
+        Some((1s, None, None)) []
+        None []
+        Some((3s, None, None)) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 3, part: Line, reason: "EOF while parsing a value, at column 7" }, Unread { line: 4, part: Event, reason: "unknown variant `killed`, expected one of `exited`, `timed_out`, `unstarted`" }]
+        Some((5s, Some(4s), Some(4s))) [Unread { line: 2, part: Action(0), reason: "missing field `grant`" }, Unread { line: 3, part: Event, reason: "lease-1 is no caller: expected `agent` or `job-<n>`" }]
+        None [Unread { line: 1, part: Event, reason: "missing field `unix_ns`" }]"#]].assert_eq(&read.join("\n"));
 }
 
 // The spans that a record's reader takes from its log, of a judge call and two leases, each
@@ -560,7 +614,7 @@ fn reads_core_times() {
 {"seq":4,"at_ns":"8000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":0},"actions":[]}
 {"seq":5,"at_ns":"9000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":1},"actions":[]}
 {"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"tick"},"actions":[{"kind":"run_command","lease":0,"command":0,"argv":[]},{"kind":"run_command","lease":1,"command":0,"argv":[]}]}
-{"seq":7,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0},"actions":[]}
+{"seq":7,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0,"end":{"exited":{"code":0}}},"actions":[]}
 {"seq":8,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
 {"seq":9,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
 {"seq":10,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"judge_exited","job":0},"actions":[]}
@@ -568,7 +622,12 @@ fn reads_core_times() {
 {"seq":12,"at_ns":"25000000000","event":{"kind":"sandbox_deleted","sandbox":"lease-1"},"actions":[]}
 "#;
     fs::write(record.join("log.jsonl"), log).unwrap();
-    let progress = Record::open(&record).unwrap().progress().unwrap().unwrap();
+    let progress = Record::open(&record)
+        .unwrap()
+        .progress()
+        .unwrap()
+        .progress
+        .unwrap();
     let sandboxes = progress.sandboxes().into_iter();
     let charged = sandboxes.map(|(place, used)| format!("{}: {:?}", place.class, used.charged));
     let calls = (progress.calls.iter()).map(|call| {

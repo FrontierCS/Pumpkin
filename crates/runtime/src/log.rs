@@ -19,32 +19,40 @@
 //! by their names in the workflow, jobs, ops and leases by their numbers, payloads by size and
 //! digest, and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
 //! anything longer; a status's job, a number the agent gave, is a decimal string too. A `caller`
-//! or `holder` is as [`caller_json`] gives it. `start_judge` names the agent's grant of the call,
-//! or `null` for the score, `start_lease` the lease's grant; a `transfer` gives its paths, and
-//! its `transfer_ended` its sizes, never what it moved. A reply is the
-//! [`OpReply`](schema::sandbox::op::OpReply) sent.
+//! or `holder` is its sandbox's name in the run, `agent`, or `job-<n>` for job `n`'s call.
+//! `start_judge` names the agent's grant of the call, or `null` for the score, `start_lease` the
+//! lease's grant; a `transfer` gives its paths, and its `transfer_ended` its sizes, never what it
+//! moved. A reply is the [`OpReply`](schema::sandbox::op::OpReply) sent.
 
 use std::collections::BTreeMap;
+use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Caller, Direction, Event, Failure, JudgeResult, Outcome, PayloadRef, Request,
-    Submission, Verdict, WorkEnd,
+    Action, Caller, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict,
+    WorkEnd,
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
 use route::{Answer, Usage};
 use schema::ir::{Gpu, GpuModel, Name};
+use schema::sandbox::ExitStatus;
+use schema::sandbox::op::{CommandEnd, TransferEnd};
 use schema::workflow::{JudgeCall, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
 
-use super::sandbox::Deleted;
+use super::sandbox::{Deleted, SandboxName};
 use super::{Clock, Durable, Host, record};
+
+mod logged;
+
+pub use logged::Direction;
+use logged::{Collected, Line};
 
 /// The run log, open for appending: each record's `at_ns` is when the log wrote it, by the run's
 /// clock, so no record's `at_ns` is before the one's before it; synced on the run's host, `H`.
@@ -186,7 +194,7 @@ impl<'h, H: Host> Log<'h, H> {
         };
         let mut event = json!({
             "kind": "model_answered",
-            "caller": caller_json(caller),
+            "caller": logged::Caller::from(caller),
             "request": request,
             "upstream_status": upstream_status,
             "answer": answer,
@@ -347,7 +355,7 @@ fn event_json(event: &Event) -> Value {
         } => json!({
             "kind": "op_arrived",
             "op": op.0,
-            "caller": caller_json(*caller),
+            "caller": logged::Caller::from(*caller),
             "request": request_json(request),
         }),
         Event::JudgeStarted { job } => json!({ "kind": "judge_started", "job": job.0 }),
@@ -460,15 +468,6 @@ fn request_json(request: &Request) -> Value {
     }
 }
 
-/// The JSON form of an op's caller, or a lease's holder: its sandbox's name in the run, `agent`,
-/// or `job-<n>` for job `n`'s call.
-fn caller_json(caller: Caller) -> String {
-    match caller {
-        Caller::Agent => "agent".to_owned(),
-        Caller::Job(job) => format!("job-{}", job.0),
-    }
-}
-
 /// The JSON form of an action.
 #[expect(clippy::too_many_lines, reason = "one arm per action")]
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
@@ -502,7 +501,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         } => json!({
             "kind": "start_lease",
             "lease": lease.0,
-            "holder": caller_json(*holder),
+            "holder": logged::Caller::from(*holder),
             "grant": workflow.lease_grant(*grant).name.as_str(),
             "instance": instance,
             "start_by_ns": nanos(*start_by),
@@ -527,9 +526,11 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             max_bytes,
         } => {
             let (direction, from, to) = match direction {
-                Direction::Put { tree, to, replace } if *replace => ("replace", tree, to),
-                Direction::Put { tree, to, .. } => ("put", tree, to),
-                Direction::Get { from, to } => ("get", from, to),
+                decision::Direction::Put { tree, to, replace } if *replace => {
+                    (Direction::Replace, tree, to)
+                }
+                decision::Direction::Put { tree, to, .. } => (Direction::Put, tree, to),
+                decision::Direction::Get { from, to } => (Direction::Get, from, to),
             };
             json!({
                 "kind": "transfer",
@@ -612,13 +613,14 @@ pub struct Place {
     pub class: String,
 }
 
-/// What a run's record says of it so far, as [`Record::progress`](crate::Record::progress)
-/// reads its log, with the bounds of its workflow and of its roles' classes. Each time is since
-/// the run started, as the log gives times.
-#[derive(Debug, Default)]
+/// What a run's log, as far as this build can read it ([`Readout`]), says of the run so far,
+/// with the bounds of its workflow and of its roles' classes.
+///
+/// Each time is since the run started, as the log gives times.
+#[derive(Debug)]
 pub struct Progress {
-    /// When the run started, since the Unix epoch, by the driving machine's clock.
-    pub started: Duration,
+    /// When the run started, by the driving machine's clock.
+    pub started: UnixTime,
     /// When the core abandons the run if it is still going.
     pub hard_end: Duration,
     /// The work phase's deadline, counted from the agent's start.
@@ -639,6 +641,49 @@ pub struct Progress {
     /// The price of each class of the run's providers that declared one, in dollars an hour, by
     /// its place, as `provider.json` records it.
     pub prices: BTreeMap<Place, f64>,
+}
+
+/// What [`Record::progress`](crate::Record::progress) reads of a run's log.
+///
+/// The run's progress, once the log records its start with its hard end, and each part of the
+/// log that this build can't read, in the log's order, which the progress leaves out.
+#[derive(Debug)]
+pub struct Readout {
+    pub progress: Option<Progress>,
+    pub unread: Vec<Unread>,
+}
+
+/// A part of a run log's line that this build can't read: it isn't JSON, or it is of a kind
+/// this build knows but lacks a field of that kind's, or holds one in another form.
+#[derive(Debug)]
+pub struct Unread {
+    /// Its line's number in the log, counting from 1.
+    pub line: u64,
+    pub part: Part,
+    /// Why it doesn't read.
+    pub reason: String,
+}
+
+/// Which part of a line doesn't read: the line, so none of it reads; its event; or its action
+/// at an index, from 0, among those it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Line,
+    Event,
+    Action(usize),
+}
+
+/// Where it is, and why it doesn't read: `line 4: <reason>`, `line 4, its event: <reason>` or,
+/// for the action at index 1, `line 4, its action 2: <reason>`.
+impl fmt::Display for Unread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { line, part, reason } = self;
+        match part {
+            Part::Line => write!(f, "line {line}: {reason}"),
+            Part::Event => write!(f, "line {line}, its event: {reason}"),
+            Part::Action(index) => write!(f, "line {line}, its action {}: {reason}", index + 1),
+        }
+    }
 }
 
 /// A sandbox of the run, whatever started it, from the core's start of it, at `asked`.
@@ -673,10 +718,10 @@ pub struct AgentSpan {
     pub end: Option<(Duration, AgentEnd)>,
 }
 
-/// How the agent ended: its command's exit, with its status as the log gives it, or its failure.
+/// How the agent ended: its command's exit, with its status, or its failure.
 #[derive(Debug)]
 pub enum AgentEnd {
-    Exited(Value),
+    Exited(ExitStatus),
     Failed(String),
 }
 
@@ -719,7 +764,7 @@ pub struct LeaseSpan {
     pub closed: Option<(Duration, Closed)>,
     /// How many commands and transfers it ran, and the last.
     pub commands: u64,
-    pub last: Option<LeaseCommand>,
+    pub last: Option<Work>,
     /// Why it failed, if it did.
     pub failed: Option<String>,
     /// How long it was busy, until the command or transfer that runs, if one does, began.
@@ -738,22 +783,19 @@ pub enum Closed {
     Expired,
 }
 
-/// A command or a transfer a lease ran, and how it ended, as the log gives it, once it has.
-#[derive(Debug)]
-pub struct LeaseCommand {
-    pub work: Work,
-    pub end: Option<Value>,
-}
-
-/// What a lease ran: a command's `argv`, or a transfer, `put` into the runner, `replace` for a
-/// put that replaces its destination, or `get` out of it, from a path to a path.
+/// What a lease ran, and how it ended, once it has: a command, its `argv`, or a transfer of a
+/// tree, from a path to a path.
 #[derive(Debug)]
 pub enum Work {
-    Command(Vec<String>),
+    Command {
+        argv: Vec<String>,
+        end: Option<CommandEnd>,
+    },
     Transfer {
-        direction: String,
+        direction: Direction,
         from: String,
         to: String,
+        end: Option<TransferEnd>,
     },
 }
 
@@ -782,6 +824,22 @@ impl LeaseSpan {
     fn until(&self, now: Duration) -> Duration {
         let closed = self.closed.map(|(at, _)| at);
         closed.or(self.sandbox.gone).unwrap_or(now)
+    }
+
+    /// Notes that its last command, if it ran one, ended at `at`, as `end` says.
+    fn command_ended(&mut self, at: Duration, end: CommandEnd) {
+        if let Some(Work::Command { end: last, .. }) = &mut self.last {
+            *last = Some(end);
+            self.rest(at);
+        }
+    }
+
+    /// Notes that its last transfer, if it ran one, ended at `at`, as `end` says.
+    fn transfer_ended(&mut self, at: Duration, end: TransferEnd) {
+        if let Some(Work::Transfer { end: last, .. }) = &mut self.last {
+            *last = Some(end);
+            self.rest(at);
+        }
     }
 
     /// Ends its busy time at `at`, if it is busy, or at its charge's end, if that came first.
@@ -833,35 +891,35 @@ pub struct Tokens {
     pub reasoning: Option<u64>,
 }
 
-/// Takes each record of the run log of the record in `dir` in turn, by `take`; false if there is
-/// no log. A last line without its newline, one being written or that a crash cut short, is left
-/// out.
+/// Takes each line of the run log of the record in `dir` whose frame reads, as a [`Line`] of
+/// the parts of it that read, in turn, by `take`, and returns the parts that don't; `None` if
+/// there is no log. A last line without its newline, one being written or that a crash cut
+/// short, is left out.
 ///
 /// # Errors
 ///
-/// Fails if the log can't be read, or a whole line of it isn't JSON, which no log that a run
-/// wrote holds: a judge's result nests no deeper than a line can hold
-/// ([`RESULT_MAX_DEPTH`](schema::sandbox::RESULT_MAX_DEPTH)).
-fn records(dir: &Path, mut take: impl FnMut(&Value)) -> Result<bool, String> {
+/// Fails if the log can't be read.
+fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>, String> {
     let path = dir.join("log.jsonl");
     let log = match File::open(&path) {
         Ok(log) => log,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context(path.display()),
     };
     let mut log = BufReader::new(log);
     let mut line = Vec::new();
+    let mut unread = Vec::new();
     for number in 1.. {
         line.clear();
         log.read_until(b'\n', &mut line).context(path.display())?;
         let Some(whole) = line.strip_suffix(b"\n") else {
             break;
         };
-        let record: Value = serde_json::from_slice(whole)
-            .context(format_args!("{}, line {number}", path.display()))?;
-        take(&record);
+        if let Some(record) = Line::read(whole, number, &mut unread) {
+            take(record);
+        }
     }
-    Ok(true)
+    Ok(Some(unread))
 }
 
 /// The final judge's job: the one that the run log of the record in `dir` names in its
@@ -869,60 +927,86 @@ fn records(dir: &Path, mut take: impl FnMut(&Value)) -> Result<bool, String> {
 ///
 /// # Errors
 ///
-/// Fails as [`records`] does, or if the log names no such job.
+/// Fails if the log can't be read, or doesn't name such a job.
 pub(super) fn final_judge(dir: &Path) -> Result<u64, String> {
     let mut job = None;
-    let logged = records(dir, |record| {
-        let actions = record["actions"].as_array().into_iter().flatten();
-        let mut started = actions.filter(|action| action["kind"] == "start_judge");
-        let started = started.find(|action| action["grant"].is_null());
-        job = job.or_else(|| started?["job"].as_u64());
+    let unread = records(dir, |line| {
+        let started = line.actions.iter().find_map(logged::Action::score_job);
+        job = job.or(started);
     })?;
     let path = dir.join("log.jsonl");
-    match (logged, job) {
+    match (unread, job) {
         (_, Some(job)) => Ok(job),
-        (false, None) => Err(format!(
+        (None, None) => Err(format!(
             "{} doesn't exist: expected a run's log",
             path.display()
         )),
-        (true, None) => Err(format!(
-            "{} names no final judge: expected a `start_judge` without a grant",
-            path.display()
-        )),
+        (Some(unread), None) => {
+            let mut error = format!(
+                "{} names no final judge: expected a `start_judge` without a grant",
+                path.display()
+            );
+            if let Some(first) = unread.first() {
+                let _ = write!(
+                    error,
+                    ", among the parts that this pumpkin can read; {} of its parts can't be read, \
+                     the first at {first}",
+                    unread.len(),
+                );
+            }
+            Err(error)
+        }
     }
 }
 
-/// Reads what the record in `dir` says of its run so far ([`Progress`]); `None` if its run log
-/// doesn't record the run's start yet.
+/// Reads what the record in `dir` says of its run so far ([`Readout`]).
 ///
 /// # Errors
 ///
-/// Fails if a file can't be read, or as [`records`] does.
-pub(super) fn progress(dir: &Path) -> Result<Option<Progress>, String> {
+/// Fails if a file of the record can't be read, or its `ir.json` or `provider.json` isn't JSON.
+pub(super) fn progress(dir: &Path) -> Result<Readout, String> {
     let ir = json_file(&dir.join("ir.json"))?;
     let provided = json_file(&dir.join("provider.json"))?;
     let roles = Roles::of(&ir, &provided);
     let mut reading = Reading::default();
-    if !records(dir, |record| reading.take(record, &roles))? {
-        return Ok(None);
-    }
-    // The run makes its log, then logs its start in it.
-    let Some((started, hard_end)) = reading.started else {
-        return Ok(None);
+    let unread = records(dir, |line| reading.take(&line, &roles))?.unwrap_or_default();
+    let Reading {
+        started,
+        last,
+        mut agent,
+        calls,
+        leases,
+        model,
+        work_end,
+        end,
+    } = reading;
+    let Some((started, hard_end)) = started else {
+        return Ok(Readout {
+            progress: None,
+            unread,
+        });
     };
-    let mut progress = reading.progress;
-    progress.started = started;
-    progress.hard_end = hard_end;
-    progress.agent.sandbox = Sandbox {
-        started: progress.agent.sandbox.started,
-        gone: progress.agent.sandbox.gone,
+    agent.sandbox = Sandbox {
+        started: agent.sandbox.started,
+        gone: agent.sandbox.gone,
         deleted: deleted(&dir.join("agent"))?,
-        gpus: progress.agent.sandbox.gpus.take(),
+        gpus: agent.sandbox.gpus.take(),
         ..roles.sandbox(Some(&roles.agent_role), Duration::ZERO)
     };
-    progress.agent.routed = roles.routed;
-    progress.deadline = roles.deadline;
-    progress.prices.clone_from(&roles.prices);
+    agent.routed = roles.routed;
+    let mut progress = Progress {
+        started,
+        hard_end,
+        deadline: roles.deadline,
+        last,
+        agent,
+        calls,
+        leases,
+        model,
+        work_end,
+        end,
+        prices: roles.prices,
+    };
     for lease in &mut progress.leases {
         lease.sandbox.deleted = deleted(&dir.join(format!("leases/{}", lease.lease)))?;
     }
@@ -935,7 +1019,10 @@ pub(super) fn progress(dir: &Path) -> Result<Option<Progress>, String> {
         let evidence = job.join(schema::sandbox::evidence_dir().as_str());
         call.evidence = evidence.is_dir().then_some(evidence);
     }
-    Ok(Some(progress))
+    Ok(Readout {
+        progress: Some(progress),
+        unread,
+    })
 }
 
 /// The JSON in `path`, or `null` if there is no such file.
@@ -1064,52 +1151,59 @@ struct Grant {
     ready_for: Option<Duration>,
 }
 
-/// A log as far as it has been read.
+/// A log as far as it has been read: what its lines say, each as [`Progress`]'s field of its
+/// name holds it.
 #[derive(Default)]
 struct Reading {
-    /// When the run started, since the Unix epoch, and its hard end, once its start is read.
-    started: Option<(Duration, Duration)>,
-    progress: Progress,
+    /// When the run started, and its hard end, once its start is read.
+    started: Option<(UnixTime, Duration)>,
+    last: Duration,
+    agent: AgentSpan,
+    calls: Vec<CallSpan>,
+    leases: Vec<LeaseSpan>,
+    model: ModelUse,
+    work_end: Option<Duration>,
+    end: Option<Duration>,
 }
 
 impl Reading {
-    /// Takes in `record`, a line of the log of a run whose roles are `roles`.
-    fn take(&mut self, record: &Value, roles: &Roles) {
-        let written = time(&record["at_ns"]).unwrap_or_default();
-        self.progress.last = self.progress.last.max(written);
-        let at = when(record);
-        self.event(at, &record["event"]);
-        let event = &record["event"];
-        let actions = record["actions"].as_array().into_iter().flatten();
-        let closed = if event["request"]["kind"] == "lease_close" {
+    /// Takes in `line`, a line of the log of a run whose roles are `roles`.
+    fn take(&mut self, line: &Line, roles: &Roles) {
+        self.last = self.last.max(line.at_ns);
+        let at = line.when();
+        let event = line.event.as_ref();
+        if let Some(event) = event {
+            self.event(at, event);
+        }
+        let request = event.and_then(logged::Event::request);
+        let closed = if matches!(request, Some(logged::Request::LeaseClose)) {
             Closed::Asked
-        } else if actions
-            .clone()
-            .any(|action| action["kind"] == "tear_down_agent")
+        } else if (line.actions.iter())
+            .any(|action| matches!(action, logged::Action::TearDownAgent))
         {
             Closed::WorkEnded
         } else {
             Closed::Expired
         };
         // A judge call's end closes the leases it holds.
-        let kind = event["kind"].as_str().unwrap_or_default();
-        let ended = (kind.starts_with("judge_"))
-            .then(|| event["job"].as_u64())
-            .flatten();
-        let progress = &mut self.progress;
-        if let Some(note) = record["note"].as_str()
+        let ended = event.and_then(logged::Event::judge_job);
+        // A holder may ask, at open, for a shorter life than its grant's.
+        let asked = match request {
+            Some(logged::Request::LeaseOpen { instance_seconds }) => {
+                instance_seconds.map(Duration::from_secs)
+            }
+            Some(logged::Request::LeaseClose | logged::Request::Other) | None => None,
+        };
+        if let Some(note) = &line.note
             && note.starts_with("collected from the agent's sandbox")
         {
-            progress.agent.sandbox.gone = Some(at);
+            self.agent.sandbox.gone = Some(at);
         }
-        for action in actions {
-            progress.action(at, action, (closed, ended), roles);
-            // A holder may ask, at open, for a shorter life than its grant's.
-            let asked = event["request"]["instance_seconds"].as_u64();
-            if let (Some(seconds), "start_lease") = (asked, action["kind"].as_str().unwrap_or(""))
-                && let Some(lease) = lease(progress, action)
+        for action in &line.actions {
+            self.action(at, action, (closed, ended), roles);
+            if let (Some(asked), logged::Action::StartLease { lease, .. }) = (asked, action)
+                && let Some(lease) = self.lease(*lease)
             {
-                let asked = Duration::from_secs(seconds);
                 lease.ready_for = Some(lease.ready_for.map_or(asked, |most| most.min(asked)));
             }
         }
@@ -1117,86 +1211,110 @@ impl Reading {
 
     /// Takes in `event`, observed at `at`.
     #[expect(clippy::too_many_lines, reason = "one arm per kind of event")]
-    fn event(&mut self, at: Duration, event: &Value) {
-        let progress = &mut self.progress;
-        match event["kind"].as_str() {
-            Some("run_started") => {
-                self.started = time(&event["unix_ns"]).zip(time(&event["hard_end_ns"]));
+    fn event(&mut self, at: Duration, event: &logged::Event) {
+        match event {
+            logged::Event::RunStarted {
+                unix_ns,
+                hard_end_ns,
+            } => self.started = hard_end_ns.map(|hard_end| (*unix_ns, hard_end)),
+            logged::Event::AgentStarted => self.agent.sandbox.started = Some(at),
+            logged::Event::AgentExited { status } => {
+                self.agent.end = Some((at, AgentEnd::Exited(*status)));
             }
-            Some("agent_started") => progress.agent.sandbox.started = Some(at),
-            Some("agent_exited") => {
-                progress.agent.end = Some((at, AgentEnd::Exited(event["status"].clone())));
+            logged::Event::AgentFailed { reason } => {
+                self.agent.end = Some((at, AgentEnd::Failed(reason.clone())));
+                self.agent.sandbox.gone.get_or_insert(at);
             }
-            Some("agent_failed") => {
-                let reason = event["reason"].as_str().unwrap_or_default().to_owned();
-                progress.agent.end = Some((at, AgentEnd::Failed(reason)));
-                progress.agent.sandbox.gone.get_or_insert(at);
-            }
-            Some("judge_started") => {
-                if let Some(call) = job(progress, event) {
+            logged::Event::JudgeStarted { job } => {
+                if let Some(call) = self.call(*job) {
                     call.sandbox.started = Some(at);
                 }
             }
-            Some("judge_timed_out") => {
-                if let Some(call) = job(progress, event) {
+            logged::Event::JudgeTimedOut { job } => {
+                if let Some(call) = self.call(*job) {
                     call.timed_out = true;
                 }
             }
-            Some("judge_collected") => {
-                let end = match (&event["result"], &event["invalid"]) {
-                    (result, _) if result["score"].is_number() => {
-                        CallEnd::Scored(result["score"].to_string())
-                    }
-                    (result, _) if result.is_object() => {
-                        CallEnd::Unscored(result["returned"].to_string())
-                    }
-                    (_, invalid) => CallEnd::Invalid(invalid.as_str().unwrap_or("").to_owned()),
+            logged::Event::JudgeCollected { job, collected } => {
+                let end = match collected {
+                    Collected::Result(result) => match &result.score {
+                        Some(score) => CallEnd::Scored(score.to_string()),
+                        None => CallEnd::Unscored(result.returned.to_string()),
+                    },
+                    Collected::Invalid(invalid) => CallEnd::Invalid(invalid.clone()),
                 };
-                if let Some(call) = job(progress, event) {
+                if let Some(call) = self.call(*job) {
                     call.end(at, end);
                 }
             }
-            Some("judge_failed") => {
-                let reason = event["reason"].as_str().unwrap_or_default().to_owned();
-                if let Some(call) = job(progress, event) {
-                    call.end(at, CallEnd::Failed(reason));
+            logged::Event::JudgeFailed { job, reason } => {
+                if let Some(call) = self.call(*job) {
+                    call.end(at, CallEnd::Failed(reason.clone()));
                 }
             }
-            Some("lease_ready") => {
-                if let Some(lease) = lease(progress, event) {
+            logged::Event::LeaseReady { lease } => {
+                if let Some(lease) = self.lease(*lease) {
                     lease.sandbox.started = Some(at);
                 }
             }
-            Some("command_ended" | "transfer_ended") => {
-                let Some(lease) = lease(progress, event) else {
-                    return;
-                };
-                if let Some(last) = &mut lease.last {
-                    last.end = Some(event["end"].clone());
-                    lease.rest(at);
+            logged::Event::CommandEnded { lease, end } => {
+                if let Some(lease) = self.lease(*lease) {
+                    lease.command_ended(at, *end);
                 }
             }
-            Some(kind @ ("lease_ended" | "lease_failed")) => {
-                if let Some(lease) = lease(progress, event) {
+            logged::Event::TransferEnded { lease, end } => {
+                if let Some(lease) = self.lease(*lease) {
+                    lease.transfer_ended(at, end.clone());
+                }
+            }
+            logged::Event::LeaseEnded { lease } => {
+                if let Some(lease) = self.lease(*lease) {
                     lease.sandbox.gone = Some(at);
-                    let reason = event["reason"].as_str().unwrap_or_default();
-                    lease.failed = (kind == "lease_failed").then(|| reason.to_owned());
+                    lease.failed = None;
                 }
             }
-            Some("model_answered") => model_answered(progress, at, event),
-            Some("sandbox_gpus") => {
-                if let Some(sandbox) = progress.named(event["sandbox"].as_str()) {
-                    let gpus = event["gpus"].as_array().into_iter().flatten();
-                    let gpus = gpus.map(|gpu| gpu.as_str().unwrap_or_default().to_owned());
-                    sandbox.gpus = Some(gpus.collect());
+            logged::Event::LeaseFailed { lease, reason } => {
+                if let Some(lease) = self.lease(*lease) {
+                    lease.sandbox.gone = Some(at);
+                    lease.failed = Some(reason.clone());
                 }
             }
-            Some("sandbox_deleted") => {
-                if let Some(sandbox) = progress.named(event["sandbox"].as_str()) {
+            logged::Event::ModelAnswered {
+                caller,
+                upstream_status,
+                answer,
+                failed,
+                usage,
+            } => {
+                let answered = Answered {
+                    upstream_status: *upstream_status,
+                    answer,
+                    failed: failed.as_ref(),
+                    usage: usage.as_ref(),
+                };
+                self.model.take(at, &answered);
+                // A judge call's own, which the run's count too.
+                if let Some(logged::Caller::Job(job)) = caller
+                    && let Some(call) = self.call(*job)
+                {
+                    call.model.take(at, &answered);
+                }
+            }
+            logged::Event::SandboxGpus { sandbox, gpus } => {
+                if let Some(sandbox) = self.named(*sandbox) {
+                    sandbox.gpus = Some(gpus.clone());
+                }
+            }
+            logged::Event::SandboxDeleted { sandbox } => {
+                if let Some(sandbox) = sandbox.and_then(|sandbox| self.named(sandbox)) {
                     sandbox.gone.get_or_insert(at);
                 }
             }
-            _ => {}
+            logged::Event::JudgeExited { .. }
+            | logged::Event::OpArrived { .. }
+            | logged::Event::OpRefused
+            | logged::Event::Tick
+            | logged::Event::Unknown => {}
         }
     }
 }
@@ -1208,24 +1326,28 @@ impl CallSpan {
     }
 }
 
-impl Progress {
-    /// The sandbox that `name` names within the run, `agent`, `job-<n>` or `lease-<n>`, if the
-    /// core started it.
-    fn named(&mut self, name: Option<&str>) -> Option<&mut Sandbox> {
-        let name = name?;
-        if name == "agent" {
-            return Some(&mut self.agent.sandbox);
+impl Reading {
+    /// The sandbox that `name` names within the run, if the core started it.
+    fn named(&mut self, name: SandboxName) -> Option<&mut Sandbox> {
+        match name {
+            SandboxName::Agent => Some(&mut self.agent.sandbox),
+            SandboxName::Job(job) => self.call(job).map(|call| &mut call.sandbox),
+            SandboxName::Lease(lease) => self.lease(lease).map(|lease| &mut lease.sandbox),
         }
-        if let Some(job) = name.strip_prefix("job-") {
-            let job: u64 = job.parse().ok()?;
-            let call = self.calls.iter_mut().find(|call| call.job == job)?;
-            return Some(&mut call.sandbox);
-        }
-        let lease: u64 = name.strip_prefix("lease-")?.parse().ok()?;
-        let leased = self.leases.iter_mut().find(|span| span.lease == lease)?;
-        Some(&mut leased.sandbox)
     }
 
+    /// Judge call `job`, if the core started it.
+    fn call(&mut self, job: u64) -> Option<&mut CallSpan> {
+        self.calls.iter_mut().find(|call| call.job == job)
+    }
+
+    /// Lease `lease`, if the core opened it.
+    fn lease(&mut self, lease: u64) -> Option<&mut LeaseSpan> {
+        self.leases.iter_mut().find(|span| span.lease == lease)
+    }
+}
+
+impl Progress {
     /// Each sandbox of the run: the agent's, each judge call's, and each lease's.
     fn each_sandbox(&self) -> impl Iterator<Item = &Sandbox> {
         let calls = self.calls.iter().map(|call| &call.sandbox);
@@ -1362,17 +1484,6 @@ pub(super) fn usage_of(progress: &Progress) -> Value {
     usage
 }
 
-/// Takes in `answered`, a `model_answered` event at `at`: the run's, and its caller's, if a judge
-/// call made it.
-fn model_answered(progress: &mut Progress, at: Duration, answered: &Value) {
-    progress.model.take(at, answered);
-    let caller = answered["caller"].as_str();
-    let job = caller.and_then(|caller| caller.strip_prefix("job-")?.parse().ok());
-    if let Some(call) = progress.calls.iter_mut().find(|call| Some(call.job) == job) {
-        call.model.take(at, answered);
-    }
-}
-
 /// The JSON form of `tokens`, as [`usage_of`] gives it.
 fn tokens_json(tokens: &Tokens) -> Value {
     let Tokens {
@@ -1392,54 +1503,37 @@ fn tokens_json(tokens: &Tokens) -> Value {
     json
 }
 
-/// The call of the job that `record`, an event or an action, names, if the core started it.
-fn job<'p>(progress: &'p mut Progress, record: &Value) -> Option<&'p mut CallSpan> {
-    let job = record["job"].as_u64()?;
-    progress.calls.iter_mut().find(|call| call.job == job)
-}
-
-/// Notes that the lease that `action` names ran `work`, which is its last, from `at`.
-fn lease_ran(progress: &mut Progress, at: Duration, action: &Value, work: Work) {
-    if let Some(lease) = lease(progress, action) {
-        lease.commands += 1;
-        lease.last = Some(LeaseCommand { work, end: None });
-        lease.working = Some(at);
-    }
-}
-
-/// The lease that `record`, an event or an action, names, if the core opened it.
-fn lease<'p>(progress: &'p mut Progress, record: &Value) -> Option<&'p mut LeaseSpan> {
-    let lease = record["lease"].as_u64()?;
-    progress.leases.iter_mut().find(|span| span.lease == lease)
-}
-
-impl Progress {
+impl Reading {
     /// Takes in `action`, which the core decided on at `at`, in a run whose roles are `roles`;
-    /// a lease it closes is `closed`.
+    /// a lease it closes is `closed`, but one that the judge call of job `ended`, which ended,
+    /// holds.
+    #[expect(clippy::too_many_lines, reason = "one arm per kind of action")]
     fn action(
         &mut self,
         at: Duration,
-        action: &Value,
+        action: &logged::Action,
         (closed, ended): (Closed, Option<u64>),
         roles: &Roles,
     ) {
-        let progress = self;
-        match action["kind"].as_str() {
-            Some("start_judge") => {
-                let grant = action["grant"].as_str().map(str::to_owned);
-                let role = match &grant {
+        match action {
+            logged::Action::StartJudge {
+                job,
+                grant,
+                timeout_ns,
+            } => {
+                let role = match grant {
                     Some(grant) => {
                         let key = (roles.agent_role.clone(), grant.clone());
                         roles.grants.get(&key).cloned().unwrap_or_default().role
                     }
                     None => roles.score_role.clone(),
                 };
-                progress.calls.push(CallSpan {
-                    job: action["job"].as_u64().unwrap_or_default(),
-                    grant,
+                self.calls.push(CallSpan {
+                    job: *job,
+                    grant: grant.clone(),
                     sandbox: roles.sandbox(role.as_deref(), at),
                     role,
-                    timeout: time(&action["timeout_ns"]).unwrap_or_default(),
+                    timeout: *timeout_ns,
                     stopped: false,
                     timed_out: false,
                     end: None,
@@ -1448,28 +1542,39 @@ impl Progress {
                     model: ModelUse::default(),
                 });
             }
-            Some("stop_judge") => {
-                if let Some(call) = job(progress, action) {
+            logged::Action::StopJudge { job } => {
+                if let Some(call) = self.call(*job) {
                     call.stopped = true;
                 }
             }
-            Some("start_lease") => progress.open_lease(at, action, roles),
-            Some("run_command") => {
-                let argv = action["argv"].as_array().into_iter().flatten();
-                let argv = argv.map(|arg| arg.as_str().unwrap_or_default().to_owned());
-                lease_ran(progress, at, action, Work::Command(argv.collect()));
-            }
-            Some("transfer") => {
-                let text = |key: &str| action[key].as_str().unwrap_or_default().to_owned();
-                let transfer = Work::Transfer {
-                    direction: text("direction"),
-                    from: text("from"),
-                    to: text("to"),
+            logged::Action::StartLease {
+                lease,
+                holder,
+                grant,
+            } => self.open_lease(at, *lease, *holder, grant, roles),
+            logged::Action::RunCommand { lease, argv } => {
+                let command = Work::Command {
+                    argv: argv.clone(),
+                    end: None,
                 };
-                lease_ran(progress, at, action, transfer);
+                self.lease_ran(at, *lease, command);
             }
-            Some("close_lease") => {
-                if let Some(lease) = lease(progress, action) {
+            logged::Action::Transfer {
+                lease,
+                direction,
+                from,
+                to,
+            } => {
+                let transfer = Work::Transfer {
+                    direction: *direction,
+                    from: from.clone(),
+                    to: to.clone(),
+                    end: None,
+                };
+                self.lease_ran(at, *lease, transfer);
+            }
+            logged::Action::CloseLease { lease } => {
+                if let Some(lease) = self.lease(*lease) {
                     let closed = match lease.holder {
                         Some(holder) if ended == Some(holder) => Closed::CallEnded,
                         _ => closed,
@@ -1477,32 +1582,38 @@ impl Progress {
                     lease.closed.get_or_insert((at, closed));
                 }
             }
-            Some("tear_down_agent") => {
-                progress.work_end.get_or_insert(at);
+            logged::Action::TearDownAgent => {
+                self.work_end.get_or_insert(at);
             }
-            Some("finish" | "abandon") => progress.end = Some(at),
-            _ => {}
+            logged::Action::Finish | logged::Action::Abandon => self.end = Some(at),
+            logged::Action::StartAgent | logged::Action::Reply | logged::Action::Unknown => {}
         }
     }
 
-    /// Takes in `action`, a `start_lease` the core decided on at `at`, in a run whose roles are
-    /// `roles`.
-    fn open_lease(&mut self, at: Duration, action: &Value, roles: &Roles) {
-        let grant = action["grant"].as_str().unwrap_or_default().to_owned();
-        // `agent`, or `job-<n>`.
-        let holder = action["holder"]
-            .as_str()
-            .and_then(|holder| holder.strip_prefix("job-")?.parse::<u64>().ok());
+    /// Takes in the open of lease `lease`, under `grant`, held by `holder`, which the core
+    /// decided on at `at`, in a run whose roles are `roles`.
+    fn open_lease(
+        &mut self,
+        at: Duration,
+        lease: u64,
+        holder: Option<logged::Caller>,
+        grant: &str,
+        roles: &Roles,
+    ) {
+        let holder = match holder {
+            Some(logged::Caller::Job(job)) => Some(job),
+            Some(logged::Caller::Agent) | None => None,
+        };
         let call = holder.and_then(|holder| self.calls.iter().find(|call| call.job == holder));
         let role = match call {
             Some(call) => call.role.clone().unwrap_or_default(),
             None => roles.agent_role.clone(),
         };
-        let granted = roles.grants.get(&(role, grant.clone())).cloned();
+        let granted = roles.grants.get(&(role, grant.to_owned())).cloned();
         let Grant { role, ready_for } = granted.unwrap_or_default();
         self.leases.push(LeaseSpan {
-            lease: action["lease"].as_u64().unwrap_or_default(),
-            grant,
+            lease,
+            grant: grant.to_owned(),
             holder,
             sandbox: roles.sandbox(role.as_deref(), at),
             ready_for,
@@ -1514,58 +1625,67 @@ impl Progress {
             working: None,
         });
     }
-}
 
-impl ModelUse {
-    /// Takes in `answered`, a `model_answered` event at `at`.
-    fn take(&mut self, at: Duration, answered: &Value) {
-        self.requests += 1;
-        let status = &answered["upstream_status"];
-        let failed = &answered["failed"];
-        if failed.is_object() {
-            let code = failed["code"].as_str().map(str::to_owned);
-            *self.failed.entry(code).or_default() += 1;
-        }
-        let whole_2xx = answered["answer"]["kind"] == "forwarded"
-            && status
-                .as_u64()
-                .is_some_and(|status| (200..300).contains(&status));
-        if !whole_2xx {
-            self.not_2xx += 1;
-        } else if !failed.is_object() {
-            self.last_good = Some(at);
-        }
-        let answer = match answered["answer"]["kind"].as_str() {
-            Some("forwarded") => status.to_string(),
-            Some("cut") => format!("{status} cut"),
-            Some(other) => other.to_owned(),
-            None => "unknown".to_owned(),
-        };
-        *self.answers.entry(answer).or_default() += 1;
-        let usage = &answered["usage"];
-        if usage.is_object() {
-            let tokens = &mut self.tokens;
-            tokens.reported += 1;
-            tokens.input += usage["input_tokens"].as_u64().unwrap_or_default();
-            tokens.output += usage["output_tokens"].as_u64().unwrap_or_default();
-            if let Some(cached) = usage["cached_tokens"].as_u64() {
-                *tokens.cached.get_or_insert(0) += cached;
-            }
-            if let Some(reasoning) = usage["reasoning_tokens"].as_u64() {
-                *tokens.reasoning.get_or_insert(0) += reasoning;
-            }
+    /// Notes that lease `lease` ran `work`, which is its last, from `at`, if the core opened it.
+    fn lease_ran(&mut self, at: Duration, lease: u64, work: Work) {
+        if let Some(lease) = self.lease(lease) {
+            lease.commands += 1;
+            lease.last = Some(work);
+            lease.working = Some(at);
         }
     }
 }
 
-/// When `record` happened, as the log's readers time it: when the core took its event, its
-/// `observed_ns`, if it has one, and else when the log wrote it, its `at_ns`.
-fn when(record: &Value) -> Duration {
-    let when = time(&record["observed_ns"]).or_else(|| time(&record["at_ns"]));
-    when.unwrap_or_default()
+/// A model request's answer, as its `model_answered` says: its upstream's status, if a response
+/// came, how the route answered it, the code of the failure it stated, if it stated one, and the
+/// tokens it reported, if it did.
+struct Answered<'e> {
+    upstream_status: Option<u16>,
+    answer: &'e logged::Answer,
+    failed: Option<&'e logged::Failed>,
+    usage: Option<&'e logged::Usage>,
 }
 
-/// A time or duration that the log gives in nanoseconds, as a decimal string.
-fn time(value: &Value) -> Option<Duration> {
-    value.as_str()?.parse().ok().map(Duration::from_nanos)
+impl ModelUse {
+    /// Takes in `answered`, a model request answered at `at`.
+    fn take(&mut self, at: Duration, answered: &Answered<'_>) {
+        let Answered {
+            upstream_status,
+            answer,
+            failed,
+            usage,
+        } = answered;
+        self.requests += 1;
+        if let Some(logged::Failed { code }) = failed {
+            *self.failed.entry(code.clone()).or_default() += 1;
+        }
+        let whole_2xx = matches!(answer, logged::Answer::Forwarded)
+            && upstream_status.is_some_and(|status| (200..300).contains(&status));
+        if !whole_2xx {
+            self.not_2xx += 1;
+        } else if failed.is_none() {
+            self.last_good = Some(at);
+        }
+        // As the log gives the status: `null` for none.
+        let status = upstream_status.map_or_else(|| "null".to_owned(), |status| status.to_string());
+        let answer = match answer {
+            logged::Answer::Forwarded => status,
+            logged::Answer::Cut => format!("{status} cut"),
+            logged::Answer::Barred => "barred".to_owned(),
+            logged::Answer::Refused => "refused".to_owned(),
+        };
+        *self.answers.entry(answer).or_default() += 1;
+        if let Some(usage) = usage {
+            let tokens = &mut self.tokens;
+            tokens.reported += 1;
+            tokens.input += usage.input_tokens;
+            tokens.output += usage.output_tokens;
+            if let Some(cached) = usage.cached_tokens {
+                *tokens.cached.get_or_insert(0) += cached;
+            }
+            if let Some(reasoning) = usage.reasoning_tokens {
+                *tokens.reasoning.get_or_insert(0) += reasoning;
+            }
+        }
+    }
 }
