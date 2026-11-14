@@ -4,7 +4,7 @@
 //! one that fails any of these:
 //!
 //! - Ops are taken only during the work phase, and refused once a finalize is accepted
-//!   ([`finalize_grace_seconds`](schema::ir::SoloThenJudge::finalize_grace_seconds)).
+//!   ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)).
 //! - A judge call names one of the agent's judge grants, and a submission its submit grant.
 //! - Its payload isn't empty, and fits its slot's
 //!   [`max_bytes`](schema::ir::Slot::max_bytes), the score's for a submission.
@@ -12,13 +12,9 @@
 //!   A refused call is not charged.
 //! - A status names one of the agent's jobs.
 //!
-//! A judge call that passes becomes a job, which the reply names, and runs in the background
-//! with the timeout that
-//! [`call_timeout_seconds`](schema::ir::JudgeGrant::call_timeout_seconds) describes.
-//!
-//! Each op the core takes gets the reply for its kind, as [`op`] describes it, the time left
-//! included ([`OpsReply::remaining_seconds`], [`SubmitReply::remaining_seconds`]). `ops` lists
-//! the agent's judge grants first, then its submit grant.
+//! A judge call that passes becomes a job, run in the background with the timeout that
+//! [`call_timeout_seconds`](schema::ir::JudgeGrant::call_timeout_seconds) describes. Each reply
+//! gives the time left until the agent's deadline.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -35,22 +31,7 @@ use schema::sandbox::op::{
 use schema::workflow::{JudgeCall, JudgeGrant, JudgeGrantId};
 
 use super::jobs::{Job, State};
-use super::{Action, Core, JobId, OpId, PayloadRef, Phase, Request, Submission, WorkEnd};
-
-/// An op the core has authorized: its request, parsed against the workflow and the run's
-/// state.
-enum Authorized {
-    Ops,
-    /// The reply about a job of the agent's.
-    Status(StatusReply),
-    Judge {
-        grant: JudgeGrantId,
-        payload: PayloadRef,
-        timeout: Duration,
-    },
-    /// A submission, to store, or to lock as the selection if final.
-    Submit(Submission),
-}
+use super::{Action, Core, JobId, OpId, PayloadRef, Phase, Request, WorkEnd};
 
 /// A grant of the agent's.
 enum Held {
@@ -59,93 +40,21 @@ enum Held {
 }
 
 impl Core<'_> {
-    /// Answers an op, and acts on it.
+    /// Answers an op, and acts on it: the reply comes first, then the actions the op calls for.
     pub(super) fn op(&mut self, op: OpId, request: Request, actions: &mut Vec<Action>) {
-        // The request is authorized before the phase is matched, so that the match can hand back
-        // the work phase's latest submission; a phase that takes no ops still refuses first.
-        let authorized = self.authorize(request);
-        let authorized = (self.taking_ops()).and_then(|latest| Ok((authorized?, latest)));
-        let (authorized, latest) = match authorized {
-            Ok(authorized) => authorized,
-            Err(message) => {
-                let reply = OpReply::Refused { message };
-                actions.push(Action::Reply { op, reply });
-                return;
-            }
-        };
-        match authorized {
-            Authorized::Ops => {
-                let reply = OpReply::Ops(self.ops());
-                actions.push(Action::Reply { op, reply });
-            }
-            Authorized::Status(reply) => {
-                let reply = OpReply::Status(reply);
-                actions.push(Action::Reply { op, reply });
-            }
-            Authorized::Judge {
-                grant,
-                payload,
-                timeout,
-            } => {
-                let job = self.jobs.add(grant);
-                let remaining = self.remaining(grant);
-                let reply = OpReply::Judge(JudgeReply {
-                    job: job.0,
-                    remaining,
-                });
-                actions.push(Action::Reply { op, reply });
-                actions.push(Action::StartJudge {
-                    job,
-                    call: JudgeCall::Grant(grant),
-                    payload,
-                    timeout,
-                });
-            }
-            Authorized::Submit(submission) => {
-                if submission.finalized {
-                    self.finalize(op, submission, actions);
-                } else {
-                    *latest = Some(submission);
-                    let reply = OpReply::Submit(SubmitReply {
-                        state: SubmitState::Stored,
-                        remaining_seconds: self.pattern.deadline.saturating_sub(self.now).as_secs(),
-                    });
-                    actions.push(Action::Reply { op, reply });
-                }
-            }
-        }
-    }
-
-    /// Locks `submission`, finalized, as the selection, and answers op `op`, which made it, with
-    /// the time left until the work phase ends ([`WorkEnd`]). A grace of 0 ends the work phase at
-    /// once.
-    fn finalize(&mut self, op: OpId, submission: Submission, actions: &mut Vec<Action>) {
-        let grace = self.pattern.finalize_grace;
-        let grace_end = self.now.saturating_add(grace);
-        let (end, work_end) = if grace_end < self.pattern.deadline {
-            (grace_end, WorkEnd::Finalized)
-        } else {
-            (self.pattern.deadline, WorkEnd::Deadline)
-        };
-        let reply = OpReply::Submit(SubmitReply {
-            state: SubmitState::Accepted,
-            remaining_seconds: end.saturating_sub(self.now).as_secs(),
-        });
+        let mut then = Vec::new();
+        let reply =
+            (self.works_until()).and_then(|deadline| self.take(deadline, request, &mut then));
+        let reply = reply.unwrap_or_else(|message| OpReply::Refused { message });
         actions.push(Action::Reply { op, reply });
-        self.phase = Phase::Finalized {
-            submission,
-            end,
-            work_end,
-        };
-        if grace.is_zero() {
-            self.end_work(WorkEnd::Finalized, actions);
-        }
+        actions.append(&mut then);
     }
 
-    /// The work phase's latest submission, or why the run takes no more ops.
-    fn taking_ops(&mut self) -> Result<&mut Option<Submission>, String> {
-        let work_end = match &mut self.phase {
-            Phase::Work { submission } => return Ok(submission),
+    /// When the agent's work ends, unless it ends it first, as a time since the run started, if
+    /// it works: at the deadline, in the work phase. Else why the run takes no more ops.
+    fn works_until(&self) -> Result<Duration, String> {
+        let work_end = match &self.phase {
+            Phase::Work { deadline, .. } => return Ok(*deadline),
             Phase::Finalized { .. } => &WorkEnd::Finalized,
             Phase::Teardown { work_end, .. }
             | Phase::Final { work_end, .. }
@@ -164,38 +73,53 @@ impl Core<'_> {
         }
     }
 
-    fn authorize(&self, request: Request) -> Result<Authorized, String> {
+    /// Takes `request`, an op made while the agent works, until the work phase's `deadline`, and
+    /// returns its reply, putting in `then` the actions to follow it; or why it is refused.
+    fn take(
+        &mut self,
+        deadline: Duration,
+        request: Request,
+        then: &mut Vec<Action>,
+    ) -> Result<OpReply, String> {
         match request {
-            Request::Ops => Ok(Authorized::Ops),
-            Request::Status { job } => self.own_job(job),
+            Request::Ops => Ok(OpReply::Ops(self.ops(deadline))),
+            Request::Status { job } => self.own_job(job).map(OpReply::Status),
             Request::Judge { grant, payload } => match self.held(&grant)? {
-                Held::Judge(id) => self.authorize_judge(id, payload),
-                Held::Submit => Err(format!(
-                    "`{grant}` is a submit grant, not a judge grant: submit to it instead"
-                )),
+                Held::Judge(id) => self.judge(id, payload, deadline, then).map(OpReply::Judge),
+                other @ Held::Submit => Err(other.misnamed(&grant, "a judge grant")),
             },
             Request::Submit {
                 grant,
                 finalize,
                 payload,
             } => match self.held(&grant)? {
-                Held::Submit => self.authorize_submit(finalize, payload),
-                Held::Judge(_) => Err(format!(
-                    "`{grant}` is a judge grant, not a submit grant: judge with it instead"
-                )),
+                Held::Submit => self
+                    .submit(finalize, payload, deadline, then)
+                    .map(OpReply::Submit),
+                other @ Held::Judge(_) => Err(other.misnamed(&grant, "a submit grant")),
             },
         }
     }
 
     /// The reply about the agent's job `number`.
-    fn own_job(&self, number: u64) -> Result<Authorized, String> {
+    fn own_job(&self, number: u64) -> Result<StatusReply, String> {
         let job = JobId(number);
-        let Some(found) = self.jobs.get(job) else {
+        let found = (self.jobs.get(job)).and_then(|found| match found.call {
+            JudgeCall::Grant(grant) => Some((found, grant)),
+            JudgeCall::Score => None,
+        });
+        let Some((found, grant)) = found else {
             return Err(format!(
                 "you have no job {number}: ask about a job that one of your calls returned"
             ));
         };
-        Ok(Authorized::Status(self.status(job, found)))
+        Ok(self.status(job, found, grant))
+    }
+
+    /// The time from now until `end`, as a reply gives the time left
+    /// ([`OpsReply::remaining_seconds`]): in whole seconds rounded down, and 0 once it has passed.
+    fn seconds_left(&self, end: Duration) -> u64 {
+        end.saturating_sub(self.now).as_secs()
     }
 
     /// The agent's grant named `name`.
@@ -208,7 +132,15 @@ impl Core<'_> {
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
     }
 
-    fn authorize_judge(&self, id: JudgeGrantId, payload: PayloadRef) -> Result<Authorized, String> {
+    /// Makes a call of grant `id` on `payload`, before the work phase's `deadline`, a job, which
+    /// `then` starts, and returns the reply that names it.
+    fn judge(
+        &mut self,
+        id: JudgeGrantId,
+        payload: PayloadRef,
+        deadline: Duration,
+        then: &mut Vec<Action>,
+    ) -> Result<JudgeReply, String> {
         let grant = self.workflow.judge_grant(id);
         let name = &grant.name;
         fits(name, &payload, self.workflow.slot(grant.slot).max_bytes)?;
@@ -234,33 +166,85 @@ impl Core<'_> {
                 total.as_secs()
             ));
         }
-        // Positive: the work phase ends at the deadline, and every limit is left above zero.
-        let run_left = self.pattern.deadline.saturating_sub(self.now);
-        let timeout = self.call_limit(id).min(run_left);
-        Ok(Authorized::Judge {
-            grant: id,
+        // The work phase's end stops every call (`end_work`), so a call is given at most the time
+        // the work phase has left when it is accepted; after a wait in the queue, its timeout can
+        // reach past the deadline, where that stop ends it all the same. Each term is positive:
+        // the work phase ends at the deadline, and every limit is left above zero.
+        let work_left = deadline.saturating_sub(self.now);
+        let judge_left =
+            (grant.cumulative()).map_or(Duration::MAX, |total| total.saturating_sub(usage.used));
+        let timeout = grant.call_timeout().min(judge_left).min(work_left);
+        let job = self.jobs.add(JudgeCall::Grant(id));
+        then.push(Action::StartJudge {
+            job,
+            call: JudgeCall::Grant(id),
             payload,
             timeout,
+        });
+        let remaining = self.remaining(id);
+        Ok(JudgeReply {
+            job: job.0,
+            remaining,
         })
     }
 
-    fn authorize_submit(&self, finalize: bool, payload: PayloadRef) -> Result<Authorized, String> {
-        let name = &self.workflow.submit_grant().name;
-        fits(name, &payload, self.submission_max_bytes())?;
-        Ok(Authorized::Submit(Submission {
+    /// Stores a submission of `payload` as the latest, or locks it as the selection if
+    /// `finalize`, settling when the work phase, whose deadline is `deadline`, ends ([`WorkEnd`]),
+    /// and returns the reply, with the time left until then; `then` ends the work phase if the
+    /// grace after a finalize is 0.
+    fn submit(
+        &mut self,
+        finalize: bool,
+        payload: PayloadRef,
+        deadline: Duration,
+        then: &mut Vec<Action>,
+    ) -> Result<SubmitReply, String> {
+        fits(
+            &self.workflow.submit_grant().name,
+            &payload,
+            self.submission_max_bytes(),
+        )?;
+        // Ops are taken only while the agent works (`works_until`): the phase goes on with the
+        // latest submission, or a finalize locks it.
+        if !finalize {
+            self.phase = Phase::Work {
+                latest: Some(payload),
+                deadline,
+            };
+            return Ok(SubmitReply {
+                state: SubmitState::Stored,
+                remaining_seconds: self.seconds_left(deadline),
+            });
+        }
+        let grace = self.workflow.agent().finalize_grace;
+        let grace_end = self.now.saturating_add(grace);
+        let (end, work_end) = if grace_end < deadline {
+            (grace_end, WorkEnd::Finalized)
+        } else {
+            (deadline, WorkEnd::Deadline)
+        };
+        self.phase = Phase::Finalized {
             payload,
-            finalized: finalize,
-        }))
+            end,
+            work_end,
+        };
+        if grace.is_zero() {
+            self.end_work(WorkEnd::Finalized, then);
+        }
+        Ok(SubmitReply {
+            state: SubmitState::Accepted,
+            remaining_seconds: self.seconds_left(end),
+        })
     }
 
     /// The most bytes a submission may hold: the score slot's, so that whatever is selected
     /// fits it.
     fn submission_max_bytes(&self) -> NonZeroU64 {
-        self.workflow.slot(self.pattern.score.slot).max_bytes
+        self.workflow.slot(self.workflow.score().slot).max_bytes
     }
 
-    /// The reply to `ops`.
-    fn ops(&self) -> OpsReply {
+    /// The reply to `ops`, while the agent works, until the work phase's `deadline`.
+    fn ops(&self, deadline: Duration) -> OpsReply {
         let judges =
             (self.workflow.judge_grants()).map(|(_, grant)| Grant::Judge(self.judge_grant(grant)));
         let submit = Grant::Submit(op::SubmitGrant {
@@ -268,8 +252,8 @@ impl Core<'_> {
             max_bytes: self.submission_max_bytes(),
         });
         OpsReply {
-            remaining_seconds: self.pattern.deadline.saturating_sub(self.now).as_secs(),
-            resources: self.workflow.agent().sandbox.needs,
+            remaining_seconds: self.seconds_left(deadline),
+            resources: self.workflow.sandbox(self.workflow.agent().role).needs,
             grants: judges.chain([submit]).collect(),
         }
     }
@@ -291,8 +275,8 @@ impl Core<'_> {
         }
     }
 
-    /// The reply to `status`, of the agent's job `id`.
-    fn status(&self, id: JobId, job: &Job) -> StatusReply {
+    /// The reply to `status`, of the agent's job `id`, a call of grant `grant`.
+    fn status(&self, id: JobId, job: &Job, grant: JudgeGrantId) -> StatusReply {
         let state = match &job.state {
             State::Queued => JobState::Queued,
             State::Running { .. } | State::Ending { .. } => JobState::Running,
@@ -310,18 +294,28 @@ impl Core<'_> {
         StatusReply {
             job: id.0,
             state,
-            remaining: self.remaining(job.grant),
+            remaining: self.remaining(grant),
         }
     }
 
-    /// What `grant` has left of its quotas.
-    fn remaining(&self, grant: JudgeGrantId) -> Remaining {
-        let calls = self.workflow.judge_grant(grant).calls;
-        let used = self.jobs.usage(grant).calls;
+    /// What grant `id` has left of its quotas.
+    fn remaining(&self, id: JudgeGrantId) -> Remaining {
+        let (grant, usage) = (self.workflow.judge_grant(id), self.jobs.usage(id));
         Remaining {
-            calls: calls.map(|calls| calls.get().saturating_sub(used)),
-            seconds: self.cumulative_left(grant).as_ref().map(Duration::as_secs),
+            calls: (grant.calls).map(|calls| calls.get().saturating_sub(usage.calls)),
+            seconds: (grant.cumulative()).map(|total| total.saturating_sub(usage.used).as_secs()),
         }
+    }
+}
+
+impl Held {
+    /// Why naming this grant, `name`, is refused for an op that takes `kind` of grant.
+    fn misnamed(&self, name: &Name, kind: &str) -> String {
+        let (is, instead) = match self {
+            Self::Judge(_) => ("a judge grant", "judge with it"),
+            Self::Submit => ("a submit grant", "submit to it"),
+        };
+        format!("`{name}` is {is}, not {kind}: {instead} instead")
     }
 }
 

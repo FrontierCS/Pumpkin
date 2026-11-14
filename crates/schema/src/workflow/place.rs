@@ -20,12 +20,12 @@ impl Workflow {
     /// each class the first of the role's needs, in the IR's order, that it doesn't meet.
     pub fn place(self, classes: &BTreeMap<Name, Class>) -> Result<Placed, ParseErrors> {
         let mut errors = Errors::default();
-        let ByRole { agent, judges } =
-            self.by_role(|sandbox| smallest(&mut errors, sandbox, classes));
-        let startups = agent.and_then(|agent| {
-            let judges = judges.into_iter().collect::<Result<_, _>>()?;
-            Ok(ByRole { agent, judges })
-        });
+        // Every role is placed before any error is returned, so that each role that fits no
+        // class is reported.
+        let fitted: Vec<Result<Duration, Reported>> = (self.roles.iter())
+            .map(|sandbox| smallest(&mut errors, sandbox, classes))
+            .collect();
+        let startups = fitted.into_iter().collect::<Result<_, _>>().map(ByRole);
         Ok(Placed {
             workflow: self,
             startups: errors.finish(startups)?,

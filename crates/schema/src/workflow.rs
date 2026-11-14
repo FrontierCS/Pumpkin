@@ -7,6 +7,7 @@
 //! Each kind of part has its own id type, so that, for example, the role a [`JudgeGrant`]
 //! judges with is known to be a [`Judge`]. Ids are only valid for the workflow that issued them.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -25,12 +26,13 @@ pub use errors::{ParseError, ParseErrors};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workflow {
     ir: crate::ir::Workflow,
-    name: WorkflowName,
+    /// Each role's sandbox, by its id.
+    roles: Vec<Sandbox>,
     agent: Agent,
-    judges: Vec<Judge>,
+    judges: BTreeMap<RoleId, Judge>,
     judge_grants: Vec<JudgeGrant>,
     submit_grant: SubmitGrant,
-    main: Main,
+    score: Score,
 }
 
 impl Workflow {
@@ -40,7 +42,7 @@ impl Workflow {
     }
 
     pub fn name(&self) -> &WorkflowName {
-        &self.name
+        &self.ir.name
     }
 
     /// The workflow's one agent.
@@ -48,34 +50,30 @@ impl Workflow {
         &self.agent
     }
 
-    pub fn judges(&self) -> impl Iterator<Item = (JudgeId, &Judge)> {
-        self.judges
-            .iter()
-            .enumerate()
-            .map(|(index, judge)| (JudgeId(index), judge))
-    }
-
     pub fn judge(&self, id: JudgeId) -> &Judge {
-        &self.judges[id.0]
+        &self.judges[&id.0]
     }
 
     /// The sandbox of any role.
     pub fn sandbox(&self, role: RoleId) -> &Sandbox {
-        match role {
-            RoleId::Agent => &self.agent.sandbox,
-            RoleId::Judge(judge) => &self.judge(judge).sandbox,
-        }
+        &self.roles[role.0]
     }
 
-    /// What `f` makes of each role's sandbox, the agent's first, then each judge's in
-    /// [`judges`](Self::judges)' order.
-    pub(crate) fn by_role<T>(&self, mut f: impl FnMut(&Sandbox) -> T) -> ByRole<T> {
-        let agent = f(&self.agent.sandbox);
-        let judges = (self.judges.iter()).map(|judge| f(&judge.sandbox));
-        ByRole {
-            agent,
-            judges: judges.collect(),
-        }
+    /// Each role, by its id, and its sandbox, in the IR's order.
+    pub fn roles(&self) -> impl Iterator<Item = (RoleId, &Sandbox)> {
+        (self.roles.iter().enumerate()).map(|(index, sandbox)| (RoleId(index), sandbox))
+    }
+
+    /// What `f` makes of each role, by its id, and its sandbox, in [`roles`](Self::roles)' order.
+    ///
+    /// # Errors
+    ///
+    /// Fails with `f`'s first error, calling `f` on no role after it.
+    pub fn by_role<T, E>(
+        &self,
+        f: impl FnMut((RoleId, &Sandbox)) -> Result<T, E>,
+    ) -> Result<ByRole<T>, E> {
+        self.roles().map(f).collect::<Result<_, _>>().map(ByRole)
     }
 
     pub fn slot(&self, id: SlotId) -> &Slot {
@@ -99,16 +97,17 @@ impl Workflow {
         &self.submit_grant
     }
 
-    /// The slot a judge call's payload lands in.
-    pub fn call_slot(&self, call: JudgeCall) -> SlotId {
-        match (call, &self.main) {
-            (JudgeCall::Grant(grant), _) => self.judge_grant(grant).slot,
-            (JudgeCall::Score, Main::SoloThenJudge(pattern)) => pattern.score.slot,
-        }
+    /// How the selected submission is judged.
+    pub fn score(&self) -> &Score {
+        &self.score
     }
 
-    pub fn main(&self) -> &Main {
-        &self.main
+    /// The slot a judge call's payload lands in.
+    pub fn call_slot(&self, call: JudgeCall) -> SlotId {
+        match call {
+            JudgeCall::Grant(grant) => self.judge_grant(grant).slot,
+            JudgeCall::Score => self.score.slot,
+        }
     }
 }
 
@@ -132,33 +131,29 @@ impl Placed {
     }
 }
 
+/// A role of any kind, by its place among the IR's roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RoleId(usize);
+
 /// A judge role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct JudgeId(usize);
+pub struct JudgeId(RoleId);
 
-/// A role of either kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RoleId {
-    /// The workflow's one agent.
-    Agent,
-    Judge(JudgeId),
+impl JudgeId {
+    pub fn role(self) -> RoleId {
+        self.0
+    }
 }
 
-/// A value for each role of the workflow that made it ([`Workflow::by_role`]).
+/// A value for each role of the workflow that made it, by the role's id
+/// ([`Workflow::by_role`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ByRole<T> {
-    agent: T,
-    /// Each judge's, in [`Workflow::judges`]' order.
-    judges: Vec<T>,
-}
+pub struct ByRole<T>(Vec<T>);
 
 impl<T> ByRole<T> {
     /// The value for `role`, a role of the workflow that made this.
-    pub(crate) fn get(&self, role: RoleId) -> &T {
-        match role {
-            RoleId::Agent => &self.agent,
-            RoleId::Judge(judge) => &self.judges[judge.0],
-        }
+    pub fn get(&self, role: RoleId) -> &T {
+        &self.0[role.0]
     }
 }
 
@@ -179,7 +174,7 @@ impl SlotId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JudgeGrantId(usize);
 
-/// What a judge call is made under: one of the agent's judge grants, or the pattern's
+/// What a judge call is made under: one of the agent's judge grants, or the workflow's
 /// [`Score`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JudgeCall {
@@ -204,18 +199,22 @@ pub struct Sandbox {
 /// and `files` keep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
-    pub sandbox: Sandbox,
+    pub role: RoleId,
     pub command: Command,
     /// In order of their paths.
     pub dirs: Vec<Dir>,
     pub files: Vec<File>,
     pub stdin: Option<String>,
+    /// See [`ir::AgentRuntime::deadline_seconds`](crate::ir::AgentRuntime::deadline_seconds).
+    pub deadline: Duration,
+    /// See
+    /// [`ir::AgentRuntime::finalize_grace_seconds`](crate::ir::AgentRuntime::finalize_grace_seconds).
+    pub finalize_grace: Duration,
 }
 
 /// A judge role.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Judge {
-    pub sandbox: Sandbox,
     /// See [`ir::JudgeRuntime::command`](crate::ir::JudgeRuntime::command).
     pub command: Command,
     /// Each named once.
@@ -264,24 +263,6 @@ impl JudgeGrant {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubmitGrant {
     pub name: Name,
-}
-
-/// The pattern that drives a run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Main {
-    SoloThenJudge(SoloThenJudge),
-}
-
-/// The parsed [`ir::SoloThenJudge`](crate::ir::SoloThenJudge). Its grants are the
-/// [workflow's](Workflow::judge_grants).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SoloThenJudge {
-    pub score: Score,
-    /// See [`ir::SoloThenJudge::deadline_seconds`](crate::ir::SoloThenJudge::deadline_seconds).
-    pub deadline: Duration,
-    /// See
-    /// [`ir::SoloThenJudge::finalize_grace_seconds`](crate::ir::SoloThenJudge::finalize_grace_seconds).
-    pub finalize_grace: Duration,
 }
 
 /// The parsed [`ir::Score`](crate::ir::Score): the slot of a judge no judge grant names, whose

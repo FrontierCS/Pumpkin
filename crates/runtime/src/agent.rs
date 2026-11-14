@@ -13,7 +13,7 @@ use schema::sandbox::{
     ExitStatus, Launch, OpPayloadLimit, RelativePath, command_stdin, file_mode, log_dir, out_dir,
     pumpkin_dir,
 };
-use schema::workflow::{self, Main, Workflow};
+use schema::workflow::{self, Workflow};
 use stdx::{Context, Deadline};
 
 use super::Input;
@@ -41,7 +41,8 @@ impl Agent {
     ) -> (Option<Self>, Event) {
         let agent = workflow.agent();
         let ops = Some(op_payload_limit(workflow));
-        let started = sandboxes.start("agent", &agent.sandbox, ops, model, by, inbox, Input::Agent);
+        let sandbox = workflow.sandbox(agent.role);
+        let started = sandboxes.start("agent", sandbox, ops, model, by, inbox, Input::Agent);
         let mut sandbox = match started {
             Ok(sandbox) => sandbox,
             Err(error) => {
@@ -154,10 +155,9 @@ fn put(
 /// The largest payload the agent may send: the largest `max_bytes` of its judge grants' slots
 /// and of the score's slot, which caps its submissions.
 fn op_payload_limit(workflow: &Workflow) -> OpPayloadLimit {
-    let Main::SoloThenJudge(pattern) = workflow.main();
     let slots = workflow.judge_grants().map(|(_, grant)| grant.slot);
     let max_bytes = |slot| workflow.slot(slot).max_bytes.get();
-    let score = max_bytes(pattern.score.slot);
+    let score = max_bytes(workflow.score().slot);
     let bytes = slots.map(max_bytes).fold(score, u64::max);
     // A parsed slot type carrying the bound would reshape `Workflow::slot` and
     // `workflow::Judge::slots`, both `pub`, and the decision core's reads of them.

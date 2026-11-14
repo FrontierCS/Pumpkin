@@ -292,7 +292,7 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     }
     // Far later than the agent's end, so that a slow engine makes a run wait longer, never end
     // differently.
-    ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(300);
+    ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(300);
     ir
 }
 

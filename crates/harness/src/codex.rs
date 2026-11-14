@@ -1,15 +1,16 @@
-//! Codex as a harness: [`CODEX_0_167_0`] pins the Codex that agents run, and [`Codex`] is one
-//! unattended run of it, which [`Codex::runtime`] writes as the agent's runtime.
+//! Codex as a harness: [`CODEX_0_167_0`] pins the Codex that agents run, and [`runtime`] writes
+//! the agent's runtime for one unattended run of it.
 //!
-//! Codex works in its workspace, and keeps its home (`CODEX_HOME`), with its configuration and
+//! Codex works in its [`Workspace`], and keeps its home (`CODEX_HOME`), with its configuration and
 //! its databases, and its temporary files (`TMPDIR`) in two directories of their own there. Its
 //! record of the run is the events it writes to its standard output as JSON lines, which the
-//! teardown collects as `command.stdout` ([`command_stdout()`]). It reaches the model only at
-//! the endpoint `sandboxd` serves ([`MODEL_PORT`]), with no credential: the host holds the key.
+//! teardown collects as `command.stdout` ([`command_stdout()`]). It reaches the model only at the
+//! endpoint `sandboxd` serves ([`MODEL_PORT`]), with no credential: the host holds the key.
 //!
 //! [`command_stdout()`]: schema::sandbox::command_stdout
 
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 
 use schema::ir::{
     self, AbsolutePath, AgentRuntime, Argv, Command, Dir, Env, EnvVar, ModelName, RolePath,
@@ -64,26 +65,6 @@ pub const CODEX_0_167_0: Pin = Pin {
 /// OpenAI Codex, Copyright 2025 OpenAI. Its entries are under the Apache License, Version 2.0,
 /// a copy of which is `codex/LICENSE`.
 const CATALOG: &str = include_str!("codex/catalog.json");
-
-/// One unattended run of Codex, `codex exec`, in a workspace, on the prompt it reads on its
-/// standard input, until it ends its turn.
-#[derive(Clone, Debug)]
-pub struct Codex {
-    workspace: AbsolutePath,
-    /// `CODEX_HOME`, `.codex` in the workspace. It can't be in the agent's [`log_dir()`], where
-    /// a workflow puts nothing, and where the links Codex keeps in it would fail the collect.
-    ///
-    /// [`log_dir()`]: schema::sandbox::log_dir
-    home: RolePath,
-    /// `TMPDIR`, `.tmp` in the workspace, beside the home: Codex refuses to make its helpers'
-    /// links in a home below its temporary directory.
-    tmp: RolePath,
-    /// `config.toml` in the home.
-    config: ir::File,
-    /// The model catalog in the home: the model's carried entry, which [`Tools::Functions`]
-    /// needs, and which [`Tools::Native`] takes unchanged if the crate carries it.
-    catalog: Option<ir::File>,
-}
 
 /// How Codex sends the model its tools, which the model upstream must forward.
 #[derive(Clone, Copy, Debug)]
@@ -157,90 +138,114 @@ impl TryFrom<&str> for ReasoningEffort {
     }
 }
 
-impl Codex {
-    /// Codex working in `workspace`, asking for `model` at `effort`, and sending its tools as
-    /// `tools` says.
+/// A directory that Codex can work in: an absolute path below which a workflow can put
+/// Codex's home and temporary directory, and the files in its home.
+#[derive(Clone, Debug)]
+pub struct Workspace {
+    path: AbsolutePath,
+    /// `CODEX_HOME`, `.codex` in the workspace. It can't be in the agent's [`log_dir()`], where
+    /// a workflow puts nothing, and where the links Codex keeps in it would fail the collect.
     ///
-    /// # Errors
-    ///
-    /// If `workspace` can't hold Codex's directories, which must be [`RolePath`]s, or if `tools`
-    /// is [`Tools::Functions`] and the crate carries no entry of Codex's catalog for `model`.
-    pub fn new(
-        workspace: AbsolutePath,
-        model: &ModelName,
-        effort: ReasoningEffort,
-        tools: Tools,
-    ) -> Result<Self, String> {
-        let home = below(&workspace, ".codex")?;
-        let tmp = below(&workspace, ".tmp")?;
-        let content = match tools {
-            Tools::Native => carried(model).ok().as_ref().map(catalog_of),
-            Tools::Functions => Some(function_catalog(model)?),
-        };
-        let catalog = match content {
-            Some(content) => Some(ir::File {
-                path: below(&workspace, ".codex/model-catalog.json")?,
-                mode: mode("0600"),
-                content,
-            }),
-            None => None,
-        };
-        let config = ir::File {
-            path: below(&workspace, ".codex/config.toml")?,
-            mode: mode("0600"),
-            content: config(model, effort, catalog.as_ref().map(|file| &file.path)),
-        };
+    /// [`log_dir()`]: schema::sandbox::log_dir
+    home: RolePath,
+    /// `TMPDIR`, `.tmp` in the workspace, beside the home: Codex refuses to make its helpers'
+    /// links in a home below its temporary directory.
+    tmp: RolePath,
+    /// `config.toml` in the home.
+    config: RolePath,
+    /// The model catalog in the home: the model's carried entry, which [`Tools::Functions`]
+    /// needs, and which [`Tools::Native`] takes unchanged if the crate carries it.
+    catalog: RolePath,
+}
+
+impl TryFrom<AbsolutePath> for Workspace {
+    type Error = String;
+
+    /// Parses a workspace in which Codex's home, its temporary directory and the files in its
+    /// home are [`RolePath`]s.
+    fn try_from(path: AbsolutePath) -> Result<Self, Self::Error> {
         Ok(Self {
-            workspace,
-            home,
-            tmp,
-            config,
-            catalog,
+            home: below(&path, ".codex")?,
+            tmp: below(&path, ".tmp")?,
+            config: below(&path, ".codex/config.toml")?,
+            catalog: below(&path, ".codex/model-catalog.json")?,
+            path,
         })
     }
+}
 
-    /// The agent's runtime that runs Codex once on `prompt`: Codex's directories and files, which
-    /// only the agent's user may read, and the command, which ends when Codex ends its turn.
-    pub fn runtime(&self, prompt: &str) -> AgentRuntime {
-        let Self {
-            workspace,
-            home,
-            tmp,
-            config,
-            catalog,
-        } = self;
-        // `exec` runs one turn, unattended, on the prompt it reads on its standard input (`-`),
-        // and writes its events to its standard output as JSON lines (`--json`), which the
-        // run's record keeps; it writes no session files (`--ephemeral`), reads no command rules
-        // (`--ignore-rules`), and works in any directory, a Git repository or not.
-        let codex = format!("{}/{}/bin/codex", harness_dir(), CODEX_0_167_0.name);
-        let flags = [
-            "--ephemeral",
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "--json",
-        ];
-        let argv = [codex.as_str(), "exec"]
-            .into_iter()
-            .chain(flags)
-            .chain(["-"]);
-        let env = [("CODEX_HOME", home), ("TMPDIR", tmp)]
-            .map(|(name, path)| checked(EnvVar::try_from(format!("{name}={path}"))));
-        let dirs = [home, tmp].map(|path| Dir {
-            path: path.clone(),
-            mode: mode("0700"),
-        });
-        AgentRuntime {
-            command: Command {
-                argv: checked(Argv::try_from(argv.map(str::to_owned).collect::<Vec<_>>())),
-                env: checked(Env::try_from(env.to_vec())),
-                cwd: workspace.clone(),
-            },
-            dirs: dirs.to_vec(),
-            files: [config].into_iter().chain(catalog).cloned().collect(),
-            stdin: Some(prompt.to_owned()),
-        }
-    }
+/// The agent's runtime that runs Codex once, as `codex exec`, on `prompt`.
+///
+/// Codex reads `prompt` on its standard input, in `workspace`, on `model` at `effort`, and sends
+/// its tools as `tools` says; the runtime holds Codex's files, readable by the agent's user
+/// alone, a command that ends with Codex's turn, and the deadline and grace.
+///
+/// # Errors
+///
+/// If `tools` is [`Tools::Functions`] and the crate carries no catalog entry for `model`.
+pub fn runtime(
+    workspace: Workspace,
+    model: &ModelName,
+    effort: ReasoningEffort,
+    tools: Tools,
+    prompt: &str,
+    deadline_seconds: NonZeroU64,
+    finalize_grace_seconds: u64,
+) -> Result<AgentRuntime, String> {
+    let Workspace {
+        path,
+        home,
+        tmp,
+        config: config_path,
+        catalog: catalog_path,
+    } = workspace;
+    let content = match tools {
+        Tools::Native => carried(model).ok().as_ref().map(catalog_of),
+        Tools::Functions => Some(function_catalog(model)?),
+    };
+    let catalog = content.map(|content| ir::File {
+        path: catalog_path,
+        mode: mode("0600"),
+        content,
+    });
+    let config = ir::File {
+        path: config_path,
+        mode: mode("0600"),
+        content: config(model, effort, catalog.as_ref().map(|file| &file.path)),
+    };
+    // `exec` runs one turn, unattended, on the prompt it reads on its standard input (`-`), and
+    // writes its events to its standard output as JSON lines (`--json`), which the run's record
+    // keeps; it writes no session files (`--ephemeral`), reads no command rules
+    // (`--ignore-rules`), and works in any directory, a Git repository or not.
+    let codex = format!("{}/{}/bin/codex", harness_dir(), CODEX_0_167_0.name);
+    let flags = [
+        "--ephemeral",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--json",
+    ];
+    let argv = [codex.as_str(), "exec"]
+        .into_iter()
+        .chain(flags)
+        .chain(["-"]);
+    let env = [("CODEX_HOME", &home), ("TMPDIR", &tmp)]
+        .map(|(name, path)| checked(EnvVar::try_from(format!("{name}={path}"))));
+    let dirs = [home, tmp].map(|path| Dir {
+        path,
+        mode: mode("0700"),
+    });
+    Ok(AgentRuntime {
+        command: Command {
+            argv: checked(Argv::try_from(argv.map(str::to_owned).collect::<Vec<_>>())),
+            env: checked(Env::try_from(env.to_vec())),
+            cwd: path,
+        },
+        dirs: dirs.to_vec(),
+        files: [config].into_iter().chain(catalog).collect(),
+        stdin: Some(prompt.to_owned()),
+        deadline_seconds,
+        finalize_grace_seconds,
+    })
 }
 
 /// The text of Codex's `config.toml`, for `model` at `effort`, with the model catalog at

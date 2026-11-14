@@ -194,7 +194,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         docker: config::Docker { context },
         upstreams,
     } = config::read(&config)?;
-    let serving = match &workflow.agent().sandbox.model_route {
+    let serving = match &workflow.sandbox(workflow.agent().role).model_route {
         Some(route) => Some(upstreams.serving(&route.models).context(config.display())?),
         None => None,
     };

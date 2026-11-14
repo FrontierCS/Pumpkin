@@ -13,7 +13,6 @@
 )]
 
 use std::collections::BTreeMap;
-use std::iter;
 use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
@@ -24,7 +23,7 @@ use schema::sandbox::{
     MAX_OP_PAYLOAD_BYTES, RelativePath, command_env, command_stderr, command_stdin, command_stdout,
     evidence_dir, pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
 };
-use schema::workflow::{Main, RoleId, Workflow};
+use schema::workflow::Workflow;
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
@@ -89,9 +88,8 @@ impl Case for Placing {
             Err(error) => return error,
         };
         let workflow = placed.workflow();
-        let judges = workflow.judges().map(|(judge, _)| RoleId::Judge(judge));
-        let roles = iter::once(RoleId::Agent).chain(judges).map(|role| {
-            let name = &workflow.sandbox(role).name;
+        let roles = workflow.roles().map(|(role, sandbox)| {
+            let name = &sandbox.name;
             format!("{name}'s starts take at most {:?}", placed.startup(role))
         });
         roles.collect::<Vec<String>>().join(", ")
@@ -315,11 +313,10 @@ fn round_trip() {
         "a round trip"
     );
     let workflow = Workflow::parse(&ir).unwrap();
-    let Main::SoloThenJudge(pattern) = workflow.main();
-    assert_eq!(workflow.agent().sandbox.name.as_str(), "agent");
+    let name = |role| workflow.sandbox(role).name.as_str();
+    assert_eq!(name(workflow.agent().role), "agent");
     assert_eq!(workflow.submit_grant().name.as_str(), "submit");
-    let judge = workflow.judge(pattern.score.slot.judge());
-    assert_eq!(judge.sandbox.name.as_str(), "final_judge");
+    assert_eq!(name(workflow.score().slot.judge().role()), "final_judge");
 }
 
 #[test]
@@ -434,63 +431,69 @@ fn broken_references() {
         .as_array_mut()
         .unwrap()
         .push(payload);
-    let pattern = &mut ir["main"]["solo_then_judge"];
-    let train = pattern["grants"][0].clone();
-    pattern["grants"].as_array_mut().unwrap().push(train);
-    pattern["grants"][0]["judge"]["role"] = json!("ghost");
-    pattern["grants"][2]["judge"]["slot"] = json!("submission");
-    pattern["score"]["role"] = json!("agent");
+    let grants = &mut ir["roles"][0]["grants"];
+    let train = grants[0].clone();
+    grants.as_array_mut().unwrap().push(train);
+    grants[0]["judge"]["role"] = json!("ghost");
+    grants[2]["judge"]["slot"] = json!("submission");
+    ir["score"]["role"] = json!("agent");
     check(
         [ir],
         &expect![[r#"
             /roles/3/name: `train_judge` also names /roles/1: give each a unique name
             /roles/2/runtime/judge/slots/1/name: `payload` also names /roles/2/runtime/judge/slots/0: give each a unique name
-            /main/solo_then_judge/grants/2/judge/name: `train` also names /main/solo_then_judge/grants/0/judge: give each a unique name
-            /main/solo_then_judge/grants/0/judge/role: no role is named `ghost`: name one listed in `roles`
-            /main/solo_then_judge/grants/2/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
-            /main/solo_then_judge/score/role: `agent` is an agent: name a judge"#]],
+            /roles/0/grants/2/judge/name: `train` also names /roles/0/grants/0/judge: give each a unique name
+            /roles/0/grants/0/judge/role: no role is named `ghost`: name one listed in `roles`
+            /roles/0/grants/2/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
+            /score/role: `agent` is an agent: name a judge"#]],
     );
 }
 
 #[test]
-fn broken_pattern() {
+fn broken_roles() {
     let mut ir = fixture();
     let mut helper = ir["roles"][0].clone();
     helper["name"] = json!("helper");
     ir["roles"].as_array_mut().unwrap().push(helper);
     ir["roles"][2]["egress"] = ir["roles"][0]["egress"].clone();
-    let pattern = &mut ir["main"]["solo_then_judge"];
+    ir["roles"][1]["grants"] = json!([{ "submit": { "name": "resubmit" } }]);
+    let grants = &mut ir["roles"][0]["grants"];
     let submit = json!({ "submit": { "name": "resubmit" } });
-    let mut retrain = pattern["grants"][0].clone();
+    let mut retrain = grants[0].clone();
     retrain["judge"]["name"] = json!("retrain");
-    pattern["grants"]
-        .as_array_mut()
-        .unwrap()
-        .extend([submit, retrain]);
-    pattern["grants"][0]["judge"]["slot"] = json!("submission");
-    pattern["score"]["role"] = json!("train_judge");
+    grants.as_array_mut().unwrap().extend([submit, retrain]);
+    grants[0]["judge"]["slot"] = json!("submission");
+    ir["score"]["role"] = json!("train_judge");
     let mut none = fixture();
     none["roles"].as_array_mut().unwrap().remove(0);
-    none["main"]["solo_then_judge"]["grants"]
+    let mut unsubmitted = fixture();
+    unsubmitted["roles"][0]["grants"]
         .as_array_mut()
         .unwrap()
         .remove(1);
+    let mut ungranted = fixture();
+    ungranted["roles"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("grants");
     let mut untimed = fixture();
-    untimed["main"]["solo_then_judge"]["grants"][0]["judge"]
+    untimed["roles"][0]["grants"][0]["judge"]
         .as_object_mut()
         .unwrap()
         .remove("call_timeout_seconds");
     check(
-        [ir, none, untimed],
+        [ir, none, unsubmitted, ungranted, untimed],
         &expect![[r#"
+            /roles/1/grants: `train_judge` is a judge, and judges hold no grants yet: remove them
             /roles/2/egress/model: `final_judge` is a judge, and only the agent has a model route: remove it
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
-            /main/solo_then_judge/grants/0/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
-            /main/solo_then_judge/grants/3/judge/role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
-            /main/solo_then_judge/grants/2/submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
-            /main/solo_then_judge/score/role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
+            /roles/0/grants/0/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
+            /roles/0/grants/3/judge/role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
+            /roles/0/grants/2/submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
+            /score/role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
             /roles: no role is an agent: a workflow has exactly one
-            /main/solo_then_judge/grants: no submit grant: give the agent exactly one
+            /roles/0/grants: no submit grant: give the agent exactly one
+            /roles/0: no submit grant: give the agent exactly one
             missing field `call_timeout_seconds`"#]],
     );
 }

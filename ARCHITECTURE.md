@@ -6,9 +6,10 @@ Names in backticks are for symbol search.
 
 ## Bird's-eye view
 
-Pumpkin runs workflows, in which an agent works and judges score what it submits. A
-workflow is data, JSON in Pumpkin's IR: one agent, its judges, and a pattern that grants the agent
-judge calls and a submission, and ends the run with a verdict. Each instance of a role is a
+Pumpkin runs workflows, in which an agent works and judges score what it submits. A workflow is
+data, JSON in Pumpkin's IR: its roles, one agent and its judges; the grants each role holds, the
+agent's judge calls and one submission; the model route of the agent, if it has one; and the
+score, the judge whose verdict ends the run. Each instance of a role is a
 sandbox, a judge's afresh for each call, whose first process, `sandboxd`, dials the host and serves
 one session: the host puts and collects files, starts commands and freezes the sandbox, and code
 in the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
@@ -60,7 +61,7 @@ code that reads it.
   such as no limit; whatever writes the IR picks the defaults.
 - **Architecture Invariant:** the agent never calls the judge that scores it: parsing
   (`Parser::score`) refuses a workflow whose score judge is the role of any of the agent's judge
-  grants.
+  grants, and a judge holds no grants (`Parser::roles`).
 - **Architecture Invariant:** a passive sandbox, one whose role makes no ops (`Create::ops`), has
   no `sandboxctl`, so it can make none.
 

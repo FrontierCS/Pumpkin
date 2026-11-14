@@ -27,7 +27,7 @@ use runtime::{Ending, Record, Run};
 use schema::ir::{self, ModelName};
 use schema::provider::{Listed, RunTag};
 use schema::sandbox::{SANDBOXCTL_PATH, command_stdout};
-use schema::workflow::{Main, Placed, RoleId};
+use schema::workflow::Placed;
 use serde_json::{Value, json};
 use test_support::http::{read_request, write_chunk};
 use test_support::{WORKFLOW, files};
@@ -345,10 +345,10 @@ fn standard_outputs(record: &Path) -> Vec<String> {
 /// to end, at most the hard end ([`lasts`]) less the final judge's startup and timeout; before
 /// the hard end; or after it.
 fn when(placed: &Placed, last: Duration) -> &'static str {
-    let Main::SoloThenJudge(pattern) = placed.workflow().main();
-    let startup = placed.startup(RoleId::Judge(pattern.score.slot.judge()));
+    let score = placed.workflow().score();
+    let startup = placed.startup(score.slot.judge().role());
     let hard_end = lasts(placed);
-    let teardown_end = hard_end.saturating_sub(startup + pattern.score.timeout);
+    let teardown_end = hard_end.saturating_sub(startup + score.timeout);
     if last < teardown_end {
         "before the agent's teardown was to end"
     } else if last < hard_end {
@@ -377,7 +377,7 @@ fn workflow(argv: &[&str]) -> Value {
 /// left depends on no command's time.
 fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = workflow(argv);
-    let grant = &mut ir["main"]["solo_then_judge"]["grants"][0]["judge"];
+    let grant = &mut ir["roles"][0]["grants"][0]["judge"];
     grant["call_timeout_seconds"] = json!(1);
     grant.as_object_mut().unwrap().remove("cumulative_seconds");
     for role in [1, 2] {
@@ -386,7 +386,7 @@ fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
     }
     ir["roles"][1]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(8);
     ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(16);
-    ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(deadline);
+    ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(deadline);
     ir
 }
 
@@ -402,9 +402,8 @@ fn routed(mut ir: Value) -> Value {
 /// teardown's end or its hard end waits seconds.
 fn short_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = ops_workflow(argv, deadline);
-    let pattern = &mut ir["main"]["solo_then_judge"];
-    pattern["finalize_grace_seconds"] = json!(0);
-    pattern["score"]["timeout_seconds"] = json!(1);
+    ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0);
+    ir["score"]["timeout_seconds"] = json!(1);
     ir
 }
 
@@ -412,7 +411,7 @@ fn short_workflow(argv: &[&str], deadline: u64) -> Value {
 fn exits() {
     // A deadline far later than the exit, so that an exit the run misses ends the work phase.
     let mut ir = workflow(&["exit", "3"]);
-    ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(30);
+    ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
     check(
         "exits",
         &Sim::new(),
@@ -441,7 +440,7 @@ fn crashes() {
     // A deadline far later than the session's end, so that an end the run misses ends the work
     // phase.
     let mut ir = workflow(&["crash"]);
-    ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(30);
+    ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
     check(
         "crashes",
         &Sim::new(),
@@ -471,9 +470,9 @@ fn crashes() {
 #[test]
 fn stalls() {
     let mut ir = workflow(&["stall"]);
-    let pattern = &mut ir["main"]["solo_then_judge"];
-    pattern["deadline_seconds"] = json!(1);
-    pattern["finalize_grace_seconds"] = json!(0);
+    let agent = &mut ir["roles"][0]["runtime"]["agent"];
+    agent["deadline_seconds"] = json!(1);
+    agent["finalize_grace_seconds"] = json!(0);
     check(
         "stalls",
         &Sim::with_startup(SHORT_STARTUP),
@@ -504,7 +503,7 @@ fn stalls() {
 fn unstarted() {
     let mut ir = workflow(&["exit", "0"]);
     // Outlasted by the start, so that the core hears of its failure before the deadline's tick.
-    ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(1);
+    ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(1);
     check(
         "unstarted",
         &Sim::with_startup(SHORT_STARTUP),
@@ -515,10 +514,10 @@ fn unstarted() {
             record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":1}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":1}
             {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
             its last record came before the agent's teardown was to end
             socket directories left: false
@@ -801,7 +800,7 @@ fn judge_stalls() {
     // the stop ends the call, and seconds shorter than the time left when the call is made, so
     // that it is the call's timeout.
     let mut ir = short_workflow(&argv, 4);
-    ir["main"]["solo_then_judge"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(2);
+    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(2);
     ir["roles"][2]["image"] = json!(sim::image(UNDELETABLE).as_str());
     check(
         "judge-stalls",
@@ -844,11 +843,11 @@ fn abandoned() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
+            failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
             record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
             payloads hold: ["slow"]
             provider.json is what the provider declared: true
-            outcome.json: {"reason":"the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
+            outcome.json: {"reason":"the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
@@ -858,7 +857,7 @@ fn abandoned() {
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
             {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"seq":7}
-            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":8}
+            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":8}
             its last record came once the hard end had passed
             its log's last record was written once the hard end had passed
             socket directories left: false
@@ -908,18 +907,18 @@ fn torn_down_past_the_hard_end() {
         &short_workflow(&["ops", "finalize submit 6"], 2),
         LINGERING,
         &expect![[r#"
-            failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
+            failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
             record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
-            outcome.json: {"reason":"the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
+            outcome.json: {"reason":"the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"seq":4}
-            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 7 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":5}
+            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":5}
             its last record came once the hard end had passed
             its log's last record was written once the hard end had passed
             socket directories left: false
@@ -1278,7 +1277,7 @@ fn model_grace_cut() {
     let argv = ["ops", "ask m-large stall", "finalize submit 6"];
     let mut ir = routed(ops_workflow(&argv, 30));
     // So that the grace runs out while the agent still waits on the stalled stream.
-    ir["main"]["solo_then_judge"]["finalize_grace_seconds"] = json!(1);
+    ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(1);
     check(
         "model-grace-cut",
         &Sim::new(),

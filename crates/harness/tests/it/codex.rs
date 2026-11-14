@@ -7,9 +7,10 @@
 )]
 
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
-use harness::codex::{Codex, ReasoningEffort, Tools};
+use harness::codex::{self, ReasoningEffort, Tools, Workspace};
 use schema::ir::{AbsolutePath, AgentRuntime, EnvVar, ModelName};
 use serde_json::Value;
 
@@ -19,14 +20,15 @@ fn check(actual: &str, expect: &Expect) {
 
 #[test]
 fn functions() {
-    let codex = codex("/workspace", "gpt-6.1-terra", Tools::Functions).unwrap();
+    let prompt = "Solve the task in /task/README.md.\n";
     check(
-        &show(&codex.runtime("Solve the task in /task/README.md.\n")),
+        &show(&codex("/workspace", "gpt-6.1-terra", Tools::Functions, prompt).unwrap()),
         &expect![[r#"
             argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             stdin: Some("Solve the task in /task/README.md.\n")
+            deadline: 1800 s, grace: 60 s
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
             file 0600 /workspace/.codex/config.toml:
@@ -86,8 +88,13 @@ fn functions() {
 
 #[test]
 fn native() {
-    let codex = codex("/srv/work", r#"vendor/"quoted"\model"#, Tools::Native).unwrap();
-    let runtime = codex.runtime("Go.\n");
+    let runtime = codex(
+        "/srv/work",
+        r#"vendor/"quoted"\model"#,
+        Tools::Native,
+        "Go.\n",
+    );
+    let runtime = runtime.unwrap();
     let mut shown = String::new();
     for file in &runtime.files {
         let _ = writeln!(shown, "file {} {}:", file.mode, file.path);
@@ -108,8 +115,7 @@ fn native() {
 
 #[test]
 fn native_carried() {
-    let codex = codex("/workspace", "glm-5.3", Tools::Native).unwrap();
-    let runtime = codex.runtime("Go.\n");
+    let runtime = codex("/workspace", "glm-5.3", Tools::Native, "Go.\n").unwrap();
     let mut shown = String::new();
     for file in &runtime.files {
         let _ = writeln!(shown, "file {} {}:", file.mode, file.path);
@@ -143,8 +149,8 @@ fn native_carried() {
 #[test]
 fn refusals() {
     let errors = [
-        codex("/pumpkin/home", "gpt-6.1-terra", Tools::Native).map(|_| ()),
-        codex("/workspace", "gpt-6.1-sol", Tools::Functions).map(|_| ()),
+        codex("/pumpkin/home", "gpt-6.1-terra", Tools::Native, "").map(|_| ()),
+        codex("/workspace", "gpt-6.1-sol", Tools::Functions, "").map(|_| ()),
         ReasoningEffort::try_from("extreme").map(|_| ()),
     ];
     let errors: Vec<String> = errors.into_iter().map(|error| error.unwrap_err()).collect();
@@ -157,11 +163,21 @@ fn refusals() {
     );
 }
 
-/// Codex working in `workspace` on `model` at `xhigh`, sending its tools as `tools` says.
-fn codex(workspace: &str, model: &str, tools: Tools) -> Result<Codex, String> {
-    let workspace = AbsolutePath::try_from(workspace.to_owned()).unwrap();
+/// The runtime of Codex working in `workspace` on `model` at `xhigh`, sending its tools as
+/// `tools` says, on `prompt`, for a work phase of 1800 s with a grace of 60 s.
+fn codex(workspace: &str, model: &str, tools: Tools, prompt: &str) -> Result<AgentRuntime, String> {
+    let workspace = Workspace::try_from(AbsolutePath::try_from(workspace.to_owned()).unwrap())?;
     let model = ModelName::try_from(model.to_owned()).unwrap();
-    Codex::new(workspace, &model, ReasoningEffort::XHigh, tools)
+    let deadline = NonZeroU64::new(1800).unwrap();
+    codex::runtime(
+        workspace,
+        &model,
+        ReasoningEffort::XHigh,
+        tools,
+        prompt,
+        deadline,
+        60,
+    )
 }
 
 /// `runtime`, a line for each part; a model catalog by its models' slugs, the fields that set
@@ -172,12 +188,15 @@ fn show(runtime: &AgentRuntime) -> String {
         dirs,
         files,
         stdin,
+        deadline_seconds,
+        finalize_grace_seconds,
     } = runtime;
     let argv: Vec<String> = command.argv.clone().into();
     let env: Vec<EnvVar> = command.env.clone().into();
     let env: Vec<String> = env.into_iter().map(String::from).collect();
     let mut shown = format!(
-        "argv: {}\nenv: {}\ncwd: {}\nstdin: {stdin:?}\n",
+        "argv: {}\nenv: {}\ncwd: {}\nstdin: {stdin:?}\ndeadline: {deadline_seconds} s, grace: \
+         {finalize_grace_seconds} s\n",
         argv.join(" "),
         env.join(" "),
         command.cwd,
