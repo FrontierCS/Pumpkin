@@ -1,6 +1,6 @@
 [package]
 name = "provider"
-version = "0.0.0"
+version.workspace = true
 description = "The interface every Pumpkin provider implements"
 edition.workspace = true
 publish.workspace = true

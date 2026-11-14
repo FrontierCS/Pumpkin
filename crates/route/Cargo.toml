@@ -1,6 +1,6 @@
 [package]
 name = "route"
-version = "0.0.0"
+version.workspace = true
 description = "The model route: what the host admits of an agent's model requests, and how it forwards them upstream"
 edition.workspace = true
 publish.workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "engine"
+version.workspace = true
+description = "The operator's Docker engine, on which Pumpkin builds and from which it publishes the images that sandboxes run"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+recipe = { path = "../recipe" }
+schema = { path = "../schema" }
+stdx = { path = "../stdx" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
+expect-test.workspace = true
+
+[lints]
+workspace = true

@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, iter};
 
-use ::docker::Engine;
+use ::docker::Docker;
 use decision::lasts;
 use expect_test::{Expect, expect};
 use provider::Provider;
@@ -65,7 +65,7 @@ impl Platform for Sim {
     }
 }
 
-impl Platform for Engine {
+impl Platform for Docker<'_> {
     fn shown(&self) -> Vec<String> {
         Vec::new()
     }

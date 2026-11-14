@@ -12,8 +12,9 @@ use std::process::{ExitCode, ExitStatus};
 use std::time::SystemTime;
 use std::{env, fmt, fs};
 
-use docker::{ContextName, Engine};
+use docker::Docker;
 use driver::{ARGV0, Driver, Handoff};
+use engine::{ContextName, Engine};
 use provider::Provider;
 use runtime::{Ending, Record, Run};
 use sandboxd::Sandboxd;
@@ -199,7 +200,8 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         None => None,
     };
     let engine = engine(context)?;
-    let placed = workflow.place(&engine.ready().classes);
+    let docker = Docker::connect(&engine)?;
+    let placed = workflow.place(&docker.ready().classes);
     let placing = "placing the workflow's roles in the engine's classes";
     let placed = placed.map_err(|errors| said(&ir, &errors, placing))?;
     let run = Run::prepare(placed, &runs, SystemTime::now(), serving)?;
@@ -209,7 +211,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     driver::locked(&id)?;
     // `execute` records why the run failed in its `outcome.json`, which `run` prints if the run
     // failed to start; this line, the driver's last, then closes that ending.
-    let executed = run.execute(&engine, sandboxd.path(), || driver::announce(&dir));
+    let executed = run.execute(&docker, sandboxd.path(), || driver::announce(&dir));
     executed.map_err(|reason| closing(&id, &format!("failed: {reason}"), &dir))?;
     Ok(ExitCode::SUCCESS)
 }

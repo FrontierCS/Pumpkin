@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-version = "0.0.0"
+version.workspace = true
 description = "Contributor tasks, run as `cargo xtask <command>`"
 edition.workspace = true
 publish = false

@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.0.0"
+version.workspace = true
 description = "The gateway: the host's end of the sessions that Pumpkin's sandboxes open"
 edition.workspace = true
 publish.workspace = true

@@ -1,0 +1,409 @@
+//! The operator's Docker engine, on which Pumpkin builds the images that its sandboxes run,
+//! whichever provider runs them.
+//!
+//! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
+//! operator names ([`ContextName`]), which nothing in the environment overrides, and reports it
+//! ([`Report`]). It builds images ([`Engine::build`]); [`confinement`] confines a role's
+//! container wherever a provider's sandbox is one. It needs Docker 25.0 or later, rootful or
+//! rootless ([`Security::rootless`]).
+
+use std::ffi::OsStr;
+use std::process::{ExitStatus, Output, Stdio};
+use std::{fmt, io};
+
+use schema::ir::{MILLIS_PER_CPU, Resources, User};
+use schema::sandbox::{PUMPKIN_BYTES, pumpkin_dir};
+use serde::{Deserialize, Serialize};
+use stdx::process::Environment;
+
+mod build;
+
+pub use build::{BuildContext, Built, Recipe};
+
+/// The most the container's log may hold, in bytes, in one file. The log is kept on the
+/// host's disk, outside the container's other limits, so it is capped whatever writes there,
+/// with the `json-file` driver named, so that the cap doesn't rest on the daemon's default.
+/// It holds the output of `sandboxd` alone, which is a line if it fails: its commands' output
+/// goes to files, and they can't open its own, since it is non-dumpable.
+const LOG_BYTES: u64 = 1 << 20;
+
+/// The most processes and threads a container may have.
+const PIDS_LIMIT: u32 = 4096;
+
+/// The name of a Docker context, which says what engine `docker` reaches, and how. `default`
+/// is Docker's own context, which reaches the engine at Docker's default socket.
+///
+/// Any name but the empty one, which `docker` would take for no name, and so reach the engine
+/// of the command line's current context. A name no context has is refused by
+/// [`Engine::connect`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ContextName(String);
+
+impl ContextName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ContextName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        if name.is_empty() {
+            Err(
+                "the Docker context's name is empty: name one that `docker context ls` lists"
+                    .to_owned(),
+            )
+        } else {
+            Ok(Self(name))
+        }
+    }
+}
+
+/// The Docker engine a context reaches, and its report.
+#[derive(Debug)]
+pub struct Engine {
+    report: Report,
+}
+
+/// The engine, as `docker` describes it before anything starts.
+#[derive(Debug, Serialize)]
+pub struct Report {
+    /// The context `docker` reaches the engine through.
+    pub context: ContextName,
+    /// The endpoint the context reaches the engine at, such as `unix:///var/run/docker.sock`.
+    pub endpoint: String,
+    /// The version of the `docker` command line.
+    pub client_version: String,
+    /// The engine's version.
+    pub engine_version: String,
+    /// What the engine's security options say.
+    pub security: Security,
+    /// The version of the kernel of the engine's host.
+    pub kernel: String,
+    /// The operating system of the engine's host.
+    pub os: String,
+}
+
+/// What the engine's security options say.
+#[derive(Debug, Serialize)]
+pub struct Security {
+    /// Whether the engine runs as an ordinary user rather than as root.
+    // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
+    // ordinary user, so escaping a container gains no more than that user has. A rootful engine
+    // runs as root, and whoever may use its socket, as the `docker` group may, can make it do
+    // anything root can.
+    pub rootless: bool,
+    /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own,
+    /// or `None` if the engine has no seccomp.
+    pub seccomp_profile: Option<String>,
+    /// Whether the engine confines containers with `AppArmor`.
+    pub apparmor: bool,
+    /// Whether the engine maps containers' users into a user namespace of their own.
+    pub userns: bool,
+}
+
+/// What `docker info` prints, as JSON.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InfoJson {
+    security_options: Option<Vec<String>>,
+    kernel_version: String,
+    operating_system: String,
+    /// The engine's version.
+    server_version: String,
+    /// The `docker` command line's version, among what it says of itself.
+    client_info: ClientInfoJson,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ClientInfoJson {
+    version: String,
+}
+
+impl Engine {
+    /// Reaches the engine through `context`, and reports it. Nothing is started.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the context can't be read, or the engine can't be reached through it, saying
+    /// what to do; or if `docker` describes the engine in JSON of another form.
+    pub fn connect(context: ContextName) -> Result<Self, String> {
+        let Reach { endpoint, info } = reach(&context)?;
+        let InfoJson {
+            security_options,
+            kernel_version,
+            operating_system,
+            server_version,
+            client_info,
+        } = serde_json::from_slice(&info.stdout).map_err(|error| {
+            format!(
+                "the JSON `docker info` printed isn't of the form expected: {error}: use \
+                 Docker's own command line, which prints it"
+            )
+        })?;
+        let report = Report {
+            context,
+            endpoint,
+            client_version: client_info.version,
+            engine_version: server_version,
+            security: Security::parse(&security_options.unwrap_or_default()),
+            kernel: kernel_version,
+            os: operating_system,
+        };
+        Ok(Self { report })
+    }
+
+    /// The engine, as it was when [`connect`](Self::connect) reached it.
+    pub fn report(&self) -> &Report {
+        &self.report
+    }
+}
+
+/// What `docker` says of the engine that a context reaches, once it has reached it.
+struct Reach {
+    /// The endpoint the context reaches the engine at.
+    endpoint: String,
+    /// What `docker info` printed, as JSON.
+    info: Output,
+}
+
+/// Reaches the engine through `context`: reads the context, and asks the engine what it is.
+fn reach(context: &ContextName) -> Result<Reach, String> {
+    let name = context.as_str();
+    let template = "{{.Endpoints.docker.Host}}";
+    // After `--`, a name that begins with `-` can't be taken for an option.
+    let inspect = ["context", "inspect", "--format", template, "--", name];
+    let inspected = docker(context, inspect).map_err(|error| {
+        format!(
+            "the Docker context `{name}` can't be read: {error}: name one that \
+             `docker context ls` lists"
+        )
+    })?;
+    let endpoint = String::from_utf8_lossy(&inspected.stdout).trim().to_owned();
+    let info = docker(context, ["info", "--format", "{{json .}}"]).map_err(|error| {
+        let todo = match &error {
+            Failure::Exited { stderr, .. } if stderr.contains("permission denied") => {
+                "let this user reach the engine's socket: by the `docker` group, which is \
+                 root-equivalent, or by running rootless Docker and naming its context"
+            }
+            Failure::Unrun(_) | Failure::Exited { .. } => {
+                "start the engine, or name a context whose engine runs"
+            }
+        };
+        format!("the Docker engine isn't reachable through context `{name}`: {error}: {todo}")
+    })?;
+    Ok(Reach { endpoint, info })
+}
+
+impl Security {
+    /// The security options `docker info` lists, each a list of `key=value`, such as
+    /// `name=seccomp,profile=builtin`.
+    fn parse(options: &[String]) -> Self {
+        let mut security = Self {
+            rootless: false,
+            seccomp_profile: None,
+            apparmor: false,
+            userns: false,
+        };
+        for option in options {
+            let mut name = None;
+            let mut profile = None;
+            for pair in option.split(',') {
+                match pair.split_once('=') {
+                    Some(("name", value)) => name = Some(value),
+                    Some(("profile", value)) => profile = Some(value),
+                    _ => {}
+                }
+            }
+            match name {
+                Some("rootless") => security.rootless = true,
+                Some("seccomp") => {
+                    security.seccomp_profile = Some(profile.unwrap_or_default().to_owned());
+                }
+                Some("apparmor") => security.apparmor = true,
+                Some("userns") => security.userns = true,
+                _ => {}
+            }
+        }
+        security
+    }
+}
+
+/// The options of `docker create` or `docker run` that confine a container to its role's `user`
+/// and `resources`, wherever a provider's sandbox is a Docker container.
+///
+/// The container's network, bind mounts and command, which say how it reaches its gateway and
+/// what it runs, are the caller's to give.
+pub fn confinement(user: User, resources: Resources) -> Vec<String> {
+    let User { uid, gid } = user;
+    let Resources {
+        cpu_millis,
+        memory_bytes,
+    } = resources;
+    let (millis, memory) = (cpu_millis.get(), memory_bytes.get());
+    vec![
+        format!("--user={uid}:{gid}"),
+        "--cap-drop=ALL".to_owned(),
+        "--security-opt=no-new-privileges".to_owned(),
+        // The daemon's `init` setting would otherwise make `docker-init` the first process, in
+        // place of `sandboxd`.
+        "--init=false".to_owned(),
+        // An image's `HEALTHCHECK` would otherwise run as the role's user outside `sandboxd`,
+        // after freezing too, with its output kept on the host.
+        "--no-healthcheck".to_owned(),
+        // Images are the operator's or the build's: a pull would fetch one that no run owns,
+        // with the operator's registry credentials.
+        "--pull=never".to_owned(),
+        format!(
+            "--cpus={}.{:03}",
+            millis / MILLIS_PER_CPU,
+            millis % MILLIS_PER_CPU
+        ),
+        format!("--memory={memory}"),
+        format!("--memory-swap={memory}"),
+        "--log-driver=json-file".to_owned(),
+        format!("--log-opt=max-size={LOG_BYTES}"),
+        "--log-opt=max-file=1".to_owned(),
+        format!("--pids-limit={PIDS_LIMIT}"),
+        // A crash would otherwise dump core where the host's `core_pattern` says: into the
+        // container's own files, such as its writable layer, or to a helper that may store it
+        // on the host's disk, outside the session and every limit. A helper still runs, but is
+        // told the limit is 0.
+        "--ulimit=core=0".to_owned(),
+        format!(
+            "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
+            pumpkin_dir()
+        ),
+        "--tmpfs=/tmp:ro".to_owned(),
+    ]
+}
+
+/// The ID of the image that `reference`, such as `<repository>:<tag>`, names on the engine of
+/// `context`, or `None` if the engine has no such image.
+///
+/// # Errors
+///
+/// Fails as [`docker`] does.
+pub fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Failure> {
+    let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", reference];
+    match docker(context, inspect) {
+        Ok(inspected) => Ok(Some(
+            String::from_utf8_lossy(&inspected.stdout).trim().to_owned(),
+        )),
+        Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `error`, from a `docker` command that failed for a reason its caller doesn't foresee, and
+/// what to do about it: Docker's error says what is wrong.
+pub fn fix_reported(error: impl fmt::Display) -> String {
+    format!("{error}: fix what Docker reports")
+}
+
+/// Runs `docker` against `context` alone with `args`, as `docker_to` does, with `docker`'s
+/// standard error captured.
+///
+/// # Errors
+///
+/// Fails as `docker_to` does.
+pub fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    docker_to(context, args, Stderr::Captured)
+}
+
+/// Runs `docker` against `context` alone with `args`, with its standard error where `stderr`
+/// says, and returns its output. Of the environment, `docker` gets only `HOME`, `PATH` and
+/// `DOCKER_CONFIG`, so that the context named alone steers it.
+///
+/// # Errors
+///
+/// Fails if the command fails, saying which it was and what Docker reported, for the caller to
+/// add what that means and what to do; or if `docker` doesn't run, asking for it on `PATH`.
+fn docker_to<I, S>(context: &ContextName, args: I, stderr: Stderr) -> Result<Output, Failure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args: Vec<S> = args.into_iter().collect();
+    // A context reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
+    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
+    let output = stdx::process::command("docker", kept)
+        // One argument, so that a name that begins with `-` can't be taken for an option.
+        .arg(format!("--context={}", context.as_str()))
+        .args(&args)
+        .stdin(Stdio::null())
+        .stderr(match stderr {
+            Stderr::Captured => Stdio::piped(),
+            Stderr::Shown => Stdio::inherit(),
+        })
+        .output()
+        .map_err(Failure::Unrun)?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`,
+        // but none of its options, which can be long.
+        let mut command = "docker".to_owned();
+        let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
+        for word in words.take(2).take_while(|word| !word.starts_with('-')) {
+            command.push(' ');
+            command.push_str(&word);
+        }
+        let stderr = match stderr {
+            Stderr::Captured => String::from_utf8_lossy(&output.stderr).into_owned(),
+            Stderr::Shown => "its output above says why".to_owned(),
+        };
+        Err(Failure::Exited {
+            command,
+            status: output.status,
+            stderr,
+        })
+    }
+}
+
+/// Why a [`docker`] command failed, displayed as [`docker`] describes its error.
+pub enum Failure {
+    /// `docker` didn't run.
+    Unrun(io::Error),
+    /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what
+    /// Docker reported, or, where its report went to this process's standard error, that it
+    /// says why.
+    Exited {
+        command: String,
+        status: ExitStatus,
+        stderr: String,
+    },
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unrun(error) => write!(
+                f,
+                "`docker` didn't run: {error}: install Docker's command line on `PATH`"
+            ),
+            Self::Exited {
+                command,
+                status,
+                stderr,
+            } => write!(f, "`{command}` failed with {status}: {}", stderr.trim()),
+        }
+    }
+}
+
+/// Where [`docker_to`] sends `docker`'s standard error.
+#[derive(Clone, Copy)]
+enum Stderr {
+    /// Into the output it returns, and the error it fails with.
+    Captured,
+    /// To this process's own standard error, as `docker` writes it, for progress that the
+    /// operator follows.
+    Shown,
+}

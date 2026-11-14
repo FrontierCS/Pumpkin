@@ -137,9 +137,24 @@ checksum = "aeda16ab4059c5fd2a83f2b9c9e9c981327b18aa8e3b313f7e6563799d4f093e"
 name = "docker"
 version = "0.0.0"
 dependencies = [
+ "engine",
  "expect-test",
  "gateway",
  "provider",
+ "recipe",
+ "schema",
+ "serde",
+ "serde_json",
+ "stdx",
+ "tempfile",
+ "test-support",
+]
+
+[[package]]
+name = "engine"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
  "recipe",
  "schema",
  "serde",
@@ -310,6 +325,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "docker",
+ "engine",
  "expect-test",
  "libc",
  "provider",
@@ -375,6 +391,7 @@ version = "0.0.0"
 dependencies = [
  "decision",
  "docker",
+ "engine",
  "expect-test",
  "gateway",
  "provider",

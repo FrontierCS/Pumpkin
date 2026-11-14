@@ -12,7 +12,7 @@ use std::process::Command;
 use std::thread::{self, JoinHandle};
 use std::{env, fs};
 
-use docker::{ContextName, Engine};
+use engine::{ContextName, Engine};
 use expect_test::expect;
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};

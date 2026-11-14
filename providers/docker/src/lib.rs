@@ -1,72 +1,45 @@
 //! The Docker provider: a sandbox for a role as a container that needs no root to start.
 //!
-//! [`Engine`], a [`Provider`], runs `docker` as an ordinary user against the engine of the
-//! operator's [context](#the-envelope), and makes each sandbox a container that has:
+//! [`Docker`], a [`Provider`], makes each sandbox a container on the operator's [`Engine`], with:
 //!
 //! - no network but loopback; the dial's socket, in a host directory mounted read-only, is the
 //!   only way out, and files move only over the session;
-//! - the role's user from its first process, no capabilities, `no-new-privileges`, CPU, memory
-//!   (swap included) and process limits, and a core file size limit of 0;
+//! - the role's [`confinement`]: its user from its first process, no capabilities,
+//!   `no-new-privileges`, CPU, memory, swap and process limits, no core file, `/pumpkin` and a
+//!   read-only `/tmp`;
 //! - `sandboxd`, mounted read-only, as its first process, dialing the [`Dial`] its create
 //!   gives, and whose output alone is the container's log, which holds at most 1 MiB;
-//! - [`/pumpkin`](pumpkin_dir), a tmpfs of at most [`PUMPKIN_BYTES`] owned by the role's user,
-//!   whose files count against the memory limit, as `/dev/shm`'s and `/dev/mqueue`'s do;
-//! - `/tmp`, a read-only mask, so a role writes to disk only in the container's writable layer
-//!   and its image's `VOLUME`s, removed with it, neither of which has a size limit;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
 //!   read-only, and `sandboxd` serving ops; other sandboxes are [passive](schema::sandbox);
 //! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
-//! # The envelope
-//!
-//! The operator names the engine, as a Docker context that nothing in the environment overrides
-//! ([`ContextName`]); [`Engine::connect`] reports it ([`Report`]). In it, the provider creates
-//! only containers, labelled with their run's [`RunTag`], by which [`Provider::list`] finds them,
-//! and their anonymous volumes; it pulls no image, and builds on Docker 25.0 or later.
+//! On the engine, it creates only containers, labelled with their run's [`RunTag`] for
+//! [`Provider::list`], and their anonymous volumes, and pulls no image. It needs an engine that
+//! enforces every limit that a container has.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::num::NonZeroU64;
 use std::path::Path;
-use std::process::{ExitStatus, Output, Stdio};
-use std::{fmt, io};
+use std::process::Output;
 
+use engine::{ContextName, Engine, Failure, confinement, docker, fix_reported, image_id};
 use provider::Provider;
-use schema::ir::{Name, Resources, User};
+use schema::ir::{MILLIS_PER_CPU, Name, Resources};
 use schema::provider::{
     Class, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
     SOCKET_NAME, SandboxId,
 };
-use schema::sandbox::{PUMPKIN_BYTES, SANDBOXCTL_PATH, pumpkin_dir};
-use serde::{Deserialize, Serialize};
+use schema::sandbox::SANDBOXCTL_PATH;
+use serde::Deserialize;
 use serde_json::json;
 use stdx::Context;
-use stdx::process::Environment;
-
-mod build;
-
-pub use build::{BuildContext, Built, Recipe};
 
 /// The name of the provider's one class of sandbox, a container on the engine's host, which
 /// gives a role as many CPUs and as much memory as the host has.
 const CLASS: &str = "container";
 
-/// The thousandths of a CPU in a CPU, the unit of a role's CPU limit, which `--cpus` takes as
-/// CPUs with three decimals.
-const MILLIS_PER_CPU: NonZeroU64 = NonZeroU64::new(1000).unwrap();
-
 /// The most seconds a sandbox's start takes, as [`Class::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
-
-/// The most the container's log may hold, in bytes, in one file. The log is kept on the
-/// host's disk, outside the container's other limits, so it is capped whatever writes there,
-/// with the `json-file` driver named, so that the cap doesn't rest on the daemon's default.
-/// It holds the output of `sandboxd` alone, which is a line if it fails: its commands' output
-/// goes to files, and they can't open its own, since it is non-dumpable.
-const LOG_BYTES: u64 = 1 << 20;
-
-/// The most processes and threads a container may have.
-const PIDS_LIMIT: u32 = 4096;
 
 /// Where `sandboxd` is mounted in the container.
 const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
@@ -80,163 +53,56 @@ const RUN_LABEL: &str = "pumpkin.run";
 /// The label that carries the name of a container's role.
 const ROLE_LABEL: &str = "pumpkin.role";
 
-/// The name of a Docker context, which says what engine `docker` reaches, and how. `default`
-/// is Docker's own context, which reaches the engine at Docker's default socket.
-///
-/// Any name but the empty one, which `docker` would take for no name, and so reach the engine
-/// of the command line's current context. A name no context has is refused by
-/// [`Engine::connect`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct ContextName(String);
-
-impl ContextName {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for ContextName {
-    type Error = String;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        if name.is_empty() {
-            Err(
-                "the Docker context's name is empty: name one that `docker context ls` lists"
-                    .to_owned(),
-            )
-        } else {
-            Ok(Self(name))
-        }
-    }
-}
-
-/// The Docker engine a context reaches, which every container of the provider's runs in, and
-/// its report.
+/// The provider of sandboxes as containers on an [`Engine`], which every container of its runs
+/// in.
 #[derive(Debug)]
-pub struct Engine {
-    report: Report,
-    /// What [`Provider::ready`] gives: the report as JSON, and the one class.
+pub struct Docker<'e> {
+    engine: &'e Engine,
+    /// What [`Provider::ready`] gives: the engine's report as JSON, and the one class.
     ready: Ready,
 }
 
-/// The engine, as `docker` describes it before anything starts.
-#[derive(Debug, Serialize)]
-pub struct Report {
-    /// The context `docker` reaches the engine through.
-    pub context: ContextName,
-    /// The endpoint the context reaches the engine at, such as `unix:///var/run/docker.sock`.
-    pub endpoint: String,
-    /// The version of the `docker` command line.
-    pub client_version: String,
-    /// The engine's version.
-    pub engine_version: String,
-    /// What the engine's security options say.
-    pub security: Security,
-    /// The version of the kernel of the engine's host.
-    pub kernel: String,
-    /// The operating system of the engine's host.
-    pub os: String,
-}
-
-/// What the engine's security options say.
-#[derive(Debug, Serialize)]
-pub struct Security {
-    /// Whether the engine runs as an ordinary user rather than as root.
-    // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
-    // ordinary user, so escaping a container gains no more than that user has. A rootful engine
-    // runs as root, and whoever may use its socket, as the `docker` group may, can make it do
-    // anything root can.
-    pub rootless: bool,
-    /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own,
-    /// or `None` if the engine has no seccomp.
-    pub seccomp_profile: Option<String>,
-    /// Whether the engine confines containers with `AppArmor`.
-    pub apparmor: bool,
-    /// Whether the engine maps containers' users into a user namespace of their own.
-    pub userns: bool,
-}
-
-/// What `docker info` prints, as JSON.
+/// What `docker info` prints of the engine's host and the limits it enforces, as JSON.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "`docker info` reports whether the engine supports each limit as a boolean"
 )]
-struct InfoJson {
-    /// Whether the engine supports memory limits, which [`create_args`] sets.
+struct HostJson {
+    /// Whether the engine supports memory limits, which a container's confinement sets.
     memory_limit: bool,
-    /// Whether the engine supports swap limits, which [`create_args`] sets.
+    /// Whether the engine supports swap limits, which a container's confinement sets.
     swap_limit: bool,
-    /// Whether the engine supports CPU limits, which [`create_args`] sets.
+    /// Whether the engine supports CPU limits, which a container's confinement sets.
     cpu_cfs_quota: bool,
-    /// Whether the engine supports process limits, which [`create_args`] sets.
+    /// Whether the engine supports process limits, which a container's confinement sets.
     pids_limit: bool,
     /// The CPUs of the engine's host, which a container's CPU limit can't pass.
     #[serde(rename = "NCPU")]
     ncpu: NonZeroU64,
     /// The memory of the engine's host, in bytes.
     mem_total: NonZeroU64,
-    security_options: Option<Vec<String>>,
-    kernel_version: String,
-    operating_system: String,
-    /// The engine's version.
-    server_version: String,
-    /// The `docker` command line's version, among what it says of itself.
-    client_info: ClientInfoJson,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ClientInfoJson {
-    version: String,
-}
-
-impl Engine {
-    /// Reaches the engine through `context`, and reports it. Nothing is started.
+impl<'e> Docker<'e> {
+    /// The provider on `engine`.
     ///
     /// # Errors
     ///
-    /// Fails if the context can't be read, or the engine can't be reached through it, saying
-    /// what to do; if `docker` describes the engine in JSON of another form; or if the engine
-    /// can't enforce the CPU, memory, swap and process limits every container has.
-    pub fn connect(context: ContextName) -> Result<Self, String> {
-        let name = context.as_str();
-        let template = "{{.Endpoints.docker.Host}}";
-        // After `--`, a name that begins with `-` can't be taken for an option.
-        let inspect = ["context", "inspect", "--format", template, "--", name];
-        let inspected = docker(&context, inspect).map_err(|error| {
-            format!(
-                "the Docker context `{name}` can't be read: {error}: name one that \
-                 `docker context ls` lists"
-            )
-        })?;
-        let endpoint = String::from_utf8_lossy(&inspected.stdout).trim().to_owned();
-        let info = docker(&context, ["info", "--format", "{{json .}}"]).map_err(|error| {
-            let todo = match &error {
-                Failure::Exited { stderr, .. } if stderr.contains("permission denied") => {
-                    "let this user reach the engine's socket: by the `docker` group, which is \
-                     root-equivalent, or by running rootless Docker and naming its context"
-                }
-                Failure::Unrun(_) | Failure::Exited { .. } => {
-                    "start the engine, or name a context whose engine runs"
-                }
-            };
-            format!("the Docker engine isn't reachable through context `{name}`: {error}: {todo}")
-        })?;
-        let InfoJson {
+    /// Fails, saying what to do, if the engine can't be read or can't enforce every container's
+    /// limits.
+    pub fn connect(engine: &'e Engine) -> Result<Self, String> {
+        let report = engine.report();
+        let info =
+            docker(&report.context, ["info", "--format", "{{json .}}"]).map_err(fix_reported)?;
+        let HostJson {
             memory_limit,
             swap_limit,
             cpu_cfs_quota,
             pids_limit,
             ncpu,
             mem_total,
-            security_options,
-            kernel_version,
-            operating_system,
-            server_version,
-            client_info,
         } = serde_json::from_slice(&info.stdout).map_err(|error| {
             format!(
                 "the JSON `docker info` printed isn't of the form expected: {error}: use \
@@ -244,7 +110,7 @@ impl Engine {
             )
         })?;
         check_limits(
-            &context,
+            &report.context,
             [
                 ("MemoryLimit", memory_limit),
                 ("SwapLimit", swap_limit),
@@ -252,30 +118,26 @@ impl Engine {
                 ("PidsLimit", pids_limit),
             ],
         )?;
-        let report = Report {
-            context,
-            endpoint,
-            client_version: client_info.version,
-            engine_version: server_version,
-            security: Security::parse(&security_options.unwrap_or_default()),
-            kernel: kernel_version,
-            os: operating_system,
+        let Some(cpu_millis) = NonZeroU64::new(ncpu.get().saturating_mul(MILLIS_PER_CPU)) else {
+            unreachable!("a product of CPUs and `MILLIS_PER_CPU`, neither of them 0, is 0")
         };
         let host = Resources {
-            cpu_millis: ncpu.saturating_mul(MILLIS_PER_CPU),
+            cpu_millis,
             memory_bytes: mem_total,
         };
-        let ready = ready(&report, host);
-        Ok(Self { report, ready })
+        Ok(Self {
+            engine,
+            ready: ready(report, host),
+        })
     }
 
-    /// The engine, as it was when [`connect`](Self::connect) reached it.
-    pub fn report(&self) -> &Report {
-        &self.report
+    /// The context `docker` reaches the engine through.
+    fn context(&self) -> &'e ContextName {
+        &self.engine.report().context
     }
 }
 
-impl Provider for Engine {
+impl Provider for Docker<'_> {
     fn ready(&self) -> &Ready {
         &self.ready
     }
@@ -283,7 +145,7 @@ impl Provider for Engine {
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
     // engine has each image and that `sandboxd` can be mounted, and names each as it is.
     fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
-        let context = &self.report.context;
+        let context = self.context();
         let published = locals.iter().map(|local| match local {
             Local::Role { image } => {
                 let image = image.to_string();
@@ -305,7 +167,7 @@ impl Provider for Engine {
     }
 
     fn create(&self, create: &Create) -> Result<Created, String> {
-        let context = &self.report.context;
+        let context = self.context();
         // Creating and starting apart gives the container's ID before anything can fail with
         // a container left behind, so a failure removes this container by its ID.
         let args = create_args(create).context("creating the container failed")?;
@@ -325,7 +187,7 @@ impl Provider for Engine {
     }
 
     fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
-        let context = &self.report.context;
+        let context = self.context();
         let ours: BTreeSet<String> = of_run(context, run)?.into_iter().collect();
         let (known, unknown): (Vec<&SandboxId>, Vec<&SandboxId>) =
             ids.iter().partition(|id| ours.contains(id.as_str()));
@@ -340,7 +202,7 @@ impl Provider for Engine {
     }
 
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
-        let ids = of_run(&self.report.context, run)?;
+        let ids = of_run(self.context(), run)?;
         let listed = ids.into_iter().map(|id| Listed {
             id: SandboxId::from(id),
         });
@@ -348,7 +210,7 @@ impl Provider for Engine {
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
-        let context = &self.report.context;
+        let context = self.context();
         let id = id.as_str();
         if !of_run(context, run)?.iter().any(|ours| ours == id) {
             return Err(format!(
@@ -362,7 +224,7 @@ impl Provider for Engine {
 }
 
 /// What [`Provider::ready`] gives of an engine that `report` describes, whose host has `host`.
-fn ready(report: &Report, host: Resources) -> Ready {
+fn ready(report: &engine::Report, host: Resources) -> Ready {
     // `Name` checks its value as it is made, and has no constant constructor.
     let Ok(name) = Name::try_from(CLASS.to_owned()) else {
         unreachable!("the class `{CLASS}` has no name, though it is a constant that is a name")
@@ -377,43 +239,9 @@ fn ready(report: &Report, host: Resources) -> Ready {
     }
 }
 
-impl Security {
-    /// The security options `docker info` lists, each a list of `key=value`, such as
-    /// `name=seccomp,profile=builtin`.
-    fn parse(options: &[String]) -> Self {
-        let mut security = Self {
-            rootless: false,
-            seccomp_profile: None,
-            apparmor: false,
-            userns: false,
-        };
-        for option in options {
-            let mut name = None;
-            let mut profile = None;
-            for pair in option.split(',') {
-                match pair.split_once('=') {
-                    Some(("name", value)) => name = Some(value),
-                    Some(("profile", value)) => profile = Some(value),
-                    _ => {}
-                }
-            }
-            match name {
-                Some("rootless") => security.rootless = true,
-                Some("seccomp") => {
-                    security.seccomp_profile = Some(profile.unwrap_or_default().to_owned());
-                }
-                Some("apparmor") => security.apparmor = true,
-                Some("userns") => security.userns = true,
-                _ => {}
-            }
-        }
-        security
-    }
-}
-
 /// Fails unless the engine of `context` supports each of `limits`, a name in `docker info`
-/// and whether it reports the limit supported. Those are the limits [`create_args`] sets, and
-/// the engine discards one it doesn't support with only a warning from `docker create`, so a
+/// and whether it reports the limit supported. Those are the limits a container's confinement
+/// sets (`engine::confinement`), and the engine discards one it doesn't support with only a warning from `docker create`, so a
 /// container would start without it.
 fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), String> {
     let unsupported: Vec<&str> = (limits.iter())
@@ -449,53 +277,17 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
         resources,
     } = role;
     let sandboxd = Path::new(sandboxd.as_str());
-    let User { uid, gid } = *user;
-    let Resources {
-        cpu_millis,
-        memory_bytes,
-    } = *resources;
-    let (millis, memory) = (cpu_millis.get(), memory_bytes.get());
     let mut args = vec![
         "create".to_owned(),
         format!("--label={RUN_LABEL}={}", run.as_str()),
         format!("--label={ROLE_LABEL}={name}"),
         "--network=none".to_owned(),
-        format!("--user={uid}:{gid}"),
-        "--cap-drop=ALL".to_owned(),
-        "--security-opt=no-new-privileges".to_owned(),
-        // The daemon's `init` setting would otherwise make `docker-init` the first process, in
-        // place of `sandboxd`.
-        "--init=false".to_owned(),
-        // An image's `HEALTHCHECK` would otherwise run as the role's user outside `sandboxd`,
-        // after freezing too, with its output kept on the host.
-        "--no-healthcheck".to_owned(),
-        // Images are the operator's or the build's: a pull would fetch one that no run owns,
-        // with the operator's registry credentials.
-        "--pull=never".to_owned(),
-        format!(
-            "--cpus={}.{:03}",
-            millis / MILLIS_PER_CPU,
-            millis % MILLIS_PER_CPU
-        ),
-        format!("--memory={memory}"),
-        format!("--memory-swap={memory}"),
-        "--log-driver=json-file".to_owned(),
-        format!("--log-opt=max-size={LOG_BYTES}"),
-        "--log-opt=max-file=1".to_owned(),
-        format!("--pids-limit={PIDS_LIMIT}"),
-        // A crash would otherwise dump core where the host's `core_pattern` says: into the
-        // container's own files, such as its writable layer, or to a helper that may store it
-        // on the host's disk, outside the session and every limit. A helper still runs, but is
-        // told the limit is 0.
-        "--ulimit=core=0".to_owned(),
-        format!(
-            "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
-            pumpkin_dir()
-        ),
-        "--tmpfs=/tmp:ro".to_owned(),
+    ];
+    args.extend(confinement(*user, *resources));
+    args.extend([
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(dir, GATEWAY_DIR)?,
-    ];
+    ]);
     if *ops {
         args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
     }
@@ -546,7 +338,7 @@ fn mountable(host: &Path, container: &str) -> Result<String, String> {
 fn remove(context: &ContextName, id: &str) -> Result<(), String> {
     match docker(context, ["rm", "--force", "--volumes", id]) {
         Ok(_) => Ok(()),
-        // Docker 29 exits 0 here; older engines, down to the module doc's floor, fail.
+        // Docker 29 exits 0 here; older engines, down to the engine's floor, Docker 25.0, fail.
         Err(Failure::Exited { stderr, .. }) if stderr.contains("No such container") => Ok(()),
         Err(error) => Err(error.to_string()),
     }
@@ -577,19 +369,6 @@ fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<String>, String> {
     Ok(ids.collect())
 }
 
-/// The ID of the image that `reference`, such as `<repository>:<tag>`, names on the engine of
-/// `context`, or `None` if the engine has no such image.
-fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Failure> {
-    let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", reference];
-    match docker(context, inspect) {
-        Ok(inspected) => Ok(Some(
-            String::from_utf8_lossy(&inspected.stdout).trim().to_owned(),
-        )),
-        Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
 /// its standard error, which `docker logs` writes to its own two streams.
 fn log_tail(context: &ContextName, id: &str) -> Result<String, Failure> {
@@ -600,107 +379,4 @@ fn log_tail(context: &ContextName, id: &str) -> Result<String, Failure> {
         stderr,
     } = docker(context, logs)?;
     Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
-}
-
-/// `error`, from a `docker` command that failed for a reason the provider doesn't foresee, and
-/// what to do about it: Docker's error says what is wrong.
-fn fix_reported(error: impl fmt::Display) -> String {
-    format!("{error}: fix what Docker reports")
-}
-
-/// Runs `docker` against `context` alone with `args`, as [`docker_to`] does, with `docker`'s
-/// standard error captured.
-fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    docker_to(context, args, Stderr::Captured)
-}
-
-/// Runs `docker` against `context` alone with `args`, with its standard error where `stderr`
-/// says, and returns its output. If the command fails, the error says which it was and what
-/// Docker reported, and the caller adds what that means and what to do; if `docker` doesn't
-/// run, the error asks for it on `PATH`. Of the environment, `docker` gets only `HOME`, `PATH`
-/// and `DOCKER_CONFIG`, so that the context named alone steers it, and a context reached over
-/// `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
-fn docker_to<I, S>(context: &ContextName, args: I, stderr: Stderr) -> Result<Output, Failure>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args: Vec<S> = args.into_iter().collect();
-    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
-    let output = stdx::process::command("docker", kept)
-        // One argument, so that a name that begins with `-` can't be taken for an option.
-        .arg(format!("--context={}", context.as_str()))
-        .args(&args)
-        .stdin(Stdio::null())
-        .stderr(match stderr {
-            Stderr::Captured => Stdio::piped(),
-            Stderr::Shown => Stdio::inherit(),
-        })
-        .output()
-        .map_err(Failure::Unrun)?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`,
-        // but none of its options, which can be long.
-        let mut command = "docker".to_owned();
-        let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
-        for word in words.take(2).take_while(|word| !word.starts_with('-')) {
-            command.push(' ');
-            command.push_str(&word);
-        }
-        let stderr = match stderr {
-            Stderr::Captured => String::from_utf8_lossy(&output.stderr).into_owned(),
-            Stderr::Shown => "its output above says why".to_owned(),
-        };
-        Err(Failure::Exited {
-            command,
-            status: output.status,
-            stderr,
-        })
-    }
-}
-
-/// Why a [`docker`] command failed, displayed as [`docker`] describes its error.
-enum Failure {
-    /// `docker` didn't run.
-    Unrun(io::Error),
-    /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what
-    /// Docker reported, or, where its report went to this process's standard error, that it
-    /// says why.
-    Exited {
-        command: String,
-        status: ExitStatus,
-        stderr: String,
-    },
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unrun(error) => write!(
-                f,
-                "`docker` didn't run: {error}: install Docker's command line on `PATH`"
-            ),
-            Self::Exited {
-                command,
-                status,
-                stderr,
-            } => write!(f, "`{command}` failed with {status}: {}", stderr.trim()),
-        }
-    }
-}
-
-/// Where [`docker_to`] sends `docker`'s standard error.
-#[derive(Clone, Copy)]
-enum Stderr {
-    /// Into the output it returns, and the error it fails with.
-    Captured,
-    /// To this process's own standard error, as `docker` writes it, for progress that the
-    /// operator follows.
-    Shown,
 }

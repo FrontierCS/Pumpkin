@@ -76,9 +76,21 @@ mod flags {
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
             /// listed in `mutants.out`, is a finding to read, not a failure.
             cmd mutants {
+                /// The paths whose changes alone are taken, if any are given.
+                repeated paths: PathBuf
                 /// The revision since whose merge base with `HEAD` the changes are taken,
                 /// `origin/main` by default.
                 optional --in-diff rev: String
+            }
+
+            /// Runs a package's tests with `UPDATE_EXPECT=1`, which rewrites each snapshot that
+            /// differs in this checkout, then prints `git diff --stat` of what changed, to read
+            /// before keeping it.
+            cmd refill {
+                /// The package whose tests run.
+                required -p, --package package: String
+                /// Only the tests whose names hold it.
+                optional filter: String
             }
 
             /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
@@ -101,6 +113,7 @@ mod flags {
         Sandboxd(Sandboxd),
         Install(Install),
         Mutants(Mutants),
+        Refill(Refill),
         InstallTools(InstallTools),
     }
 
@@ -124,7 +137,16 @@ mod flags {
 
     #[derive(Debug)]
     pub struct Mutants {
+        pub paths: Vec<PathBuf>,
+
         pub in_diff: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub struct Refill {
+        pub filter: Option<String>,
+
+        pub package: String,
     }
 
     #[derive(Debug)]
@@ -177,7 +199,12 @@ fn try_main() -> Result<()> {
             Ok(())
         }
         flags::XtaskCmd::Install(flags::Install { root }) => install(&cargo, root),
-        flags::XtaskCmd::Mutants(flags::Mutants { in_diff }) => mutants(&cargo, in_diff.as_deref()),
+        flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
+            mutants(&cargo, &paths, in_diff.as_deref())
+        }
+        flags::XtaskCmd::Refill(flags::Refill { package, filter }) => {
+            refill(&cargo, &package, filter.as_deref())
+        }
         flags::XtaskCmd::InstallTools(flags::InstallTools) => tools::install(&cargo),
     }
 }
@@ -313,16 +340,35 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
     Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
 }
 
-/// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default.
-/// Missed mutants and timeouts are findings, not failures.
-fn mutants(cargo: &Cargo, rev: Option<&str>) -> Result<()> {
+/// Runs the tests of `package`, those whose names hold `filter` if it is given, with
+/// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs, below `CARGO_WORKSPACE_DIR`,
+/// this checkout's root, whatever the caller's environment names; then prints `git diff --stat`,
+/// also if a test failed.
+fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
+    tools::require(cargo, tools::NEXTEST)?;
+    let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);
+    let test = test.args(filter).env("UPDATE_EXPECT", "1");
+    // expect-test takes the variable as a directory that ends in `/`.
+    let ran = test
+        .env("CARGO_WORKSPACE_DIR", format!("{}/", root().display()))
+        .run();
+    cargo.sh.cmd("git").args(["diff", "--stat"]).run()?;
+    Ok(ran?)
+}
+
+/// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default, below
+/// `paths` alone if there are any. Missed mutants and timeouts are findings, not failures.
+fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::MUTANTS)?;
     tools::require(cargo, tools::NEXTEST)?;
-    let again = match rev {
-        Some(rev) => format!("cargo xtask mutants --in-diff {rev}"),
-        None => "cargo xtask mutants".to_owned(),
-    };
-    let diff = diff::since(&cargo.sh, rev.unwrap_or("origin/main"), &again)?;
+    let mut again = "cargo xtask mutants".to_owned();
+    for path in paths {
+        again = format!("{again} {}", path.display());
+    }
+    if let Some(rev) = rev {
+        again = format!("{again} --in-diff {rev}");
+    }
+    let diff = diff::since(&cargo.sh, rev.unwrap_or("origin/main"), paths, &again)?;
     let scratch = cargo.sh.create_temp_dir()?;
     let diff_path = scratch.path().join("changes.diff");
     cargo.sh.write_file(&diff_path, diff)?;

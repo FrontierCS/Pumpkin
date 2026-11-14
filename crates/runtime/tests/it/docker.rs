@@ -11,19 +11,24 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use docker::{ContextName, Engine};
+use docker::Docker;
+use engine::{ContextName, Engine};
 use schema::ir::Image;
 use schema::provider::SandboxId;
 use test_support::{BUSYBOX, docker, sandboxd};
 
 use crate::provider::{Locals, Subject};
 
-/// The engine the tests' context reaches ([`test_support::docker_context`]).
-pub(crate) fn engine() -> &'static Engine {
+/// The provider on the engine the tests' context reaches ([`test_support::docker_context`]).
+pub(crate) fn engine() -> &'static Docker<'static> {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
-    ENGINE.get_or_init(|| {
-        let name = ContextName::try_from(test_support::docker_context()).unwrap();
-        Engine::connect(name).unwrap()
+    static PROVIDER: OnceLock<Docker<'static>> = OnceLock::new();
+    PROVIDER.get_or_init(|| {
+        let engine = ENGINE.get_or_init(|| {
+            let name = ContextName::try_from(test_support::docker_context()).unwrap();
+            Engine::connect(name).unwrap()
+        });
+        Docker::connect(engine).unwrap()
     })
 }
 
@@ -41,7 +46,7 @@ pub(crate) fn image() -> Image {
     Image::try_from(id.clone()).unwrap()
 }
 
-impl Subject for Engine {
+impl Subject for Docker<'_> {
     fn locals(&self, dir: &Path) -> Locals {
         // A `sandboxd` that fails as it starts, saying why.
         let mute = dir.join("stand-in-sandboxd");

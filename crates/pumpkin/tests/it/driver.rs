@@ -8,7 +8,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
 
-use docker::{ContextName, Engine};
+use docker::Docker;
+use engine::{ContextName, Engine};
 use expect_test::expect;
 use provider::Provider as _;
 use schema::provider::RunTag;
@@ -324,7 +325,7 @@ fn detaches() {
 /// What a test on Docker leaves behind, to remove once it is over, however it ends: for each
 /// run recorded in `runs` its driver, its containers and its socket directory.
 struct Cleanup<'a> {
-    engine: &'a Engine,
+    provider: &'a Docker<'a>,
     runs: PathBuf,
 }
 
@@ -344,9 +345,9 @@ impl Drop for Cleanup<'_> {
             let Ok(tag) = RunTag::try_from(id) else {
                 continue;
             };
-            if let Ok(listed) = self.engine.list(&tag) {
+            if let Ok(listed) = self.provider.list(&tag) {
                 let ids: Vec<_> = listed.into_iter().map(|listed| listed.id).collect();
-                let _ = self.engine.delete(&tag, &ids);
+                let _ = self.provider.delete(&tag, &ids);
             }
         }
     }
@@ -391,8 +392,9 @@ fn lost_on_docker() {
     let image = image(&engine);
     scratch.write("sleeps.json", &workflow(&image, &["sleep", "300"]));
     scratch.write("pumpkin.toml", &docker_table(&context));
+    let docker = Docker::connect(&engine).unwrap();
     let _cleanup = Cleanup {
-        engine: &engine,
+        provider: &docker,
         runs: scratch.0.join("runs"),
     };
     let mut run = scratch.pumpkin(&["run", "sleeps.json", "--sandboxd", &sandboxd]);
@@ -404,7 +406,7 @@ fn lost_on_docker() {
     let tag = RunTag::try_from(id.to_owned()).unwrap();
     // Once a sandbox is listed, the run's `docker` children have run, and none may hold the
     // record's lock, which `unlocked` waits for no process to hold.
-    poll(|| Some(()).filter(|()| !engine.list(&tag).unwrap().is_empty()));
+    poll(|| Some(()).filter(|()| !docker.list(&tag).unwrap().is_empty()));
     let driver = live_driver(&scratch.0.join(dir)).unwrap();
     assert!(signal("KILL", driver), "the driver is gone");
     unlocked(&scratch.0.join(dir));
