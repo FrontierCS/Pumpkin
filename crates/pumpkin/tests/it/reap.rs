@@ -2,17 +2,15 @@
 
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt as _, symlink};
-use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::Stdio;
 
 use expect_test::expect;
 use serde_json::json;
-use stdx::process::Environment;
 
 use super::{
-    EC2, INFO, MODAL, MODAL_HELPER, PUMPKIN, Scratch, Step, check, docker_table, install,
-    invocation, poll, ran, report, write_gone, write_on, write_record,
+    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, poll, ran, report,
+    write_gone, write_on, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -205,12 +203,11 @@ esac
     );
 }
 
-/// A lost run on `local`, of kind `docker`, `aws`, of kind `ec2`, and `gpus`, of kind `modal`,
-/// which left a sandbox on each.
+/// A lost run on `local`, of kind `docker`, and `aws`, of kind `ec2`, which left a sandbox on
+/// each.
 const SPREAD: &str = "20261108-120700-0a000008";
 
-/// A lost run on `aws` and `gpus`, which left a sandbox on each, and which `cancel` reaps, whose
-/// configuration names Modal's configuration file in its job's directory, gone with the job.
+/// A lost run on `aws`, which left a sandbox there, and which `cancel` reaps.
 const CANCELLED: &str = "20261108-120800-0a000009";
 
 /// A lost run on `aws`, whose configuration is gone.
@@ -219,18 +216,17 @@ const UNCONFIGURED: &str = "20261108-120900-0a00000a";
 /// A lost run on `aws`, which the configuration that ran it no longer names.
 const UNNAMED: &str = "20261108-121100-0a00000c";
 
-/// A run that no record names, whose sandboxes on `aws` and `gpus` a reap leaves.
-const OTHER: &str = "20261108-121000-0a00000b";
-
+// Lost runs on a provider that `reap` and `cancel` reach, `local`, and on one that they can't,
+// `aws`, whose `aws` fails each call, as one does once its account is gone: each takes what the
+// run's record holds and its configuration names, removes what it can reach, records the run as
+// failed, and says what remains and how to reap it again.
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "most of it is the stand-ins' sandboxes, the steps and their snapshot"
+    reason = "most of it is the records, the steps and their snapshot"
 )]
 fn reaps_providers() {
     let scratch = Scratch::new("reaps_providers");
-    let bin = scratch.0.join("bin");
-    let installed = install(&scratch, ".pumpkin/installed", &MODAL_HELPER);
     let (calls, container) = (scratch.0.join("docker-calls"), "c".repeat(64));
     let docker = format!(
         r#"#!/bin/sh
@@ -250,39 +246,22 @@ esac
         calls.display()
     );
     let path = write_on(&scratch, SPREAD, "default", None, &docker);
-    for (command, stand_in) in [("aws", test_support::aws()), ("uv", test_support::uv())] {
-        symlink(stand_in, bin.join(command)).unwrap();
-    }
+    let poison = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../xtask/poison/aws");
+    symlink(poison, scratch.0.join("bin/aws")).unwrap();
     let config = scratch.0.join("pumpkin.toml");
     scratch.write(
         "pumpkin.toml",
-        &format!("{}\n{EC2}\n{MODAL}", docker_table("default")),
+        &format!("{}\n{EC2}", docker_table("default")),
     );
-    let gone = scratch.0.join("job/modal.toml");
-    let modal = MODAL.replace(
-        "[providers.gpus.modal]\n",
-        &format!("[providers.gpus.modal]\nconfig = \"{}\"\n", gone.display()),
-    );
-    let job = scratch.0.join("job.toml");
-    scratch.write(
-        "job.toml",
-        &format!("{}\n{EC2}\n{modal}", docker_table("default")),
-    );
-    scratch.write("sent/modal.toml", "[pumpkin]\ntoken_id = \"ak-x\"\n");
-    let sent = scratch.0.join("sent/modal.toml");
     scratch.write(
         "bare.toml",
-        &format!(
-            "{}\n{}",
-            docker_table("default"),
-            "[providers.local.docker]\n"
-        ),
+        &format!("{}\n{LOCAL}", docker_table("default")),
     );
     // Each run's record, which names the configuration that ran it, and what each of its
     // providers reported, of which a reap reads only a Docker engine's context.
     let records = [
-        (SPREAD, &["local", "aws", "gpus"][..], config.clone()),
-        (CANCELLED, &["aws", "gpus"], job),
+        (SPREAD, &["local", "aws"][..], config.clone()),
+        (CANCELLED, &["aws"], config),
         (UNCONFIGURED, &["aws"], scratch.0.join("gone.toml")),
         (UNNAMED, &["aws"], scratch.0.join("bare.toml")),
     ];
@@ -306,186 +285,71 @@ esac
         let provided = json!({ "providers": reports.collect::<serde_json::Map<_, _>>() });
         scratch.write(&format!("runs/{id}/provider.json"), &provided);
     }
-    // The sandboxes that each record holds: on each provider, one the provider lists, which the
-    // reap removes; one on `aws` that its list misses, as one in another region would be; and
-    // one on `gpus` that the run deleted.
     let held = [
-        (SPREAD, "agent", "local", "c".repeat(64), false),
-        (
-            SPREAD,
-            "jobs/0",
-            "aws",
-            "i-00000000000000038".to_owned(),
-            false,
-        ),
-        (SPREAD, "jobs/1", "gpus", "sb-8".to_owned(), false),
-        (
-            SPREAD,
-            "jobs/2",
-            "aws",
-            "i-0000000000000000f".to_owned(),
-            false,
-        ),
-        (SPREAD, "jobs/3", "gpus", "sb-7".to_owned(), true),
-        (
-            CANCELLED,
-            "jobs/0",
-            "aws",
-            "i-00000000000000039".to_owned(),
-            false,
-        ),
+        (SPREAD, "agent", "local", container.clone()),
+        (SPREAD, "jobs/0", "aws", "i-00000000000000038".to_owned()),
+        (CANCELLED, "jobs/0", "aws", "i-00000000000000039".to_owned()),
     ];
-    for (run, dir, provider, id, deleted) in held {
-        let mut sandbox = json!({ "provider": provider, "id": id, "report": {} });
-        if deleted {
-            sandbox["delete"] = json!({ "state": "deleted" });
-        }
+    for (run, dir, provider, id) in held {
+        let sandbox = json!({ "provider": provider, "id": id, "report": {} });
         scratch.write(&format!("runs/{run}/{dir}/sandbox.json"), &sandbox);
     }
-    // An instance of each run's on the stand-in `aws`, running.
-    let instances = [SPREAD, CANCELLED, OTHER].map(|run| {
-        let id = format!("i-{:017x}", run.as_bytes()[run.len() - 1]);
-        scratch.write(&format!("bin/instances/{id}/state"), "running\n");
-        scratch.write(&format!("bin/instances/{id}/run"), run);
-        id
-    });
-    // A sandbox of each run's in the stand-in for Modal's SDK, in Pumpkin's App, each a process
-    // of the test's, in a process group of its own, which a delete kills.
-    let sandboxes = [SPREAD, CANCELLED, OTHER].map(|run| {
-        let id = format!("sb-{}", &run[run.len() - 1..]);
-        let process = stdx::process::command("cat", Environment::Inherited)
-            .stdin(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        scratch.write("bin/apps/pumpkin-images", "");
-        let dir = format!("bin/sandboxes/{id}");
-        scratch.write(&format!("{dir}/app"), "pumpkin-images");
-        let tags = json!({ "pumpkin-run": run, "pumpkin-role": "train_judge" });
-        scratch.write(&format!("{dir}/tags.json"), &tags);
-        scratch.write(&format!("{dir}/request.json"), &json!({ "digest": null }));
-        scratch.write(&format!("{dir}/pid"), &process.id());
-        (id, process)
-    });
-    let command = |program: &Path, args: &[&str]| {
-        let mut command = scratch.program(program, args);
+    let command = |args: &[&str]| {
+        let mut command = scratch.pumpkin(args);
         command.args(["--runs", "runs"]).env("PATH", &path);
         ran(command, &scratch.0, false)
     };
-    let sent = sent.to_str().unwrap();
-    let mut steps = vec![
-        command(&installed, &["cancel", CANCELLED]),
-        command(&installed, &["cancel", "--modal-config", sent, CANCELLED]),
-        command(&installed, &["reap"]),
-    ];
-    let states = instances.iter().map(|id| {
-        let state = fs::read_to_string(bin.join(format!("instances/{id}/state"))).unwrap();
-        format!("{id}: {}", state.trim())
+    let mut steps = vec![command(&["cancel", CANCELLED]), command(&["reap"])];
+    let reaps = fs::read_to_string(scratch.0.join(format!("runs/{SPREAD}/reaps.jsonl"))).unwrap();
+    let reaps = reaps.lines().map(|line| {
+        let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
+        line["at_ns"] = json!("<at>");
+        line.to_string()
     });
     steps.push(format!(
-        "the stand-in aws's instances:\n{}",
-        states.collect::<Vec<_>>().join("\n")
+        "{SPREAD}'s reaps.jsonl:\n{}",
+        reaps.collect::<Vec<_>>().join("\n")
     ));
-    let ended = sandboxes.map(|(id, mut process)| {
-        let returncode = bin.join(format!("sandboxes/{id}/returncode"));
-        let ended = fs::read_to_string(returncode).unwrap_or_else(|_| "none".to_owned());
-        // Its standard input ends, so that it ends, if a delete didn't kill it.
-        drop(process.stdin.take());
-        format!("{id}: returncode {ended}, {}", process.wait().unwrap())
-    });
-    steps.push(format!(
-        "the stand-in SDK's sandboxes:\n{}",
-        ended.join("\n")
-    ));
-    for run in [SPREAD, CANCELLED] {
-        let reaps = fs::read_to_string(scratch.0.join(format!("runs/{run}/reaps.jsonl"))).unwrap();
-        let reaps = reaps.lines().map(|line| {
-            let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
-            line["at_ns"] = json!("<at>");
-            line.to_string()
-        });
-        steps.push(format!(
-            "{run}'s reaps.jsonl:\n{}",
-            reaps.collect::<Vec<_>>().join("\n")
-        ));
-    }
     let called = fs::read_to_string(&calls).unwrap();
     steps.push(format!("docker was called with:\n{}", called.trim_end()));
-    steps.push(command(Path::new(PUMPKIN), &["reap"]));
-    let built = Path::new(PUMPKIN).parent().unwrap().to_str().unwrap();
     check(
         &scratch,
         steps.into_iter().map(Step::Ran),
         false,
-        &[(built, "<built>")],
+        &[],
         &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin cancel 20261108-120800-0a000009 --runs runs
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin cancel 20261108-120800-0a000009 --runs runs
             exit status: Some(3)
-            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `gpus`, if it left any, can't be removed, as it can't be reached: Modal refused the helper's `ready`: AuthError: Modal profile 'pumpkin' was not found in <scratch>/job/modal.toml. Run `modal profile list` to see available profiles: fix what Modal reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
-            pumpkin: run 20261108-120800-0a000009 left 1 sandbox on provider `aws`, now removed: i-00000000000000039
+            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
             pumpkin: run 20261108-120800-0a000009 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120800-0a000009 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120800-0a000009
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/job.toml
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml
             pumpkin: to remove what it left once its provider can be reached: pumpkin reap --runs <scratch>/runs
             printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
-            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin cancel --modal-config <scratch>/sent/modal.toml 20261108-120800-0a000009 --runs runs
-            exit status: Some(0)
-            pumpkin: run 20261108-120800-0a000009 left 1 sandbox on provider `gpus`, now removed: sb-9
-            pumpkin: run 20261108-120800-0a000009 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120800-0a000009
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/job.toml
-            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
-            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin reap --runs runs
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
             exit status: Some(3)
-            pumpkin: run 20261108-120700-0a000008's sandbox i-0000000000000000f on provider `aws`, which its record holds undeleted, isn't listed there now: it has ended since, or the provider is reached elsewhere than the run reached it, as when the configuration that ran the run, or the Docker context, has moved to another region, profile or engine since; if so, put it back as it was when the run ran, and reap again: pumpkin reap --runs <scratch>/runs
-            pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `aws`, now removed: i-00000000000000038
-            pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `gpus`, now removed: sb-8
+            pumpkin: run 20261108-120700-0a000008's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120700-0a000008, to stop reaping it
             pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `local`, now removed: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
             pumpkin: run 20261108-120700-0a000008 was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `gpus`, if it left any, can't be removed, as it can't be reached: Modal refused the helper's `ready`: AuthError: Modal profile 'pumpkin' was not found in <scratch>/job/modal.toml. Run `modal profile list` to see available profiles: fix what Modal reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
+            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
             pumpkin: run 20261108-120900-0a00000a's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120900-0a00000a, to stop reaping it
             pumpkin: run 20261108-120900-0a00000a was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-121100-0a00000c's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/bare.toml, names no provider `aws`: put its `[providers.aws]` table back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-121100-0a00000c, to stop reaping it
             pumpkin: run 20261108-121100-0a00000c was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: 3 runs ran on a provider that can't be reached, as said above: what each left there may remain
+            pumpkin: 4 runs ran on a provider that can't be reached, as said above: what each left there may remain
             pumpkin: to reap again once it can be reached: pumpkin reap --runs <scratch>/runs
             printed:
               20261108-120700-0a000008
               20261108-120900-0a00000a
               20261108-121100-0a00000c
-            the stand-in aws's instances:
-            i-00000000000000038: terminated
-            i-00000000000000039: terminated
-            i-00000000000000062: running
-            the stand-in SDK's sandboxes:
-            sb-8: returncode -9, signal: 9 (SIGKILL)
-            sb-9: returncode -9, signal: 9 (SIGKILL)
-            sb-b: returncode none, exit status: 0
             20261108-120700-0a000008's reaps.jsonl:
-            {"at_ns":"<at>","id":"i-00000000000000038","provider":"aws","reaped":"removed"}
-            {"at_ns":"<at>","id":"sb-8","provider":"gpus","reaped":"removed"}
             {"at_ns":"<at>","id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","provider":"local","reaped":"removed"}
-            {"at_ns":"<at>","id":"i-0000000000000000f","provider":"aws","reaped":"gone"}
-            20261108-120800-0a000009's reaps.jsonl:
-            {"at_ns":"<at>","id":"i-00000000000000039","provider":"aws","reaped":"removed"}
-            {"at_ns":"<at>","id":"sb-9","provider":"gpus","reaped":"removed"}
             docker was called with:
             context inspect --format {{.Endpoints.docker.Host}} -- default
             info --format {{json .}}
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-120700-0a000008
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-            rm --force --volumes cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-            $ PATH=<scratch>/bin:/usr/bin:/bin <built>/pumpkin reap --runs runs
-            exit status: Some(3)
-            pumpkin: run 20261108-120700-0a000008's sandboxes on provider `gpus`, if it left any, can't be removed, as it can't be reached: <built>/pumpkin-modal.py doesn't exist: expected Modal's helper and its lock beside `pumpkin`, as `cargo xtask install` installs them; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120700-0a000008, to stop reaping it
-            pumpkin: run 20261108-120700-0a000008's sandbox i-0000000000000000f on provider `aws`, which its record holds undeleted, isn't listed there now: it has ended since, or the provider is reached elsewhere than the run reached it, as when the configuration that ran the run, or the Docker context, has moved to another region, profile or engine since; if so, put it back as it was when the run ran, and reap again: pumpkin reap --runs <scratch>/runs
-            pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `local`, now removed: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `gpus`, if it left any, can't be removed, as it can't be reached: <built>/pumpkin-modal.py doesn't exist: expected Modal's helper and its lock beside `pumpkin`, as `cargo xtask install` installs them; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
-            pumpkin: run 20261108-120900-0a00000a's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120900-0a00000a, to stop reaping it
-            pumpkin: run 20261108-121100-0a00000c's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/bare.toml, names no provider `aws`: put its `[providers.aws]` table back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-121100-0a00000c, to stop reaping it
-            pumpkin: 4 runs ran on a provider that can't be reached, as said above: what each left there may remain
-            pumpkin: to reap again once it can be reached: pumpkin reap --runs <scratch>/runs
-            printed:
-              20261108-120700-0a000008"#]],
+            rm --force --volumes cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"#]],
     );
 }
 

@@ -68,9 +68,8 @@ impl Ec2<'_> {
     /// # Errors
     ///
     /// Fails before launching if `dial` isn't to IPv4 or the class isn't the envelope's; fails if
-    /// AWS refuses the launch or the timer, or `create.by` passes first (an instance launched
-    /// anyway carries the run's tag), or the list misses the instance for 200 s, terminating it
-    /// or saying it is left.
+    /// AWS refuses the launch or the timer, `create.by` passes first, or the list misses the
+    /// instance for 200 s, leaving any instance it launched, which carries the run's tag.
     pub(crate) fn create_instance(
         &self,
         create: &Create,
@@ -133,15 +132,9 @@ impl Ec2<'_> {
             &user_data(&start, self.region.as_str()),
             by,
         )?;
-        // An instance without its timer is what the timer exists to prevent.
-        let timer = self.set_timer(run, &id, hard_end, by);
-        let timer = timer.map_err(|failed| self.undo(&id, &failed, by))?;
+        let timer = self.set_timer(run, &id, hard_end, by)?;
         let group = &self.reached.group.0;
-        (self.listed(run, &id, by)).map_err(|failed| {
-            // Kept, to end the instance should its termination fail.
-            let left = format!("its timer, schedule `{group}/{timer}`, is left to end it");
-            format!("{}; {left}", self.undo(&id, &failed, by))
-        })?;
+        self.listed(run, &id, by)?;
         Ok(Created {
             id: SandboxId::from(id.0),
             report: json!({ "ami": ami, "timer": { "group": group, "name": timer } }),
@@ -251,15 +244,6 @@ impl Ec2<'_> {
             group.0
         ))?;
         Ok(name)
-    }
-
-    /// `failed`, the error of a create that launched instance `id`, once it has begun to
-    /// terminate the instance, by `by`, or saying that the instance is left.
-    fn undo(&self, id: &InstanceId, failed: &str, by: Deadline) -> String {
-        match self.reached.terminate(id, Bound::Create(by)) {
-            Ok(()) => format!("{failed}; instance `{id}`'s termination began"),
-            Err(left) => format!("{failed}; {left}"),
-        }
     }
 
     /// Lists run `run` until its list finds instance `id`, in whatever state, for up to

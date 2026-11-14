@@ -73,7 +73,7 @@ impl Scratch {
         // canonical path.
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
         let scratch = Self(fs::canonicalize(dir.path()).unwrap(), dir);
-        install(&scratch, ".pumpkin/bin", &[]);
+        install(&scratch, ".pumpkin/bin");
         scratch
     }
 
@@ -929,8 +929,7 @@ fn docker_table(context: &str) -> String {
 /// each role of [`workflow`]'s fits.
 const LOCAL: &str = "[providers.local.docker]\n";
 
-/// The table of a provider, `aws`, of kind `ec2`, whose settings name the envelope that
-/// [`test_support::aws`] describes.
+/// The table of a provider, `aws`, of kind `ec2`, whose settings name an envelope.
 const EC2: &str = r#"[providers.aws.ec2]
 region = "us-west-1"
 classes = { agent = { template = "lt-0aaaaaaaaaaaaaaaa", version = 7, vcpus = 32, memory_mib = 262144 }, judge = { template = "lt-0bbbbbbbbbbbbbbbb", version = 2, vcpus = 8, memory_mib = 16384 } }
@@ -938,9 +937,8 @@ repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
 timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
 "#;
 
-/// The table of a provider, `gpus`, of kind `modal`, whose settings name the workspace that
-/// [`test_support::uv`]'s stand-in for Modal's SDK reaches, and the repository that
-/// [`test_support::aws`] describes, and its one class, `h100`.
+/// The table of a provider, `gpus`, of kind `modal`, whose settings name a workspace and a
+/// repository, and its one class, `h100`.
 const MODAL: &str = r#"[providers.gpus.modal]
 profile = "pumpkin"
 dials_from = "203.0.113.7"
@@ -948,14 +946,8 @@ images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:a
 classes = { h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 17179869184, startup_seconds = 1800 } }
 "#;
 
-/// The files of Modal's helper, the script and its lock, which `cargo xtask install` installs
-/// beside `pumpkin`, where a run that places a role on a provider of kind `modal` finds them.
-const MODAL_HELPER: [&str; 2] = ["pumpkin-modal.py", "pumpkin-modal.py.lock"];
-
-/// Makes `scratch`'s directory `dir`, and links `pumpkin` there, and copies beside it each of
-/// `beside`, of [`MODAL_HELPER`]'s files, from the Modal provider's crate; returns the link's
-/// path.
-fn install(scratch: &Scratch, dir: &str, beside: &[&str]) -> PathBuf {
+/// Makes `scratch`'s directory `dir`, and links `pumpkin` there; returns the link's path.
+fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let dir = scratch.0.join(dir);
     fs::create_dir_all(&dir).unwrap();
     // A link, which writes nothing where a copy would write the whole executable; `pumpkin` finds
@@ -967,18 +959,8 @@ fn install(scratch: &Scratch, dir: &str, beside: &[&str]) -> PathBuf {
     if let Some(buildifier) = std::env::var_os("PUMPKIN_BUILDIFIER") {
         fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
     }
-    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers/modal/helper");
-    for file in beside {
-        fs::copy(helper.join(file), dir.join(file)).unwrap();
-    }
     dir.join("pumpkin")
 }
-
-/// What [`test_support::aws`] runs in place of `ecr batch-get-image` once it is in the stand-in's
-/// directory: the repository holds whatever image it is asked about, so that none is pushed.
-const HELD: &str = r#"digest=$(printf '%s\n' "$@" | sed --quiet 's/^imageDigest=//p')
-echo '{"images": [{"imageId": {"imageDigest": "'"$digest"'"}}], "failures": []}'
-"#;
 
 /// The engine of the Docker context `context`, as `scratch`'s `pumpkin` reaches it.
 fn engine(scratch: &Scratch, context: &str) -> Engine {

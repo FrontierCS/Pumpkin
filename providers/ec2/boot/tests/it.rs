@@ -1,7 +1,7 @@
-//! `ec2-boot`, against [`test_support::instance`], a stand-in for the commands an instance runs
-//! it with, `docker`, `nft` and `shutdown`, which records each call, so these tests
-//! need no instance. Each runs `ec2-boot start` in a directory of its own, below which it keeps
-//! its files, as it keeps them below `/` on an instance.
+//! `ec2-boot`, against [`STAND_IN`], a stand-in for the commands an instance runs it with,
+//! `docker`, `nft` and `shutdown`, which records each call, so these tests need no instance.
+//! Each runs `ec2-boot start` in a directory of its own, below which it keeps its files, as it
+//! keeps them below `/` on an instance.
 
 #![expect(
     clippy::unwrap_used,
@@ -9,6 +9,7 @@
 )]
 
 use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::process::Stdio;
 use std::{env, fs, iter};
 
@@ -20,6 +21,37 @@ use tempfile::TempDir;
 
 /// A time far past every test, in seconds since the Unix epoch.
 const LATER: u64 = 4_102_444_800;
+
+/// The stand-in for `docker`, `nft` and `shutdown`, which a boot runs through links to it, each
+/// named as its command, in `bin`: it answers as each would on an instance whose Docker is 29.1.3
+/// and supports every limit, and records each call in `calls`, its command and then its
+/// arguments, a line each, the call ended by an empty line. `nft` keeps what it reads in
+/// `nft-rules`; `docker cp` writes the path it copies from to the file it copies to; `docker run`
+/// writes, to `env-file`, the mode and the text of the file that its `--env-file` names.
+const STAND_IN: &str = r#"#!/bin/sh
+dir=${0%/*}
+name=${0##*/}
+{ echo "$name"; printf '%s\n' "$@"; echo; } >> "$dir/calls"
+case "$name $1" in
+    "nft "*) cat > "$dir/nft-rules" ;;
+    "shutdown "*|"docker pull") ;;
+    "docker info") echo true true true true ;;
+    "docker version") echo 29.1.3 ;;
+    # The reference by digest that the image was pulled by.
+    "docker image") for last; do :; done; echo "$last" ;;
+    "docker logout") echo "Removing login credentials for $2" ;;
+    "docker create") echo c0ffee ;;
+    "docker cp") echo "copied from $2" > "$3" ;;
+    "docker rm") echo "$2" ;;
+    "docker run")
+        for arg; do case $arg in --env-file=*) file=${arg#--env-file=} ;; esac; done
+        { printf 'mode 0%s: ' "$(stat --format=%a -- "$file")"; cat -- "$file"; } > "$dir/env-file"
+        echo 5f3c ;;
+    "docker wait") echo 0 ;;
+    "docker logs") echo 'a line on standard error' >&2; echo 'a line on standard output' ;;
+    *) echo "the stand-in doesn't know \`$name $*\`" >&2; exit 1 ;;
+esac
+"#;
 
 /// A directory of one boot's own: `bin`, which holds links to the stand-in, each named as a
 /// command, and the files it writes, and `root`, which the boot runs in. Dropping it removes it.
@@ -36,7 +68,9 @@ impl Instance {
         fs::create_dir_all(dir.path().join("bin")).unwrap();
         // As the user data makes it, before `ec2-boot` runs.
         fs::create_dir_all(dir.path().join("root/run/pumpkin")).unwrap();
-        let stand_in = test_support::instance();
+        let stand_in = dir.path().join("stand-in");
+        fs::write(&stand_in, STAND_IN).unwrap();
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
         for command in ["docker", "nft", "shutdown"] {
             std::os::unix::fs::symlink(&stand_in, dir.path().join("bin").join(command)).unwrap();
         }

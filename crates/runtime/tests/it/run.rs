@@ -329,6 +329,12 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
                     *time = "<ns>".into();
                 }
             }
+            if let Some(usd) = sandboxes.get_mut("usd") {
+                *usd = "<usd>".into();
+            }
+        }
+        if let Some(usd) = usage.get_mut("usd") {
+            *usd = "<usd>".into();
         }
     }
     outcome.to_string()

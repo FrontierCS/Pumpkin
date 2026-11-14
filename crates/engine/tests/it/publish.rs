@@ -26,12 +26,10 @@ const WAITING: &str = "pumpkin: waiting for a publish slot: all 4 held, by ";
 
 /// The stand-in `docker`: `image inspect` of an image's platform waits until the slots' count,
 /// 4, have run at once and the test has written `go`, or a minute passes, notes how many run,
-/// then answers as an engine of a manifest for `linux/amd64` does; every other command goes to
-/// `test_support::stand_in_docker`.
+/// then answers as an engine of a manifest for `linux/amd64` does; the three commands with which
+/// the engine is reached answer as Docker's would; any other fails.
 fn stand_in(dir: &Path) -> String {
     let dir = dir.display();
-    let other = test_support::stand_in_docker();
-    let other = other.display();
     format!(
         r#"#!/bin/sh
 case " $* " in
@@ -46,7 +44,11 @@ case " $* " in
     ls --directory "{dir}"/running.* | wc --lines >> "{dir}/at-once"
     rmdir "{dir}/running.$$"
     echo '{{"Os":"linux","Architecture":"amd64","Descriptor":{{"mediaType":"application/vnd.oci.image.manifest.v1+json"}}}}' ;;
-*) exec "{other}" "$@" ;;
+*" context inspect "*) echo unix:///nonexistent/docker-stand-in.sock ;;
+*" info --format "*)
+    echo '{{"MemoryLimit": true, "SwapLimit": true, "CpuCfsQuota": true, "CPUSet": true, "PidsLimit": true, "MemTotal": 8589934592, "ID": "stand-in", "DriverStatus": [["driver-type", "io.containerd.snapshotter.v1"]], "SecurityOptions": ["name=seccomp,profile=builtin"], "KernelVersion": "7.0.0", "OperatingSystem": "stand-in", "ServerVersion": "29.9.2", "ClientInfo": {{"Version": "29.9.2"}}}}' ;;
+*" version --format "*) echo linux/amd64 ;;
+*) echo "the stand-in docker doesn't know \`$*\`" >&2; exit 1 ;;
 esac
 "#
     )

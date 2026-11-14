@@ -167,15 +167,11 @@ version = "0.0.0"
 dependencies = [
  "aws",
  "engine",
- "expect-test",
- "gateway",
  "provider",
  "schema",
  "serde",
  "serde_json",
  "stdx",
- "tempfile",
- "test-support",
 ]
 
 [[package]]
@@ -187,7 +183,6 @@ dependencies = [
  "serde_json",
  "stdx",
  "tempfile",
- "test-support",
 ]
 
 [[package]]
@@ -352,16 +347,12 @@ version = "0.0.0"
 dependencies = [
  "aws",
  "engine",
- "expect-test",
- "gateway",
  "provider",
  "schema",
  "serde",
  "serde_json",
  "sha2",
  "stdx",
- "tempfile",
- "test-support",
 ]
 
 [[package]]
