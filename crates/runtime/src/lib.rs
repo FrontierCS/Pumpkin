@@ -54,8 +54,8 @@ use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
 pub use log::{
-    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, LeaseCommand, LeaseSpan, ModelUse, Place,
-    PlaceUse, Progress, Sandbox, Tokens, Work,
+    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Direction, LeaseSpan, ModelUse, Part, Place,
+    PlaceUse, Progress, Readout, Sandbox, Tokens, Unread, Work,
 };
 use log::{Entry, Log};
 use model::{Exchange, Served};
@@ -166,7 +166,7 @@ impl<'r, H: Host> Run<'r, H> {
         let outcome = self.run_on(sandboxd, (private, dialer), started);
         // What the run used, as its log, synced, says; none if the run never began its log.
         let (outcome, usage) = match log::progress(&self.dir) {
-            Ok(progress) => (outcome, progress.as_ref().map(log::usage_of)),
+            Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
             Err(error) => (failed_also(outcome, Err(error)), None),
         };
         let mut recorded = match &outcome {

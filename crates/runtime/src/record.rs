@@ -40,7 +40,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
 
-use super::log::{self, Progress};
+use super::log::{self, Readout};
 use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System};
 
@@ -505,13 +505,13 @@ impl Record {
         }
     }
 
-    /// What the run's log says of it so far ([`Progress`]); `None` if its log doesn't record
-    /// its start yet, as a run that has yet to start.
+    /// What the run's log says of it so far, as far as this build can read it ([`Readout`]).
     ///
     /// # Errors
     ///
-    /// Fails if a file of the record can't be read.
-    pub fn progress(&self) -> Result<Option<Progress>, String> {
+    /// Fails if a file of the record can't be read, or its `ir.json` or `provider.json` isn't
+    /// JSON.
+    pub fn progress(&self) -> Result<Readout, String> {
         log::progress(&self.dir)
     }
 

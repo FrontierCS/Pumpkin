@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
-use std::{io, iter};
+use std::{fmt, io, iter};
 
 use decision::{Event, JobId, LeaseId};
 use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
@@ -31,6 +31,7 @@ use schema::sandbox::{
     command_env, command_stderr, command_stdout, pumpkin_dir,
 };
 use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, RunnerId, Workflow};
+use serde::{Deserialize, Deserializer, de};
 use serde_json::Value;
 use stdx::{Context, Deadline};
 
@@ -241,13 +242,13 @@ impl Which {
     /// The sandbox's name within its run, which its socket directory has too.
     pub(super) fn name(self) -> Name {
         let name = match self {
-            Self::Agent => "agent".to_owned(),
-            Self::Job(job, _) => format!("job-{}", job.0),
-            Self::Lease(lease, ..) => format!("lease-{}", lease.0),
+            Self::Agent => SandboxName::Agent,
+            Self::Job(job, _) => SandboxName::Job(job.0),
+            Self::Lease(lease, ..) => SandboxName::Lease(lease.0),
         };
         // A `Name` made of such parts, which couldn't fail, would be a `pub` item of the schema
         // for this one caller.
-        let Ok(name) = Name::try_from(name) else {
+        let Ok(name) = Name::try_from(name.to_string()) else {
             unreachable!(
                 "a sandbox's name within its run is no name, though `agent`, and `job-` and \
                  `lease-` with a number's digits, are names: a letter, then letters, digits and \
@@ -255,6 +256,44 @@ impl Which {
             )
         };
         name
+    }
+}
+
+/// A sandbox's name within its run, as [`Which::name`] gives it and the run log reads it back:
+/// the agent's, job `n`'s or lease `n`'s, `agent`, `job-<n>` or `lease-<n>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SandboxName {
+    Agent,
+    Job(u64),
+    Lease(u64),
+}
+
+impl fmt::Display for SandboxName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Agent => f.write_str("agent"),
+            Self::Job(job) => write!(f, "job-{job}"),
+            Self::Lease(lease) => write!(f, "lease-{lease}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SandboxName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        let numbered = |prefix: &str| name.strip_prefix(prefix)?.parse().ok();
+        if name == "agent" {
+            Ok(Self::Agent)
+        } else if let Some(job) = numbered("job-") {
+            Ok(Self::Job(job))
+        } else if let Some(lease) = numbered("lease-") {
+            Ok(Self::Lease(lease))
+        } else {
+            Err(de::Error::invalid_value(
+                de::Unexpected::Str(&name),
+                &"`agent`, `job-<n>` or `lease-<n>`",
+            ))
+        }
     }
 }
 

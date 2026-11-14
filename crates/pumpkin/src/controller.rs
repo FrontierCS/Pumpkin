@@ -1745,7 +1745,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let lines = crate::progress::lines(&listing, now, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
     said_sends(&reached)?;
-    said_when(now);
+    said_when(now.since_epoch());
     if unlisted > 0 {
         return Err("a run can't be listed, as said above".to_owned());
     }
@@ -1791,7 +1791,7 @@ fn said_sends(reached: &Reached) -> Result<(), String> {
 /// Says when the controller began a listing, at `began`, since the Unix epoch, if it took
 /// [`STALE`] or more to arrive.
 fn said_when(began: Duration) {
-    let took = crate::unix_now().saturating_sub(began);
+    let took = crate::unix_now().since_epoch().saturating_sub(began);
     if took < STALE {
         return;
     }

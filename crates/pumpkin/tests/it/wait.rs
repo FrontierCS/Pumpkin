@@ -207,10 +207,11 @@ fn judge_stderr() {
     // The final judge's job follows the agent's train job, whose standard error isn't shown.
     let shown = "20261108-120000-0000000a";
     write_record(&scratch, shown, true, Some(no_result.clone()));
-    let log = [
-        json!({ "seq": 0, "actions": [{ "kind": "start_judge", "job": 0, "grant": "train" }] }),
-        json!({ "seq": 1, "actions": [{ "kind": "start_judge", "job": 1, "grant": null }] }),
-    ];
+    let start = |job: u64, grant: Value| {
+        let start = json!({ "kind": "start_judge", "job": job, "grant": grant, "timeout_ns": "0" });
+        json!({ "seq": job, "at_ns": "0", "actions": [start] })
+    };
+    let log = [start(0, json!("train")), start(1, Value::Null)];
     let lines: Vec<String> = log.iter().map(|line| format!("{line}\n")).collect();
     scratch.write(&format!("runs/{shown}/log.jsonl"), &lines.concat());
     scratch.write(
@@ -221,8 +222,7 @@ fn judge_stderr() {
     let path = scratch.0.join(format!("runs/{shown}/jobs/1/log"));
     fs::create_dir_all(&path).unwrap();
     fs::write(path.join("command.stderr"), stderr).unwrap();
-    let final_job =
-        json!({ "seq": 0, "actions": [{ "kind": "start_judge", "job": 0, "grant": null }] });
+    let final_job = start(0, Value::Null);
     let large = "20261108-120000-0000000b";
     write_record(&scratch, large, true, Some(no_result.clone()));
     scratch.write(
@@ -719,14 +719,20 @@ fn summarizes() {
     );
 }
 
-// `wait` of a live run says each milestone its log records; it looks at the log again a poll
-// later, so the test ends it once it has said the last.
+// `wait` of a live run says each milestone its log records, and once the part that doesn't read;
+// the test ends the run once it has said the last, so `wait` reads the log again a poll later.
 #[test]
 fn follows_milestones() {
     let scratch = Scratch::new("follows-milestones");
     let id = "20261110-100000-0000000a";
     let priced = lease_places(true);
-    let dir = write_run(&scratch, id, asked(id, 30), &judged_log(), None, &priced);
+    let mut log = judged_log();
+    log.push(logged(
+        1,
+        json!({ "kind": "tick" }),
+        json!([{ "kind": "close_lease" }]),
+    ));
+    let dir = write_run(&scratch, id, asked(id, 30), &log, None, &priced);
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
     let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
@@ -740,10 +746,14 @@ fn follows_milestones() {
             break;
         }
     }
-    child.kill().unwrap();
+    let outcome = json!({ "state": "finished", "score": 49.36 });
+    scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
+    drop(driver);
+    stderr.read_to_string(&mut said).unwrap();
     child.wait().unwrap();
+    // The summary, which follows, says the part too, on a line of its own.
     let said: Vec<&str> = (said.lines())
-        .filter(|line| line.starts_with("pumpkin:  "))
+        .filter(|line| line.starts_with("pumpkin:  ") || line.contains("can't be read"))
         .collect();
     let step = Step::Ran(format!("{invoked}\n{}", said.join("\n")));
     check(
@@ -753,6 +763,7 @@ fn follows_milestones() {
         &[],
         &expect![[r#"
         $ pumpkin wait 20261110-100000-0000000a --runs runs
+        pumpkin: run 20261110-100000-0000000a: 1 part of its log can't be read by this pumpkin, the first at line 52, its action 1: missing field `lease`
         pumpkin:    0:05 the agent started on aws/judge
         pumpkin:    0:40 train judge job 0 asked on modal/a100_80
         pumpkin:    0:46 train judge job 0 started with unknown GPUs
@@ -780,14 +791,14 @@ fn follows_milestones() {
         pumpkin:   16:45 cpu lease 2 ended: closed as the work phase ended
         pumpkin:   16:46 final judge job 4 asked on modal/a100_80
         pumpkin:   16:50 final judge job 4 started with NVIDIA A100-SXM4-80GB
-        pumpkin:   18:20 final judge job 4 ended: 49.36"#]],
+        pumpkin:   18:20 final judge job 4 ended: 49.36
+          1 part of its log can't be read by this pumpkin, the first at line 52, its action 1: missing field `lease`"#]],
     );
 }
 
 // A run whose final judge returned its whole result, as deep as a result may nest, which `wait`
-// and `ls` read back; and the record of one a level deeper, which no run writes, as no result is,
-// whose log they refuse. Each log ends with a line cut short, as by a crash, which the readers
-// leave out.
+// and `ls` read back; and one a level deeper, which no run writes, whose line they leave out and
+// say. Each log ends with a line cut short, as by a crash, which they leave out quietly.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -864,12 +875,19 @@ fn reads_the_deepest_results() {
         pumpkin: run 20261113-123335-0000000a finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000a
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
         $ pumpkin ls --runs runs 20261113-123335-0000000b
-        exit status: Some(1)
-        pumpkin: <scratch>/runs/20261113-123335-0000000b/log.jsonl, line 6: recursion limit exceeded at line 1 column 743
-        pumpkin: 1 run can't be listed, as said above
+        exit status: Some(0)
+        pumpkin: run 20261113-123335-0000000b: 1 part of its log can't be read by this pumpkin, the first at line 6: recursion limit exceeded, at column 743
+        printed:
+          20261113-123335-0000000b finished         1s  6               -  example/lease
+          1 run: 1 finished
         $ pumpkin wait --runs runs 20261113-123335-0000000b
         exit status: Some(0)
-        pumpkin: the run's summary can't be read: <scratch>/runs/20261113-123335-0000000b/log.jsonl, line 6: recursion limit exceeded at line 1 column 743
+        pumpkin: run 20261113-123335-0000000b started 0s after it was asked for, and ran 1s:
+             0:00 agent on aws/judge, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
+             0:01 final judge job 0 on modal/a100_80 with unknown GPUs, which never ended
+          model: 0 requests
+          sandboxes: 1 on aws/judge, 1s in all, 1 created, all deleted; 1 on modal/a100_80, 0s in all, 1 created, all deleted
+          1 part of its log can't be read by this pumpkin, the first at line 6: recursion limit exceeded, at column 743
         pumpkin: run 20261113-123335-0000000b finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000b
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
