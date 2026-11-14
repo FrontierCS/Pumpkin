@@ -24,7 +24,7 @@ use std::process::{Command, Output};
 use std::time::Duration;
 use std::{fs, iter, thread};
 
-use docker::{BuildContext, Engine, Recipe};
+use engine::{BuildContext, Engine, Recipe};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;

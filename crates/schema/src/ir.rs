@@ -92,6 +92,9 @@ pub struct Resources {
     pub memory_bytes: NonZeroU64,
 }
 
+/// The thousandths of a CPU in a CPU, the unit of a CPU limit ([`Resources::cpu_millis`]).
+pub const MILLIS_PER_CPU: u64 = 1000;
+
 /// What runs in a role's sandboxes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

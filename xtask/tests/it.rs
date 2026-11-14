@@ -285,13 +285,14 @@ fn diff() {
         |sh| {
             sh.write_file("changed.rs", "fn f() {\n    g();\n}\n")
                 .unwrap();
-            let refused = diff::since(sh, "HEAD", again).unwrap_err();
+            let refused = diff::since(sh, "HEAD", &[], again).unwrap_err();
             cmd!(sh, "git add --intent-to-add -- new.rs")
                 .quiet()
                 .run()
                 .unwrap();
-            let diff = diff::since(sh, "HEAD", again).unwrap();
-            format!("{refused}\n{diff}")
+            let diff = diff::since(sh, "HEAD", &[], again).unwrap();
+            let below = diff::since(sh, "HEAD", &["changed.rs".into()], again).unwrap();
+            format!("{refused}\n{diff}below changed.rs:\n{below}")
         },
         &expect![[r#"
             the diff would leave out untracked Rust files: add them to it with `git add --intent-to-add -- <repo>/new.rs`, then run `cargo xtask mutants --in-diff HEAD` again
@@ -318,6 +319,16 @@ fn diff() {
             +++ b/new.rs
             @@ -0,0 +1 @@
             +fn g() {}
+            below changed.rs:
+            diff --git a/changed.rs b/changed.rs
+            index 59760b5..e20511e 100644
+            --- a/changed.rs
+            +++ b/changed.rs
+            @@ -1 +1,3 @@
+            -fn f() {}
+            +fn f() {
+            +    g();
+            +}
         "#]],
     );
 }

@@ -1,6 +1,6 @@
 [package]
 name = "decision"
-version = "0.0.0"
+version.workspace = true
 description = "The driver's decision core: what a run does next, decided from what has happened"
 edition.workspace = true
 publish.workspace = true

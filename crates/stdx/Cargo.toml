@@ -1,6 +1,6 @@
 [package]
 name = "stdx"
-version = "0.0.0"
+version.workspace = true
 description = "Small extensions to the standard library that Pumpkin's crates share"
 edition.workspace = true
 publish.workspace = true

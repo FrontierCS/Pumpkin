@@ -1,6 +1,6 @@
 [package]
 name = "pumpkin"
-version = "0.0.0"
+version.workspace = true
 description = "The `pumpkin` command, which runs workflows"
 edition.workspace = true
 publish.workspace = true
@@ -12,6 +12,7 @@ test = false
 
 [dependencies]
 docker = { path = "../../providers/docker" }
+engine = { path = "../engine" }
 provider = { path = "../provider" }
 route = { path = "../route" }
 runtime = { path = "../runtime" }

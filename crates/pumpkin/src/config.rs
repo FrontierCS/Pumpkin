@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use docker::ContextName;
+use engine::ContextName;
 use route::{self, Key, Serving, UpstreamUrl};
 use schema::ir::{ModelName, Models, Name};
 use serde::{Deserialize, Deserializer, de};

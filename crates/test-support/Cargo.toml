@@ -1,6 +1,6 @@
 [package]
 name = "test-support"
-version = "0.0.0"
+version.workspace = true
 description = "What the tests of more than one of Pumpkin's crates share"
 edition.workspace = true
 publish.workspace = true

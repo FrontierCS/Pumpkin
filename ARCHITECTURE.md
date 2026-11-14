@@ -25,7 +25,8 @@ The binaries are `pumpkin` (`crates/pumpkin/src/main.rs`), which runs a workflow
 `sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
 (`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
 parsed; `Placed`, its roles placed in classes of sandbox; `Core`, a run's decisions; `Session`,
-the host's end of a sandbox; `Provider`, a provider a run has connected to; `Engine`, Docker's.
+the host's end of a sandbox; `Provider`, a provider a run has connected to; `Engine`, the
+operator's Docker engine, on which the images that sandboxes run are built.
 
 ## Front ends
 
@@ -72,6 +73,19 @@ Git repository's URL.
   it is `#![no_std]`, so it reads only the text it is given, and a harness and a provider share
   one check without either depending on the other.
 
+**`crates/engine`.** The operator's Docker engine, on which Pumpkin builds the images that
+sandboxes run, whichever provider runs them: `Engine` reaches the engine of a named Docker context
+(`ContextName`), reports it (`Report`), and builds images, each tagged by its build's inputs, from
+a recipe (`Recipe`) that `recipe::check` passes and a context of directories (`BuildContext`) that
+it stages; and `confinement` confines a role's container wherever a provider's sandbox is one.
+- **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
+  `recipe`, `schema` and `stdx`, so a crate that only builds or publishes images depends on it,
+  and on no provider.
+- **Architecture Invariant:** production code reaches Docker only through it, whose `docker` runs
+  against the named context alone, so the operator's choice of engine holds. Tests run `docker`
+  directly only to observe containers and images, pause containers, or build, tag and remove
+  images of their own.
+
 **`crates/gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
 `Session`, whose one owner moves trees, runs commands (`Process`) and answers ops, hearing of each
 op, each model request, each command's exit and the session's end as an `Arrival` sent to it.
@@ -98,11 +112,10 @@ consoles.
 - **Architecture Invariant:** every call on sandboxes names its run and keeps to that run's, by
   its tag, so runs that share a provider never reach each other's sandboxes.
 
-**`providers/docker`.** `docker`, a sandbox as a container that needs no root to start:
-`Engine` reaches the engine of a named Docker context (`ContextName`), reports it (`Report`), is
-the `Provider` that makes each sandbox a container, and builds images, each tagged by its build's
-inputs, from a recipe (`Recipe`) that `recipe::check` passes and a context of directories
-(`BuildContext`) that it stages. A provider is `providers/<name>`, crate `<name>`, which holds its
+**`providers/docker`.** `docker`, a sandbox as a container that needs no root to start, on the
+operator's engine: `Docker`, made from an `Engine`, is the `Provider` that makes each sandbox a
+container under the engine's `confinement`, once it has checked that the engine enforces each of
+a container's limits (`Docker::connect`). A provider is `providers/<name>`, crate `<name>`, which holds its
 platform's calls and its sandboxes' confinement.
 - **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
   its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
@@ -111,10 +124,6 @@ platform's calls and its sandboxes' confinement.
 - **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
   `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands and the
   session's owner find them anywhere.
-- **Architecture Invariant:** production code reaches Docker only through `Engine`, which runs
-  `docker` against the named context alone, so the operator's choice of engine holds. Tests run
-  `docker` directly only to observe containers and images, pause containers, or build, tag and
-  remove images of their own.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
@@ -190,8 +199,9 @@ that writes the agent's runtime that runs it.
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
 and with `--docker` the tests that need Docker), `cargo xtask sandboxd`, `cargo xtask install`,
 which installs `pumpkin` beside a static `sandboxd`, `cargo xtask mutants`, which runs
-cargo-mutants on the working tree's changes (`diff`), and `cargo xtask install-tools`, which
-installs the contributor tools that `tools` pins. A check is a step of `ci`.
+cargo-mutants on the working tree's changes (`diff`), `cargo xtask refill`, which rewrites a
+package's snapshots, and `cargo xtask install-tools`, which installs the contributor tools that
+`tools` pins. A check is a step of `ci`.
 
 ## Cross-cutting concerns
 

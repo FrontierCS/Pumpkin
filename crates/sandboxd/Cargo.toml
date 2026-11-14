@@ -1,6 +1,6 @@
 [package]
 name = "sandboxd"
-version = "0.0.0"
+version.workspace = true
 description = "sandboxd, the supervisor in every Pumpkin sandbox"
 edition.workspace = true
 publish.workspace = true

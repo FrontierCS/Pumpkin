@@ -11,7 +11,6 @@
     reason = "a failed test shows its containers' logs"
 )]
 
-use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -20,7 +19,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use docker::{BuildContext, Built, ContextName, Engine, Recipe, Report, Security};
+use docker::Docker;
+use engine::{ContextName, Engine, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Listener, Op, Process, Put, Session};
 use provider::Provider;
@@ -189,8 +189,8 @@ impl Drop for Fixture {
     // binary and hide the other tests' results: failures are printed instead. Without an
     // engine, no test started a container.
     fn drop(&mut self) {
-        if let Ok(engine) = connected() {
-            let provider: &dyn Provider = engine;
+        if let Ok(provider) = connected() {
+            let provider: &dyn Provider = provider;
             for run in [&self.run, &self.other_run] {
                 if thread::panicking()
                     && let Err(error) = show_logs(run)
@@ -207,21 +207,27 @@ impl Drop for Fixture {
     }
 }
 
-/// The engine the tests reach Docker through ([`test_support::docker_context`]), or why it
-/// can't be reached.
-fn connected() -> &'static Result<Engine, String> {
+/// The engine the tests reach Docker through, by the context `PUMPKIN_DOCKER_CONTEXT` names,
+/// or `default`, or why it can't be reached.
+fn reached() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
     ENGINE.get_or_init(|| Engine::connect(ContextName::try_from(test_support::docker_context())?))
 }
 
-/// The engine the tests reach Docker through.
-fn engine() -> &'static Engine {
-    connected().as_ref().unwrap()
+/// The provider on the engine, or why either can't be reached.
+fn connected() -> &'static Result<Docker<'static>, String> {
+    static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
+    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?))
 }
 
-/// The engine, as the runtime holds a provider: what the tests start sandboxes through.
-fn provider() -> &'static dyn Provider {
-    engine()
+/// The engine the tests reach Docker through.
+fn engine() -> &'static Engine {
+    reached().as_ref().unwrap()
+}
+
+/// The provider on the engine, as the runtime holds one: what the tests start sandboxes through.
+fn provider() -> &'static Docker<'static> {
+    connected().as_ref().unwrap()
 }
 
 /// The deadline of a start that begins now, by the startup that the provider's one class
@@ -536,59 +542,25 @@ fn confinement() {
     );
 }
 
+// What the provider declares as ready: the engine's report, and its one class, which has what
+// the host has.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn report() {
-    check(
-        "report",
-        |_| {
-            let Report {
-                context: _,
-                endpoint,
-                client_version,
-                engine_version,
-                security: _,
-                kernel,
-                os,
-            } = engine().report();
-            let named = [endpoint, client_version, engine_version, kernel, os];
-            let mut ready = serde_json::to_value(provider().ready()).unwrap();
-            let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
-            let reported = format!("{reported:?}");
-            // The host's, which every engine has its own of.
-            let classes = ready["classes"].as_object_mut().unwrap();
-            for class in classes.values_mut() {
-                class["resources"] = "<the host's>".into();
-            }
-            let mut lines = vec![
-                format!(
-                    "endpoint, versions, kernel and OS named: {}",
-                    named.iter().all(|named| !named.is_empty())
-                ),
-                format!(
-                    "ready: a report of {reported}, and the classes {}",
-                    ready["classes"]
-                ),
-                ContextName::try_from(String::new()).unwrap_err(),
-            ];
-            // `docker context inspect` mustn't take `--help` for its own option, which prints its
-            // help and succeeds.
-            for name in ["pumpkin-missing", "--help"] {
-                let refused = Engine::connect(ContextName::try_from(name.to_owned()).unwrap());
-                let refused = refused.unwrap_err();
-                let (wrong, _) = refused.split_once(": ").unwrap();
-                let (_, todo) = refused.rsplit_once(": ").unwrap();
-                lines.push(format!("{wrong}: …: {todo}"));
-            }
-            lines
-        },
-        &expect![[r#"
-            endpoint, versions, kernel and OS named: true
-            ready: a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and the classes {"container":{"resources":"<the host's>","startup_seconds":540}}
-            the Docker context's name is empty: name one that `docker context ls` lists
-            the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
-            the Docker context `--help` can't be read: …: name one that `docker context ls` lists"#]],
+fn ready() {
+    let mut ready = serde_json::to_value(provider().ready()).unwrap();
+    let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
+    let reported = format!("{reported:?}");
+    // The host's, which every engine has its own of.
+    let classes = ready["classes"].as_object_mut().unwrap();
+    for class in classes.values_mut() {
+        class["resources"] = "<the host's>".into();
+    }
+    let ready = format!(
+        "a report of {reported}, and the classes {}",
+        ready["classes"]
     );
+    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and the classes {"container":{"resources":"<the host's>","startup_seconds":540}}"#]]
+    .assert_eq(&ready);
 }
 
 #[test]
@@ -681,294 +653,6 @@ fn redact(fixture: &Fixture, message: &str) -> String {
         return format!("{before}{from}…{to}{after}");
     }
     message
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn builds() {
-    check(
-        "builds",
-        |fixture| {
-            let mut builds = Builds::new(fixture);
-            let dir = fixture.dir.path().join("context");
-            let mut lines = vec![format!("built: {}", builds.build("Dockerfile"))];
-            let [first] = <[String; 1]>::try_from(builds.tags(&builds.seen[0])).unwrap();
-            run(&["image", "rm", &first]);
-            put(&dir, "file", "two", 0o644);
-            lines.push(format!("another content: {}", builds.build("Dockerfile")));
-            let second = builds.seen[1].clone();
-            run(&["tag", &second, &first]);
-            put(&dir, "file", "one", 0o644);
-            let found = builds.build("Dockerfile");
-            lines.push(format!("the first inputs, their tag moved to B: {found}"));
-            put(&dir, "file", "one", 0o755);
-            lines.push(format!("another mode: {}", builds.build("Dockerfile")));
-            lines.push(format!(
-                "another recipe: {}",
-                builds.build("other/Dockerfile")
-            ));
-            let (context, dockerfile) = (builds.context(), Recipe::File(relative("Dockerfile")));
-            let base = engine().build(&context, &dockerfile, &[], &builds.repository);
-            let base = base.unwrap();
-            let on_base = Recipe::Text(format!("FROM {}\nCOPY file /on-base\n", base.tag()));
-            let built = builds.build_in(&context, &on_base, &[&base]);
-            lines.push(format!("a text on its base: {built}"));
-            let refused = builds.build_in(&context, &on_base, &[]);
-            let refused = refused.replace(base.tag(), "<base>");
-            lines.push(format!("built before, now without its base: {refused}"));
-            lines.push(format!(
-                "an absent recipe: {}",
-                builds.build("absent/Dockerfile")
-            ));
-            std::os::unix::fs::symlink("file", dir.join("link")).unwrap();
-            lines.push(format!("a symbolic link: {}", builds.build("Dockerfile")));
-            fs::remove_file(dir.join("link")).unwrap();
-            for (what, name) in [("a space", "a b"), ("a tab", "a\tb")] {
-                put(&dir, name, "", 0o644);
-                lines.push(format!(
-                    "a name with {what}: {}",
-                    builds.build("Dockerfile")
-                ));
-                fs::remove_file(dir.join(name)).unwrap();
-            }
-            // Without `id`, the inputs are the same in every process, so the tag the refusal
-            // names pins the digest's text; the lookup fails before anything is built.
-            fs::remove_file(dir.join("id")).unwrap();
-            let repository = "pumpkin-docker-tests/Builds";
-            let uppercase = engine().build(&context, &dockerfile, &[], repository);
-            let refused = redact(fixture, &uppercase.unwrap_err());
-            lines.push(format!("an uppercase repository: {refused}"));
-            lines
-        },
-        &expect![[r#"
-            built: A, tagged :1
-            another content: B, tagged :2
-            the first inputs, their tag moved to B: B, tagged :1 :2
-            another mode: C, tagged :3
-            another recipe: C, tagged :3 :4
-            a text on its base: D, tagged :5
-            built before, now without its base: Dockerfile:1: `<base>` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a base the build is given
-            an absent recipe: `absent/Dockerfile` is no regular file in the build's context: name the build's recipe by its path there
-            a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
-            a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
-            a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
-            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:ae5393eb92660d45221c68f0974539eb1151a715d549a35397299be084351a30` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
-    );
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn mounts() {
-    check(
-        "mounts",
-        |fixture| {
-            let mut builds = Builds::new(fixture);
-            let shared = fixture.dir.path().join("shared");
-            put(&shared, "tool", "one", 0o755);
-            let dir = builds.context().dir;
-            let at = |path: &str| BuildContext {
-                dir: dir.clone(),
-                mounts: BTreeMap::from([(relative(path), shared.clone())]),
-            };
-            let recipe = Recipe::Text("FROM scratch\nCOPY file id shared/tool /\n".to_owned());
-            let built = builds.build_in(&at("shared"), &recipe, &[]);
-            let mut lines = vec![format!("mounted: {built}")];
-            put(&shared, "tool", "two", 0o755);
-            let built = builds.build_in(&at("shared"), &recipe, &[]);
-            lines.push(format!("a mounted file changed: {built}"));
-            for (what, path) in [
-                ("over a file", "file"),
-                ("in a file", "file/shared"),
-                ("in nothing", "absent/shared"),
-                ("at a name with a space", "a b"),
-            ] {
-                let refused = builds.build_in(&at(path), &recipe, &[]);
-                lines.push(format!("mounted {what}: {refused}"));
-            }
-            lines
-        },
-        &expect![[r#"
-            mounted: A, tagged :1
-            a mounted file changed: B, tagged :2
-            mounted over a file: the build's context holds `file` already, where <dir>/shared is to be mounted: mount it where the context holds nothing
-            mounted in a file: the build's context holds no directory `file` for <dir>/shared to be mounted in: mount it in a directory the context holds
-            mounted in nothing: the build's context holds no directory `absent` for <dir>/shared to be mounted in: mount it in a directory the context holds
-            mounted at a name with a space: `a b` holds whitespace or a control character: mount <dir>/shared at a path without them"#]],
-    );
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
-fn modes() {
-    check(
-        "modes",
-        |fixture| {
-            let mut builds = Builds::new(fixture);
-            let dir = fixture.dir.path().join("context");
-            // Built only if the image holds each file with the mode the stage gives it.
-            let recipe = Recipe::Text(format!(
-                "FROM {BUSYBOX}\nCOPY . /context\nRUN cd /context && test \"$(stat -c %a file \
-                 tool other other/Dockerfile | xargs)\" = '644 755 755 644'\n"
-            ));
-            let mut lines = Vec::new();
-            for (what, [file, tool, dirs]) in [
-                ("group-writable", [0o664, 0o775, 0o775]),
-                ("for their owners alone", [0o600, 0o700, 0o700]),
-                ("as git checks them out", [0o644, 0o755, 0o755]),
-            ] {
-                put(&dir, "file", "one", file);
-                put(&dir, "tool", "", tool);
-                for dir in [dir.join("other"), dir.clone()] {
-                    fs::set_permissions(dir, fs::Permissions::from_mode(dirs)).unwrap();
-                }
-                let built = builds.build_in(&builds.context(), &recipe, &[]);
-                lines.push(format!("{what}: {built}"));
-            }
-            lines
-        },
-        &expect![[r#"
-            group-writable: A, tagged :1
-            for their owners alone: A, tagged :1
-            as git checks them out: A, tagged :1"#]],
-    );
-}
-
-/// Runs `docker` with `args`, which must succeed.
-fn run(args: &[&str]) {
-    let output = docker().args(args).output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
-
-/// Writes `text` to the file at `path` in `dir`, with permission bits `mode`, and makes each
-/// directory it needs with bits 0755, whatever this process's umask.
-fn put(dir: &Path, path: &str, text: &str, mode: u32) {
-    let file = dir.join(path);
-    for parent in file.ancestors().skip(1) {
-        if parent == dir.parent().unwrap() {
-            break;
-        }
-        fs::create_dir_all(parent).unwrap();
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    fs::write(&file, text).unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
-}
-
-/// The images a test builds in `repository`, by their IDs in the order they were first built,
-/// and the tags it has shown, in the order they were first shown. Dropping it removes each tag
-/// the images have in `repository`, and so each image no other repository tags.
-struct Builds<'f> {
-    fixture: &'f Fixture,
-    repository: String,
-    seen: Vec<String>,
-    shown: Vec<String>,
-}
-
-impl<'f> Builds<'f> {
-    /// The images of a test that builds with `context`, in the fixture's directory, as its
-    /// context: a recipe that copies `file`, which holds `one`, and `id`, which holds this
-    /// process's ID, into an empty image, at `Dockerfile` and at `other/Dockerfile`; each in a
-    /// repository of this process's own.
-    fn new(fixture: &'f Fixture) -> Self {
-        let dir = fixture.dir.path().join("context");
-        let recipe = "FROM scratch\nCOPY file id /\n";
-        put(&dir, "Dockerfile", recipe, 0o644);
-        put(&dir, "other/Dockerfile", recipe, 0o644);
-        put(&dir, "file", "one", 0o644);
-        // An image is named by its content, so another process's test that built the same
-        // inputs would have the same image, which removing its last tag here would delete, even
-        // between that test's build and its `docker tag`. With this process's ID, the images
-        // are its own.
-        put(&dir, "id", &std::process::id().to_string(), 0o644);
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-        Self {
-            fixture,
-            repository: format!("pumpkin-docker-tests/builds-{}", std::process::id()),
-            seen: Vec::new(),
-            shown: Vec::new(),
-        }
-    }
-
-    /// The fixture's `context`, with nothing mounted in it.
-    fn context(&self) -> BuildContext {
-        BuildContext {
-            dir: Some(self.fixture.dir.path().join("context")),
-            mounts: BTreeMap::new(),
-        }
-    }
-
-    /// [`Builds::build_in`] of the file `recipe` of the fixture's `context`, with no bases.
-    fn build(&mut self, recipe: &str) -> String {
-        self.build_in(&self.context(), &Recipe::File(relative(recipe)), &[])
-    }
-
-    /// Builds `recipe` on `bases` with `context`, and shows the image, by the letter of its
-    /// first build, and its tags in the repository, and the tag the build returned if it is
-    /// none of them, each by the number of its first showing, as their digests cover `id`; or
-    /// why the build failed.
-    fn build_in(&mut self, context: &BuildContext, recipe: &Recipe, bases: &[&Built]) -> String {
-        let built = engine().build(context, recipe, bases, &self.repository);
-        let (image, returned) = match built {
-            Ok(built) => (built.image().as_str().to_owned(), built.tag().to_owned()),
-            Err(error) => return redact(self.fixture, &error),
-        };
-        let index = first_seen(&mut self.seen, &image);
-        let letter = char::from(b'A' + u8::try_from(index).unwrap());
-        // The returned tag first, so that a new tag's number doesn't rest on how tags sort.
-        let returned = 1 + first_seen(&mut self.shown, &returned);
-        let tags = self.tags(&image);
-        let mut tags: Vec<usize> = (tags.iter())
-            .map(|tag| 1 + first_seen(&mut self.shown, tag))
-            .collect();
-        tags.sort_unstable();
-        let stray = (!tags.contains(&returned)).then(|| format!(", but returned :{returned}"));
-        let tags: Vec<String> = tags.iter().map(|number| format!(":{number}")).collect();
-        format!(
-            "{letter}, tagged {}{}",
-            tags.join(" "),
-            stray.unwrap_or_default()
-        )
-    }
-
-    /// The tags `image` has in the repository, sorted, or none if the engine has no such image.
-    fn tags(&self, image: &str) -> Vec<String> {
-        let format = "{{json .RepoTags}}";
-        let inspect = ["image", "inspect", "--format", format, image];
-        let Ok(output) = docker().args(inspect).output() else {
-            return Vec::new();
-        };
-        let tags: Vec<String> = serde_json::from_slice(&output.stdout).unwrap_or_default();
-        let prefix = format!("{}:", self.repository);
-        let mut tags: Vec<String> = (tags.into_iter())
-            .filter(|tag| tag.starts_with(&prefix))
-            .collect();
-        tags.sort();
-        tags
-    }
-}
-
-impl Drop for Builds<'_> {
-    // Nothing here panics, for the reason the fixture's drop gives; a tag that can't be
-    // removed is printed.
-    fn drop(&mut self) {
-        for image in &self.seen {
-            for tag in self.tags(image) {
-                let removed = docker().args(["image", "rm", &tag]).output();
-                if !removed.is_ok_and(|removed| removed.status.success()) {
-                    eprintln!("the test's image tag {tag} can't be removed");
-                }
-            }
-        }
-    }
-}
-
-/// The index of `item` in `list`, which gets it at its end if it lacks it.
-fn first_seen(list: &mut Vec<String>, item: &str) -> usize {
-    if let Some(index) = list.iter().position(|listed| listed == item) {
-        return index;
-    }
-    list.push(item.to_owned());
-    list.len() - 1
 }
 
 #[test]

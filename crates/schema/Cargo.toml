@@ -1,6 +1,6 @@
 [package]
 name = "schema"
-version = "0.0.0"
+version.workspace = true
 description = "Pumpkin's v0 schemas: Rust types serialized as JSON"
 edition.workspace = true
 publish.workspace = true
