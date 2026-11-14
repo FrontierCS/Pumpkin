@@ -130,6 +130,9 @@ pub(crate) const LINGERING: &str = "/sim/lingering";
 /// runs whose tests use it.
 const LINGER: Duration = Duration::from_secs(7);
 
+/// An [`image`]'s name whose sandbox's delete waits `DAWDLE` before it deletes it.
+pub(crate) const DAWDLING: &str = "/sim/dawdling";
+
 /// An [`image`]'s name whose sandbox's delete waits until each other sandbox of its run is
 /// deleted, and no other delete is under way, as a platform may finish a delete that began later
 /// first, and only then deletes it.
@@ -138,6 +141,11 @@ pub(crate) const LAST: &str = "/sim/last";
 /// The longest a delete of a [`LAST`] sandbox waits: one that waits this long waits on a sandbox
 /// that nothing deletes, the test's bug.
 const LAST_WAITS: Duration = Duration::from_secs(60);
+
+/// How long a delete of a [`DAWDLING`] sandbox takes: far longer than a run takes to collect what
+/// a judge call's sandbox holds and delete it, and far shorter than the bounds of the runs whose
+/// tests use it.
+const DAWDLE: Duration = Duration::from_secs(1);
 
 /// How long a sandbox's fake `sandboxd` takes to end once its sandbox is deleted.
 // A platform's sandbox ends some time after it is told to, so a delete that doesn't wait for its
@@ -879,7 +887,7 @@ struct Faults {
     /// How many deletes it refuses, `u32::MAX` for every one, as [`UNDELETABLE`]'s, or one, as
     /// [`REFUSED_ONCE`]'s.
     refusals: u32,
-    /// How long its delete waits: [`LINGERING`]'s.
+    /// How long its delete waits: [`LINGERING`]'s or [`DAWDLING`]'s.
     linger: Duration,
     /// [`LAST`]'s.
     last: bool,
@@ -961,6 +969,8 @@ impl Faults {
             refusals,
             linger: if names(LINGERING) {
                 LINGER
+            } else if names(DAWDLING) {
+                DAWDLE
             } else {
                 Duration::ZERO
             },

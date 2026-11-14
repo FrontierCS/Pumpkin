@@ -8,8 +8,8 @@ Names in backticks are for symbol search.
 
 Pumpkin runs workflows, in which an agent works and judges score what it submits. A workflow is
 data, JSON in Pumpkin's IR: its roles, each an agent, a judge or a runner (one agent, its judges,
-and the runners that it leases); the grants each role holds, the agent's judge calls, leases and
-one submission; the model route of the agent, if it has one; and the
+and the runners that they lease); the grants each role holds, the agent's judge calls, leases and
+one submission, and a judge's leases; the model route of the agent, if it has one; and the
 score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a
 judge's afresh for each call and a runner's for each lease, whose supervisor, `sandboxd`, meets the
 host, dialing it, and serves one session: the host puts and collects files, starts and kills
@@ -70,7 +70,7 @@ Another program's format, such as `docker info`'s, stays with the code that read
   such as no limit; whatever writes the IR picks the defaults.
 - **Architecture Invariant:** the agent never calls the judge that scores it: parsing
   (`Parser::score`) refuses a workflow whose score judge is the role of any of the agent's judge
-  grants, and a judge holds no grants (`Parser::roles`); nor does it run what a judge
+  grants, and a judge holds only lease grants (`Parser::roles`); nor does it run what a judge
   runs: parsing (`Parser::agents_runner`) refuses an agent's lease of a runner whose image is a
   judge's.
 - **Architecture Invariant:** a passive sandbox, one whose role makes no ops (`Create::ops`), has
@@ -195,8 +195,9 @@ child of the run (`child`), on a thread of its own, which `judge` or `lease` dri
 serves the agent's model requests through `route`'s `Route` and `Upstream`, and judges the model
 provider's answers, until the work phase ends (`model_requests_allowed`), or the provider refuses
 the route's key.
-- **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs and
-  its leases are gone, so nothing the agent started runs while its submission is judged.
+- **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs, and
+  every lease it or they held, are gone, so nothing the agent started runs while its submission
+  is judged; and a run ends only once the final judge's leases are gone too.
 - **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and
   nowhere else: no op reply carries a file collected from a judge's sandbox, so only the operator
   sees it; a lease's status carries the ends of its own commands' output to its holder alone, and

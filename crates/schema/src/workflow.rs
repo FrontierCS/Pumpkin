@@ -101,7 +101,7 @@ impl Workflow {
         &self.judge_grants[id.0]
     }
 
-    /// The agent's lease grants, in the IR's order.
+    /// Every role's lease grants: the agent's, then each judge's, each in the IR's order.
     pub fn lease_grants(&self) -> impl Iterator<Item = (LeaseGrantId, &LeaseGrant)> {
         (self.lease_grants.iter().enumerate()).map(|(index, grant)| (LeaseGrantId(index), grant))
     }
@@ -439,13 +439,15 @@ pub struct Runner {
     pub env: Env,
 }
 
-/// A lease grant of the agent's; see [`ir::LeaseGrant`](crate::ir::LeaseGrant).
+/// A lease grant of a role's, the agent's or a judge's; see
+/// [`ir::LeaseGrant`](crate::ir::LeaseGrant).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseGrant {
     pub name: Name,
-    /// The role that holds it: the agent.
+    /// The role that holds it: the agent, or a judge.
     pub holder: RoleId,
-    /// The runner, which no other lease grant names, and whose image is no judge's.
+    /// The runner, which no other lease grant names, and whose image, if the agent holds the
+    /// grant, is no judge's ([`ir::LeaseGrant::role`](crate::ir::LeaseGrant::role)).
     pub runner: RunnerId,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,

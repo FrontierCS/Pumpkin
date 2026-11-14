@@ -38,8 +38,8 @@ use test_support::{WORKFLOW, files, sandboxes, standard_outputs};
 use crate::host::{LateTake, SimHost, SlowSync};
 use crate::run::{PROVIDER, Runs, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
-    self, BRIEF, HUNG, Journal, LAST, LATER, LINGERING, LOST, MUTE, REFUSED_ONCE, SLOW, Sim,
-    UNDELETABLE, UNLISTABLE, UNPUBLISHED, UNSHOWN, VANISHING,
+    self, BRIEF, DAWDLING, HUNG, Journal, LAST, LATER, LINGERING, LOST, MUTE, REFUSED_ONCE, SLOW,
+    Sim, UNDELETABLE, UNLISTABLE, UNPUBLISHED, UNSHOWN, VANISHING,
 };
 
 /// A `sandboxd` that dials.
@@ -1716,7 +1716,7 @@ fn judge_placed_apart() {
             {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":5}
+            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":100,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":5}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":8}
@@ -1829,7 +1829,7 @@ fn sweeps_each_provider() {
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
             {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":100,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":4}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":null},"seq":7}
@@ -1914,8 +1914,8 @@ fn watches_each_provider() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"here","sandbox":"job-0"},"seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":7}
-            {"actions":[{"kind":"reply","op":2,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":8}
-            {"actions":[{"kind":"reply","op":3,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":1,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"job":"1","kind":"status"}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"reply","op":2,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":100,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","op":3,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":1,"kind":"status","remaining":{"calls":100,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"job":"1","kind":"status"}},"observed_ns":"<ns>","seq":9}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":12}
@@ -3426,6 +3426,275 @@ fn transfer_cut() {
             its last record came before the agent's teardown was to end
             socket directories left: false
             their directory's mode at each create: ["700", "700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
+/// [`ops_workflow`]'s workflow, with `argv` as the agent's command, and a deadline of 30 s, whose
+/// judge `judge`, 1 for the train judge and 2 for the score's, runs `judge_argv`, and leases a
+/// runner, `box`, under its grant `box`, 1 at a time, each for 60 s, whose image is [`DAWDLING`],
+/// so that a lease that ends with its call ends once the call has; and whose train calls time out
+/// after 20 s.
+fn judge_lease_workflow(argv: &[&str], judge: usize, judge_argv: &[&str]) -> Value {
+    let mut ir = ops_workflow(argv, 30);
+    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
+    ir["roles"][judge]["runtime"]["judge"]["command"]["argv"] = json!(judge_argv);
+    let mut runner = ir["roles"][1].clone();
+    runner["name"] = json!("box");
+    runner["image"] = json!(sim::image(DAWDLING));
+    runner["runtime"] = json!({ "runner": { "cwd": "/work" } });
+    ir["roles"].as_array_mut().unwrap().push(runner);
+    ir["roles"][judge]["grants"] = json!([{ "lease": {
+        "name": "box", "role": "box", "instances": 1, "instance_seconds": 60,
+        "transfer_bytes": 64,
+    } }]);
+    ir
+}
+
+/// What a judge that leases runs: it opens a lease, puts its slot's payload there, runs a command
+/// there, which prints 7, reads the command's end from the lease's status, and scores what it
+/// printed.
+const LEASING_JUDGE: [&str; 8] = [
+    "ops",
+    "lease_open box",
+    "await_lease 0 ready",
+    "lease_put 0 /pumpkin/in/payload /work/in",
+    "await_transfer 0 moved",
+    "lease_run 0 - print 7",
+    "await_lease 0 ready",
+    "result",
+];
+
+// A run whose train judge leases a runner as its call runs, as [`LEASING_JUDGE`] does, its ops
+// relayed by its call's thread and named its call's in the run log; its lease ends as its
+// command ends; and the agent, which names the call's lease, is refused, as no lease of its own
+// has that number.
+#[test]
+fn judge_leases() {
+    let argv = [
+        "ops",
+        "judge train 6",
+        "await 0 completed",
+        "lease_status 0",
+        "finalize submit 6",
+    ];
+    check(
+        &System,
+        "judge-leases",
+        &[(PROVIDER, &Sim::new())],
+        &judge_lease_workflow(&argv, 1, &LEASING_JUDGE),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
+            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":5}
+            {"actions":[{"kind":"reply","op":2,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"direction":"put","from":"/pumpkin/in/payload","kind":"transfer","lease":0,"max_bytes":64,"to":"/work/in","transfer":0}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","op":4,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer","transfer":0},"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":4,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"reply","op":5,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"argv":["print","7"],"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":5,"request":{"argv":["print","7"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0,"stderr":"","stdout":"7"},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"reply","op":6,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"command":1,"end":{"exited":{"code":0}},"kind":"command","stderr":"","stdout":"7"},"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":6,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":12}
+            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":15}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":16}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":17}
+            {"actions":[{"kind":"reply","op":7,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":7},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":18}
+            {"actions":[{"kind":"reply","op":8,"reply":{"kind":"refused","message":"you have no lease 0: name one that `lease open` returned"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":8,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":19}
+            {"actions":[{"kind":"reply","op":9,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":9,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":20}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":22}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":23}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":24}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":25}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":26}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":27}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700", "700", "700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose score's judge leases a runner in the final phase, as [`LEASING_JUDGE`] does, and
+// scores what its command printed; the run ends once its lease has, after the call.
+#[test]
+fn score_leases() {
+    check(
+        &System,
+        "score-leases",
+        &[(PROVIDER, &Sim::new())],
+        &judge_lease_workflow(&["ops", "finalize submit 6"], 2, &LEASING_JUDGE),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(7))
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":7,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","op":2,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"direction":"put","from":"/pumpkin/in/payload","kind":"transfer","lease":0,"max_bytes":64,"to":"/work/in","transfer":0}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"<ns>","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"reply","op":4,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer","transfer":0},"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":4,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":12}
+            {"actions":[{"kind":"reply","op":5,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"argv":["print","7"],"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":5,"request":{"argv":["print","7"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0,"stderr":"","stdout":"7"},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"reply","op":6,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"command":1,"end":{"exited":{"code":0}},"kind":"command","stderr":"","stdout":"7"},"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":6,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":17}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":18}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":19}
+            {"actions":[{"kind":"finish","outcome":{"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":20}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700", "700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose train judge leases a runner whose create takes seconds, longer than the call's
+// timeout of 1 s, and exits at once: the lease, closed as the call ends, starts by the call's
+// timeout, not by its class's startup, so its create gives up then, and the lease ends without
+// its runner ever ready, charged nothing; the run goes on to its score, and its end deletes the
+// sandbox that the create left.
+#[test]
+fn lease_starts_by_its_holders_end() {
+    let judge = ["ops", "lease_open box"];
+    let argv = [
+        "ops",
+        "judge train 6",
+        "await 0 errored",
+        "finalize submit 6",
+    ];
+    let mut ir = judge_lease_workflow(&argv, 1, &judge);
+    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
+    ir["roles"][3]["image"] = json!(sim::image(SLOW).as_str());
+    check(
+        &System,
+        "lease-starts-by-its-holders-end",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, leases/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: the simulated create gave up at its deadline, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","op":2,"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":16}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":17}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":18}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700", "700", "700", "700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose train judge exits as a command it started in its lease still runs: the lease
+// closes as the call's command ends, with the command in it, and the call ends without a result.
+#[test]
+fn judge_exits_leasing() {
+    let judge = [
+        "ops",
+        "lease_open box",
+        "await_lease 0 ready",
+        "lease_run 0 - sleep",
+    ];
+    let argv = [
+        "ops",
+        "judge train 6",
+        "await 0 errored",
+        "finalize submit 6",
+    ];
+    check(
+        &System,
+        "judge-exits-leasing",
+        &[(PROVIDER, &Sim::new())],
+        &judge_lease_workflow(&argv, 1, &judge),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, leases/0/console.txt, leases/0/log/0/collected, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
+            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":5}
+            {"actions":[{"kind":"reply","op":2,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"argv":["sleep"],"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"argv":["sleep"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":7}
+            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":12}
+            {"actions":[{"kind":"reply","op":4,"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":13}
+            {"actions":[{"kind":"reply","op":5,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":16}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":17}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":18}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":19}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":20}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":21}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700", "700", "700", "700"]
             listed once it ended: []"#]],
     );
 }

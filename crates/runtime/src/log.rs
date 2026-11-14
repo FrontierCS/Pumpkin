@@ -402,10 +402,12 @@ fn request_json(request: &Request) -> Value {
     }
 }
 
-/// The JSON form of an op's caller, or a lease's holder: its sandbox's name in the run, `agent`.
+/// The JSON form of an op's caller, or a lease's holder: its sandbox's name in the run, `agent`,
+/// or `job-<n>` for job `n`'s call.
 fn caller_json(caller: Caller) -> String {
     match caller {
         Caller::Agent => "agent".to_owned(),
+        Caller::Job(job) => format!("job-{}", job.0),
     }
 }
 

@@ -18,7 +18,7 @@ use expect_test::{Expect, expect};
 use provider::{RunTag, Sweep as _};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
-use test_support::{WORKFLOW, docker_context, files, sandboxd, standard_outputs};
+use test_support::{BUSYBOX, WORKFLOW, docker_context, files, sandboxd, standard_outputs};
 
 use super::{
     LOCAL, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first, check, containers, cpu_list,
@@ -1000,10 +1000,10 @@ fn refusals() {
                 5 |     roles = [{"egress": {"model": {"models": ["gpt-6-astra"]}}, "grants": [{"judge": {"call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "name": "train", "role": "train_judge", "slot": "payload"}}, {"submit": {"name": "submit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"grants": [{"submit": {"name": "resubmit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=train", "DATASET=/data/train.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}],
                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^^^^^^^
                 the IR's /roles/1/name
-            tasks/task.star:5:821: `agent` is a judge, and judges hold no grants yet: remove them
+            tasks/task.star:5:833: `agent` is a judge, and judges hold only lease grants: remove it
                 5 |     roles = [{"egress": {"model": {"models": ["gpt-6-astra"]}}, "grants": [{"judge": {"call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "name": "train", "role": "train_judge", "slot": "payload"}}, {"submit": {"name": "submit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"grants": [{"submit": {"name": "resubmit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=train", "DATASET=/data/train.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                the IR's /roles/1/grants
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^
+                the IR's /roles/1/grants/0/submit
             tasks/task.star:5:186: no role is named `train_judge`: name one listed in `roles`
                 5 |     roles = [{"egress": {"model": {"models": ["gpt-6-astra"]}}, "grants": [{"judge": {"call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "name": "train", "role": "train_judge", "slot": "payload"}}, {"submit": {"name": "submit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"grants": [{"submit": {"name": "resubmit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=train", "DATASET=/data/train.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}],
                   |                                                                                                                                                                                          ^^^^^^^^^^^^^
@@ -1017,10 +1017,10 @@ fn refusals() {
                 5 |     roles = [{"egress": {"model": {"models": ["gpt-6-astra"]}}, "grants": [{"judge": {"call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "name": "train", "role": "train_judge", "slot": "payload"}}, {"submit": {"name": "submit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"grants": [{"submit": {"name": "resubmit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=train", "DATASET=/data/train.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}],
                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^^^^^^^
                 the IR's /roles/1/name
-            tasks/task.star:5:821: `agent` is a judge, and judges hold no grants yet: remove them
+            tasks/task.star:5:833: `agent` is a judge, and judges hold only lease grants: remove it
                 5 |     roles = [{"egress": {"model": {"models": ["gpt-6-astra"]}}, "grants": [{"judge": {"call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "name": "train", "role": "train_judge", "slot": "payload"}}, {"submit": {"name": "submit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"grants": [{"submit": {"name": "resubmit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=train", "DATASET=/data/train.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                the IR's /roles/1/grants
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^
+                the IR's /roles/1/grants/0/submit
             tasks/task.star:5:186: no role is named `train_judge`: name one listed in `roles`
                 5 |     roles = [{"egress": {"model": {"models": ["gpt-6-astra"]}}, "grants": [{"judge": {"call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "name": "train", "role": "train_judge", "slot": "payload"}}, {"submit": {"name": "submit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"grants": [{"submit": {"name": "resubmit"}}], "image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=train", "DATASET=/data/train.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"judge": {"command": {"argv": ["/usr/local/bin/judge"], "cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}, "result": {"returns": ["/raw_score", "/metrics", "/failure"], "score": "/raw_score"}, "slots": [{"max_bytes": 4194304, "name": "payload"}]}}, "user": {"gid": 65532, "uid": 65532}}],
                   |                                                                                                                                                                                          ^^^^^^^^^^^^^
@@ -1724,6 +1724,102 @@ fn leases_on_docker() {
             sandboxctl lease close 0: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":0}}
             got: /workspace/got /workspace/got/A /workspace/got/deep /workspace/got/deep/b , A: HELLO, deep/b: deep
             sandboxctl submit submit /workspace/six --finalize: exit 0: {"kind":"submit","state":"accepted","remaining_seconds":"<s>"}"#]],
+    );
+}
+
+/// What the agent of the run whose final judge leases a runner submits: a program that prints
+/// `/answers`, a file of the judges' image, or, if it can't read it, 7.
+const PROGRAM: &str = "cat /answers || echo 7";
+
+/// What the final judge of the run whose final judge leases a runner does, through `sandboxctl`,
+/// whose path stands as `SANDBOXCTL`: shows that it reads `/answers`, a file of its image; opens a
+/// lease of a runner of an image of its own, puts its slot there and runs the submitted program
+/// in it, shows the lease's status once the program has ended, its times as `<s>`, and scores
+/// what the program printed.
+const ISOLATING_JUDGE: &str = r#"
+    echo "the judge reads /answers: $(cat /answers)"
+    ready() { until SANDBOXCTL lease status 0 | grep -q '"state":"ready"'; do sleep 1; done; }
+    SANDBOXCTL lease open box > /dev/null
+    ready
+    SANDBOXCTL lease put 0 /pumpkin/in/payload /work/submission > /dev/null
+    ready
+    SANDBOXCTL lease run 0 -- sh /work/submission/raw > /dev/null
+    ready
+    status=$(SANDBOXCTL lease status 0)
+    echo "$status" | sed --regexp-extended 's/"(elapsed_seconds|busy_seconds|idle_seconds|instance_seconds)":[0-9]+/"\1":"<s>"/g'
+    score=$(echo "$status" | sed --quiet 's/.*"stdout":"\([0-9]*\)\\n".*/\1/p')
+    printf '{"raw_score": %s}' "$score" > /pumpkin/out/result.json"#;
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn judge_leases_on_docker() {
+    let scratch = Scratch::new("isolation");
+    let sandboxd = sandboxd().to_str().unwrap().to_owned();
+    let context = docker_context();
+    let engine = engine(&context);
+    let agent = format!(
+        "#!/bin/sh\nprintf '%s\\n' '{PROGRAM}' > /workspace/program\n\
+         {SANDBOXCTL_PATH} submit submit /workspace/program --finalize\n"
+    );
+    let mut ir = workflow("", &["/workspace/agent"]);
+    let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": agent });
+    let runtime = &mut ir["roles"][0]["runtime"]["agent"];
+    runtime["files"].as_array_mut().unwrap().push(launcher);
+    let judge = ISOLATING_JUDGE.replace("SANDBOXCTL", SANDBOXCTL_PATH);
+    ir["roles"][2]["runtime"]["judge"]["command"]["argv"] = json!(["sh", "-c", judge]);
+    ir["roles"][2]["grants"] = json!([{ "lease": {
+        "name": "box", "role": "box", "instances": 1, "instance_seconds": 120,
+        "transfer_bytes": 1_048_576,
+    } }]);
+    let mut runner = ir["roles"][1].clone();
+    runner["name"] = json!("box");
+    runner["image"] = json!(RUNNER);
+    runner["runtime"] = json!({ "runner": { "cwd": "/work" } });
+    ir["roles"].as_array_mut().unwrap().push(runner);
+    scratch.write_task("isolation", &ir);
+    // The judges', and the agent's, image holds `/answers`; the runner's doesn't.
+    let recipe =
+        format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace && echo 42 > /answers\n");
+    scratch.write("isolation/Dockerfile", &recipe);
+    scratch.write("pumpkin.toml", &machine(&context));
+    build_first(&scratch, "isolation", "pumpkin.toml");
+    let mut run = scratch.pumpkin(&["run", "isolation/task.star", "--sandboxd", &sandboxd]);
+    run.args(["--wait", "--config", "pumpkin.toml"]);
+    let output = with_room(&mut run);
+    let rootful = !engine.report().security.rootless;
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    let (id, dir) = record(&stderr).unwrap();
+    let record = scratch.0.join(dir);
+    let mut lines = vec![format!("exit status: {:?}", output.status.code())];
+    let listed = containers(&context).list(&RunTag::try_from(id.to_owned()).unwrap());
+    lines.push(format!("listed once it ended: {:?}", listed.unwrap()));
+    let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
+    lines.push(format!("score: {}", outcome["score"]));
+    for stream in ["stdout", "stderr"] {
+        // The lease's second work, after the put.
+        let path = record.join(format!("leases/0/log/1/command.{stream}"));
+        let text = fs::read_to_string(path).unwrap_or_default();
+        lines.push(format!("the program's {stream}: {text:?}"));
+    }
+    lines.extend(standard_outputs(&record));
+    let shown = [(&sandboxd[..], "<sandboxd>")];
+    check(
+        &scratch,
+        [Step::Ran(lines.join("\n"))],
+        rootful,
+        &shown,
+        &expect![[r#"
+            exit status: Some(0)
+            listed once it ended: []
+            score: 7
+            the program's stdout: "7\n"
+            the program's stderr: "cat: can't open '/answers': No such file or directory\n"
+            the agent's standard output:
+            {"kind":"submit","state":"accepted","remaining_seconds":60}
+            job 0's standard output:
+            the judge reads /answers: 42
+            {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"command","command":1,"end":{"exited":{"code":0}},"stdout":"7\n","stderr":"cat: can't open '/answers': No such file or directory\n"},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":null}}"#]],
     );
 }
 

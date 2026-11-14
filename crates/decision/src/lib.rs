@@ -50,8 +50,8 @@ pub struct OpId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobId(pub u64);
 
-/// A lease. The core numbers leases from 0, in the order it opens them, and callers ask about
-/// their leases by these numbers.
+/// A lease. The core numbers leases from 0, in the order it opens them, whoever holds them, and
+/// callers ask about their leases by these numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LeaseId(pub u64);
 
@@ -60,6 +60,8 @@ pub struct LeaseId(pub u64);
 pub enum Caller {
     /// The agent, from its sandbox.
     Agent,
+    /// A judge's call, from the sandbox of its job, while the judge's command runs.
+    Job(JobId),
 }
 
 /// A payload the runtime holds, named by its digest.
@@ -211,8 +213,8 @@ pub enum Action {
     /// [`Event::CommandEnded`], and last [`Event::LeaseEnded`] once [`Action::CloseLease`]
     /// closes it, or [`Event::LeaseFailed`] at any point, once the lease's sandbox is gone.
     /// Its runner is to have started by `start_by`, since the run started: its holder's end, the
-    /// work phase's for the agent, past which nothing could use it; else the start is given up,
-    /// and the lease fails.
+    /// work phase's for the agent, its command's timeout for a call, past which nothing could
+    /// use it; else the start is given up, and the lease fails.
     StartLease {
         lease: LeaseId,
         holder: Caller,
@@ -408,12 +410,13 @@ enum Phase {
         work_end: WorkEnd,
     },
     /// The work phase has ended, and the agent has been torn down. The jobs it left, stopped or
-    /// collecting, and its leases, closed, are ending.
+    /// collecting, and the leases it and they held, closed, are ending.
     Teardown {
         work_end: WorkEnd,
         submission: Option<Submission>,
     },
-    /// The final judge judges the selected submission in job `job`.
+    /// The final judge judges the selected submission in job `job`, and the run ends once the
+    /// job, and every lease it held, has ended.
     Final {
         work_end: WorkEnd,
         submission: Submission,
@@ -450,7 +453,8 @@ impl<'w> Core<'w> {
     ///
     /// The time acts before the event: an `at` that reaches the hard end, the work phase's end,
     /// or a lease's, abandons the run, ends the work phase or closes the lease first, and the
-    /// event then finds it so.
+    /// event then finds it so. A report that a job's command has ended, or that the job has,
+    /// closes the leases it holds.
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
         let mut actions = Vec::new();
@@ -474,21 +478,25 @@ impl<'w> Core<'w> {
                 caller,
                 request,
             } => self.op(op, caller, request, &mut actions),
-            Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
+            Event::JudgeStarted { job } => {
+                self.on_job(job, |state| state.started(at), &mut actions);
+            }
             // The run log keeps the status; whether a call scored is its result's to say.
             Event::JudgeExited { job, status: _ } => {
-                self.on_job(job, |state| state.ended(at, jobs::End::Exited));
+                let ended = |state: &mut jobs::State| state.ended(at, jobs::End::Exited);
+                self.on_job(job, ended, &mut actions);
             }
             Event::JudgeTimedOut { job } => {
-                self.on_job(job, |state| state.ended(at, jobs::End::TimedOut));
+                let ended = |state: &mut jobs::State| state.ended(at, jobs::End::TimedOut);
+                self.on_job(job, ended, &mut actions);
             }
             Event::JudgeCollected { job, result } => {
                 let outcome = result.map_err(Failure::InvalidResult);
-                self.on_job(job, |state| state.report(at, outcome));
+                self.on_job(job, |state| state.report(at, outcome), &mut actions);
             }
             Event::JudgeFailed { job, reason } => {
                 let outcome = Err(Failure::Error(reason));
-                self.on_job(job, |state| state.report(at, outcome));
+                self.on_job(job, |state| state.report(at, outcome), &mut actions);
             }
             Event::LeaseReady { lease } => self.on_lease(lease, |lease| lease.state.ready(at)),
             Event::CommandEnded {
@@ -522,7 +530,8 @@ impl<'w> Core<'w> {
     /// end of a lease ([`Core::handle`]) or of the phase ([`Core::phase_due`]), whichever comes
     /// first. The runtime sends [`Event::Tick`] once that time has come.
     pub fn tick_due(&self) -> Duration {
-        // Leases are ready only while the agent works, as its work's end closes them.
+        // A run that has ended has no lease ready: the work phase's end closes the agent's and
+        // its calls', and the run ends only once the score's call's have ended.
         let phase = self.phase_due();
         self.leases_due().map_or(phase, |lease| phase.min(lease))
     }
@@ -627,7 +636,7 @@ impl<'w> Core<'w> {
     }
 
     /// Moves the run on once what it waits for is done: the final phase once nothing the agent
-    /// started runs on, and the run's end once the final job has ended.
+    /// started runs on, and the run's end once the final job, and every lease, has ended.
     fn advance(&mut self, actions: &mut Vec<Action>) {
         match &self.phase {
             Phase::Teardown {
@@ -649,6 +658,9 @@ impl<'w> Core<'w> {
                 else {
                     return;
                 };
+                if !self.leases.all_ended() {
+                    return;
+                }
                 let submission = submission.clone();
                 let verdict = match outcome.clone() {
                     Ok(result) => Verdict::Judged { submission, result },
@@ -681,7 +693,7 @@ impl<'w> Core<'w> {
             return self.finish(Outcome { work_end, verdict }, actions);
         };
         // The final phase comes after the deadline, so the time left before it doesn't count.
-        let job = self.jobs.add(JudgeCall::Score);
+        let job = (self.jobs).add(JudgeCall::Score, self.workflow.score().timeout);
         actions.push(Action::StartJudge {
             job,
             call: JudgeCall::Score,
@@ -695,10 +707,25 @@ impl<'w> Core<'w> {
         };
     }
 
-    /// Applies a report on job `job` to its state, if the run has a job by that number.
-    fn on_job(&mut self, job: JobId, apply: impl FnOnce(&mut jobs::State)) {
-        if let Some(state) = self.jobs.state_mut(job) {
-            apply(state);
+    /// Applies a report on job `job` to its state, if the run has a job by that number, then
+    /// closes the leases the job holds unless its command still runs, or has yet to start.
+    fn on_job(
+        &mut self,
+        job: JobId,
+        apply: impl FnOnce(&mut jobs::State),
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.jobs.state_mut(job) else {
+            return;
+        };
+        apply(state);
+        match state {
+            jobs::State::Queued | jobs::State::Running { .. } => {}
+            jobs::State::Ending { .. } | jobs::State::Ended { .. } => {
+                let closed =
+                    (self.leases).close_where(self.now, |lease| lease.holder == Caller::Job(job));
+                actions.extend(closed.into_iter().map(|lease| Action::CloseLease { lease }));
+            }
         }
     }
 

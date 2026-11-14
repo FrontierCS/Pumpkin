@@ -1,11 +1,14 @@
 //! The jobs that judge calls become, and the meter they keep.
 //!
-//! A call counts from when it is accepted, even if its job fails before its command starts.
-//! Its seconds run from its command's start to the command's exit, to its stop at the timeout,
+//! A call counts from when it is accepted, unless its job fails before its command starts, as
+//! when its sandbox fails to start: that is the run's or its provider's failure, not the
+//! caller's, so the call is given back, as a lease that fails to start costs nothing. Its
+//! seconds run from its command's start to the command's exit, to its stop at the timeout,
 //! to the job's failure, or to the core stopping it when the work phase ends, each as the
 //! runtime observed it. A call keeps its grant, which
 //! [runs one call at a time](schema::ir::JudgeGrant), busy until its job has ended,
-//! once its outputs are collected and its sandbox destroyed.
+//! once its outputs are collected and its sandbox destroyed, and every lease it held has ended,
+//! which the core reads from its leases.
 //!
 //! The cumulative seconds left are what the grant allows less what ended commands used. A call
 //! is accepted only once the grant's earlier calls have all ended, and its timeout is at most
@@ -69,6 +72,8 @@ pub(super) struct Jobs(Vec<Job>);
 pub(super) struct Job {
     /// What the call was made under.
     pub(super) call: JudgeCall,
+    /// The longest its command may run.
+    pub(super) timeout: Duration,
     pub(super) state: State,
 }
 
@@ -82,10 +87,12 @@ pub(super) enum State {
     /// Its command has ended, or the core stopped the job; its sandbox is being collected and
     /// destroyed. `used` is how long its command ran, none if it didn't start.
     Ending { used: Duration, end: End },
-    /// Its sandbox is gone.
+    /// Its sandbox is gone. It is `charged` against its grant's calls unless it failed before
+    /// its command started.
     Ended {
         used: Duration,
         outcome: Result<JudgeResult, Failure>,
+        charged: bool,
     },
 }
 
@@ -134,6 +141,7 @@ impl State {
     /// as a failure before the command started, ends the job all the same, its command's time
     /// running until the report if it had started.
     pub(super) fn report(&mut self, at: Duration, outcome: Result<JudgeResult, Failure>) {
+        let charged = !matches!((&*self, &outcome), (Self::Queued, Err(_)));
         let (used, outcome) = match *self {
             Self::Queued => (Duration::ZERO, outcome),
             Self::Running { started } => (at.saturating_sub(started), outcome),
@@ -145,19 +153,31 @@ impl State {
             },
             Self::Ended { .. } => return,
         };
-        *self = Self::Ended { used, outcome };
+        *self = Self::Ended {
+            used,
+            outcome,
+            charged,
+        };
     }
 }
 
 impl Jobs {
-    /// Adds a job, queued, made under `call`.
-    pub(super) fn add(&mut self, call: JudgeCall) -> JobId {
+    /// Adds a job, queued, made under `call`, whose command may run for `timeout`.
+    pub(super) fn add(&mut self, call: JudgeCall, timeout: Duration) -> JobId {
         let job = JobId(self.0.len() as u64);
         self.0.push(Job {
             call,
+            timeout,
             state: State::Queued,
         });
         job
+    }
+
+    /// The jobs made under `grant`.
+    pub(super) fn of(&self, grant: JudgeGrantId) -> impl Iterator<Item = JobId> {
+        let jobs = self.0.iter().enumerate();
+        jobs.filter(move |(_, job)| job.call == JudgeCall::Grant(grant))
+            .map(|(index, _)| JobId(index as u64))
     }
 
     pub(super) fn get(&self, job: JobId) -> Option<&Job> {
@@ -194,7 +214,8 @@ impl Jobs {
     pub(super) fn usage(&self, grant: JudgeGrantId) -> Usage {
         let mut usage = Usage::default();
         for job in (self.0.iter()).filter(|job| job.call == JudgeCall::Grant(grant)) {
-            usage.calls += 1;
+            let charged = !matches!(job.state, State::Ended { charged: false, .. });
+            usage.calls += u64::from(charged);
             match job.state {
                 State::Queued | State::Running { .. } => usage.busy = true,
                 State::Ending { used, .. } => {

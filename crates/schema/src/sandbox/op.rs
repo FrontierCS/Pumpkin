@@ -161,7 +161,7 @@ pub enum OpReply {
 #[serde(deny_unknown_fields)]
 pub struct OpsReply {
     /// The time left to work, in whole seconds rounded down: from when the op reached its owner,
-    /// or later, until the deadline.
+    /// or later, until the deadline, or, for a judge's call, until its command's timeout.
     pub remaining_seconds: u64,
     /// The caller's CPU and memory limits: its role's.
     pub resources: Resources,

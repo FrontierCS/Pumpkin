@@ -1,6 +1,6 @@
 //! The run's children: sandboxes that the core starts for a part of the run, each on a thread of
-//! its own, in a fresh passive sandbox, which a driver of its kind drives: a judge call's, the
-//! `judge` module's, or a lease's, the `lease` module's.
+//! its own, in a fresh sandbox, passive but for a judge's that holds grants, which a driver of its
+//! kind drives: a judge call's, the `judge` module's, or a lease's, the `lease` module's.
 //!
 //! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
 //! reports the child's end only once its sandbox is deleted; a sandbox that can't be deleted fails
@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use decision::Event;
-use gateway::{Arrival, Session};
+use decision::{Event, JobId, Request};
+use gateway::{Arrival, Session, Trees};
 use provider::UnixTime;
+use schema::sandbox::OpPayloadLimit;
 
 use super::host::deadline;
 use super::log::Entry;
@@ -53,15 +54,15 @@ pub(super) struct Deadlines {
 
 /// What reaches a child's thread through its inbox.
 pub(super) enum Message<O> {
-    /// What its session's reader handed over ([`Registration::accept`]): at most its commands'
-    /// exits and its end, since a passive session hands out no op, and the session takes no
-    /// model requests.
+    /// What its session's reader handed over ([`Registration::accept`]): its commands' exits
+    /// and its end, and the ops of a session that takes them, as a judge's that holds grants
+    /// does; no session of a child takes model requests.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
     Session(Arrival),
     /// The core's stop.
     Stop,
-    /// An order of the core's for its driver.
+    /// An order of the core's for its driver, or the core's reply to its op.
     Order(O),
 }
 
@@ -70,16 +71,27 @@ pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a child's time from its
     /// reports' times, which the loop's delays then don't lengthen.
     Event(Duration, Event),
+    /// An op that job `job`'s call's sandbox made, at the time `at` the thread took it, which the
+    /// loop numbers, and whose reply it sends back as an order, with the sandbox's `trees`, which
+    /// a transfer the op asks for moves.
+    Op {
+        at: Duration,
+        job: JobId,
+        request: Request,
+        trees: Trees,
+    },
     /// Why the child's sandbox couldn't be deleted, which fails the run.
     Undeleted(String),
 }
 
-/// Runs `child` to its end, reporting as it goes: starts its sandbox, then hands its session to
-/// `drive`, whose event is the child's last report once the sandbox is deleted. A child whose
-/// start is due by a time that has passed fails at once, with nothing created, as one whose
-/// sandbox doesn't start does ([`Which::failed`]).
+/// Runs `child` to its end, reporting as it goes: starts its sandbox, whose session takes ops
+/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose event is
+/// the child's last report once the sandbox is deleted. A child whose start is due by a time that
+/// has passed fails at once, with nothing created, as one whose sandbox doesn't start does
+/// ([`Which::failed`]).
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
+    ops: Option<OpPayloadLimit>,
     drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session) -> Event,
 ) {
     let which = child.which;
@@ -94,7 +106,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     }
     let by = deadline(&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
-    let started = (child.sandboxes).start(which, None, by, child.hard_end, inbox, Message::Session);
+    let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(error) => {

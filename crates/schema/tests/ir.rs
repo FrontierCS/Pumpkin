@@ -959,6 +959,55 @@ fn broken_leases() {
     );
 }
 
+/// [`leasing`]'s workflow, with a runner, `checker`, of the final judge's image, which the final
+/// judge leases under its grant `box`.
+fn judge_leasing() -> Value {
+    let mut ir = leasing();
+    let mut checker = ir["roles"][3].clone();
+    checker["name"] = json!("checker");
+    checker["image"] = ir["roles"][2]["image"].clone();
+    ir["roles"].as_array_mut().unwrap().push(checker);
+    ir["roles"][2]["grants"] = json!([{ "lease": {
+        "name": "box", "role": "checker", "instances": 1, "instance_seconds": 60,
+        "transfer_bytes": 64,
+    } }]);
+    ir
+}
+
+#[test]
+fn judge_leases() {
+    let mut same_image = judge_leasing();
+    let image = json!(format!("sha256:{}", "4".repeat(64)));
+    same_image["roles"][3]["image"] = image.clone();
+    same_image["roles"][4]["image"] = image;
+    let mut both = judge_leasing();
+    both["roles"][2]["grants"][0]["lease"]["role"] = json!("gpu");
+    let mut unheld = judge_leasing();
+    unheld["roles"][2]["grants"] = json!([
+        { "lease": {
+            "name": "box", "role": "train_judge", "instances": 1, "instance_seconds": 60,
+            "transfer_bytes": 64,
+        } },
+        { "submit": { "name": "box" } },
+        { "judge": {
+            "name": "again", "role": "train_judge", "slot": "payload", "call_timeout_seconds": 1,
+        } },
+    ]);
+    check(
+        [judge_leasing(), same_image, both, unheld],
+        &expect![[r#"
+            parsed
+            parsed
+            /roles/2/grants/0/lease/role: `gpu` is named by `agent`'s lease grant `gpu` and `final_judge`'s `box`: name each runner from one grant
+            /roles/4: `checker` is a runner that no lease grant names: name it from one
+            /roles/2/grants/1/submit: `final_judge` is a judge, and judges hold only lease grants: remove it
+            /roles/2/grants/2/judge: `final_judge` is a judge, and judges hold only lease grants: remove it
+            /roles/2/grants/1/submit/name: `box` also names /roles/2/grants/0/lease: give each a unique name
+            /roles/2/grants/0/lease/role: `train_judge` is a judge: name a runner
+            /roles/4: `checker` is a runner that no lease grant names: name it from one"#]],
+    );
+}
+
 #[test]
 fn broken_roles() {
     let mut ir = fixture();
@@ -994,7 +1043,7 @@ fn broken_roles() {
     check(
         [ir, none, unsubmitted, ungranted, untimed],
         &expect![[r#"
-            /roles/1/grants: `train_judge` is a judge, and judges hold no grants yet: remove them
+            /roles/1/grants/0/submit: `train_judge` is a judge, and judges hold only lease grants: remove it
             /roles/2/egress/model: `final_judge` is a judge, and only the agent has a model route: remove it
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             /roles/0/grants/0/judge/slot: `train_judge` has no slot named `submission`: name one of its slots

@@ -74,7 +74,9 @@ struct Running {
 ///
 /// [`child::run`]: super::child::run
 pub(super) fn run<H: Host>(lease: LeaseId, runner: &Runner, child: &mut Child<'_, H, Order>) {
-    super::child::run(child, |child, session| drive(lease, runner, child, session));
+    super::child::run(child, None, |child, session| {
+        drive(lease, runner, child, session)
+    });
 }
 
 /// Runs the commands the core orders in `child`'s sandbox, whose session is `session`, until the
