@@ -1,8 +1,11 @@
-//! A simulated provider, [`Sim`], which stands in for a platform: each sandbox is a thread of
-//! this process, running a fake `sandboxd` that dials its create's [`Dial`] at once and answers
-//! the session's requests, running each command by its program, which may make ops or judge a
-//! payload ([`Sim`]). What it does that a run acts on may go to a [`Journal`], in order with
-//! what other parts of a test's simulated world tell it.
+//! A simulated provider, [`Sim`], which stands in for a platform, and passes the suite every
+//! provider passes ([`suite`](test_support::suite)).
+//!
+//! Each sandbox is a thread of this process, running a fake `sandboxd` that dials its create's
+//! dial, a socket's, at once; says hello and answers the session's requests,
+//! running each command by its program, which may make ops or judge a payload ([`Sim`]). What it
+//! does that a run acts on may go to a [`Journal`], in order with what other parts of a test's
+//! simulated world tell it.
 
 #![expect(
     clippy::unwrap_used,
@@ -12,40 +15,64 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use provider::Provider;
-use schema::ir::{AbsolutePath, Image, Name, Resources};
-use schema::provider::{
-    Class, Console, Create, Created, Dial, Listed, Local, Published, Ready, RunTag, SOCKET_NAME,
-    SandboxId,
+use provider::{
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, RunTag,
+    SandboxId, SandboxdRef,
 };
+use schema::ir::{AbsolutePath, Image, Name, Resources, Sha256Digest};
 use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, RESULT_MAX_BYTES, RelativePath, ToSandbox, frame, log_dir,
-    out_dir, pumpkin_dir,
+    Entry, ExitStatus, FromSandbox, HelloReply, PROTOCOL_VERSION, RESULT_MAX_BYTES, RelativePath,
+    SOCKET_NAME, SocketDial, ToSandbox, frame, log_dir, out_dir, pumpkin_dir,
 };
-use serde_json::json;
+use schema::workflow::Class;
+use serde_json::{Value, json};
+use stdx::Deadline;
+use test_support::suite::{Locals, Subject};
 
-use crate::provider::{Locals, Subject};
-
-/// The path of a `sandboxd`, or an image's repository, that never dials: a create that names
+/// The path of a `sandboxd`, or an [`image`]'s name, that never dials: a create that names
 /// it, as published, makes a sandbox whose `sandboxd` prints so, and ends.
 pub(crate) const MUTE: &str = "/sim/mute";
+
+/// The path of a `sandboxd`, or an [`image`]'s name, that never dials, as [`MUTE`]'s, but
+/// hangs, as one stuck as it starts, rather than end, until its sandbox is deleted.
+pub(crate) const HUNG: &str = "/sim/hung";
+
+/// The path of a `sandboxd`, or an [`image`]'s name, that never dials, as [`MUTE`]'s.
+///
+/// The provider frees its sandbox once its `sandboxd` has ended, so the run's list leaves it out,
+/// as [`Provider::list`] lets such a provider.
+pub(crate) const VANISHING: &str = "/sim/vanishing";
+
+/// The path of a `sandboxd`, or an [`image`]'s name, that hangs without dialing, as
+/// [`HUNG`]'s, and whose sandbox fails the run's list until it is deleted, as a provider's API
+/// may fail.
+pub(crate) const UNLISTABLE: &str = "/sim/unlistable";
 
 /// The path of a `sandboxd` whose create fails, leaving behind a sandbox, as [`MUTE`]'s, that
 /// the run's list still finds.
 pub(crate) const LOST: &str = "/sim/lost";
 
-/// An image's repository whose create returns [`SLOW_CREATE`] after it starts the sandbox,
+/// The path of a `sandboxd`, or an [`image`]'s name, that dials, but says hello in the sandbox
+/// protocol's next version, as a `sandboxd` built from a later Pumpkin would.
+pub(crate) const LATER: &str = "/sim/later";
+
+/// An [`image`]'s name whose create returns `SLOW_CREATE` after it starts the sandbox,
 /// whose `sandboxd` has dialed by then.
+///
+/// A create whose deadline comes first gives up then, and fails, leaving the sandbox for the run's
+/// list to find ([`Creator::create`](provider::Creator::create)), which, where it listens, ends itself as no gateway claims
+/// it.
 pub(crate) const SLOW: &str = "/sim/slow";
 
 /// How long a create of [`SLOW`] takes: far longer than a run takes to act on what its agent
@@ -65,40 +92,75 @@ pub(crate) const BRIEF: Resources = Resources {
 /// longer, never fail.
 const BRIEF_STARTUP: u64 = 2;
 
-/// How long a command that awaits a job's state waits between the `status` ops it makes.
+/// How long a command that awaits a job's state waits between the `status` ops it makes, and a
+/// sandbox that listens between its looks for the gateway's connection, or its deletion.
 const AWAIT_POLL: Duration = Duration::from_millis(10);
 
 /// What every tree the simulated `sandboxd` collects holds: a file of this name, which holds the
 /// same.
 const COLLECTED: &str = "collected";
 
-/// The path of a `sandboxd` that the simulated provider refuses to publish.
+/// The path of a `sandboxd`, or an [`image`]'s name, that the simulated provider refuses to
+/// publish.
 pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 
-/// The path of a `sandboxd`, or an image's repository, that dials, but whose sandbox the
+/// The path of a `sandboxd`, or an [`image`]'s name, that dials, but whose sandbox the
 /// simulated provider refuses to delete.
+///
+/// Once a delete is refused, its console shows nothing, as an EC2 instance's once its terminate
+/// was sent and the wait for it gave up.
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
-/// The path of a `sandboxd`, or an image's repository, whose sandbox's delete waits [`LINGER`]
+/// The path of a `sandboxd`, or an [`image`]'s name, whose first delete fails, as one of
+/// [`UNDELETABLE`]'s does.
+///
+/// The next deletes it, as a provider's API may fail a call once.
+pub(crate) const REFUSED_ONCE: &str = "/sim/refused-once";
+
+/// The path of a `sandboxd`, or an [`image`]'s name, that dials, but whose sandbox's console
+/// the simulated provider fails to read.
+pub(crate) const UNSHOWN: &str = "/sim/unshown";
+
+/// The path of a `sandboxd`, or an [`image`]'s name, whose sandbox's delete waits `LINGER`
 /// before it deletes it.
 pub(crate) const LINGERING: &str = "/sim/lingering";
 
 /// How long a delete of a [`LINGERING`] sandbox takes: seconds longer than the hard end of the
 /// runs whose tests use it.
-const LINGER: Duration = Duration::from_secs(10);
+const LINGER: Duration = Duration::from_secs(7);
 
-/// A provider whose sandboxes are threads, each running a fake `sandboxd`, which answers each
-/// request until [stalled](Subject::stall), and whose paths and images such as [`MUTE`] and
-/// [`SLOW`] change what it does. It keeps the files put, and collects [`COLLECTED`] from any
-/// directory, and from `out` a judge's result too. A command whose program is `exit` exits with
-/// its argument; `stall` stalls the sandbox; `crash` ends the session; `ops` takes the steps its
-/// arguments give ([`step`]), each once the one before it is answered, then exits with 0;
-/// `judge` judges the payload at the path its argument gives ([`judge`]); any other runs until
-/// the sandbox is frozen.
+/// An [`image`]'s name whose sandbox's delete waits until each other sandbox of its run is
+/// deleted, and no other delete is under way, as a platform may finish a delete that began later
+/// first, and only then deletes it.
+pub(crate) const LAST: &str = "/sim/last";
+
+/// The longest a delete of a [`LAST`] sandbox waits: one that waits this long waits on a sandbox
+/// that nothing deletes, the test's bug.
+const LAST_WAITS: Duration = Duration::from_secs(60);
+
+/// How long a sandbox's fake `sandboxd` takes to end once its sandbox is deleted.
+// A platform's sandbox ends some time after it is told to, so a delete that doesn't wait for its
+// end returns while it runs, which the suite then sees (`Subject::held`): far longer than the
+// suite takes to look after a delete returns, and far shorter than any test's bounds.
+const ENDING: Duration = Duration::from_millis(100);
+
+/// A provider whose sandboxes are threads, each running a fake `sandboxd`.
+///
+/// A create whose deadline has passed as it begins fails, making nothing. A sandbox's `sandboxd`
+/// says this version's hello, unless its create names a fault, such as [`MUTE`] or [`LATER`], and
+/// stops reading once [stalled](Subject::stall); the sandbox is listed as ended once it exits
+/// ([`VANISHING`] and [`UNLISTABLE`] aside). It keeps the files put, collects a tree of one file,
+/// `COLLECTED`, from any directory, with what its commands wrote there (`collect`), and runs each
+/// command by its program (`Served::start`). Each fault, such as [`UNPUBLISHED`], says in its doc
+/// what it does.
 pub(crate) struct Sim {
+    /// The name of its platform, which each reference it publishes begins with, then `:`.
+    platform: &'static str,
     ready: Ready,
-    // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
-    state: Mutex<State>,
+    // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock,
+    // which each instance that `Subject::connect` makes shares, as a platform's instances share
+    // its sandboxes.
+    state: Arc<Mutex<State>>,
     journal: Option<Journal>,
 }
 
@@ -127,8 +189,12 @@ struct State {
     next: u64,
     /// The sandboxes made and not yet deleted, by id.
     sandboxes: BTreeMap<String, Sandbox>,
+    /// The sandboxes deleted, which the platform holds until their threads have ended.
+    deleted: Vec<Deleted>,
+    /// How many deletes are under way.
+    deleting: usize,
     /// The permission bits of the directory that held each create's socket directory, in the
-    /// order of the creates.
+    /// order of the creates that dialed a socket.
     modes: Vec<u32>,
     /// Whether each create asked for the model endpoint, in the order of the creates.
     models: Vec<bool>,
@@ -136,8 +202,14 @@ struct State {
 
 struct Sandbox {
     run: RunTag,
-    undeletable: bool,
-    lingering: bool,
+    /// How many deletes it refuses yet, `u32::MAX` for every one.
+    refusals: u32,
+    /// How long its delete waits.
+    linger: Duration,
+    /// [`LAST`]'s.
+    last: bool,
+    unshown: bool,
+    listing: Listing,
     // Shared with the sandbox's thread, which prints to its console and hands over its
     // connection.
     shared: Arc<Mutex<Status>>,
@@ -148,6 +220,30 @@ impl Sandbox {
     fn of(&self, run: &RunTag) -> bool {
         self.run.as_str() == run.as_str()
     }
+
+    /// Whether its fake `sandboxd` has exited: its thread has returned, but not for a stall,
+    /// which stands for a `sandboxd` that is stuck, as a paused container's is.
+    fn ended(&self) -> bool {
+        self.thread.is_finished() && !status(&self.shared).stalled
+    }
+}
+
+/// What [`Subject::held`] keeps of a deleted sandbox.
+struct Deleted {
+    id: String,
+    run: RunTag,
+    /// Its status, which its thread keeps until it ends.
+    shared: Weak<Mutex<Status>>,
+}
+
+/// How the run's list shows a sandbox.
+enum Listing {
+    /// As it is, ended or not.
+    Shown,
+    /// Left out once it has ended, as [`VANISHING`]'s.
+    LeftOutOnceEnded,
+    /// Not at all: the list fails while it lasts, as [`UNLISTABLE`]'s.
+    Failing,
 }
 
 /// What a sandbox's thread and the [`Sim`] share.
@@ -155,48 +251,49 @@ impl Sandbox {
 struct Status {
     console: String,
     /// The thread's connection once dialed, by which a delete ends the session.
-    connection: Option<UnixStream>,
+    connection: Option<Connection>,
     stalled: bool,
     deleted: bool,
     /// Where its session's reads go, if the provider has a journal.
     journal: Option<Journal>,
 }
 
+impl Status {
+    /// The status of a sandbox as it starts, whose session's reads go to `journal`, if any.
+    fn new(journal: Option<Journal>) -> Self {
+        Self {
+            journal,
+            ..Self::default()
+        }
+    }
+}
+
 impl Sim {
+    /// A simulated provider whose startup is 30 s.
     pub(crate) fn new() -> Self {
         // Far longer than a thread takes to start and dial, so that a busy machine makes a start
         // wait longer, never fail.
         Self::with_startup(30)
     }
 
-    /// A simulated provider that declares two classes: `sim`, whose startup is `seconds`, which
-    /// every role fits, and `brief`, which gives a role [`BRIEF`].
+    /// A simulated provider, of platform `sim`, that declares two classes: `sim`, whose startup
+    /// is `seconds`, which every role fits, and `brief`, which gives a role [`BRIEF`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `seconds` is 0.
     pub(crate) fn with_startup(seconds: u64) -> Self {
-        let class = |name: &str, resources, seconds| {
-            let class = Class {
-                resources,
-                startup_seconds: NonZeroU64::new(seconds).unwrap(),
-            };
-            (Name::try_from(name.to_owned()).unwrap(), class)
-        };
-        let all = Resources {
-            cpu_millis: NonZeroU64::new(1 << 20).unwrap(),
-            memory_bytes: NonZeroU64::new(1 << 50).unwrap(),
-        };
         Self {
-            ready: Ready {
-                report: json!({ "provider": "sim" }),
-                classes: BTreeMap::from([
-                    class("sim", all, seconds),
-                    class("brief", BRIEF, BRIEF_STARTUP),
-                ]),
-            },
-            state: Mutex::new(State {
+            platform: "sim",
+            ready: ready(NonZeroU64::new(seconds).unwrap()),
+            state: Arc::new(Mutex::new(State {
                 next: 1,
                 sandboxes: BTreeMap::new(),
+                deleted: Vec::new(),
+                deleting: 0,
                 modes: Vec::new(),
                 models: Vec::new(),
-            }),
+            })),
             journal: None,
         }
     }
@@ -223,7 +320,7 @@ impl Sim {
     }
 
     /// The permission bits of the directory that held each create's socket directory, in the
-    /// order of the creates.
+    /// order of the creates that dialed a socket.
     pub(crate) fn modes(&self) -> Vec<u32> {
         self.state().modes.clone()
     }
@@ -236,6 +333,43 @@ impl Sim {
     fn state(&self) -> MutexGuard<'_, State> {
         stdx::unpoisoned(self.state.lock())
     }
+
+    /// What `reference`, the create's `what`, names on the platform: the rest of it, past the
+    /// platform's name; or why it names nothing there.
+    fn own<'r>(&self, what: &str, reference: &'r str) -> Result<&'r str, String> {
+        let rest = (reference.strip_prefix(self.platform)).and_then(|rest| rest.strip_prefix(':'));
+        rest.ok_or_else(|| {
+            format!(
+                "{what} `{reference}` is no reference of platform `{}`: name one that its \
+                 provider published",
+                self.platform
+            )
+        })
+    }
+}
+
+/// What a simulated provider declares whose class `sim` has a startup of `startup_seconds`, which
+/// every role fits: that class and `brief`, which gives a role [`BRIEF`].
+fn ready(startup_seconds: NonZeroU64) -> Ready {
+    let class = |name: &str, resources, startup_seconds| {
+        let class = Class {
+            resources,
+            startup_seconds,
+        };
+        (Name::try_from(name.to_owned()).unwrap(), class)
+    };
+    let all = Resources {
+        cpu_millis: NonZeroU64::new(1 << 20).unwrap(),
+        memory_bytes: NonZeroU64::new(1 << 50).unwrap(),
+    };
+    let brief = NonZeroU64::new(BRIEF_STARTUP).unwrap();
+    Ready {
+        report: json!({ "provider": "sim" }),
+        classes: BTreeMap::from([
+            class("sim", all, startup_seconds),
+            class("brief", BRIEF, brief),
+        ]),
+    }
 }
 
 impl Provider for Sim {
@@ -243,108 +377,206 @@ impl Provider for Sim {
         &self.ready
     }
 
-    fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
-        let published = locals.iter().map(|local| match local {
-            Local::Role { image } => Ok(Published::from(image.to_string())),
-            Local::Sandboxd { path } if path.as_os_str() == UNPUBLISHED => Err(format!(
-                "{UNPUBLISHED} can't be published by the simulated provider: name another path"
-            )),
-            Local::Sandboxd { path } => Ok(Published::from(path.display().to_string())),
-        });
-        published.collect()
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+        let (mut deleted, mut failures) = (Vec::new(), Vec::new());
+        let mut state = self.state();
+        let named = |id: &str| ids.iter().any(|ours| ours.as_str() == id);
+        let waits = |state: &State| {
+            let last = (state.sandboxes.iter()).any(|(id, sandbox)| named(id) && sandbox.last);
+            let others =
+                (state.sandboxes.iter()).any(|(id, sandbox)| sandbox.of(run) && !named(id));
+            last && (others || state.deleting > 0)
+        };
+        let waited = Deadline::after(LAST_WAITS);
+        while waits(&state) {
+            drop(state);
+            assert!(
+                waited.remaining().is_some(),
+                "a delete of a `LAST` sandbox waited {LAST_WAITS:?} for the run's others: expected \
+                 the test to delete each"
+            );
+            thread::sleep(AWAIT_POLL);
+            state = self.state();
+        }
+        state.deleting += 1;
+        for id in ids.iter().map(SandboxId::as_str) {
+            let found = state.sandboxes.get_mut(id);
+            match found.map(|sandbox| (sandbox.of(run), sandbox.refusals > 0, sandbox)) {
+                None => {}
+                Some((false, _, _)) => failures.push(format!(
+                    "{id} is another run's sandbox, not run {}'s, so the simulated provider left \
+                     it: name only the run's own",
+                    run.as_str()
+                )),
+                Some((true, true, sandbox)) => {
+                    if sandbox.refusals != u32::MAX {
+                        sandbox.refusals -= 1;
+                    }
+                    status(&sandbox.shared).console.clear();
+                    failures.push(format!(
+                        "{id} can't be deleted by the simulated provider: create one with another \
+                         `sandboxd`"
+                    ));
+                }
+                Some((true, false, _)) => deleted.extend(state.sandboxes.remove_entry(id)),
+            }
+        }
+        state
+            .deleted
+            .extend(deleted.iter().map(|(id, sandbox)| Deleted {
+                id: id.clone(),
+                run: sandbox.run.clone(),
+                shared: Arc::downgrade(&sandbox.shared),
+            }));
+        // Each thread ends once told, and joining it waits for nothing the lock holds.
+        drop(state);
+        for (id, sandbox) in deleted {
+            self.tell(|| format!("deleted {id}"));
+            stop(sandbox);
+        }
+        self.state().deleting -= 1;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
-    fn create(&self, create: &Create) -> Result<Created, String> {
-        let Dial::Socket { dir } = &create.dial;
-        let image = create.image.as_str();
-        let repository = image
-            .split_once('@')
-            .map_or(image, |(repository, _)| repository);
-        let names = |fault: &str| create.sandboxd.as_str() == fault || repository == fault;
-        let (socket, lost) = (dir.join(SOCKET_NAME), names(LOST));
-        let (mute, undeletable, lingering) =
-            (lost || names(MUTE), names(UNDELETABLE), names(LINGERING));
-        let parent = fs::metadata(dir.parent().unwrap()).unwrap();
-        let mode = parent.permissions().mode() & 0o777;
-        let shared = Arc::new(Mutex::new(Status {
-            journal: self.journal.clone(),
-            ..Status::default()
-        }));
+    fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+        let state = self.state();
+        let ours = (state.sandboxes.iter()).filter(|(_, sandbox)| sandbox.of(run));
+        let mut listed = Vec::new();
+        for (id, sandbox) in ours {
+            let ended = sandbox.ended();
+            match sandbox.listing {
+                Listing::Failing => {
+                    return Err(format!(
+                        "the simulated list failed while {id} lasts: delete it, or create one \
+                         with another `sandboxd`"
+                    ));
+                }
+                Listing::LeftOutOnceEnded if ended => {}
+                Listing::Shown | Listing::LeftOutOnceEnded => listed.push(Listed {
+                    id: SandboxId::from(id.clone()),
+                    ended,
+                }),
+            }
+        }
+        Ok(listed)
+    }
+
+    fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
+        if *image == self::image(UNPUBLISHED) {
+            return Err(format!(
+                "{image} can't be published by the simulated provider: name another image"
+            ));
+        }
+        Ok(ImageRef::from(format!("{}:{image}", self.platform)))
+    }
+
+    fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String> {
+        if path.as_os_str() == UNPUBLISHED {
+            return Err(format!(
+                "{UNPUBLISHED} can't be published by the simulated provider: name another path"
+            ));
+        }
+        let path = path.display();
+        Ok(SandboxdRef::from(format!("{}:{path}", self.platform)))
+    }
+
+    fn meeting(&self) -> Meeting<'_> {
+        Meeting::Local(self)
+    }
+
+    fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
+        self.console_of(run, id)
+    }
+}
+
+impl Creator<SocketDial> for Sim {
+    fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        let gateway = Gateway::Socket(dial.dir.join(SOCKET_NAME));
+        self.made(create, gateway)
+    }
+}
+
+impl Sim {
+    /// Creates the sandbox that `create` describes, which meets the gateway at `gateway`.
+    // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more;
+    // and the name needs no use, as each sandbox is created once.
+    fn made(&self, create: &Create, gateway: Gateway) -> Result<Created, String> {
+        let by = Deadline::at_unix(create.by.since_epoch());
+        if by.remaining().is_none() {
+            let passed =
+                "the simulated create's deadline had passed: expected time left to make it";
+            return Err(passed.to_owned());
+        }
+        let path = self.own("the `sandboxd`", create.sandboxd.as_str())?;
+        let digest = self.own("the image", create.image.as_str())?;
+        let Faults {
+            made,
+            dialing,
+            listing,
+            refusals,
+            linger,
+            last,
+            unshown,
+        } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
+        let (mute, hung) = dialing.silent();
+        let hello = if dialing == Dialing::Later {
+            json!({ "version": PROTOCOL_VERSION + 1 })
+        } else {
+            json!({ "version": PROTOCOL_VERSION })
+        };
+        let mode = gateway.mode();
+        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone())));
+        // Before its thread starts, so that the console shows it once the create returns, however
+        // late the thread runs.
+        (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
-            .spawn(move || sandboxd(&socket, mute, model, &ours))
+            .spawn(move || sandboxd(&gateway, mute, hung, &hello, model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
-        if names(SLOW) {
-            thread::sleep(SLOW_CREATE);
-        }
+        let late = made == Made::Slow && {
+            thread::sleep(SLOW_CREATE.min(by.remaining().unwrap_or_default()));
+            by.remaining().is_none()
+        };
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
         state.next += 1;
-        state.modes.push(mode);
+        state.modes.extend(mode);
         state.models.push(model);
-        let run = create.run.clone();
         let sandbox = Sandbox {
-            run,
-            undeletable,
-            lingering,
+            run: create.run.clone(),
+            refusals,
+            linger,
+            last,
+            unshown,
+            listing,
             shared,
             thread,
         };
         state.sandboxes.insert(id.clone(), sandbox);
-        drop(state);
         self.tell(|| format!("created {id}"));
-        if lost {
-            return Err(
-                "the simulated create failed, and can't name what it made: expected the run's \
+        if made == Made::Lost || late {
+            let failed = if made == Made::Lost {
+                "failed"
+            } else {
+                "gave up at its deadline"
+            };
+            return Err(format!(
+                "the simulated create {failed}, and can't name what it made: expected the run's \
                  list to find it"
-                    .to_owned(),
-            );
+            ));
         }
         Ok(Created {
             id: SandboxId::from(id),
         })
     }
 
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
-        let (mut deleted, mut kept, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
-        let mut state = self.state();
-        for id in ids {
-            let ours = (state.sandboxes.get(id.as_str())).filter(|sandbox| sandbox.of(run));
-            match ours.map(|sandbox| sandbox.undeletable) {
-                Some(true) => kept.push(id.as_str()),
-                Some(false) => {
-                    let removed = state.sandboxes.remove(id.as_str());
-                    deleted.extend(removed.map(|sandbox| (id.as_str(), sandbox)));
-                }
-                None => unknown.push(id.clone()),
-            }
-        }
-        // Each thread ends once told, and joining it waits for nothing the lock holds.
-        drop(state);
-        for (id, sandbox) in deleted {
-            stop(sandbox);
-            self.tell(|| format!("deleted {id}"));
-        }
-        if !kept.is_empty() {
-            return Err(format!(
-                "{} can't be deleted by the simulated provider: create one with another `sandboxd`",
-                kept.join(", ")
-            ));
-        }
-        Ok(unknown)
-    }
-
-    fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
-        let state = self.state();
-        let ours = (state.sandboxes.iter()).filter(|(_, sandbox)| sandbox.of(run));
-        let listed = ours.map(|(id, _)| Listed {
-            id: SandboxId::from(id.clone()),
-        });
-        Ok(listed.collect())
-    }
-
-    fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
+    /// What sandbox `id` of `run` printed, as [`Provider::console`] asks.
+    fn console_of(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let state = self.state();
         let ours = state.sandboxes.get(id.as_str());
         let Some(sandbox) = ours.filter(|sandbox| sandbox.of(run)) else {
@@ -354,22 +586,115 @@ impl Provider for Sim {
                 run.as_str()
             ));
         };
+        if sandbox.unshown {
+            return Err(format!(
+                "the simulated console of {} can't be read: create one with another `sandboxd`",
+                id.as_str()
+            ));
+        }
         let text = status(&sandbox.shared).console.clone();
         Ok(Console { text })
     }
 }
 
-/// An image of `repository`, pinned by a digest of zeros.
-pub(crate) fn image(repository: &str) -> Image {
-    Image::try_from(format!("{repository}@sha256:{}", "0".repeat(64))).unwrap()
+/// Where a simulated sandbox meets the gateway.
+enum Gateway {
+    /// At the socket of this path, of its own.
+    Socket(PathBuf),
+}
+
+impl Gateway {
+    /// The permission bits of the directory that holds a socket's directory.
+    fn mode(&self) -> Option<u32> {
+        match self {
+            Self::Socket(socket) => {
+                let parent = fs::metadata(socket.parent()?.parent()?).unwrap();
+                Some(parent.permissions().mode() & 0o777)
+            }
+        }
+    }
+}
+
+/// A simulated sandbox's connection to the gateway.
+enum Connection {
+    Unix(UnixStream),
+}
+
+impl Connection {
+    /// Dials `gateway`.
+    fn dial(gateway: &Gateway) -> io::Result<Self> {
+        match gateway {
+            Gateway::Socket(socket) => UnixStream::connect(socket).map(Self::Unix),
+        }
+    }
+
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            Self::Unix(stream) => stream.try_clone().map(Self::Unix),
+        }
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        match self {
+            Self::Unix(stream) => stream.shutdown(how),
+        }
+    }
+}
+
+impl Read for Connection {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for Connection {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Unix(stream) => stream.flush(),
+        }
+    }
+}
+
+/// The image named `name`, such as a fault's, whose digest is `name`'s bytes, then zeros.
+///
+/// # Panics
+///
+/// Panics if `name` is over 32 bytes.
+pub(crate) fn image(name: &str) -> Image {
+    let mut bytes = [0; 32];
+    bytes[..name.len()].copy_from_slice(name.as_bytes());
+    Image::try_from(String::from(Sha256Digest::from(bytes))).unwrap()
 }
 
 impl Subject for Sim {
+    fn connect(&self) -> Result<Box<dyn Provider + '_>, String> {
+        Ok(Box::new(Self {
+            platform: self.platform,
+            ready: Ready {
+                report: self.ready.report.clone(),
+                classes: self.ready.classes.clone(),
+            },
+            state: Arc::clone(&self.state),
+            journal: self.journal.clone(),
+        }))
+    }
+
     fn locals(&self, _: &Path) -> Locals {
         Locals {
             image: image("sim"),
             sandboxd: PathBuf::from("/sim/sandboxd"),
             mute: PathBuf::from(MUTE),
+            broken: PathBuf::from(LOST),
+            unreachable_image: image(UNPUBLISHED),
+            unreachable_sandboxd: PathBuf::from(UNPUBLISHED),
         }
     }
 
@@ -377,25 +702,145 @@ impl Subject for Sim {
         let state = self.state();
         status(&state.sandboxes[id.as_str()].shared).stalled = true;
     }
+
+    fn held(&self, run: &RunTag) -> Vec<SandboxId> {
+        let state = self.state();
+        // An ended sandbox that its list leaves out stands for one the platform has freed,
+        // though the provider keeps it until it is deleted, to end its thread.
+        let freed = |sandbox: &Sandbox| {
+            matches!(sandbox.listing, Listing::LeftOutOnceEnded) && sandbox.ended()
+        };
+        let held = (state.sandboxes.iter())
+            .filter(|(_, sandbox)| sandbox.of(run) && !freed(sandbox))
+            .map(|(id, _)| id);
+        // A deleted sandbox whose thread still runs stands for one still ending.
+        let ending = (state.deleted.iter())
+            .filter(|deleted| deleted.run.as_str() == run.as_str())
+            .filter(|deleted| deleted.shared.strong_count() > 0)
+            .map(|deleted| &deleted.id);
+        held.chain(ending)
+            .map(|id| SandboxId::from(id.clone()))
+            .collect()
+    }
 }
 
 fn status(shared: &Mutex<Status>) -> MutexGuard<'_, Status> {
     stdx::unpoisoned(shared.lock())
 }
 
+/// The faults a create simulates, each of the paths and image names above that it names.
+struct Faults {
+    made: Made,
+    dialing: Dialing,
+    listing: Listing,
+    /// How many deletes it refuses, `u32::MAX` for every one, as [`UNDELETABLE`]'s, or one, as
+    /// [`REFUSED_ONCE`]'s.
+    refusals: u32,
+    /// How long its delete waits: [`LINGERING`]'s.
+    linger: Duration,
+    /// [`LAST`]'s.
+    last: bool,
+    /// [`UNSHOWN`]'s.
+    unshown: bool,
+}
+
+/// How a create ends.
+#[derive(PartialEq, Eq)]
+enum Made {
+    /// It returns the sandbox.
+    Named,
+    /// It fails, leaving the sandbox, as [`LOST`]'s.
+    Lost,
+    /// It returns after [`SLOW_CREATE`], as [`SLOW`]'s.
+    Slow,
+}
+
+/// What a sandbox's `sandboxd` does.
+#[derive(PartialEq, Eq)]
+enum Dialing {
+    /// It dials and says hello.
+    Hello,
+    /// It dials and says hello in the next version, as [`LATER`]'s.
+    Later,
+    /// It never dials, and ends.
+    Mute,
+    /// It never dials, and hangs, as [`HUNG`]'s and [`UNLISTABLE`]'s.
+    Hung,
+}
+
+impl Dialing {
+    /// Whether the `sandboxd` never dials, and whether it hangs.
+    fn silent(&self) -> (bool, bool) {
+        match self {
+            Self::Hello | Self::Later => (false, false),
+            Self::Mute => (true, false),
+            Self::Hung => (true, true),
+        }
+    }
+}
+
+impl Faults {
+    /// The faults of a create that `names` each fault it simulates.
+    fn of(names: impl Fn(&str) -> bool) -> Self {
+        let (lost, unlistable, vanishing) = (names(LOST), names(UNLISTABLE), names(VANISHING));
+        let listing = if unlistable {
+            Listing::Failing
+        } else if vanishing {
+            Listing::LeftOutOnceEnded
+        } else {
+            Listing::Shown
+        };
+        let made = if lost {
+            Made::Lost
+        } else if names(SLOW) {
+            Made::Slow
+        } else {
+            Made::Named
+        };
+        let dialing = if unlistable || names(HUNG) {
+            Dialing::Hung
+        } else if lost || vanishing || names(MUTE) {
+            Dialing::Mute
+        } else if names(LATER) {
+            Dialing::Later
+        } else {
+            Dialing::Hello
+        };
+        let refusals = if names(UNDELETABLE) {
+            u32::MAX
+        } else {
+            u32::from(names(REFUSED_ONCE))
+        };
+        Self {
+            made,
+            dialing,
+            listing,
+            refusals,
+            linger: if names(LINGERING) {
+                LINGER
+            } else {
+                Duration::ZERO
+            },
+            last: names(LAST),
+            unshown: names(UNSHOWN),
+        }
+    }
+}
+
 /// Tells a deleted sandbox's thread to end, closing its connection if it has one, and waits
-/// until it has, after [`LINGER`] if it is [`LINGERING`].
+/// until it has, after its delete's wait.
 fn stop(sandbox: Sandbox) {
     let Sandbox {
         run: _,
-        undeletable: _,
-        lingering,
+        refusals: _,
+        linger,
+        last: _,
+        unshown: _,
+        listing: _,
         shared,
         thread,
     } = sandbox;
-    if lingering {
-        thread::sleep(LINGER);
-    }
+    thread::sleep(linger);
     let mut status = status(&shared);
     status.deleted = true;
     if let Some(connection) = status.connection.take() {
@@ -403,19 +848,44 @@ fn stop(sandbox: Sandbox) {
         let _ = connection.shutdown(Shutdown::Both);
     }
     drop(status);
+    // A thread that hangs waits to be woken once its sandbox is deleted.
+    thread.thread().unpark();
     // Only a bug panics the thread, and joining raises its panic here.
     thread.join().unwrap();
 }
 
-/// A sandbox's fake `sandboxd`: it prints why it doesn't dial if `mute`, or else dials `socket`
-/// and serves the session until the session ends, the sandbox is deleted, or it is stalled,
-/// with the model endpoint if `model`.
-fn sandboxd(socket: &Path, mute: bool, model: bool, shared: &Mutex<Status>) {
+/// What the console of a sandbox whose `sandboxd` never dials shows.
+const NEVER_DIALS: &str = "sandboxd: a simulated one, which never dials\n";
+
+/// A sandbox's fake `sandboxd`, whose console its create has written: if `mute`, it waits until
+/// the sandbox is deleted if `hung`, and else ends; or else it [dials](dial), saying `hello`.
+/// Once its sandbox is deleted, it takes
+/// [`ENDING`] to end.
+fn sandboxd(
+    gateway: &Gateway,
+    mute: bool,
+    hung: bool,
+    hello: &Value,
+    model: bool,
+    shared: &Mutex<Status>,
+) {
     if mute {
-        (status(shared).console).push_str("sandboxd: a simulated one, which never dials\n");
-        return;
+        // A park can end spuriously, so the deletion is checked again.
+        while hung && !status(shared).deleted {
+            thread::park();
+        }
+    } else {
+        dial(gateway, hello, model, shared);
     }
-    let dialed = UnixStream::connect(socket).and_then(|connection| {
+    if status(shared).deleted {
+        thread::sleep(ENDING);
+    }
+}
+
+/// Dials `gateway`, opens the session with `hello`, and serves it until the session ends, the
+/// sandbox is deleted, or it is stalled, with the model endpoint if `model`.
+fn dial(gateway: &Gateway, hello: &Value, model: bool, shared: &Mutex<Status>) {
+    let dialed = Connection::dial(gateway).and_then(|connection| {
         let other = connection.try_clone()?;
         Ok((connection, other))
     });
@@ -423,17 +893,31 @@ fn sandboxd(socket: &Path, mute: bool, model: bool, shared: &Mutex<Status>) {
     match dialed {
         // A sandbox deleted as it dialed has no session to serve.
         Ok(_) if status.deleted => {}
-        Ok((connection, other)) => {
+        Ok((mut connection, other)) => {
             status.connection = Some(other);
             drop(status);
-            serve(connection, model, shared);
+            if open(&mut connection, hello) {
+                serve(connection, model, shared);
+            }
         }
         Err(error) => {
-            let socket = socket.display();
-            let failed = format!("sandboxd: connecting to the gateway at {socket} failed: {error}");
+            let at = match gateway {
+                Gateway::Socket(socket) => socket.display().to_string(),
+            };
+            let failed = format!("sandboxd: connecting to the gateway at {at} failed: {error}");
             status.console.push_str(&failed);
         }
     }
+}
+
+/// Opens the session on `connection` with `hello`: whether the gateway accepted it.
+fn open(connection: &mut Connection, hello: &Value) -> bool {
+    let sent = frame::write(connection, hello, &[]);
+    let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
+    // Unlike `sandboxd`, it prints no refusal: a run reads the console of a start that failed as
+    // soon as the refusal is sent, so what it found would depend on a race. A connection may also
+    // end before the session opens, as a delete ends it.
+    matches!(answer, Ok(Some((HelloReply::Accepted, _))))
 }
 
 /// A step of a command that makes ops.
@@ -894,7 +1378,7 @@ fn collect(
 
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more, serving the model endpoint if `model`.
-fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
+fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let (mut caller, mut files, mut result) = (None::<Caller>, Files::default(), None);
     // The stream of a freeze that waits for a model response to end.
@@ -983,7 +1467,7 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
 /// [`End::Close`] says if `close`, and else as [`End::Crash`] does. Returns whether the session
 /// goes on.
 fn send(
-    connection: &mut UnixStream,
+    connection: &mut Connection,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     crashed: bool,
     close: bool,

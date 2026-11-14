@@ -9,10 +9,10 @@ Names in backticks are for symbol search.
 Pumpkin runs workflows, in which an agent works and judges score what it submits. A workflow is
 data, JSON in Pumpkin's IR: its roles, one agent and its judges; the grants each role holds, the
 agent's judge calls and one submission; the model route of the agent, if it has one; and the
-score, the judge whose verdict ends the run. Each instance of a role is a
-sandbox, a judge's afresh for each call, whose first process, `sandboxd`, dials the host and serves
-one session: the host puts and collects files, starts commands and freezes the sandbox, and code
-in the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
+score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a judge's
+afresh for each call, whose supervisor, `sandboxd`, meets the host, dialing it, and serves one
+session: the host puts and collects files, starts commands and freezes the sandbox, and code in
+the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
 driver's decision core decides what a run does, and a provider, such as Docker's, makes sandboxes.
 The session is the boundary that matters most: a sandbox may be buggy, and the agent is
 opportunistic and goal-directed, using whatever it can reach to finish its task or raise its
@@ -37,23 +37,24 @@ the IR, as a task repository's Rust factories do.
 
 ## Code map
 
-Each crate depends only on crates above it. **Architecture Invariant** callouts often name absences.
+Each crate depends only on crates above it, but `test-support`, which only tests use.
+**Architecture Invariant** callouts often name absences.
 
 **`crates/stdx`.** What `std` lacks and several crates share, such as `Context` for errors.
 - **Architecture Invariant:** it knows nothing of Pumpkin: it depends on no Pumpkin crate.
 
-**`crates/test-support`.** What the tests of more than one crate share, such as a complete
-workflow (`WORKFLOW`) and what the tests that need Docker reach it with; a helper that one
-crate's tests use stays in that crate's tests.
+**`crates/test-support`.** What the tests of more than one crate share, such as the conformance
+suite every provider passes (`suite`), a complete workflow (`WORKFLOW`), and what the tests that
+need Docker reach it with; a helper that one crate's tests use stays in that crate's tests.
 - **Architecture Invariant:** only tests use it: each crate that does names it under
   `[dev-dependencies]`.
 
-**`crates/schema`.** The formats Pumpkin's programs share, never copied into a consumer:
-`ir`, the workflow IR; `workflow`, a workflow parsed, and placed; `sandbox`, the sandbox
-protocol, its `frame`s, `tree`s, ops (`sandbox::op`) and the in-sandbox contract: the paths,
-limits and environment a role's commands and its session's owner share; `provider`, the values a
-run and its providers exchange. Another program's format, such as `docker info`'s, stays with the
-code that reads it.
+**`crates/schema`.** The formats Pumpkin's programs share, never copied into a consumer: `ir`, the
+workflow IR; `workflow`, a workflow parsed, and placed in the classes of sandbox that providers
+declare (`Class`); `sandbox`, the sandbox protocol, its `frame`s, `tree`s, ops (`sandbox::op`),
+how a sandbox meets the gateway (`SocketDial`) and the in-sandbox contract: the paths, limits and
+environment a role's commands and its session's owner share.
+Another program's format, such as `docker info`'s, stays with the code that reads it.
 **API Boundary:** the IR, the in-sandbox contract, `sandboxctl`'s JSON.
 - **Architecture Invariant:** outside its tests, it depends on `serde` and `serde_json` alone,
   because `sandboxd`, a small static binary, depends on it.
@@ -74,11 +75,12 @@ Git repository's URL.
   it is `#![no_std]`, so it reads only the text it is given, and a harness and a provider share
   one check without either depending on the other.
 
-**`crates/engine`.** The operator's Docker engine, on which Pumpkin builds the images that
-sandboxes run, whichever provider runs them: `Engine` reaches the engine of a named Docker context
-(`ContextName`), reports it (`Report`), and builds images, each tagged by its build's inputs, from
-a recipe (`Recipe`) that `recipe::check` passes and a context of directories (`BuildContext`) that
-it stages; and `confinement` confines a role's container wherever a provider's sandbox is one.
+**`crates/engine`.** The operator's Docker engine, on which Pumpkin builds the images that sandboxes
+run, whichever provider runs them, and from which it publishes them: `Engine` reaches the engine of
+a named Docker context (`ContextName`), reports it (`Report`), and builds images, each tagged by its
+build's inputs, from a recipe (`Recipe`) that `recipe::check` passes and a context of directories
+(`BuildContext`) that it stages; and `confinement` confines a role's container wherever a
+provider's sandbox is one.
 - **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
   `recipe`, `schema` and `stdx`, so a crate that only builds or publishes images depends on it,
   and on no provider.
@@ -87,13 +89,16 @@ it stages; and `confinement` confines a role's container wherever a provider's s
   directly only to observe containers and images, pause containers, or build, tag and remove
   images of their own.
 
-**`crates/gateway`.** The host's end of sessions: a sandbox's `Listener` makes its
-`Session`, whose one owner moves trees, runs commands (`Process`) and answers ops, hearing of each
-op, each model request, each command's exit and the session's end as an `Arrival` sent to it.
+**`crates/gateway`.** The host's end of sessions: where a sandbox meets the gateway (`meeting`), a
+`Registration` that its run's `Sockets` issues, makes the sandbox's `Session`, whose one owner moves
+trees, runs commands (`Process`) and answers ops, hearing of each op, each model request, each
+command's exit and the session's end as an `Arrival` sent to it.
 - **Architecture Invariant:** a sandbox can't harm the host through its session: anything out of
-  protocol ends the session, and a session costs the host only bounded memory and bounded waits.
-  So a session accepted with no op payload limit (`Listener::accept`) ends at its first op
-  (`Assembler::open`).
+  protocol ends the session, and a session costs the host only bounded memory and bounded waits,
+  as does a peer yet to say which sandbox it is. So a session accepted with no op payload limit
+  (`Registration::accept`) ends at its first op (`Assembler::open`). The gateway makes each
+  meeting, the private directory of a run's sockets included, so no caller can make one that
+  breaks this, given a parent where no other user may rename that directory (`Sockets::create`).
 - **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes
   have the same sessions: of Pumpkin's crates, it depends only on `schema` and `stdx`.
 
@@ -105,26 +110,35 @@ the model endpoint, `ctl` is `sandboxctl`, and `sys` holds the system calls `std
 - **Architecture Invariant:** it has only its role's privileges, so it is no boundary within its
   sandbox: where the role runs the agent's code, that code can shape what `sandboxd` reports.
 
-**`crates/provider`.** `Provider`, a run's one handle on a provider for every side effect
-on it: it publishes what the run's sandboxes run, creates, lists and deletes them, and reads their
-consoles.
+**`crates/provider`.** `Provider`, a run's one handle on a provider for every side effect on it: it
+publishes what the run's sandboxes run, creates, lists and deletes them, and reads their consoles;
+and the values they take and give, such as `Create`. How a provider's sandboxes meet the gateway is
+its `Meeting`, each way of which holds the create, a `Creator`, that takes what that way gives a
+sandbox: a socket's dial. A provider is `providers/<name>`, crate `<name>`, which holds its
+platform's calls, but those that a crate of its own holds for every provider that makes them, as
+`engine` does the operator's Docker engine's.
 - **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
   `schema`.
 - **Architecture Invariant:** every call on sandboxes names its run and keeps to that run's, by
   its tag, so runs that share a provider never reach each other's sandboxes.
+- **Architecture Invariant:** a provider holds no session, and the run's times reach it as data: its
+  sandboxes meet the gateway where the runtime gives them, dialing it, and a provider bounds only
+  its own platform calls, so no provider depends on `gateway` outside its tests.
+- **Architecture Invariant:** a create gets only what its provider's `Meeting` takes, so no
+  provider and no run handles a dial of another way.
+- **Architecture Invariant:** no provider depends on another's crate: what two providers share is
+  in a crate of its own, as `engine` is.
+- **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
+  `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands and the
+  session's owner find them anywhere.
+- **Architecture Invariant:** a sandbox that no start claims ends itself, so one that a provider
+  makes after the run gave up its create runs nothing: its `sandboxd` finds its registration gone
+  with the start that issued it.
 
 **`providers/docker`.** `docker`, a sandbox as a container that needs no root to start, on the
 operator's engine: `Docker`, made from an `Engine`, is the `Provider` that makes each sandbox a
 container under the engine's `confinement`, once it has checked that the engine enforces each of
-a container's limits (`Docker::connect`). A provider is `providers/<name>`, crate `<name>`, which holds its
-platform's calls and its sandboxes' confinement.
-- **Architecture Invariant:** a provider holds no session, and the run's times reach it as data:
-  its sandboxes dial what the runtime gives them (`Dial`), the gateway accepts them, and a provider
-  bounds only its own platform calls, so no provider depends on `gateway` outside its
-  tests.
-- **Architecture Invariant:** every provider starts `sandboxd` first in each sandbox, and presents
-  `/pumpkin` with the directories `sandbox` says every sandbox has, so a role's commands and the
-  session's owner find them anywhere.
+a container's limits (`Docker::connect`).
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
@@ -148,7 +162,7 @@ observes and returns the `Action`s the runtime is to perform, until one ends the
 agent's sandbox makes over its session, and `Upstream` forwards a closed one to the model provider
 and says how it answered (`Answer`); `Serving` is the upstream that serves a run's route, with the
 model names it takes. The crate holds the route's rules and all that reaches the model provider,
-so the TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
+so the model provider's TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
 - **Architecture Invariant:** the route stays closed: a request reaches the models its workflow
   allows and nothing else of the model provider's, so a response carries nothing but what its own
   request sent. The rules are in the crate's docs.
@@ -157,12 +171,12 @@ so the TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
   reverse; what the run does with an answer, its health and fault rule, is the runtime's.
 
 **`crates/runtime`.** The host side: the driver's runtime, whose `Run` prepares each run, then
-drives the decision core on the run's `Provider`, timed by its `Host`, whose clock makes the
-inboxes the run's threads wait on (`System`, the machine's), keeping the run's record, whose
-files `record` lays out, and its run log, whose records `log` does, each synced through the
-host. `model` serves the agent's model requests through `route`'s `Route` and `Upstream`, and
-judges the model provider's answers, until the work phase ends (`model_requests_allowed`), or
-the provider refuses the route's key.
+drives the decision core on the run's `Provider`, whose sandboxes meet the gateway where its
+`Meeting` says, timed by its `Host`, whose clock makes the inboxes the run's threads wait on
+(`System`, the machine's), keeping the run's record, whose files `record` lays out, and its run
+log, whose records `log` does, each synced through the host. `model` serves the agent's model
+requests through `route`'s `Route` and `Upstream`, and judges the model provider's answers, until
+the work phase ends (`model_requests_allowed`), or the provider refuses the route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
 - **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and
@@ -173,12 +187,13 @@ the provider refuses the route's key.
 - **Architecture Invariant:** a run takes its workflow placed (`Placed`), so each role fits the
   class of sandbox it is placed in, and each sandbox is given as long to start as its role's class
   takes.
-- **Architecture Invariant:** the runtime is written once, against `Provider`: the library depends
-  on no provider's crate, only its tests do, so a new provider changes no runtime code.
+- **Architecture Invariant:** the runtime is written once, against `Provider`: it depends on no
+  provider's crate, not even in its tests, which run on the simulated provider (`Sim`), so a new
+  provider changes no runtime code.
 - **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
   the runtime reaches a run's provider only through `Sandboxes`; and a run's end deletes
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
-  fails.
+  fails, but for one that a create that gave up makes only after that list (`Creator::create`).
 
 **`crates/harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the

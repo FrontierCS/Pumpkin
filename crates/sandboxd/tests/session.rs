@@ -1,9 +1,10 @@
-//! `sandboxd` and the gateway's end of its session, together. `sandboxd` runs here as an
-//! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
+//! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
+//! sandbox's own ([`Meeting`]). `sandboxd` runs here as an ordinary process, not as a sandbox's first process, and a temporary directory stands in for
 //! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
 //! `/pumpkin`, nor the model endpoint, at a port of the sandbox's own loopback: the Docker
 //! provider's tests make ops and model requests, in real sandboxes. A fake gateway sends
-//! what the gateway's end never would, or holds up what only a slow link would.
+//! what the gateway's end never would, or holds up what only a slow link would, having read the
+//! hello.
 
 #![expect(
     clippy::unwrap_used,
@@ -12,6 +13,7 @@
 )]
 
 use std::cell::Cell;
+use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -21,28 +23,42 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Listener, Process, Put, Session};
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode};
+use gateway::{Arrival, Process, Put, Session, Sockets};
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
 use schema::sandbox::frame::MAX_BODY_BYTES;
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, Launch, RelativePath, ToSandbox, dir_mode, file_mode, frame,
+    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RelativePath,
+    SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, frame,
 };
-use stdx::Deadline;
+use serde_json::{Value, json};
 use stdx::process::Environment;
+use test_support::hung;
 
 /// What `sandboxd` and the tests' other programs get of the tests' environment: `PATH` alone,
 /// to find the programs they run.
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
-/// A request's deadline, which only a test that hangs reaches, so no outcome rests on it.
-fn hung() -> Deadline {
-    Deadline::after(Duration::from_secs(60))
+/// Where a test's `sandboxd` meets the gateway.
+#[derive(Clone, Copy)]
+enum Meeting {
+    /// At a socket of the sandbox's own.
+    Socket,
+}
+
+/// What issued a sandbox's meeting, which lasts as long as the sandbox.
+#[expect(
+    dead_code,
+    reason = "the issuers are held for their drop, which ends the meeting"
+)]
+enum Gateway {
+    Sockets(Sockets),
 }
 
 /// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
 struct Sandbox {
     root: PathBuf,
+    gateway: Gateway,
     session: Session,
     arrivals: Receiver<Arrival>,
     sandboxd: Child,
@@ -50,8 +66,9 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// Starts `sandboxd` and puts the directories a role expects.
-    fn start() -> Self {
+    /// Starts `sandboxd`, meeting the gateway as `meeting` says, and puts the directories a role
+    /// expects.
+    fn start(meeting: Meeting) -> Self {
         // Kept if the test fails.
         let root = tempfile::Builder::new()
             .prefix("sandboxd-")
@@ -61,14 +78,20 @@ impl Sandbox {
         // Without symbolic links, as the kernel names the working directories that
         // `processes` finds the sandbox's processes by.
         let root = fs::canonicalize(root).unwrap();
-        let socket = root.join("gateway.sock");
-        let listener = Listener::bind(socket.clone()).unwrap();
-        let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY)
-            .arg(&socket)
-            .spawn()
-            .unwrap();
+        let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+        let (gateway, registration) = match meeting {
+            Meeting::Socket => {
+                let sockets = Sockets::create(root.join("sockets")).unwrap();
+                let name = Name::try_from("sandbox".to_owned()).unwrap();
+                let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+                sandboxd.arg(dir.join(SOCKET_NAME));
+                (Gateway::Sockets(sockets), registration)
+            }
+        };
+        let sandboxd = sandboxd.spawn().unwrap();
         let (sender, arrivals) = mpsc::channel();
-        let accepted = listener.accept(hung(), None, false, sender, |arrival| arrival);
+        let accepted =
+            registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
@@ -80,11 +103,17 @@ impl Sandbox {
             .unwrap();
         Self {
             root,
+            gateway,
             session,
             arrivals,
             sandboxd,
             commands: Cell::new(0),
         }
+    }
+
+    /// The path of a socket `name` in the root.
+    fn socket(&self, name: &str) -> PathBuf {
+        self.root.join(name)
     }
 
     /// How `process` exited, if its exit is what arrives next, within `wait`.
@@ -216,73 +245,61 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
     panic!("sandboxd ran on 10 s after its session ended: it should exit with the session");
 }
 
-/// Runs `scenario` against a new sandbox, ends the session by dropping it, and checks what the
-/// scenario reported, what arrived after it, how `sandboxd` exited, and how many processes were
-/// left running in the sandbox, against `expect`. Those left get 2 s to exit, and are then
-/// killed.
-fn check(scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
-    let mut sandbox = Sandbox::start();
+/// Runs `scenario` against a new sandbox, whose `sandboxd` meets the gateway as `meeting` says,
+/// ends the session by dropping it, and checks what the scenario reported, what arrived after it,
+/// how `sandboxd` exited, and how many processes were left running in the sandbox, against
+/// `expect`. Those left get 2 s to exit, and are then killed.
+fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
+    let mut sandbox = Sandbox::start(meeting);
     let mut lines = scenario(&mut sandbox);
-    let Sandbox {
-        root,
-        session,
-        arrivals,
-        mut sandboxd,
-        ..
-    } = sandbox;
-    drop(session);
-    lines.extend(
-        arrivals
-            .try_iter()
-            .map(|arrival| format!("then {arrival:?}")),
-    );
-    lines.push(format!("sandboxd: {}", exited(&mut sandboxd)));
-    let left = processes(&root, Duration::from_secs(2), <[u32]>::is_empty);
-    lines.push(format!("left running: {}", left.len()));
-    if !left.is_empty() {
-        // `kill` fails for any that exited meanwhile, which is as good as killed.
-        let pids = left.iter().map(u32::to_string);
-        stdx::process::command("kill", PATH_ONLY)
-            .args(["--signal", "KILL"])
-            .args(pids)
-            .status()
-            .unwrap();
-    }
+    lines.extend(sandbox.end());
     expect.assert_eq(&lines.join("\n"));
-    fs::remove_dir_all(root).unwrap();
+}
+
+impl Sandbox {
+    /// Ends the session by dropping it, and says what arrived after it, how `sandboxd` exited, and
+    /// how many processes were left running in the sandbox, which get 2 s to exit, and are then
+    /// killed.
+    fn end(self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let Self {
+            root,
+            gateway,
+            session,
+            arrivals,
+            mut sandboxd,
+            commands: _,
+        } = self;
+        drop(session);
+        // The meeting ends with the session it opened.
+        drop(gateway);
+        lines.extend(
+            arrivals
+                .try_iter()
+                .map(|arrival| format!("then {arrival:?}")),
+        );
+        lines.push(format!("sandboxd: {}", exited(&mut sandboxd)));
+        let left = processes(&root, Duration::from_secs(2), <[u32]>::is_empty);
+        lines.push(format!("left running: {}", left.len()));
+        if !left.is_empty() {
+            // `kill` fails for any that exited meanwhile, which is as good as killed.
+            let pids = left.iter().map(u32::to_string);
+            stdx::process::command("kill", PATH_ONLY)
+                .args(["--signal", "KILL"])
+                .args(pids)
+                .status()
+                .unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+        lines
+    }
 }
 
 #[test]
 fn judge() {
     check(
-        |sandbox| {
-            let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
-            // Over two frames, and kept as evidence, so that it is put and collected in several.
-            let raw = pattern(2 * MAX_BODY_BYTES + 12345);
-            let root = absolute(&sandbox.root);
-            let put = [
-                Put::Dir(&slot, dir_mode()),
-                Put::File(&payload, file_mode(), &raw),
-            ];
-            sandbox.session.put(&root, &put, hung()).unwrap();
-            let script = r#"
-                printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
-                mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
-                mkdir ../out/empty
-                echo "home=$HOME mode=$MODE in $(pwd)"
-                echo warning >&2
-                exit 3"#;
-            let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
-            let judge = sandbox.session.start(launch, hung()).unwrap();
-            let exited = sandbox.exit(judge, Duration::from_secs(10)).unwrap();
-            let mut lines = vec![format!("exited: {exited:?}")];
-            sandbox.session.freeze(hung()).unwrap();
-            lines.extend(sandbox.collect("out").unwrap());
-            let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
-            lines.push(format!("payload collected intact: {}", kept == raw));
-            lines.extend(sandbox.collect("log").unwrap());
-            lines
-        },
+        Meeting::Socket,
+        judging,
         &expect![[r#"
             exited: Code(3)
             out/empty/
@@ -297,9 +314,40 @@ fn judge() {
     );
 }
 
+/// [`judge`]'s scenario.
+fn judging(sandbox: &mut Sandbox) -> Vec<String> {
+    let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
+    // Over two frames, and kept as evidence, so that it is put and collected in several.
+    let raw = pattern(2 * MAX_BODY_BYTES + 12345);
+    let root = absolute(&sandbox.root);
+    let put = [
+        Put::Dir(&slot, dir_mode()),
+        Put::File(&payload, file_mode(), &raw),
+    ];
+    sandbox.session.put(&root, &put, hung()).unwrap();
+    let script = r#"
+        printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
+        mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
+        mkdir ../out/empty
+        echo "home=$HOME mode=$MODE in $(pwd)"
+        echo warning >&2
+        exit 3"#;
+    let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
+    let judge = sandbox.session.start(launch, hung()).unwrap();
+    let exited = sandbox.exit(judge, Duration::from_secs(10)).unwrap();
+    let mut lines = vec![format!("exited: {exited:?}")];
+    sandbox.session.freeze(hung()).unwrap();
+    lines.extend(sandbox.collect("out").unwrap());
+    let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
+    lines.push(format!("payload collected intact: {}", kept == raw));
+    lines.extend(sandbox.collect("log").unwrap());
+    lines
+}
+
 #[test]
 fn modes_and_stdin() {
     check(
+        Meeting::Socket,
         |sandbox| {
             let mode = |mode: &str| Mode::try_from(mode.to_owned()).unwrap();
             let paths = ["home", "in/tools", "in/tools/tool", "in/prompt"].map(relative);
@@ -351,6 +399,7 @@ fn pattern(len: usize) -> Vec<u8> {
 #[test]
 fn freezing() {
     check(
+        Meeting::Socket,
         |sandbox| {
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
             let group = sandbox.session.start(launch, hung()).unwrap();
@@ -380,6 +429,7 @@ fn freezing() {
 #[test]
 fn full_sandbox() {
     check(
+        Meeting::Socket,
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
             let sleep = sandbox.session.start(launch, hung()).unwrap();
@@ -421,6 +471,7 @@ fn full_sandbox() {
 #[test]
 fn refusals() {
     check(
+        Meeting::Socket,
         |sandbox| {
             let mut lines = Vec::new();
             let mut missing = sandbox.sh("", &[]);
@@ -493,6 +544,7 @@ fn show_error(sandbox: &Sandbox, outcome: io::Result<()>) -> String {
 #[test]
 fn ending_the_session() {
     check(
+        Meeting::Socket,
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
             sandbox.session.start(launch, hung()).unwrap();
@@ -511,9 +563,10 @@ fn ending_the_session() {
 #[test]
 fn model_answers() {
     check(
+        Meeting::Socket,
         |sandbox| {
             // A fake gateway, as the gateway's end never answers a request it didn't take.
-            let socket = sandbox.root.join("fake.sock");
+            let socket = sandbox.socket("fake.sock");
             let end = ToSandbox::ModelEnd {
                 request: 0,
                 cut: false,
@@ -534,20 +587,48 @@ fn model_answers() {
 /// A `sandboxd` whose gateway, a fake at `socket`, sends it `message` once it connects: how it
 /// exited, and why.
 fn answered(socket: &Path, message: &ToSandbox) -> String {
-    let (mut connection, sandboxd) = fake_gateway(socket);
+    let (mut connection, sandboxd) = accepting_gateway(socket);
     frame::write(&mut connection, message, &[]).unwrap();
     ended(sandboxd)
 }
 
 #[test]
+fn hello_answers() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            let message = format!("a stand-in for sandbox protocol {}", PROTOCOL_VERSION + 1);
+            let refusal = json!({ "type": "refused", "message": message, "later": true });
+            let (mut gateway, sandboxd, hello) = fake_gateway(&sandbox.socket("refused.sock"));
+            frame::write(&mut gateway, &refusal, &[]).unwrap();
+            let refused = sandbox.show(&ended(sandboxd));
+            let (gateway, sandboxd, _) = fake_gateway(&sandbox.socket("unanswered.sock"));
+            drop(gateway);
+            let unanswered = sandbox.show(&ended(sandboxd));
+            vec![
+                format!("its hello: {hello}; refused: {refused}"),
+                format!("unanswered: {unanswered}"),
+            ]
+        },
+        &expect![[r#"
+            its hello: {"version":0}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for sandbox protocol 1
+            unanswered: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/unanswered.sock failed: it closed the connection before it answered the hello: expected it to accept or refuse the session
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
 fn reading_while_collecting() {
     check(
+        Meeting::Socket,
         |sandbox| {
             // Far more than a connection buffers, so that a `sandboxd` that read nothing while it
             // collected would hold the put's write up until its deadline.
             let tree = pattern(4 * MAX_BODY_BYTES);
             fs::write(sandbox.root.join("out/tree"), &tree).unwrap();
-            let (mut gateway, sandboxd) = fake_gateway(&sandbox.root.join("fake.sock"));
+            let (mut gateway, sandboxd) = accepting_gateway(&sandbox.socket("fake.sock"));
             let frames = collect_and_put(&sandbox.root, &tree);
             let sent = (frames.iter())
                 .try_for_each(|(message, body)| frame::write(&mut gateway, message, body));
@@ -636,19 +717,23 @@ fn hear_both(gateway: &mut UnixStream, tree: &[u8]) -> Vec<String> {
     [collect, put].into_iter().flatten().collect()
 }
 
-/// A `sandboxd` whose gateway is a fake at `socket`, and the fake's end of its session once it
-/// connects, which waits on each read and write as long as a request does ([`hung`]).
-fn fake_gateway(socket: &Path) -> (UnixStream, Child) {
+/// [`fake_gateway`], which accepts the hello.
+fn accepting_gateway(socket: &Path) -> (UnixStream, Child) {
+    let (mut connection, sandboxd, _) = fake_gateway(socket);
+    frame::write(&mut connection, &HelloReply::Accepted, &[]).unwrap();
+    (connection, sandboxd)
+}
+
+/// A `sandboxd` whose gateway is a fake at `socket`, the fake's end of its session once it
+/// connects, which waits on each read and write as long as a request does ([`hung`]), and the
+/// hello it read there.
+fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     let gateway = UnixListener::bind(socket).unwrap();
     gateway.set_nonblocking(true).unwrap();
-    let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY)
-        .arg(socket)
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let sandboxd = sandboxd(&[socket.as_ref()]);
     // A `sandboxd` that never connects fails the test rather than hang it.
     let by = hung();
-    let connection = loop {
+    let mut connection = loop {
         match gateway.accept() {
             Ok((connection, _)) => break connection,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -664,7 +749,15 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child) {
     connection.set_nonblocking(false).unwrap();
     connection.set_read_timeout(hung().remaining()).unwrap();
     connection.set_write_timeout(hung().remaining()).unwrap();
-    (connection, sandboxd)
+    let (hello, _) = frame::read::<Value>(&mut connection).unwrap().unwrap();
+    (connection, sandboxd, hello)
+}
+
+/// A `sandboxd` run with `args`, with its standard error piped.
+fn sandboxd(args: &[&OsStr]) -> Child {
+    let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+    sandboxd.args(args).stderr(Stdio::piped());
+    sandboxd.spawn().unwrap()
 }
 
 /// How `sandboxd`, whose standard error is piped, exited after its session ended, and why, if it

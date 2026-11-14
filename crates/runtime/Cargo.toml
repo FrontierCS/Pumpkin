@@ -21,8 +21,6 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-docker = { path = "../../providers/docker" }
-engine = { path = "../engine" }
 test-support = { path = "../test-support" }
 expect-test.workspace = true
 tempfile.workspace = true

@@ -1,6 +1,8 @@
-//! What the tests of more than one of Pumpkin's crates share: a complete workflow
-//! ([`WORKFLOW`]), a stand-in HTTP server's end of a connection ([`http`]), a directory's
-//! listing ([`files`]), and what the tests that need Docker reach it with.
+//! What the tests of more than one of Pumpkin's crates share: the conformance suite every
+//! provider passes ([`suite`]); a complete workflow ([`WORKFLOW`]); a directory's listing
+//! ([`files`]); for the tests that need Docker or the static `sandboxd`, the engine they reach
+//! ([`docker`]), the pinned image they build on ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]);
+//! and a stand-in HTTP server's end of a connection ([`http`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -11,12 +13,16 @@
 
 use std::fs;
 use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
+use stdx::Deadline;
 use stdx::process::Environment;
 
 pub mod http;
+pub mod suite;
 
 /// A complete workflow, in the IR's JSON.
 ///
@@ -25,7 +31,16 @@ pub mod http;
 /// and environment are placeholders.
 pub const WORKFLOW: &str = include_str!("workflow.json");
 
-/// The files and empty directories below `dir`, by their paths from it, sorted.
+/// How long a test waits for what only a test that hangs never sees, so no outcome rests on it.
+pub const HUNG: Duration = Duration::from_secs(60);
+
+/// A request's deadline, [`HUNG`] from now.
+pub fn hung() -> Deadline {
+    Deadline::after(HUNG)
+}
+
+/// The files and empty directories below `dir`, by their paths from it, sorted, each executable
+/// file marked `*`.
 pub fn files(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
@@ -35,12 +50,15 @@ pub fn files(dir: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     for name in names {
         let path = dir.join(&name);
-        if path.is_dir() {
+        let metadata = fs::metadata(&path).unwrap();
+        if metadata.is_dir() {
             let below = files(&path);
             if below.is_empty() {
                 lines.push(format!("{name}/"));
             }
             lines.extend(below.iter().map(|below| format!("{name}/{below}")));
+        } else if metadata.permissions().mode() & 0o100 != 0 {
+            lines.push(format!("{name}*"));
         } else {
             lines.push(name);
         }
@@ -97,7 +115,7 @@ pub fn build(dockerfile: &str, contexts: &[(&str, &str)], tag: &str) -> String {
 pub fn sandboxd() -> PathBuf {
     let Some(sandboxd) = std::env::var_os("PUMPKIN_SANDBOXD") else {
         panic!(
-            "`PUMPKIN_SANDBOXD` is unset: run the Docker tests with `cargo xtask ci --docker`, \
+            "`PUMPKIN_SANDBOXD` is unset: run the ignored tests with `cargo xtask ci --docker`, \
              which builds sandboxd and sets it"
         );
     };

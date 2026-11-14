@@ -16,30 +16,33 @@ use std::{fs, io, iter};
 
 use decision::{Event, JobId, JudgeResult};
 use gateway::{Arrival, Put, Session};
+use provider::UnixTime;
 use schema::ir::Name;
 use schema::sandbox::{
     RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir, pumpkin_dir,
     result_file, slot_dir, slot_payload,
 };
-use schema::workflow::{Judge, Sandbox};
+use schema::workflow::Judge;
 use stdx::Context;
 
 use super::host::deadline;
-use super::sandbox::{PUMPKIN, Sandboxes, collect, launch};
+use super::sandbox::{PUMPKIN, Sandboxes, Which, collect, launch};
 use super::{Clock, Host, Inbox, Input};
 
 /// A judge call, as its thread sees it, timed and synced by the host `H`.
 pub(super) struct Call<'r, H: Host> {
     pub(super) job: JobId,
     pub(super) judge: &'r Judge,
-    /// The judge's sandbox.
-    pub(super) sandbox: &'r Sandbox,
+    pub(super) which: Which,
     pub(super) slot: &'r Name,
     /// Where the payload is stored.
     pub(super) payload: PathBuf,
     /// The longest the judge's command may run.
     pub(super) timeout: Duration,
     pub(super) deadlines: Deadlines,
+    /// The run's hard end, as its sandbox's create takes it
+    /// ([`Create::hard_end`](provider::Create::hard_end)).
+    pub(super) hard_end: UnixTime,
     /// The call's directory in the record, `jobs/<n>`, which exists and is empty.
     pub(super) dir: PathBuf,
     pub(super) sandboxes: &'r Sandboxes<'r>,
@@ -63,11 +66,11 @@ pub(super) struct Deadlines {
 
 /// What reaches a judge call's thread through its inbox.
 pub(super) enum Message {
-    /// What its session's reader handed over ([`Listener::accept`]): at most its command's
+    /// What its session's reader handed over ([`Registration::accept`]): at most its command's
     /// exit, as it runs one command, and its end, since a passive session hands out no op, and
     /// the session takes no model requests.
     ///
-    /// [`Listener::accept`]: gateway::Listener::accept
+    /// [`Registration::accept`]: gateway::Registration::accept
     Session(Arrival),
     /// The core's stop.
     Stop,
@@ -105,10 +108,10 @@ pub(super) fn run<H: Host>(call: &mut Call<'_, H>) {
             .to_owned();
         return call.event(Event::JudgeFailed { job, reason });
     }
-    let name = format!("job-{}", job.0);
-    let (sandbox, by) = (call.sandbox, deadline(&call.clock, call.deadlines.startup));
+    let by = deadline(&call.clock, call.deadlines.startup);
     let inbox = call.inbox.sender();
-    let started = (call.sandboxes).start(&name, sandbox, None, false, by, inbox, Message::Session);
+    let started =
+        (call.sandboxes).start(call.which, None, by, call.hard_end, inbox, Message::Session);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(error) => {
@@ -193,7 +196,7 @@ fn wait<H: Host>(call: &mut Call<'_, H>, timeout: Duration) -> Result<Ended, Str
         // the kind of session.
         Some(Message::Session(Arrival::Op(_) | Arrival::Refused(_))) => unreachable!(
             "job {}'s passive session handed out an op, though it was accepted without an op \
-             payload limit, and such a session ends on an op instead (`Listener::accept`)",
+             payload limit, and such a session ends on an op instead (`Registration::accept`)",
             job.0
         ),
         // No type excludes a model request here, since one `Arrival` serves sessions with model

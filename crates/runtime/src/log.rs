@@ -31,6 +31,7 @@ use decision::{
     WorkEnd,
 };
 use gateway::RefusedOp;
+use provider::UnixTime;
 use route::Answer;
 use schema::workflow::{JudgeCall, Workflow};
 use serde::{Deserialize, Serialize};
@@ -82,10 +83,10 @@ impl<'h, H: Host> Log<'h, H> {
     pub(super) fn start(
         &mut self,
         workflow: &Workflow,
-        unix: Duration,
+        unix: UnixTime,
         actions: &[Action],
     ) -> Result<(), String> {
-        let event = json!({ "kind": "run_started", "unix_ns": nanos(unix) });
+        let event = json!({ "kind": "run_started", "unix_ns": nanos(unix.since_epoch()) });
         self.decided(workflow, Duration::ZERO, event, actions)
     }
 

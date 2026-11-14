@@ -16,11 +16,10 @@ use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use expect_test::{Expect, expect};
-use provider::Provider;
+use provider::{Provider, Ready};
 use route::{Key, Serving, Upstream, UpstreamUrl};
 use runtime::{Run, System};
 use schema::ir::{self, ModelName, Name};
-use schema::provider::Ready;
 use schema::workflow::{Placed, Workflow};
 use serde_json::Value;
 use tempfile::TempDir;

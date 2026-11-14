@@ -132,7 +132,7 @@ pub struct AgentRuntime {
     /// How long the work phase may last.
     ///
     /// The clock starts once the agent's sandbox and its command have started, or, at the latest,
-    /// once its class's [`startup_seconds`](crate::provider::Class::startup_seconds) have passed
+    /// once its class's [`startup_seconds`](crate::workflow::Class::startup_seconds) have passed
     /// since the run's start, so the time the sandbox takes to start, which that startup bounds
     /// instead, doesn't count against it.
     /// Judging the selected submission comes after the deadline, bounded instead by the

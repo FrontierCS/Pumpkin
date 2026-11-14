@@ -7,11 +7,12 @@
 //! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
 //! on one inbox of the run's [`Host`], into which the agent's session hands what it reads, and
 //! each judge call's thread its reports. Its sandboxes start on one path, the `sandbox`
-//! module's, and the agent's is the `agent` module's. Each model request of the agent's is
-//! answered on a thread of its own, as the `model` module serves the agent's route, until the
-//! core stops allowing them ([`Core::model_requests_allowed`]), which ends the route's
-//! exchanges. The record's files and the run log's records, and when each is written, are laid
-//! out in the `record` and `log` modules.
+//! module's, which ends a start once its sandbox has ended, and the agent's is the `agent`
+//! module's. Each model request of the agent's is answered on a thread of its own, as the `model`
+//! module serves the agent's route, until the core stops allowing them
+//! ([`Core::model_requests_allowed`]), which ends the route's exchanges. The record's files and
+//! the run log's records, and when each is written, are laid out in the `record` and `log`
+//! modules.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -22,9 +23,8 @@ use std::{fs, io, mem};
 
 use decision::{Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, lasts};
 use gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
-use provider::Provider;
+use provider::{Provider, RunTag, SandboxId, UnixTime};
 use route::{Answer, Serving};
-use schema::provider::{RunTag, SandboxId};
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{JudgeCall, Placed, Workflow};
 use serde_json::json;
@@ -46,7 +46,7 @@ use log::Log;
 use model::Served;
 pub use record::{Ending, Record};
 use record::{Lock, Payloads};
-use sandbox::Sandboxes;
+use sandbox::{Published, Sandboxes, Which};
 
 /// A run, prepared on its host, `H`: its workflow placed, and its record begun.
 #[derive(Debug)]
@@ -141,12 +141,12 @@ impl<'h, H: Host> Run<'h, H> {
     ) -> Result<Outcome, String> {
         let host = self.host;
         record::write_json(host, &self.dir, "provider.json", &json!(provider.ready()))?;
-        let workflow = self.placed.workflow();
-        let sandboxes = Sandboxes::create(provider, self.tag(), workflow, sandboxd)?;
+        let published = Published::create(provider, &self.placed, sandboxd, &self.tag())?;
         started()?;
         let clock = host.start();
-        let unix = record::since_epoch(clock.unix())?;
+        let unix = UnixTime::of(clock.unix())?;
         let inbox = clock.inbox();
+        let sandboxes = Sandboxes::new(published, self.tag(), &self.placed);
         let log = Log::create(host, clock.clone(), &self.dir)?;
         let mut runtime = Runtime {
             placed: &self.placed,
@@ -154,6 +154,7 @@ impl<'h, H: Host> Run<'h, H> {
             dir: &self.dir,
             sandboxes: &sandboxes,
             clock,
+            unix_hard_end: unix.saturating_add(lasts(&self.placed)),
             log,
             payloads: Payloads::create(host, &self.dir)?,
             agent: None,
@@ -298,6 +299,9 @@ struct Runtime<'r, H: Host> {
     /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
     sandboxes: &'r Sandboxes<'r>,
     clock: H::Clock,
+    /// The run's hard end, as each of its sandboxes' creates takes it
+    /// ([`Create::hard_end`](provider::Create::hard_end)).
+    unix_hard_end: UnixTime,
     log: Log<'r, H>,
     payloads: Payloads<'r, H>,
     agent: Option<Agent>,
@@ -326,11 +330,11 @@ struct Runtime<'r, H: Host> {
 /// ([`Input::reached`]), by which the core decides on it, however long the loop takes to get to
 /// it.
 enum Input {
-    /// What the agent's session's reader handed over ([`Listener::accept`]), when it did: at most
-    /// the op in flight, as the session holds one, the model requests in flight, its command's
-    /// exit, as it runs one command, and its end.
+    /// What the agent's session's reader handed over ([`Registration::accept`]), when it did: at
+    /// most the op in flight, as the session holds one, the model requests in flight, its
+    /// command's exit, as it runs one command, and its end.
     ///
-    /// [`Listener::accept`]: gateway::Listener::accept
+    /// [`Registration::accept`]: gateway::Registration::accept
     Agent(Duration, Arrival),
     /// A note on a model request of the agent's, for the run log alone, from the thread that
     /// answers it.
@@ -366,7 +370,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     /// Drives the run from its start, `unix` after the Unix epoch, until the core finishes or
     /// abandons it, and waits for its judge calls' threads, stopping those still running; then
     /// gives the core what is left in the inbox ([`Runtime::drain`]).
-    fn drive(&mut self, unix: Duration) -> Result<Outcome, String> {
+    fn drive(&mut self, unix: UnixTime) -> Result<Outcome, String> {
         let (mut core, actions) = Core::start(self.placed);
         self.log.start(self.workflow(), unix, &actions)?;
         if let Some(served) = self.served {
@@ -685,10 +689,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                         &self.clock,
                         self.placed.startup(self.workflow().agent().role),
                     );
-                    let (sender, model) = (self.inbox.sender(), self.served.is_some());
-                    let clock = self.clock.clone();
+                    let (sender, clock) = (self.inbox.sender(), self.clock.clone());
+                    let hard_end = self.unix_hard_end;
                     let (agent, event) =
-                        Agent::start(self.sandboxes, self.workflow(), model, by, sender, clock);
+                        Agent::start(self.sandboxes, self.workflow(), by, hard_end, sender, clock);
                     self.agent = agent;
                     self.pending.push_back((self.clock.now(), event));
                 }
@@ -824,11 +828,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let mut call = judge::Call::<'_, H> {
             job,
             judge: self.workflow().judge(slot.judge()),
-            sandbox: self.workflow().sandbox(slot.judge().role()),
+            which: Which::Job(job, slot.judge()),
             slot: &self.workflow().slot(slot).name,
             payload: self.payloads.path(&payload.digest),
             timeout,
             deadlines,
+            hard_end: self.unix_hard_end,
             dir,
             sandboxes: self.sandboxes,
             clock: self.clock.clone(),

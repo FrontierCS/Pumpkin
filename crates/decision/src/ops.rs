@@ -143,7 +143,7 @@ impl Core<'_> {
     ) -> Result<JudgeReply, String> {
         let grant = self.workflow.judge_grant(id);
         let name = &grant.name;
-        fits(name, &payload, self.workflow.slot(grant.slot).max_bytes)?;
+        fits(name, &payload, self.workflow.slot(grant.slot).max_bytes())?;
         let usage = self.jobs.usage(id);
         if let Some(calls) = grant.calls
             && usage.calls >= calls.get()
@@ -240,7 +240,7 @@ impl Core<'_> {
     /// The most bytes a submission may hold: the score slot's, so that whatever is selected
     /// fits it.
     fn submission_max_bytes(&self) -> NonZeroU64 {
-        self.workflow.slot(self.workflow.score().slot).max_bytes
+        self.workflow.slot(self.workflow.score().slot).max_bytes()
     }
 
     /// The reply to `ops`, while the agent works, until the work phase's `deadline`.
@@ -268,7 +268,7 @@ impl Core<'_> {
         } = grant;
         op::JudgeGrant {
             name: name.clone(),
-            max_bytes: self.workflow.slot(*slot).max_bytes,
+            max_bytes: self.workflow.slot(*slot).max_bytes(),
             calls: *calls,
             cumulative_seconds: *cumulative_seconds,
             call_timeout_seconds: *call_timeout_seconds,

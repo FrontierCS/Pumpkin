@@ -2,12 +2,15 @@
 //!
 //! A frame is a message's length and its JSON, then a body's length and its bytes. Both
 //! lengths are big-endian `u32`s, and both are capped, so that a reader never allocates more
-//! than [`MAX_MESSAGE_BYTES`] plus [`MAX_BODY_BYTES`] for a frame.
+//! than [`MAX_MESSAGE_BYTES`] plus [`MAX_BODY_BYTES`] for a frame. Every version of the protocol
+//! keeps this encoding ([`super`]).
 
 use std::io::{self, Read, Write};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+use super::{Hello, HelloReply, MAX_HELLO_BYTES};
 
 /// The largest message in a frame.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -38,17 +41,73 @@ pub fn write(writer: &mut impl Write, message: &impl Serialize, body: &[u8]) -> 
 /// # Errors
 ///
 /// Fails if reading fails, if the connection ends inside a frame, if a length is over its cap,
-/// or if the message is not a `T`.
+/// or if the message isn't JSON, or is no `T`.
 pub fn read<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<(T, Vec<u8>)>> {
-    let Some(message_len) = read_len(reader, MAX_MESSAGE_BYTES, "message", true)? else {
+    let within = |len: u32, max: usize, what: &str| {
+        capped(len, max).ok_or_else(|| {
+            invalid_data(format!(
+                "a frame's {what} is {len} bytes: it holds at most {max}"
+            ))
+        })
+    };
+    let Some(message_len) = read_len(reader)? else {
         return Ok(None);
     };
-    let message = read_bytes(reader, message_len)?;
-    let message = serde_json::from_slice(&message).map_err(invalid_data)?;
-    let Some(body_len) = read_len(reader, MAX_BODY_BYTES, "body", false)? else {
+    let message = read_message(reader, within(message_len, MAX_MESSAGE_BYTES, "message")?)?;
+    let Some(body_len) = read_len(reader)? else {
         return Err(io::ErrorKind::UnexpectedEof.into());
     };
-    Ok(Some((message, read_bytes(reader, body_len)?)))
+    let body = read_bytes(reader, within(body_len, MAX_BODY_BYTES, "body")?)?;
+    Ok(Some((message, body)))
+}
+
+/// Reads a [`Hello`], the frame that opens a session, or `None` if the connection ended cleanly
+/// before it. It refuses a frame longer than [`MAX_HELLO_BYTES`] from its lengths alone.
+///
+/// # Errors
+///
+/// Fails if reading fails, if the connection ends inside the frame, if the message is longer than
+/// a hello's or there is a body, or if the message isn't JSON, or is no hello.
+pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<Hello>> {
+    read_bodiless(reader, MAX_HELLO_BYTES, ["the hello", "a hello"])
+}
+
+/// Reads a [`HelloReply`], the answer to a hello, or `None` if the connection ended cleanly before
+/// it.
+///
+/// It reads a message of at most [`MAX_MESSAGE_BYTES`] and no body, and refuses a longer frame
+/// from its lengths alone.
+///
+/// # Errors
+///
+/// Fails as [`read_hello`] does, for an answer's message and body.
+pub fn read_hello_reply(reader: &mut impl Read) -> io::Result<Option<HelloReply>> {
+    read_bodiless(
+        reader,
+        MAX_MESSAGE_BYTES,
+        ["the answer to the hello", "an answer"],
+    )
+}
+
+/// Reads a frame of a message of at most `max` bytes and no body, named as `the` one and as `a`
+/// one in what it says of a frame that it refuses.
+fn read_bodiless<T: DeserializeOwned>(
+    reader: &mut impl Read,
+    max: usize,
+    [the, a]: [&str; 2],
+) -> io::Result<Option<T>> {
+    let Some(len) = read_len(reader)? else {
+        return Ok(None);
+    };
+    let over = || invalid_data(format!("{the} is {len} bytes: {a} holds at most {max}"));
+    let message = read_message(reader, capped(len, max).ok_or_else(over)?)?;
+    match read_len(reader)? {
+        Some(0) => Ok(Some(message)),
+        Some(len) => Err(invalid_data(format!(
+            "{the} has a {len}-byte body: {a} has none"
+        ))),
+        None => Err(io::ErrorKind::UnexpectedEof.into()),
+    }
 }
 
 fn encode_len(len: usize, max: usize, what: &str) -> io::Result<[u8; 4]> {
@@ -62,32 +121,37 @@ fn encode_len(len: usize, max: usize, what: &str) -> io::Result<[u8; 4]> {
     }
 }
 
-/// Reads a length, or `None` if the connection ended before its first byte and `may_end`.
-fn read_len(
-    reader: &mut impl Read,
-    max: usize,
-    what: &str,
-    may_end: bool,
-) -> io::Result<Option<usize>> {
+/// Reads a length, or `None` if the connection ended before its first byte.
+fn read_len(reader: &mut impl Read) -> io::Result<Option<u32>> {
     let mut bytes = [0; 4];
     let mut filled = 0;
     while filled < bytes.len() {
         match reader.read(&mut bytes[filled..]) {
-            Ok(0) if filled == 0 && may_end => return Ok(None),
+            Ok(0) if filled == 0 => return Ok(None),
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(read) => filled += read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
     }
-    let len = u32::from_be_bytes(bytes);
+    Ok(Some(u32::from_be_bytes(bytes)))
+}
+
+/// `len`, if it is at most `max`.
+fn capped(len: u32, max: usize) -> Option<usize> {
     // A length that doesn't fit a usize is over the cap, a usize.
-    match usize::try_from(len) {
-        Ok(len) if len <= max => Ok(Some(len)),
-        Ok(_) | Err(_) => Err(invalid_data(format!(
-            "a frame's {what} is {len} bytes: it holds at most {max}"
-        ))),
-    }
+    usize::try_from(len).ok().filter(|&len| len <= max)
+}
+
+fn read_message<T: DeserializeOwned>(reader: &mut impl Read, len: usize) -> io::Result<T> {
+    let message = read_bytes(reader, len)?;
+    serde_json::from_slice(&message).map_err(|error| {
+        if error.is_syntax() || error.is_eof() {
+            invalid_data(format!("a frame's message isn't JSON: {error}"))
+        } else {
+            invalid_data(error)
+        }
+    })
 }
 
 fn read_bytes(reader: &mut impl Read, len: usize) -> io::Result<Vec<u8>> {

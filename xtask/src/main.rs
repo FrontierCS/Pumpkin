@@ -58,9 +58,10 @@ mod flags {
             /// Runs the checks every change must pass, in order, and stops at the first that
             /// fails.
             cmd ci {
-                /// Runs the Docker tests too, which are ignored otherwise, against the static
-                /// sandboxd that `sandboxd` builds, through the Docker context
-                /// `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
+                /// Runs the tests that need Docker or the static sandboxd, or take minutes, too,
+                /// which are ignored otherwise, against the static sandboxd that `sandboxd`
+                /// builds, through the Docker context `PUMPKIN_DOCKER_CONTEXT` names, or
+                /// `default`.
                 optional --docker
             }
 
@@ -358,9 +359,9 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
 }
 
 /// Runs the tests of `package`, those whose names hold `filter` if it is given, with the
-/// environment `ci` gives them ([`tested`]) and `UPDATE_EXPECT=1`, which rewrites each snapshot that differs, below `CARGO_WORKSPACE_DIR`,
-/// this checkout's root, whatever the caller's environment names; then prints `git diff --stat`,
-/// also if a test failed.
+/// environment `ci` gives them ([`tested`]) and `UPDATE_EXPECT=1`, which rewrites each snapshot
+/// that differs, below `CARGO_WORKSPACE_DIR`, this checkout's root, whatever the caller's
+/// environment names; then prints `git diff --stat`, also if a test failed.
 fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);

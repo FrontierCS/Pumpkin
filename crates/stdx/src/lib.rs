@@ -3,7 +3,7 @@
 use std::fmt::Display;
 use std::panic;
 use std::sync::LockResult;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod process;
 
@@ -76,6 +76,17 @@ impl Deadline {
     /// The deadline `remaining` from now; one past what the clock can hold is never reached.
     pub fn after(remaining: Duration) -> Self {
         Self(Instant::now().checked_add(remaining))
+    }
+
+    /// The deadline `since_epoch` after the Unix epoch by this machine's clock, as it reads now,
+    /// so that a later change of the clock doesn't move it: one already past has passed, and one
+    /// past what the clock can hold is never reached.
+    pub fn at_unix(since_epoch: Duration) -> Self {
+        let Some(at) = UNIX_EPOCH.checked_add(since_epoch) else {
+            return Self(None);
+        };
+        let remaining = at.duration_since(SystemTime::now());
+        Self::after(remaining.unwrap_or(Duration::ZERO))
     }
 
     /// The time left, which is never zero: `None` once the deadline has passed, and

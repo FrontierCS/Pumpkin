@@ -1,31 +1,34 @@
 //! The sandbox protocol, v0: what the gateway and `sandboxd` say to each other over a session.
 //!
-//! A session is one connection, which `sandboxd` opens to the gateway as its sandbox starts and
-//! which lasts as long as the sandbox, on a socket of the sandbox's own, so it identifies it.
+//! A session is one connection, which lasts as long as its sandbox and identifies it: to a socket
+//! of the sandbox's own. `sandboxd` sends a [`Hello`] first, and the gateway answers with a
+//! [`HelloReply`], accepting its own [`PROTOCOL_VERSION`] alone. Every version keeps that order, the [`frame`] encoding, a hello's `version` and size
+//! ([`MAX_HELLO_BYTES`]), a reply's `type` and a refusal's `message`.
 //!
-//! Both sides send [`frame`]s, each a message and a body of raw bytes: [`ToSandbox`] from the
-//! gateway, [`FromSandbox`] from `sandboxd`. Every request from the gateway names a stream, a
-//! number it uses once, and everything sent in reply names the same stream. Files move as trees
-//! of [`Entry`]s, each a directory or a regular file whose bytes follow in `Data` frames, every
-//! entry after its parent's, then an `End`, so no link or special file crosses a session, and
-//! every path is a [`RelativePath`]; a tree the gateway puts gives each entry its [`Mode`].
+//! Both sides send [`frame`]s: [`ToSandbox`] from the gateway, [`FromSandbox`] from `sandboxd`;
+//! a reply names its request's stream, a number the gateway uses once. Files move as trees of
+//! [`Entry`]s, each a directory or a regular file whose bytes follow in `Data` frames, after its
+//! parent's, then an `End`, so no link or special file crosses a session, and every path is a
+//! [`RelativePath`]; a tree the gateway puts gives each entry its [`Mode`].
 //!
-//! Ops go the other way ([`op`]): an op opens with [`FromSandbox::Op`], numbered apart from the
-//! gateway's streams, and gives its payload's size first, so the gateway checks it before any
-//! byte arrives; the bytes follow in [`FromSandbox::OpData`], and the gateway answers once, with
-//! [`ToSandbox::OpReply`]. A sandbox has at most one op in flight, so its callers take turns,
-//! and the owner answers each promptly, long work with a job that later ops ask about. A session
-//! takes ops only if accepted with an [`OpPayloadLimit`], and model requests only if accepted
-//! for them ([`FromSandbox::ModelRequest`]).
+//! Ops go the other way ([`op`]): [`FromSandbox::Op`] gives a payload's size before its bytes
+//! follow in [`FromSandbox::OpData`], and the gateway answers once ([`ToSandbox::OpReply`]), at
+//! most one op in flight a sandbox. A session takes ops only if accepted with an
+//! [`OpPayloadLimit`], and model requests only if accepted for them ([`FromSandbox::ModelRequest`]).
 //!
 //! Every provider presents [`pumpkin_dir()`] as [`pumpkin_subdirs()`] says, within
 //! [`PUMPKIN_BYTES`]. A role that makes ops has `sandboxctl` at [`SANDBOXCTL_PATH`], served at
-//! [`CONTROL_SOCKET`]; any other's sandbox is passive, its session taking no op. A role with a
-//! model route has the model endpoint at [`MODEL_PORT`], and an agent's image its harness below
-//! [`harness_dir()`]. A workflow puts nothing there ([`RolePath`](crate::ir::RolePath)).
+//! [`CONTROL_SOCKET`]; any other's sandbox is passive. A role with a model route has the model
+//! endpoint at [`MODEL_PORT`], and an agent's image its harness below [`harness_dir()`]. A
+//! workflow puts nothing there ([`RolePath`](crate::ir::RolePath)).
+
+use std::fmt;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use op::{OpCall, OpReply};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub use crate::ir::values::RelativePath;
 use crate::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
@@ -40,10 +43,13 @@ pub const MAX_OP_PAYLOAD_BYTES: u64 = 64 << 20;
 
 /// The most bytes an op's payload may hold in a session that takes ops, which the gateway
 /// accepts it with: at most [`MAX_OP_PAYLOAD_BYTES`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OpPayloadLimit(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OpPayloadLimit(pub(crate) u64);
 
 impl OpPayloadLimit {
+    /// No bytes: a session whose ops carry no payload.
+    pub const NONE: Self = Self(0);
+
     pub fn bytes(self) -> u64 {
         self.0
     }
@@ -77,7 +83,7 @@ pub const MAX_MODEL_REQUEST_BYTES: u64 = MAX_OP_PAYLOAD_BYTES;
 /// The session's owner puts a role's inputs there and collects its results from there; a
 /// role's commands read and write them at the paths below it.
 pub fn pumpkin_dir() -> AbsolutePath {
-    valid("/pumpkin")
+    const { AbsolutePath::from_static("/pumpkin") }
 }
 
 /// The directories below [`pumpkin_dir()`], there before a role's first command starts: the
@@ -95,49 +101,49 @@ pub fn pumpkin_subdirs() -> [RelativePath; 4] {
 
 /// `0755`, the mode of each directory the session's owner puts below [`pumpkin_dir()`].
 pub fn dir_mode() -> Mode {
-    valid("0755")
+    Mode::new(0o755)
 }
 
 /// `0644`, the mode of each file the session's owner puts below [`pumpkin_dir()`].
 pub fn file_mode() -> Mode {
-    valid("0644")
+    Mode::new(0o644)
 }
 
 /// `in`, which the session's owner puts a role's inputs in.
 fn in_dir() -> RelativePath {
-    valid("in")
+    const { RelativePath::from_static("in") }
 }
 
 /// `home`, the home of a role's commands.
 fn home_dir() -> RelativePath {
-    valid("home")
+    const { RelativePath::from_static("home") }
 }
 
 /// `out`, which the session's owner collects a role's results from.
 pub fn out_dir() -> RelativePath {
-    valid("out")
+    const { RelativePath::from_static("out") }
 }
 
 /// `log`, which holds the output of a role's commands.
 pub fn log_dir() -> RelativePath {
-    valid("log")
+    const { RelativePath::from_static("log") }
 }
 
 /// `in/<slot>`, the directory of a judge's slot named `slot`.
 pub fn slot_dir(slot: &Name) -> RelativePath {
-    valid(&format!("{}/{slot}", in_dir()))
+    in_dir().join(&RelativePath::from(slot))
 }
 
 /// `in/<slot>/raw`, where a judge call's payload is, in the slot the call names, before the
 /// judge's command starts.
 pub fn slot_payload(slot: &Name) -> RelativePath {
-    valid(&format!("{}/raw", slot_dir(slot)))
+    slot_dir(slot).join(&const { RelativePath::from_static("raw") })
 }
 
 /// `out/result.json`, where a judge writes its result, of at most [`RESULT_MAX_BYTES`]: its
 /// [`ResultSpec`](crate::ir::ResultSpec) says how it is read, and what of it the caller sees.
 pub fn result_file() -> RelativePath {
-    valid(&format!("{}/result.json", out_dir()))
+    out_dir().join(&const { RelativePath::from_static("result.json") })
 }
 
 /// The most bytes a judge's result ([`result_file()`]) may hold: a larger one is no result,
@@ -153,30 +159,29 @@ pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 /// `out/evidence`, there before a judge's command starts, which holds the files of evidence
 /// that only the operator sees.
 pub fn evidence_dir() -> RelativePath {
-    valid(&format!("{}/evidence", out_dir()))
+    out_dir().join(&const { RelativePath::from_static("evidence") })
 }
 
 /// The environment that a role's command, whose IR gives it `env`, runs with: `HOME` first, set
 /// to `home` below [`pumpkin_dir()`], then `env`; or `env` alone, if it sets `HOME` itself.
 pub fn command_env(env: &Env) -> Env {
-    let home = pumpkin_dir().join(&home_dir());
-    env.with_default(valid::<EnvVar>(&format!("HOME={home}")))
+    env.with_default(EnvVar::home(&pumpkin_dir().join(&home_dir())))
 }
 
 /// `log/command.stdout`, where a role's commands write their standard output.
 pub fn command_stdout() -> RelativePath {
-    valid(&format!("{}/command.stdout", log_dir()))
+    log_dir().join(&const { RelativePath::from_static("command.stdout") })
 }
 
 /// `log/command.stderr`, where a role's commands write their standard error.
 pub fn command_stderr() -> RelativePath {
-    valid(&format!("{}/command.stderr", log_dir()))
+    log_dir().join(&const { RelativePath::from_static("command.stderr") })
 }
 
 /// `in/command.stdin`, which the agent's command reads its standard input from, if its runtime
 /// gives one ([`AgentRuntime::stdin`](crate::ir::AgentRuntime::stdin)).
 pub fn command_stdin() -> RelativePath {
-    valid(&format!("{}/command.stdin", in_dir()))
+    in_dir().join(&const { RelativePath::from_static("command.stdin") })
 }
 
 /// The most [`pumpkin_dir()`] holds, in bytes, so that whatever the session's owner collects
@@ -185,6 +190,10 @@ pub fn command_stdin() -> RelativePath {
 /// A provider may back it with the role's memory, so that its files and the role's processes
 /// share the role's memory limit: a role can keep there at most the smaller of the two.
 pub const PUMPKIN_BYTES: u64 = 1 << 30;
+
+/// Where every provider presents `sandboxd`'s binary in a sandbox, `/.pumpkin/sandboxd`, which it
+/// starts there.
+pub const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
 
 /// Where `sandboxctl` is in a sandbox whose role makes ops, `/.pumpkin/bin/sandboxctl`.
 ///
@@ -204,14 +213,18 @@ pub const CONTROL_SOCKET: &str = "/pumpkin/sandboxctl/socket";
 /// Pumpkin adds a harness to a task's agent image in a directory of its own below this one,
 /// named for the harness and its version, such as `codex-0.167.0`.
 pub fn harness_dir() -> AbsolutePath {
-    valid("/harness")
+    const { AbsolutePath::from_static("/harness") }
 }
 
 /// The directories of a sandbox that hold Pumpkin's own files: [`pumpkin_dir()`]; `/.pumpkin`,
 /// where providers present `sandboxd`, and `sandboxctl` at [`SANDBOXCTL_PATH`]; and
 /// [`harness_dir()`].
 pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 3] {
-    [pumpkin_dir(), valid("/.pumpkin"), harness_dir()]
+    [
+        pumpkin_dir(),
+        const { AbsolutePath::from_static("/.pumpkin") },
+        harness_dir(),
+    ]
 }
 
 /// The port of the model endpoint, on `127.0.0.1` in a sandbox whose role has a model route.
@@ -223,20 +236,194 @@ pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 3] {
 /// session to take model requests.
 pub const MODEL_PORT: u16 = 11235;
 
-/// `value`, one of this module's constant paths, variables or modes, or a path that holds a
-/// slot's name, as the type it is.
-fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
-    match T::try_from(value.to_owned()) {
-        Ok(value) => value,
-        // Checking them as the crate builds would take a `const fn` copy of each check, and a
-        // constructor that skips the checks.
-        Err(error) => unreachable!(
-            "each of this module's paths is normalized: `/pumpkin`, `/.pumpkin` and `/harness` \
-             are absolute, and each of `/pumpkin`'s directories and files, and a slot's `Name`, \
-             from a-z, 0-9, `_` and `-`, one plain component; `HOME` is a variable's name; each \
-             mode is `0` and three octal digits; yet {error}"
-        ),
+/// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
+pub const PROTOCOL_VERSION: u32 = 0;
+
+/// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox));
+/// its body holds none.
+pub const MAX_HELLO_BYTES: usize = 255;
+
+/// How long either end gives the other to send its hello, or to answer it, from when it takes
+/// the connection: the gateway that a sandbox dials.
+// A `sandboxd` sends its hello as it connects, and the gateway answers at once, so this waits
+// for the network alone: a hello lost three times still arrives within it, resent at TCP's first
+// retransmission timeout, 1 s, and then at twice the wait before each time.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What `sandboxd` sends first on every session, with an empty body: `{"version":v}`, with `v` its
+/// [`PROTOCOL_VERSION`], or `{"version":v,"grant":"…"}` where it presents a grant;
+/// [`frame::read_hello`] reads one.
+///
+/// Its `Deserialize` refuses a hello of another version for its version, whatever else it
+/// holds, then a field that this version's form lacks or a grant that isn't one, and a frame
+/// that gives no version.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(into = "HelloJson", try_from = "Value")]
+pub struct Hello {
+    /// The grant the sandbox presents where it dials an address that several sandboxes share;
+    /// none on a socket of its own.
+    pub grant: Option<RegistrationGrant>,
+}
+
+/// The JSON form of a [`Hello`] at this version.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelloJson {
+    version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant: Option<RegistrationGrant>,
+}
+
+impl From<Hello> for HelloJson {
+    fn from(Hello { grant }: Hello) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            grant,
+        }
     }
+}
+
+impl TryFrom<Value> for Hello {
+    type Error = String;
+
+    fn try_from(json: Value) -> Result<Self, Self::Error> {
+        /// What a hello holds at every version.
+        #[derive(Deserialize)]
+        #[serde(expecting = "an object with a `version`")]
+        struct Versioned {
+            version: u32,
+        }
+        // From a `Value`, whose errors give no position, unlike a reader's, which would put one
+        // at the end of each refusal.
+        let Versioned { version } = Versioned::deserialize(&json).map_err(|error| {
+            format!("the session's first frame is no hello: {error}: open the session with one")
+        })?;
+        if version != PROTOCOL_VERSION {
+            return Err(format!(
+                "sandboxd speaks sandbox protocol {version}: expected {PROTOCOL_VERSION}, which \
+                 this gateway speaks, as a sandboxd built from the same Pumpkin does"
+            ));
+        }
+        let HelloJson { version: _, grant } = HelloJson::deserialize(json).map_err(|error| {
+            format!("the hello isn't of sandbox protocol {PROTOCOL_VERSION}'s form: {error}")
+        })?;
+        Ok(Self { grant })
+    }
+}
+
+/// A registration grant: the secret by which a sandbox that dials an address several sandboxes
+/// share tells the gateway which it is.
+///
+/// The gateway issues each, of random bytes, for one sandbox's start, and accepts it once, in
+/// that sandbox's [`Hello`], while the start waits: it opens one session. It is
+/// [`REGISTRATION_GRANT_BYTES`] bytes, written as twice as many lowercase hexadecimal digits. Its
+/// `==` takes the same time whichever of its bytes differ. Its `Debug` shows none of them, it has
+/// no `Display`, and the error that refuses digits quotes none.
+#[derive(Clone, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RegistrationGrant([u8; REGISTRATION_GRANT_BYTES]);
+
+/// How many bytes a [`RegistrationGrant`] holds.
+pub const REGISTRATION_GRANT_BYTES: usize = 16;
+
+impl From<[u8; REGISTRATION_GRANT_BYTES]> for RegistrationGrant {
+    fn from(bytes: [u8; REGISTRATION_GRANT_BYTES]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl TryFrom<String> for RegistrationGrant {
+    type Error = String;
+
+    fn try_from(digits: String) -> Result<Self, Self::Error> {
+        // The error quotes none of the digits, which may be a grant's.
+        let refused = || {
+            format!(
+                "the registration grant isn't {} lowercase hexadecimal digits: present the one \
+                 the gateway issued for the sandbox",
+                2 * REGISTRATION_GRANT_BYTES
+            )
+        };
+        let value = |digit: u8| match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            _ => None,
+        };
+        if digits.len() != 2 * REGISTRATION_GRANT_BYTES {
+            return Err(refused());
+        }
+        let mut bytes = [0; REGISTRATION_GRANT_BYTES];
+        for (byte, &[high, low]) in bytes.iter_mut().zip(digits.as_bytes().as_chunks().0) {
+            let (Some(high), Some(low)) = (value(high), value(low)) else {
+                return Err(refused());
+            };
+            *byte = (high << 4) | low;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl RegistrationGrant {
+    /// Its digits, as its JSON form writes them.
+    pub fn digits(&self) -> String {
+        crate::ir::values::hex(&self.0)
+    }
+}
+
+impl Serialize for RegistrationGrant {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.digits())
+    }
+}
+
+impl PartialEq for RegistrationGrant {
+    fn eq(&self, other: &Self) -> bool {
+        // Every byte is compared, without a branch on any, so that a peer that presents grants
+        // learns nothing of an issued one from how long the gateway takes to refuse its own.
+        let differ = (self.0.iter().zip(&other.0)).fold(0, |differ, (a, b)| differ | (a ^ b));
+        // Opaque to the optimizer, which could otherwise compile the fold to an equality that
+        // stops at the first byte that differs.
+        core::hint::black_box(differ) == 0
+    }
+}
+
+impl Eq for RegistrationGrant {}
+
+impl fmt::Debug for RegistrationGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // None of its digits, so that no message or log carries a grant by accident.
+        f.write_str("RegistrationGrant(..)")
+    }
+}
+
+/// Where a sandbox's `sandboxd` dials the gateway on the gateway's host: the Unix socket at
+/// [`SOCKET_NAME`] in `dir`, which the gateway issued for this sandbox (`gateway::Sockets`).
+///
+/// The gateway listens there from before the create, since `sandboxd` dials once, as it starts.
+/// The socket takes the first connection, whoever makes it, so the provider shows `dir` to this
+/// sandbox alone; the role's user needs to traverse only `dir`.
+#[derive(Debug)]
+pub struct SocketDial {
+    pub dir: PathBuf,
+}
+
+/// The name of a [`SocketDial`]'s socket in its directory.
+pub const SOCKET_NAME: &str = "s";
+
+/// The gateway's answer to the session's first frame, with an empty body: `{"type":"accepted"}`,
+/// or a refusal.
+///
+/// Its `Deserialize` reads a reply's `type`, and a refusal's `message`, whatever else it holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Without `deny_unknown_fields`, so that `sandboxd` reads a refusal from a gateway of any version,
+// whose form may hold more.
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HelloReply {
+    /// The session is open: the gateway's requests follow.
+    Accepted,
+    /// The gateway refuses the session, for the reason `message` gives, and closes the
+    /// connection.
+    Refused { message: String },
 }
 
 /// What the gateway sends.
@@ -261,6 +448,7 @@ pub enum ToSandbox {
     /// Starts a command in a process group of its own. `sandboxd` replies when it has
     /// started, and later sends [`FromSandbox::Exited`] on the same stream.
     Start { stream: u32, launch: Launch },
+
     /// Kills every process in the sandbox but `sandboxd` and refuses to start more, so that
     /// what is collected afterwards can't change. `sandboxd` replies once they are gone.
     Freeze { stream: u32 },
@@ -300,8 +488,8 @@ pub enum FromSandbox {
     /// The end of the tree being collected.
     End { stream: u32 },
     /// Opens op `op`, while no other op is in flight. Its payload, of `size` bytes, at most
-    /// [`MAX_OP_PAYLOAD_BYTES`], follows in `OpData` frames. Only an [`OpCall::Judge`] or an
-    /// [`OpCall::Submit`] takes one; `size` is 0 for any other call. The op is whole once
+    /// [`MAX_OP_PAYLOAD_BYTES`], follows in `OpData` frames. Only a call that takes one
+    /// ([`OpCall::takes_payload`]) has one; `size` is 0 for any other. The op is whole once
     /// `size` bytes of `OpData` have arrived, at once for 0, and the gateway answers it after
     /// that.
     Op { op: u32, call: OpCall, size: u64 },

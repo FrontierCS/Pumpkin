@@ -7,42 +7,41 @@
 //! - the role's [`confinement`]: its user from its first process, no capabilities,
 //!   `no-new-privileges`, CPU, memory, swap and process limits, no core file, `/pumpkin` and a
 //!   read-only `/tmp`;
-//! - `sandboxd`, mounted read-only, as its first process, dialing the [`Dial`] its create
-//!   gives, and whose output alone is the container's log, which holds at most 1 MiB;
-//! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), mounted
-//!   read-only, and `sandboxd` serving ops; other sandboxes are [passive](schema::sandbox);
+//! - `sandboxd`, read-only, as its first process, dialing its [`SocketDial`], its log's only
+//!   writer;
+//! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), read-only;
 //! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
 //! On the engine, it creates only containers, labelled with their run's [`RunTag`] for
 //! [`Provider::list`], and their anonymous volumes, and pulls no image. It needs an engine that
 //! enforces every limit that a container has.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Output;
 
-use engine::{ContextName, Engine, Failure, confinement, docker, fix_reported, image_id};
-use provider::Provider;
-use schema::ir::{MILLIS_PER_CPU, Name, Resources};
-use schema::provider::{
-    Class, Console, Create, Created, Dial, Listed, Local, Published, Ready, Role, RunTag,
-    SOCKET_NAME, SandboxId,
+use engine::{
+    Bound, ContextName, Engine, Failure, REMOVE_TIMEOUT, confinement, docker, docker_to,
+    fix_reported,
 };
-use schema::sandbox::SANDBOXCTL_PATH;
+use provider::{
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Role, RunTag,
+    SandboxId, SandboxdRef,
+};
+use schema::ir::{Image, MILLIS_PER_CPU, Name, Resources};
+use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
+use schema::workflow::Class;
 use serde::Deserialize;
 use serde_json::json;
-use stdx::Context;
+use stdx::{Context, Deadline};
 
 /// The name of the provider's one class of sandbox, a container on the engine's host, which
 /// gives a role as many CPUs and as much memory as the host has.
-const CLASS: &str = "container";
+const CLASS: Name = Name::from_static("container");
 
 /// The most seconds a sandbox's start takes, as [`Class::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
-
-/// Where `sandboxd` is mounted in the container.
-const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
 
 /// Where the session's socket directory is mounted in the container.
 const GATEWAY_DIR: &str = "/.pumpkin/gateway";
@@ -54,7 +53,8 @@ const RUN_LABEL: &str = "pumpkin.run";
 const ROLE_LABEL: &str = "pumpkin.role";
 
 /// The provider of sandboxes as containers on an [`Engine`], which every container of its runs
-/// in.
+/// in. Its commands are bounded as the engine's are, a create's at the create's deadline
+/// ([`Create::by`]).
 #[derive(Debug)]
 pub struct Docker<'e> {
     engine: &'e Engine,
@@ -94,8 +94,8 @@ impl<'e> Docker<'e> {
     /// limits.
     pub fn connect(engine: &'e Engine) -> Result<Self, String> {
         let report = engine.report();
-        let info =
-            docker(&report.context, ["info", "--format", "{{json .}}"]).map_err(fix_reported)?;
+        let info = docker(&report.context, ["info", "--format", "{{json .}}"])
+            .map_err(|error| fix_reported(&error))?;
         let HostJson {
             memory_limit,
             swap_limit,
@@ -143,99 +143,96 @@ impl Provider for Docker<'_> {
     }
 
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
-    // engine has each image and that `sandboxd` can be mounted, and names each as it is.
-    fn publish(&self, locals: &[Local]) -> Result<Vec<Published>, String> {
-        let context = self.context();
-        let published = locals.iter().map(|local| match local {
-            Local::Role { image } => {
-                let image = image.to_string();
-                match image_id(context, &image) {
-                    Ok(Some(_)) => Ok(Published::from(image)),
-                    Ok(None) => Err(format!(
-                        "the engine of context `{}` has no image {image}: build or load it \
-                         there first, as the provider pulls none",
-                        context.as_str()
-                    )),
-                    Err(error) => Err(fix_reported(error)),
-                }
-            }
-            Local::Sandboxd { path } => (mountable(path, SANDBOXD_PATH))
-                .context("publishing `sandboxd` failed")
-                .map(Published::from),
-        });
-        published.collect()
+    // engine has the image, and names it as it is.
+    fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
+        let context = &self.engine.report().context;
+        match engine::image_id(context, image.as_str()) {
+            Ok(Some(_)) => Ok(ImageRef::from(image.to_string())),
+            Ok(None) => Err(format!(
+                "the engine of context `{}` has no image {image}: build or load it there first, \
+                 as the provider pulls none",
+                context.as_str()
+            )),
+            Err(error) => Err(engine::fix_reported(&error)),
+        }
     }
 
-    fn create(&self, create: &Create) -> Result<Created, String> {
-        let context = self.context();
-        // Creating and starting apart gives the container's ID before anything can fail with
-        // a container left behind, so a failure removes this container by its ID.
-        let args = create_args(create).context("creating the container failed")?;
-        let created = docker(context, &args).map_err(fix_reported)?;
-        let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
-        if let Err(error) = docker(context, ["start", &id]) {
-            let mut message = fix_reported(error);
-            let left = format_args!("container {id} is left behind, as removing it failed");
-            if let Err(removal) = remove(context, &id).context(left) {
-                message = format!("{message}; {removal}");
-            }
-            return Err(message);
-        }
-        Ok(Created {
-            id: SandboxId::from(id),
-        })
+    // A sandbox mounts `sandboxd` from the host, so a publish checks that it can be mounted, and
+    // names it by its path, resolved.
+    fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String> {
+        (mountable(path, SANDBOXD_PATH))
+            .context("publishing `sandboxd` failed")
+            .map(SandboxdRef::from)
     }
 
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<Vec<SandboxId>, String> {
-        let context = self.context();
-        let ours: BTreeSet<String> = of_run(context, run)?.into_iter().collect();
-        let (known, unknown): (Vec<&SandboxId>, Vec<&SandboxId>) =
-            ids.iter().partition(|id| ours.contains(id.as_str()));
-        let failures: Vec<String> = (known.iter())
-            .filter_map(|id| remove(context, id.as_str()).err())
-            .collect();
-        if failures.is_empty() {
-            Ok(unknown.into_iter().cloned().collect())
-        } else {
-            Err(fix_reported(failures.join("; ")))
-        }
+    // A container reaches the host only through the socket mounted into it.
+    fn meeting(&self) -> Meeting<'_> {
+        Meeting::Local(self)
+    }
+
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+        delete(self.context(), run, ids)
     }
 
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
-        let ids = of_run(self.context(), run)?;
-        let listed = ids.into_iter().map(|id| Listed {
-            id: SandboxId::from(id),
-        });
-        Ok(listed.collect())
+        of_run(self.context(), run)
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let context = self.context();
         let id = id.as_str();
-        if !of_run(context, run)?.iter().any(|ours| ours == id) {
+        if !of_run(context, run)?
+            .iter()
+            .any(|ours| ours.id.as_str() == id)
+        {
             return Err(format!(
                 "container {id} is no sandbox of run {}: name one that the run's list finds",
                 run.as_str()
             ));
         }
-        let text = log_tail(context, id).map_err(fix_reported)?;
+        let text = log_tail(context, id).map_err(|error| fix_reported(&error))?;
         Ok(Console { text })
+    }
+}
+
+impl Creator<SocketDial> for Docker<'_> {
+    fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        let context = self.context();
+        // Each of its commands gives up at its deadline (`Docker`). A `docker create` given up on
+        // may still make its container: the engine finishes a request whose client has gone, and
+        // a list sees the container only once the engine has registered it, which may be after
+        // the run's end has listed. Nothing starts it (`Creator::create`).
+        let by = Bound::Until(Deadline::at_unix(create.by.since_epoch()));
+        // Creating and starting apart gives the container's ID before anything can fail with
+        // a container left behind, so a failure removes this container by its ID.
+        let args = create_args(create, &dial);
+        let args = args.context("creating the container failed")?;
+        let created = docker_to(context, &args, by).map_err(|error| fix_reported(&error))?;
+        let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
+        if let Err(error) = docker_to(context, ["start", &id], by) {
+            let mut message = fix_reported(&error);
+            let left = format_args!("container {id} is left behind, as removing it failed");
+            if let Err(removal) = remove(context, &id, by).context(left) {
+                message = format!("{message}; {removal}");
+            }
+            return Err(message);
+        }
+        // A container is all a create makes.
+        Ok(Created {
+            id: SandboxId::from(id),
+        })
     }
 }
 
 /// What [`Provider::ready`] gives of an engine that `report` describes, whose host has `host`.
 fn ready(report: &engine::Report, host: Resources) -> Ready {
-    // `Name` checks its value as it is made, and has no constant constructor.
-    let Ok(name) = Name::try_from(CLASS.to_owned()) else {
-        unreachable!("the class `{CLASS}` has no name, though it is a constant that is a name")
-    };
     let class = Class {
         resources: host,
         startup_seconds: STARTUP_SECONDS,
     };
     Ready {
         report: json!(report),
-        classes: BTreeMap::from([(name, class)]),
+        classes: BTreeMap::from([(CLASS, class)]),
     }
 }
 
@@ -259,18 +256,25 @@ fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), 
     ))
 }
 
-/// The arguments of `docker create` for the container.
-fn create_args(create: &Create) -> Result<Vec<String>, String> {
+/// The arguments of `docker create` for the container, which dials the socket `dial` names.
+fn create_args(create: &Create, dial: &SocketDial) -> Result<Vec<String>, String> {
     let Create {
         run,
+        name: sandbox_name,
         role,
         image,
         sandboxd,
         ops,
         model,
-        dial,
+        // Nothing here reads the hard end, and no clock ends a container: it ends with its
+        // `sandboxd`, which ends with its session, over a socket on the driver's machine that the
+        // driver's death closes, as `Creator::create` asks of a sandbox there. While the driver
+        // holds the session, even hung, the container runs on.
+        hard_end: _,
+        // The deadline bounds the create's commands (`Docker::create`), and none of their options.
+        by: _,
     } = create;
-    let Dial::Socket { dir } = dial;
+    let SocketDial { dir } = dial;
     let Role {
         name,
         user,
@@ -279,6 +283,10 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
     let sandboxd = Path::new(sandboxd.as_str());
     let mut args = vec![
         "create".to_owned(),
+        // `<run>.<name>`, so that `docker ps` shows which sandbox of which run it is: unique on
+        // the engine, as run tags are and a name is within its run, and read back as both, as a
+        // name holds no `.`.
+        format!("--name={}.{sandbox_name}", run.as_str()),
         format!("--label={RUN_LABEL}={}", run.as_str()),
         format!("--label={ROLE_LABEL}={name}"),
         "--network=none".to_owned(),
@@ -308,15 +316,16 @@ fn create_args(create: &Create) -> Result<Vec<String>, String> {
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.
 fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
-    let source = mountable(host, container)?;
+    // `--mount` reads its value as a line of CSV, so the source, which may hold commas and
+    // quotes, is a quoted field, with each quote doubled.
+    let source = mountable(host, container)?.replace('"', "\"\"");
     Ok(format!(
-        "--mount=type=bind,source={source},target={container},readonly"
+        "--mount=type=bind,\"source={source}\",target={container},readonly"
     ))
 }
 
 /// The path that a `--mount` of `host`, which must exist, at `container` names: `host`'s own,
-/// resolved, in UTF-8 and without commas, which `--mount` would read as the start of another
-/// option.
+/// resolved, in UTF-8, as the engine's API takes it.
 fn mountable(host: &Path, container: &str) -> Result<String, String> {
     let host = host.canonicalize().map_err(|error| {
         format!(
@@ -324,49 +333,138 @@ fn mountable(host: &Path, container: &str) -> Result<String, String> {
             host.display()
         )
     })?;
-    let Some(source) = host.to_str().filter(|path| !path.contains(',')) else {
+    let Some(source) = host.to_str() else {
         return Err(format!(
-            "{} can't be mounted at {container}: name a path of UTF-8 without commas",
+            "{} can't be mounted at {container}: name a path of UTF-8",
             host.display()
         ));
     };
     Ok(source.to_owned())
 }
 
-/// Removes the container with ID `id`, and its anonymous volumes. `--force` kills the container
-/// first if it runs. A container already gone is removed.
-fn remove(context: &ContextName, id: &str) -> Result<(), String> {
-    match docker(context, ["rm", "--force", "--volumes", id]) {
+/// Removes the container with ID `id`, and its anonymous volumes, within `bound`. `--force` kills
+/// the container first if it runs. A container already gone is removed.
+fn remove(context: &ContextName, id: &str, bound: Bound) -> Result<(), Failure> {
+    match docker_to(context, ["rm", "--force", "--volumes", id], bound) {
         Ok(_) => Ok(()),
         // Docker 29 exits 0 here; older engines, down to the engine's floor, Docker 25.0, fail.
         Err(Failure::Exited { stderr, .. }) if stderr.contains("No such container") => Ok(()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     }
 }
 
-/// The IDs of run `run`'s containers, running or not: those whose run label holds its tag.
-fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<String>, String> {
+/// Deletes the containers of run `run` that `ids` name, on the engine of `context`, as
+/// [`Sweep::delete`] does.
+fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    // With no id to filter by, the lookup would list every run's containers, for nothing.
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // Every sandbox's container carries its run's label, so a container this doesn't find is
+    // no sandbox, or one removed already. One lookup tells whose container each id names; one
+    // that fails tells none's, so each is then left.
+    let filters = (ids.iter()).map(|id| format!("id={}", id.as_str()));
+    let shown: Vec<&str> = ids.iter().map(SandboxId::as_str).collect();
+    let unfound = format_args!(
+        "looking up {} failed, so no container was removed",
+        shown.join(", ")
+    );
+    let found = labelled(context, filters).context(unfound)?;
+    let failures = ids.iter().filter_map(|id| {
+        let id = id.as_str();
+        let found = found.iter().find(|found| found.id == id)?;
+        if found.run != run.as_str() {
+            return Some(format!(
+                "container {id} is another run's sandbox, not run {}'s, so it was left: name \
+                 only the run's own, which its list finds",
+                run.as_str()
+            ));
+        }
+        // A forced removal stops the container, then removes it and its anonymous volumes,
+        // and the engine answers once all are done, but for a volume it fails to remove,
+        // which it only logs; `sandboxd`, the container's first process, takes every other
+        // process of its PID namespace with it as it ends.
+        let removed = remove(context, id, Bound::Within(REMOVE_TIMEOUT))
+            .map_err(|error| fix_reported(&error));
+        let left = format_args!("container {id} is left, as removing it failed");
+        removed.context(left).err()
+    });
+    let failures: Vec<String> = failures.collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// Run `run`'s containers, running or not: those whose run label holds its tag. A container
+/// stays until it is removed, so one whose `sandboxd` has exited is listed as ended.
+fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<Listed>, String> {
     let filter = format!("label={RUN_LABEL}={}", run.as_str());
-    let format = format!("{{{{.ID}}}} {{{{.Label \"{RUN_LABEL}\"}}}}");
+    let found = labelled(context, [filter])?;
+    let listed = found
+        .into_iter()
+        .map(|Labelled { id, state, run: _ }| Listed {
+            id: SandboxId::from(id),
+            ended: ended(&state),
+        });
+    Ok(listed.collect())
+}
+
+/// A container that carries a run label, as `docker container ls` shows it.
+struct Labelled {
+    /// Its full ID.
+    id: String,
+    /// Its state, as [`ended`] reads it.
+    state: String,
+    /// The tag its run label holds.
+    run: String,
+}
+
+/// The containers, running or not, that carry a run label and match `filters` too, each a
+/// filter that `docker container ls --filter` takes.
+fn labelled(
+    context: &ContextName,
+    filters: impl IntoIterator<Item = String>,
+) -> Result<Vec<Labelled>, String> {
+    let format = format!("{{{{.ID}}}} {{{{.State}}}} {{{{.Label \"{RUN_LABEL}\"}}}}");
+    let label = format!("label={RUN_LABEL}");
     let ls = [
         "container",
         "ls",
         "--all",
         "--no-trunc",
-        "--filter",
-        &filter,
         "--format",
         &format,
+        "--filter",
+        &label,
     ];
-    let listed = docker(context, ls).map_err(fix_reported)?;
-    // Each row's label is compared here too, so that neither a bug in the filter nor how
-    // `docker` reads it reaches another run's container, whatever deletes what this finds.
+    let mut ls: Vec<String> = ls.map(str::to_owned).into();
+    for filter in filters {
+        ls.extend(["--filter".to_owned(), filter]);
+    }
+    let listed = docker(context, ls).map_err(|error| fix_reported(&error))?;
     let rows = String::from_utf8_lossy(&listed.stdout);
-    let ids = rows.lines().filter_map(|row| {
-        let (id, label) = row.split_once(' ')?;
-        (label == run.as_str()).then(|| id.to_owned())
+    let found = rows.lines().filter_map(|row| {
+        let (id, row) = row.split_once(' ')?;
+        let (state, run) = row.split_once(' ')?;
+        Some(Labelled {
+            id: id.to_owned(),
+            state: state.to_owned(),
+            run: run.to_owned(),
+        })
     });
-    Ok(ids.collect())
+    Ok(found.collect())
+}
+
+/// Whether a container in `state`, as `docker container ls` prints it, has ended: it no longer
+/// runs, so its first process, `sandboxd`, has exited.
+fn ended(state: &str) -> bool {
+    // Of the states Docker's API names, `created`, `running`, `paused` and `restarting` run or
+    // will. A state that a later engine adds counts as running too: a start then waits on a
+    // sandbox in it until its deadline, rather than failing one that may yet dial, and the list,
+    // which consoles and sweeps read too, doesn't fail on it.
+    matches!(state, "exited" | "dead" | "removing")
 }
 
 /// The last lines of the container's log: those of `sandboxd`'s standard output, then those of
