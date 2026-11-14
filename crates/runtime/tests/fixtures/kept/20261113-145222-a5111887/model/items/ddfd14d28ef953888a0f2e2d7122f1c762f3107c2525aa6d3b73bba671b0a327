@@ -1,0 +1,1 @@
+{"arguments":"{\"cmd\":\"cat /frontier/task/README.md && printf '\\\\n--- frontier-gpu skill ---\\\\n' && cat /workspace/.frontier-gpu/SKILL.md\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":30000}","call_id":"call_84c8762f004d4538b688d1e3","id":"fc_call_84c8762f004d4538b688d1e3","name":"exec_command","status":"completed","type":"function_call"}

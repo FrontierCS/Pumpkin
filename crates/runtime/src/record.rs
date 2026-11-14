@@ -16,6 +16,7 @@
 //!   call and of lease `n`'s runner, once created: its `sandbox.json` ([`write_sandbox`]), its
 //!   `console.txt` as the run deleted it ([`write_console`]), and its `out` and `log` as far as
 //!   collected, but a result over [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
+//! - `model/`: each model exchange, each conversation item once (`Exchange`);
 //! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
 //! - `reaps.jsonl`: each sandbox that a reap removed, or found gone ([`REAPS`]);
 //! - `outcome.json`: how the run ended, and what it used (`log::usage_of`): `{"state":
@@ -513,6 +514,17 @@ impl Record {
     /// Fails if a file of the record can't be read.
     pub fn progress(&self) -> Result<Option<Progress>, String> {
         log::progress(&self.dir)
+    }
+
+    /// Model request `number`'s body as it went upstream, or as its client sent it, rebuilt from
+    /// where the record keeps it, as its log's `model_answered` names it (`model::Exchange`).
+    ///
+    /// # Errors
+    ///
+    /// Fails if the log names no request `number` that the record kept, or a file it names can't
+    /// be read or isn't the form the record keeps.
+    pub fn model_request(&self, number: u64) -> Result<Vec<u8>, String> {
+        super::model::rebuilt_request(&self.dir, number)
     }
 
     /// The build of Pumpkin that made the record, shown as a [`Build`] is, if it isn't [`BUILD`];

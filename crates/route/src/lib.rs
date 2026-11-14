@@ -19,4 +19,14 @@ mod usage;
 
 pub use closure::Route;
 pub use upstream::{Answer, Key, Serving, Upstream, UpstreamUrl, serve};
+
+/// Where [`serve`] keeps a model exchange as it passes, for the run's record.
+pub trait Keep {
+    /// The request's body as it went upstream, with the field that holds its conversation, if
+    /// it is one the route read; or, if it never went upstream, as its client sent it.
+    fn request(&self, body: &[u8], conversation: Option<&'static str>);
+    /// The next bytes of the answer's body: the upstream's, as each part arrives, even where the
+    /// route answers its client with a refusal in its place, or, if none came, the refusal.
+    fn response(&self, bytes: &[u8]);
+}
 pub use usage::{Failure, Usage};

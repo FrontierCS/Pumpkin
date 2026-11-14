@@ -276,11 +276,20 @@ serves the model requests of each sandbox whose role has a route through `route`
 work phase ends, a judge call's while its command runs (`model_requests_allowed`), or until the
 provider refuses an entry's key, which fails the run as the deployment's fault, but for one heard
 after the agent's final submission locked the selection, on a route that served before it.
-`Record` also reads a record, for `pumpkin`: a live run's phase and bounds (`Progress`), and the
-arguments that started it (`Record::args`).
+`Record` also reads a record, for `pumpkin`: a live run's phase and bounds (`Progress`), the
+arguments that started it (`Record::args`), and each model request it kept
+(`Record::model_request`).
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs, and
   every lease it or they held, are gone, so nothing the agent started runs while its submission
   is judged; and a run ends only once the final judge's leases are gone too.
+- **Architecture Invariant:** the record keeps every model exchange of every caller as the route
+  saw it pass, which no sandbox can alter, written as it passes (`route::Keep`,
+  `model::Exchange`), in `model/` of the record, numbered as the run log numbers requests: the
+  request's body as it went upstream, or as its client sent it if the route refused it, each item
+  of a conversation the route read kept once, by its digest, from which `Record::model_request`
+  rebuilds the body byte for byte; and the answer's body as it came back from the upstream, a
+  stream's as its events, even where the route answered its client with a refusal instead, or
+  else the route's refusal. The deployment's key, a header, is never written.
 - **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and
   nowhere else: no op reply carries a file collected from a judge's sandbox, so only the operator
   sees it; a lease's status carries the ends of its own commands' output to its holder alone, and

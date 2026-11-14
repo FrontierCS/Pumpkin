@@ -1,15 +1,21 @@
 //! The model routes that a run serves: each role's ([`routes`]), and each sandbox's of a role
 //! with one, as the run serves it ([`Served`]), by the rules of [`route`].
 
+use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::fs::{self, File};
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
-use route::{Answer, Route, Serving, Upstream};
-use schema::ir::{ApiRoute, Name};
+use route::{Answer, Keep, Route, Serving, Upstream};
+use schema::ir::{ApiRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
-use stdx::{Deadline, unpoisoned};
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+use stdx::{Context as _, Deadline, unpoisoned};
 
 use crate::Stopped;
 
@@ -126,12 +132,12 @@ impl Served {
         })
     }
 
-    /// Answers `incoming`, the sandbox's model request numbered `number`, as [`route::serve`]
-    /// does. It gives `note` a note on a request that it forwards, before it does, and tells
-    /// `answered` how it answered the request, before the answer's end is written.
+    /// Answers `incoming`, the sandbox's model request numbered `number`, as [`route::serve`] does,
+    /// keeping it in `exchange`. It gives `note` a note on a request that it forwards, before it
+    /// does, and tells `answered` how it answered the request, before the answer's end is written.
     pub(super) fn serve(
         &self,
-        number: u64,
+        (number, exchange): (u64, &Exchange),
         incoming: IncomingModelRequest,
         allowed: bool,
         by: Deadline,
@@ -145,7 +151,10 @@ impl Served {
             }
             answered(answer);
         };
-        route::serve(&self.entries, incoming, allowed, by, forwarding, answered);
+        let entries = &self.entries;
+        route::serve(
+            entries, incoming, allowed, by, exchange, forwarding, answered,
+        );
     }
 
     /// Notes how upstream `name` answered request `number`, if the route is open, in what the
@@ -264,5 +273,211 @@ fn failure(answer: &Answer) -> Option<String> {
             status,
             ..
         } => Some(format!("{status}, no answer")),
+    }
+}
+
+/// A model exchange, as the record keeps it while it passes ([`Keep`]), in `model/` of the
+/// record, numbered as the run log numbers requests: its request as `<n>.request` and its
+/// answer's body as `<n>.response`, each made as its first bytes come. A request whose body holds
+/// a conversation the route read keeps each of its items once, in `items/<hex>`, the item's JSON
+/// named by its SHA-256, and its body with that list of items as their digests, in order;
+/// [`Record::model_request`](super::Record::model_request) rebuilds it.
+pub(super) struct Exchange {
+    dir: PathBuf,
+    number: u64,
+    request: Part,
+    response: Part,
+    /// The request's body, once it has come.
+    body: Cell<Option<Body>>,
+    /// The items it made, to sync at its end.
+    items: RefCell<Vec<File>>,
+    /// Why keeping it failed, if it did: it is then kept no further.
+    failed: RefCell<Option<String>>,
+}
+
+/// What an exchange keeps of its request's body: its size, and the field whose items are kept
+/// apart, with their count, if they are.
+#[derive(Clone, Copy)]
+struct Body {
+    bytes: u64,
+    items: Option<(&'static str, usize)>,
+}
+
+/// One file of an exchange's.
+struct Part {
+    name: &'static str,
+    file: RefCell<Option<File>>,
+    bytes: Cell<u64>,
+}
+
+impl Exchange {
+    /// Exchange `number`, to keep in the record at `record`.
+    pub(super) fn new(record: &Path, number: u64) -> Self {
+        let part = |name| Part {
+            name,
+            file: RefCell::new(None),
+            bytes: Cell::new(0),
+        };
+        Self {
+            dir: record.join("model"),
+            number,
+            request: part("request"),
+            response: part("response"),
+            body: Cell::new(None),
+            items: RefCell::new(Vec::new()),
+            failed: RefCell::new(None),
+        }
+    }
+
+    /// What the run log's `model_answered` says of where it is kept so far: `{"request": {"path":
+    /// p, "bytes": b, "body_bytes": s, "items": {"field": f, "count": c}}, "response": {"path": p,
+    /// "bytes": b}}`, each part once it has bytes, with the paths below the record: `s` the size of
+    /// the request's body, and `items` the field whose `c` items are kept apart, if any.
+    pub(super) fn kept(&self) -> Value {
+        let mut kept = json!({});
+        for part in [&self.request, &self.response] {
+            if part.file.borrow().is_some() {
+                let path = format!("model/{}.{}", self.number, part.name);
+                kept[part.name] = json!({ "path": path, "bytes": part.bytes.get() });
+            }
+        }
+        if let (Some(Body { bytes, items }), Some(request)) =
+            (self.body.get(), kept.get_mut("request"))
+        {
+            request["body_bytes"] = json!(bytes);
+            if let Some((field, count)) = items {
+                request["items"] = json!({ "field": field, "count": count });
+            }
+        }
+        kept
+    }
+
+    /// Syncs what it kept to the record's disk, and returns why keeping it failed, if it did.
+    pub(super) fn finish(self) -> Option<String> {
+        let parts = [self.request, self.response].into_iter();
+        let files = parts.filter_map(|part| part.file.into_inner());
+        let synced = (files.chain(self.items.into_inner())).try_for_each(|file| file.sync_data());
+        let failed = self.failed.into_inner();
+        failed.or_else(|| {
+            synced
+                .err()
+                .map(|error| format!("syncing it failed: {error}"))
+        })
+    }
+
+    /// Adds `bytes` to `part`'s file, which it makes if it has none yet.
+    fn add(&self, part: &Part, bytes: &[u8]) {
+        if bytes.is_empty() || self.failed.borrow().is_some() {
+            return;
+        }
+        let mut file = part.file.borrow_mut();
+        let written = match &mut *file {
+            Some(file) => file.write_all(bytes),
+            None => fs::create_dir_all(&self.dir)
+                .and_then(|()| {
+                    File::create_new(self.dir.join(format!("{}.{}", self.number, part.name)))
+                })
+                .and_then(|made| file.insert(made).write_all(bytes)),
+        };
+        match written {
+            Ok(()) => part.bytes.set(part.bytes.get() + bytes.len() as u64),
+            Err(error) => *self.failed.borrow_mut() = Some(format!("{} {error}", part.name)),
+        }
+    }
+
+    /// `body` with each item of its array `field` kept apart, once in the record ([`Exchange`]),
+    /// and its place in the array holding its digest; `None` if `body` is no JSON object whose
+    /// `field` is an array, or an item couldn't be kept.
+    fn without_items(&self, body: &[u8], field: &str) -> Option<(Vec<u8>, usize)> {
+        let Ok(Value::Object(mut fields)) = serde_json::from_slice(body) else {
+            return None;
+        };
+        let Some(Value::Array(items)) = fields.get_mut(field) else {
+            return None;
+        };
+        let dir = self.dir.join("items");
+        fs::create_dir_all(&dir).ok()?;
+        for item in items.iter_mut() {
+            // The body went upstream as `serde_json` writes it, so each item is written alike,
+            // and the body rebuilt from the items' text is the body that went.
+            let text = item.to_string();
+            let digest = Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(text.as_bytes())));
+            let path = dir.join(digest.hex());
+            // Kept once: by an earlier request, or by another caller's at the same time.
+            match File::create_new(&path) {
+                Ok(mut file) => {
+                    file.write_all(text.as_bytes()).ok()?;
+                    self.items.borrow_mut().push(file);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return None,
+            }
+            *item = Value::String(digest.as_str().to_owned());
+        }
+        let count = items.len();
+        Some((Value::Object(fields).to_string().into_bytes(), count))
+    }
+}
+
+/// Model request `number`'s body, rebuilt from the record at `record`, as
+/// [`Record::model_request`](super::Record::model_request) says.
+pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, String> {
+    let log = record.join("log.jsonl");
+    let text = fs::read_to_string(&log).context(log.display())?;
+    let kept = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|line| line["event"].clone())
+        .find(|event| event["kind"] == "model_answered" && event["request"] == number)
+        .map(|event| event["kept"]["request"].clone());
+    let Some(Value::Object(kept)) = kept else {
+        return Err(format!("the run log names no kept model request {number}"));
+    };
+    let path = record.join(kept.get("path").and_then(Value::as_str).unwrap_or_default());
+    let bytes = fs::read(&path).context(path.display())?;
+    let Some(field) = kept.get("items").and_then(|items| items["field"].as_str()) else {
+        return Ok(bytes);
+    };
+    let unkept = |what: &str| {
+        format!(
+            "{}: {what}: expected a body kept with its items apart",
+            path.display()
+        )
+    };
+    let Ok(Value::Object(mut fields)) = serde_json::from_slice(&bytes) else {
+        return Err(unkept("not a JSON object"));
+    };
+    let Some(Value::Array(items)) = fields.get_mut(field) else {
+        return Err(unkept(&format!("no array `{field}`")));
+    };
+    for item in items.iter_mut() {
+        let hex = item
+            .as_str()
+            .and_then(|digest| digest.strip_prefix("sha256:"));
+        let Some(hex) = hex.filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit())) else {
+            return Err(unkept("an item that is no digest"));
+        };
+        let path = record.join("model/items").join(hex);
+        let text = fs::read(&path).context(path.display())?;
+        *item = serde_json::from_slice(&text)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    Ok(Value::Object(fields).to_string().into_bytes())
+}
+
+impl Keep for Exchange {
+    fn request(&self, body: &[u8], conversation: Option<&'static str>) {
+        let split = conversation.and_then(|field| Some((field, self.without_items(body, field)?)));
+        let (kept, items) = match &split {
+            Some((field, (rest, count))) => (rest.as_slice(), Some((*field, *count))),
+            None => (body, None),
+        };
+        let bytes = body.len() as u64;
+        self.body.set(Some(Body { bytes, items }));
+        self.add(&self.request, kept);
+    }
+
+    fn response(&self, bytes: &[u8]) {
+        self.add(&self.response, bytes);
     }
 }

@@ -21,9 +21,10 @@ use expect_test::{Expect, expect};
 use provider::{Provider, Ready};
 use route::{Key, Serving, UpstreamUrl};
 use runtime::{Record, Recorded, Run, System, new_id};
-use schema::ir::{self, Api, ModelName, Name};
+use schema::ir::{self, Api, ModelName, Name, Sha256Digest};
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use stdx::process::Environment;
 use tempfile::TempDir;
 use test_support::{WORKFLOW, files};
@@ -331,6 +332,57 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
         }
     }
     outcome.to_string()
+}
+
+// Every request of a recorded run rebuilds byte for byte from the record that keeps each of its
+// conversation's items once: a run of Codex's, trimmed to its first 10 requests, each with its
+// tools cut to its first two, beside the size and SHA-256 of each trimmed body.
+#[test]
+fn rebuilds_kept_requests() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/kept/20261113-145222-a5111887");
+    let record = Record::open(&fixture).unwrap();
+    let sums = fs::read_to_string(fixture.join("requests.sha256")).unwrap();
+    let lines: Vec<String> = sums
+        .lines()
+        .map(|line| {
+            let [number, size, digest] = line.splitn(3, ' ').collect::<Vec<_>>()[..] else {
+                panic!("`{line}` is no line of requests.sha256");
+            };
+            let rebuilt = record.model_request(number.parse().unwrap()).unwrap();
+            let sha256: [u8; 32] = Sha256::digest(&rebuilt).into();
+            let same =
+                rebuilt.len().to_string() == size && Sha256Digest::from(sha256).as_str() == digest;
+            format!(
+                "request {number}: {} bytes, as the run sent it: {same}",
+                rebuilt.len()
+            )
+        })
+        .collect();
+    let items = fs::read_dir(fixture.join("model/items")).unwrap().count();
+    let kept: u64 = fs::read_dir(fixture.join("model"))
+        .unwrap()
+        .chain(fs::read_dir(fixture.join("model/items")).unwrap())
+        .map(|entry| entry.unwrap().metadata().unwrap())
+        .filter(std::fs::Metadata::is_file)
+        .map(|metadata| metadata.len())
+        .sum();
+    expect![[r#"
+        request 0: 25402 bytes, as the run sent it: true
+        request 1: 36910 bytes, as the run sent it: true
+        request 2: 46629 bytes, as the run sent it: true
+        request 3: 55080 bytes, as the run sent it: true
+        request 4: 62291 bytes, as the run sent it: true
+        request 5: 74456 bytes, as the run sent it: true
+        request 6: 87158 bytes, as the run sent it: true
+        request 7: 88641 bytes, as the run sent it: true
+        request 8: 89794 bytes, as the run sent it: true
+        request 9: 90582 bytes, as the run sent it: true
+        kept: 38 items, 141000 bytes in all"#]]
+    .assert_eq(&format!(
+        "{}\nkept: {items} items, {kept} bytes in all",
+        lines.join("\n")
+    ));
 }
 
 // The model use that a record's reader takes from its log, of answers that come in turn: a good
