@@ -219,7 +219,7 @@ pub(super) fn write_variants(scratch: &Scratch, label: &str) {
     );
     scratch.write("tasks/bench/tools/Dockerfile", &tools);
     let toolchain = format!(
-        "FROM {BUSYBOX} AS go\nRUN echo toolchain && mkdir -p /usr/local/go \
+        "FROM {BUSYBOX} AS go\nRUN echo toolchain && mkdir --parents /usr/local/go \
          && echo go1.24 > /usr/local/go/VERSION\nLABEL {label}\nFROM go\nRUN false\n"
     );
     scratch.write("tasks/bench/toolchain/Dockerfile", &toolchain);
@@ -369,7 +369,7 @@ fn tasks() {
               them, and PUMPKIN.star holds only comments. It reaches no Docker engine, no
               network and no configuration, so an image's build may still fail, as on a
               recipe's step that fails.
-            $ env -u HOME PATH=<scratch>/bin pumpkin check tasks/bench/task.star --arg model=model-a
+            $ env --unset=HOME PATH=<scratch>/bin pumpkin check tasks/bench/task.star --arg model=model-a
             exit status: Some(0)
             docker was run: false
             $ pumpkin check tasks/bench/task.star --arg=model=model-a --arg effort=low --arg deadline=3600

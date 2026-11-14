@@ -116,7 +116,7 @@ fn waits() {
             $ pumpkin wait nowhere/x
             exit status: Some(1)
             pumpkin: nowhere/x is not a directory: expected the directory of a run's record
-            $ env -u HOME pumpkin wait runs/20261107-120000-1b8a6389
+            $ env --unset=HOME pumpkin wait runs/20261107-120000-1b8a6389
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             printed outcome.json: {"score":7.5,"state":"finished","work_end":{"kind":"agent_exited","status":{"code":1}}}

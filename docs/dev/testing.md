@@ -5,9 +5,9 @@ The rules for writing Pumpkin's tests and their snapshots.
 - WRITE few tests, at the public boundary, through one `check` helper per test file that
   compares against an `expect![[...]]` snapshot; do not test what the type system or serde
   already guarantees
-- START a snapshot as `expect![[""]]`, fill it with `cargo xtask refill -p <crate> [<test>]`,
-  which rewrites the snapshots of this checkout alone and prints `git diff --stat`, and read the
-  diff before keeping it
+- START a snapshot as `expect![[""]]`, fill it with
+  `cargo xtask refill --package <crate> [<test>]`, which rewrites the snapshots of this checkout
+  alone and prints `git diff --stat`, and read the diff before keeping it
 - PREFER one integration test binary per crate; add modules, not files under `tests/`
 - ASSUME that each test runs alone, in a process of its own, as cargo-nextest runs it in
   `cargo xtask ci`: tests share no per-process state

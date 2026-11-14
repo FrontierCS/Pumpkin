@@ -733,7 +733,7 @@ fn hung_create() {
             // it makes its container however slow the engine is, and the provider's create, which
             // waits for the output it holds, returns once it has ended.
             let script = "#!/bin/sh\nPATH=${PATH#*:}\n\
-                          [ \"$2\" = create ] && { setsid -w docker \"$@\"; exec sleep 60; }\n\
+                          [ \"$2\" = create ] && { setsid --wait docker \"$@\"; exec sleep 60; }\n\
                           exec docker \"$@\"\n";
             let docker = bin.join("docker");
             fs::write(&docker, script).unwrap();
