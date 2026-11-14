@@ -144,7 +144,11 @@ fn fake_sandbox(socket: &Path, requests: Vec<Request>, parts: Option<&Sender<()>
     )
     .unwrap();
     let (reply, _) = frame::read::<HelloReply>(&mut connection).unwrap().unwrap();
-    assert_eq!(reply, HelloReply::Accepted, "the answer to the hello");
+    assert_eq!(
+        reply,
+        HelloReply::Accepted { grant: None },
+        "the answer to the hello"
+    );
     let mut heard = Vec::new();
     for (request, (method, path, headers, body)) in (0..).zip(requests) {
         let open = FromSandbox::ModelRequest {

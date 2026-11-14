@@ -1,10 +1,11 @@
 //! The sandbox protocol, v0: what the gateway and `sandboxd` say to each other over a session.
 //!
 //! A session is one connection, which lasts as long as its sandbox and identifies it: to a socket
-//! of the sandbox's own, or by a hello that presents its [`RegistrationGrant`]. `sandboxd` sends
-//! a [`Hello`] first, and the gateway answers with a [`HelloReply`], accepting its own
-//! [`PROTOCOL_VERSION`] alone. Every version keeps that order, the [`frame`] encoding, a hello's
-//! `version` and size ([`MAX_HELLO_BYTES`]), a reply's `type` and a refusal's `message`.
+//! of the sandbox's own, by a hello that presents its [`RegistrationGrant`], or the gateway's to
+//! its endpoint ([`Listening`]). `sandboxd` sends a [`Hello`]
+//! first, and the gateway answers with a [`HelloReply`], accepting its own [`PROTOCOL_VERSION`]
+//! alone. Every version keeps that order, the [`frame`] encoding, a hello's `version` and size
+//! ([`MAX_HELLO_BYTES`]), a reply's `type` and a refusal's `message`.
 //!
 //! Both sides send [`frame`]s: [`ToSandbox`] from the gateway, [`FromSandbox`] from `sandboxd`;
 //! a reply names its request's stream, a number the gateway uses once. Files move as trees of
@@ -257,7 +258,7 @@ pub const MAX_HELLO_BYTES: usize = 1024;
 const _: () = assert!(8 * (96 + 3) + 128 <= MAX_HELLO_BYTES);
 
 /// How long either end gives the other to send its hello, or to answer it, from when it takes
-/// the connection: the gateway that a sandbox dials.
+/// the connection: the gateway that a sandbox dials, or a `sandboxd` that listens.
 // A `sandboxd` sends its hello as it connects, and the gateway answers at once, so this waits
 // for the network alone: a hello lost three times still arrives within it, resent at TCP's first
 // retransmission timeout, 1 s, and then at twice the wait before each time.
@@ -446,25 +447,99 @@ pub struct TcpDial {
     pub grant: RegistrationGrant,
 }
 
+/// What a sandbox whose `sandboxd` listens is given: the grant that the gateway's answer to its
+/// hello presents.
+///
+/// `sandboxd` listens, with `--listen` and an address of the sandbox's own, and `--by` the start's
+/// deadline, `grant`'s digits kept as for a [`TcpDial`], and the gateway dials it after the create,
+/// until that deadline, at the [`Endpoint`] the create gives, behind TLS that the provider ends
+/// with a Web PKI certificate for the endpoint's name. `sandboxd` opens the session with the first peer whose answer to its
+/// hello presents `grant` ([`HelloReply`]), and TLS keeps the grant from any but the provider.
+#[derive(Debug)]
+pub struct Listening {
+    pub grant: RegistrationGrant,
+}
+
+/// Where the gateway dials a sandbox whose `sandboxd` listens ([`Listening`]): a DNS name,
+/// which its provider's TLS certificate names, and a TCP port, such as `ta-1.w.modal.host:443`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    host: String,
+    port: u16,
+}
+
+impl Endpoint {
+    /// The endpoint at `host`, a DNS name, as letters, digits and `-` in labels of 1 to 63
+    /// characters, neither starting nor ending with `-`, joined by `.`, at most 253 in all, the
+    /// last not all digits, and `port`, which isn't 0.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `host` isn't such a name, or `port` is 0.
+    pub fn new(host: String, port: u16) -> Result<Self, String> {
+        let label = |label: &str| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        };
+        // A last label of digits alone would make an IPv4 address of the name, which no
+        // certificate for a name is.
+        let numeric = host
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.bytes().all(|byte| byte.is_ascii_digit()));
+        if host.len() > 253 || !host.split('.').all(label) || numeric {
+            return Err(format!(
+                "`{}` is not a DNS name: give the name the endpoint's certificate is for, such \
+                 as `ta-1.w.modal.host`",
+                host.escape_debug()
+            ));
+        }
+        if port == 0 {
+            return Err(format!(
+                "port 0 of `{host}` is no endpoint's: give the port it serves"
+            ));
+        }
+        Ok(Self { host, port })
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
+}
+
 /// The name of a [`SocketDial`]'s socket in its directory.
 pub const SOCKET_NAME: &str = "s";
 
 /// The environment variable that holds, as its digits, the [`RegistrationGrant`] that a
 /// `sandboxd` presents in its hello where it dials its gateway at a TCP address.
 ///
-/// A provider that starts `sandboxd` for a [`TcpDial`] sets it, and `sandboxd` keeps it from
-/// every command it starts.
+/// A provider that starts `sandboxd` for a [`TcpDial`] or [`Listening`] sets it, and
+/// `sandboxd` keeps it from every command it starts.
 // The environment, not `argv`, which every process may read through `/proc`: a process's
 // environment is open only to those that may trace it. The role's code runs as `sandboxd`'s
 // user, which may until `sandboxd` is non-dumpable, and may keep a handle opened by then, so what
 // keeps the grant from that code is that none of it runs before the hello, which spends the
 // grant: `sandboxd` starts each command after it, and before it only the image's `nvidia-smi`,
 // to name the sandbox's GPUs, without this variable, once it is non-dumpable; and the provider
-// starts nothing else as the role's user before it (`TcpDial`).
+// starts nothing else as the role's user before it (`TcpDial`, `Listening`).
 pub const SANDBOXD_GRANT: &str = "SANDBOXD_GRANT";
 
 /// The gateway's answer to the session's first frame, with an empty body: `{"type":"accepted"}`,
-/// or a refusal.
+/// or `{"type":"accepted","grant":"…"}` where the gateway dialed, or a refusal.
 ///
 /// Its `Deserialize` reads a reply's `type`, and a refusal's `message`, whatever else it holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,8 +547,13 @@ pub const SANDBOXD_GRANT: &str = "SANDBOXD_GRANT";
 // whose form may hold more.
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HelloReply {
-    /// The session is open: the gateway's requests follow.
-    Accepted,
+    /// The session is open: the gateway's requests follow. Where the gateway dialed a `sandboxd`
+    /// that listens, it presents the sandbox's `grant`, and `sandboxd` serves no peer that
+    /// presents another, or none; elsewhere it presents none.
+    Accepted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<RegistrationGrant>,
+    },
     /// The gateway refuses the session, for the reason `message` gives, and closes the
     /// connection.
     Refused { message: String },

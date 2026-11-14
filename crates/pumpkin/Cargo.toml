@@ -17,12 +17,14 @@ ec2 = { path = "../../providers/ec2" }
 engine = { path = "../engine" }
 gateway = { path = "../gateway" }
 lang = { path = "../lang" }
+modal = { path = "../../providers/modal" }
 provider = { path = "../provider" }
 recipe = { path = "../recipe" }
 route = { path = "../route" }
 runtime = { path = "../runtime" }
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+tls = { path = "../tls" }
 clap.workspace = true
 libc.workspace = true
 rustix = { workspace = true, features = ["fs", "process", "stdio", "thread"] }

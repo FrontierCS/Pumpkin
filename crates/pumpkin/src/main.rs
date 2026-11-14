@@ -5,10 +5,11 @@
 //! driver process ([`driver`]), with the `sandboxd` that [`sandboxd`] finds. `check` checks a
 //! task's source, which [`star`] reads, and lints it, and `build` builds its images and prints its
 //! IR. `fmt` formats `.star` files, and `check` lints them, with the formatter beside `pumpkin`
-//! ([`style`]), and [`lock`] writes a recipe's fetch stage. What a command says of an ending or a
-//! refusal ends with the commands to run next, as [`next`] makes them. All that it writes on this
-//! machine, but what a command names, as `--runs` does, goes in the workspace's directory of it
-//! ([`Workspace`]).
+//! ([`style`]). `ls`
+//! lists the runs, and [`lock`] writes a recipe's fetch stage. What a command says of an ending
+//! or a refusal ends with the commands to run next, as [`next`] makes them. All that it writes
+//! on this machine, but what a command names, as `--runs` does, goes in the workspace's
+//! directory of it ([`Workspace`]).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -24,7 +25,8 @@ use docker::{CpuList, Docker};
 use driver::{ARGV0, Driver, Handoff};
 use ec2::Ec2;
 use engine::{ContextName, Engine};
-use gateway::GrantListener;
+use gateway::{Dialer, GrantListener};
+use modal::Modal;
 use provider::{Meeting, Provider, RunTag, SandboxId, Sweep};
 use runtime::{BUILD, Ending, Reaped, Record, Recorded, Run, System};
 use rustix::fs::Mode;
@@ -51,6 +53,10 @@ mod workspace;
 // A judge's diagnostic, such as a traceback, fits many times over; more is a log, which the record
 // keeps for reading, rather than a message for a terminal.
 const JUDGE_STDERR_SHOWN_BYTES: u64 = 1 << 20;
+
+/// The file name of the Modal provider's helper, which `cargo xtask install` installs beside
+/// `pumpkin`, with its lock, of this name and `.lock`.
+const MODAL_HELPER: &str = "pumpkin-modal.py";
 
 fn main() -> ExitCode {
     // A run's judge calls, each session's reader, and the evaluation of `check` and `build` run
@@ -314,7 +320,11 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     driver::locked(&id)?;
     // `execute` records why the run stopped in its `outcome.json`, which `run` prints if the run
     // didn't start; these lines, the driver's last, then close that ending.
-    let executed = run.execute(sandboxd.path(), private.as_ref(), || driver::announce(&dir));
+    // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
+    let dialer = Dialer::new(tls::Client::web_pki());
+    let executed = run.execute(sandboxd.path(), private.as_ref(), &dialer, || {
+        driver::announce(&dir)
+    });
     if let Err(stopped) = executed {
         say(closing(&id, &stopped.to_string(), &dir));
         advise("run it again", &again);
@@ -586,7 +596,7 @@ impl Reaching {
     /// How provider `name` of the run of `record`, which reported `report` of itself, is
     /// reached, once it has been tried: a provider whose report names a Docker context by the
     /// engine of that context, as `Docker::reach` reaches it; any other by its table in the
-    /// configuration that ran the run ([`run_config`]), of kind `ec2`. Fails, saying
+    /// configuration that ran the run ([`run_config`]), of kind `ec2` or `modal`. Fails, saying
     /// why, if it can't be named so, as when that configuration can't be read, or names no such
     /// provider; or, in the outer error, if the record is wrong, as when its report names no
     /// context but the configuration names the provider of kind `docker`.
@@ -650,6 +660,11 @@ impl Reaching {
             Some(config::Kind::Ec2(settings)) => {
                 Ec2::reach(settings).map(|reached| Box::new(reached) as _)
             }
+            Some(config::Kind::Modal(settings)) => (modal_helper())
+                .and_then(|helper| {
+                    Modal::reach(settings, None, &helper, &Workspace::find()?.modal())
+                })
+                .map(|reached| Box::new(reached) as _),
         };
         self.reached.insert(reachable.clone(), reached);
         Ok(Ok(reachable))
@@ -674,8 +689,9 @@ fn run_config(record: &Record) -> Result<PathBuf, String> {
 
 /// Reaps the run of `record`, which has ended or is lost, on each provider that its
 /// `provider.json` names, as `reaching` reaches it ([`Record::reap`]), and says what was left.
-/// Of a provider that can't be reached, it says so, and how to reap `runs` again, as commands name
-/// it ([`end`]); and removes the rest.
+/// Of a provider that can't be reached, it says so, and, as `reaper` has it, how to reap `runs`
+/// again, as commands name it ([`end`]), or that what the run left there ends by its hard end;
+/// and removes the rest.
 fn reaped(record: &Record, reaching: &mut Reaching, runs: Option<&str>) -> Result<Swept, String> {
     let id = record.id();
     let failed = |error| format!("run {id} can't be reaped: {error}");
@@ -1042,15 +1058,14 @@ fn home(instead: &str) -> Result<PathBuf, String> {
 }
 
 /// A provider of the machine's configuration, connected as its kind says.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a run makes one for each provider it names, once, so a box would save it nothing"
-)]
 enum Connected<'e> {
     /// The machine's Docker engine, as a provider.
     Docker(Docker<'e>),
     /// An EC2 envelope, which pushes what its sandboxes pull from the machine's Docker engine.
     Ec2(Ec2<'e>),
+    /// A Modal workspace, which imports what its sandboxes run, pushed from the machine's Docker
+    /// engine.
+    Modal(Modal<'e>),
 }
 
 impl<'e> Connected<'e> {
@@ -1059,8 +1074,9 @@ impl<'e> Connected<'e> {
     ///
     /// # Errors
     ///
-    /// Fails, naming the provider, if the engine can't run sandboxes, an EC2 envelope can't be
-    /// reached, or if `engine` can't push what its sandboxes pull.
+    /// Fails, naming the provider, if the engine can't run sandboxes, an EC2 envelope or a Modal
+    /// workspace can't be reached, as one whose helper isn't beside this `pumpkin`, or if
+    /// `engine` can't push what its sandboxes pull.
     fn new(
         name: &Name,
         kind: config::Kind,
@@ -1074,6 +1090,12 @@ impl<'e> Connected<'e> {
             config::Kind::Ec2(settings) => Workspace::find()
                 .and_then(|workspace| Ec2::connect(&settings, engine.pusher()?, &workspace.ec2()))
                 .map(Self::Ec2),
+            config::Kind::Modal(settings) => modal_helper()
+                .and_then(|helper| {
+                    let pusher = engine.pusher()?;
+                    Modal::connect(&settings, &helper, &Workspace::find()?.modal(), pusher)
+                })
+                .map(Self::Modal),
         };
         connected.context(format_args!("reaching provider `{name}` failed"))
     }
@@ -1082,6 +1104,7 @@ impl<'e> Connected<'e> {
         match self {
             Self::Docker(docker) => docker,
             Self::Ec2(ec2) => ec2,
+            Self::Modal(modal) => modal,
         }
     }
 
@@ -1090,9 +1113,31 @@ impl<'e> Connected<'e> {
     fn pushes(&self) -> bool {
         match self {
             Self::Docker(_) => false,
-            Self::Ec2(_) => true,
+            Self::Ec2(_) | Self::Modal(_) => true,
         }
     }
+}
+
+/// The Modal provider's helper, `pumpkin-modal.py`, beside the `pumpkin` executable that runs, as
+/// `cargo xtask install` installs it, with its lock beside it.
+///
+/// # Errors
+///
+/// Fails if that `pumpkin` can't be found, or the helper or its lock isn't beside it.
+fn modal_helper() -> Result<PathBuf, String> {
+    let pumpkin = workspace::exe("expected Modal's helper beside it")?;
+    let helper = pumpkin.with_file_name(MODAL_HELPER);
+    let lock = pumpkin.with_file_name(format!("{MODAL_HELPER}.lock"));
+    for file in [&helper, &lock] {
+        if !file.is_file() {
+            return Err(format!(
+                "{} doesn't exist: expected Modal's helper and its lock beside `pumpkin`, as \
+                 `cargo xtask install` installs them",
+                file.display()
+            ));
+        }
+    }
+    Ok(helper)
 }
 
 /// `workflow`, of the task whose entry is `path`, placed in the classes that `providers`, read
@@ -1139,7 +1184,7 @@ fn listen(
     let mut private = Vec::new();
     for (name, connected) in placed_on.iter() {
         match connected.provider().meeting() {
-            Meeting::Local(_) => {}
+            Meeting::Local(_) | Meeting::Listen(_) => {}
             Meeting::Private(_) => private.push(format!("`{name}`")),
         }
     }

@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, thread};
 
 use expect_test::expect;
-use gateway::{Arrival, Put, Registration, Session, Sockets};
+use gateway::{Arrival, Dialer, Put, Registration, Session, Sockets};
 use provider::{
     Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
     SandboxdRef, UnixTime,
@@ -404,8 +404,11 @@ fn put(mut session: Session) -> String {
 /// removes the directory.
 struct Suite<'a> {
     subject: &'a dyn Subject,
-    /// Where the provider's sandboxes meet the gateway.
+    /// Where the provider's sandboxes meet the gateway, if they dial it.
     sockets: Sockets,
+    /// Where the suite dials the sandboxes of a provider whose sandboxes listen, behind the
+    /// stand-in TLS edge.
+    dialer: Dialer,
     run: RunTag,
     other: RunTag,
     /// The sandboxes created, each by its id, its role, by which the outcomes name it, and
@@ -449,6 +452,7 @@ impl<'a> Suite<'a> {
         Self {
             subject,
             sockets: Sockets::create(dir.path().join("sockets")).unwrap(),
+            dialer: Dialer::new(crate::edge::client()),
             run,
             other,
             made: Vec::new(),
@@ -504,7 +508,7 @@ impl<'a> Suite<'a> {
 
     /// Creates a sandbox of `run` for `role`, named for it, in the provider's slowest class, which
     /// runs `image` and `sandboxd`, meets the gateway where the provider's meeting says, at the
-    /// socket the suite's sockets issue as `socket`, and gives up by
+    /// socket the suite's sockets issue as `socket` or where the suite dials it, and gives up by
     /// `by`; returns its id and the registration of where it meets the gateway, or how its create
     /// failed.
     fn make(
@@ -523,9 +527,14 @@ impl<'a> Suite<'a> {
                 let (dial, registration) = self.sockets.issue(&socket).unwrap();
                 Ok((creator.create(&create, dial)?.id, registration))
             }
+            Meeting::Listen(creator) => {
+                let (dial, unreached) = self.dialer.issue().unwrap();
+                let (created, endpoint) = creator.create(&create, dial)?;
+                Ok((created.id, unreached.at(endpoint)))
+            }
             Meeting::Private(_) => panic!(
                 "the suite meets no sandbox that dials a private address: run it on a provider \
-                 whose sandboxes dial a socket"
+                 whose sandboxes dial a socket, or listen"
             ),
         }
     }

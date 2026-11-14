@@ -1,0 +1,458 @@
+//! TLS 1.3 below a session whose connection crosses the Internet: a [`Client`]'s end, which
+//! trusts a server only by its certificate, checked against the roots it trusts and the name it
+//! dialed, and a [`Server`]'s, which shows its certificate chain.
+//!
+//! Each end hands its session a [`Stream`]: a Unix socket of its own, whose other end a relay
+//! thread carries to and from the TLS connection, so the session reads, writes, times out and
+//! shuts down as on any socket, from as many threads as it likes, and the relay never waits on
+//! one way while the other has bytes to move. The session's end of its socket closes the TLS
+//! connection, with TLS's `close_notify`, and the TCP connection below it; the peer's
+//! `close_notify` ends the session's reads, and any other end of the TCP connection, or a break
+//! in its TLS, fails them, saying why ([`Stream`]).
+
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpStream};
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::Duration;
+
+use rustix::event::{self, PollFd, PollFlags, Timespec};
+use rustix::io::Errno;
+use rustls::crypto::CryptoProvider;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{
+    ClientConfig, ClientConnection, ConfigBuilder, Connection, RootCertStore, ServerConfig,
+    ServerConnection, WantsVerifier,
+};
+use stdx::Deadline;
+
+/// The most bytes the relay reads from either side at once: a TLS record's most plaintext.
+const CHUNK_BYTES: usize = 16 * 1024;
+
+/// How long the relay of a session that has ended still sends what it holds, and its
+/// `close_notify`, once the session's end of its socket has closed.
+// The session has written its last; what remains is at most a chunk's records, which a link
+// that moves anything at all sends within this. A peer that reads nothing more holds it no longer.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A TLS client, and the roots it trusts, which its clones share.
+#[derive(Clone, Debug)]
+pub struct Client {
+    config: Arc<ClientConfig>,
+}
+
+impl Client {
+    /// A client that trusts Web PKI's roots, those of Mozilla's program as `webpki-roots` ships
+    /// them.
+    pub fn web_pki() -> Self {
+        let roots = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        Self::with(roots)
+    }
+
+    /// A client that trusts `root`, a certificate in DER, alone.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `root` isn't a certificate that can be a root.
+    pub fn trusting(root: &[u8]) -> io::Result<Self> {
+        let mut roots = RootCertStore::empty();
+        (roots.add(CertificateDer::from(root.to_vec()))).map_err(|error| tls(&error))?;
+        Ok(Self::with(roots))
+    }
+
+    fn with(roots: RootCertStore) -> Self {
+        let mut config = builder(ClientConfig::builder_with_provider(provider()))
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        // Each session is a connection of its own, which nothing resumes.
+        config.resumption = rustls::client::Resumption::disabled();
+        Self {
+            config: Arc::new(config),
+        }
+    }
+
+    /// Runs TLS on `stream`, a connection to the server `name`, a DNS name, which the server's
+    /// certificate must name, with the handshake done by `by`, and returns the session's
+    /// [`Stream`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if `name` isn't a DNS name, if the server's certificate isn't one of `name` from a
+    /// trusted root, if the handshake fails otherwise or isn't done by `by`, or if a relay's thread
+    /// can't start: TLS's own failures as [`InvalidData`](io::ErrorKind::InvalidData) alone.
+    pub fn connect(&self, stream: TcpStream, name: &str, by: Deadline) -> io::Result<Stream> {
+        let Ok(server @ ServerName::DnsName(_)) = ServerName::try_from(name.to_owned()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "`{}` is not a DNS name: give a server's",
+                    name.escape_debug()
+                ),
+            ));
+        };
+        let connection =
+            ClientConnection::new(Arc::clone(&self.config), server).map_err(|error| tls(&error))?;
+        let expected = format!("expected TLS 1.3 from `{name}`, with a certificate trusted for it");
+        carry(Connection::Client(connection), stream, by, &expected)
+    }
+}
+
+/// A TLS server, and the certificate chain it shows, which its clones share.
+#[derive(Clone, Debug)]
+pub struct Server {
+    config: Arc<ServerConfig>,
+}
+
+impl Server {
+    /// A server that shows `chain`, certificates in DER from its own to the last below a root,
+    /// whose own is of `key`, a PKCS #8 private key in DER.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `key` isn't a private key, or isn't the key of `chain`'s first certificate.
+    pub fn new(chain: &[&[u8]], key: &[u8]) -> io::Result<Self> {
+        let chain = (chain.iter())
+            .map(|certificate| CertificateDer::from(certificate.to_vec()))
+            .collect();
+        let key = PrivateKeyDer::try_from(key.to_vec()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the server's key can't be read: {error}: expected a PKCS #8 key in DER"),
+            )
+        })?;
+        let mut config = builder(ServerConfig::builder_with_provider(provider()))
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .map_err(|error| tls(&error))?;
+        // Each session is a connection of its own, which nothing resumes.
+        config.send_tls13_tickets = 0;
+        Ok(Self {
+            config: Arc::new(config),
+        })
+    }
+
+    /// Runs TLS on `stream`, a connection to a client, with the handshake done by `by`, and
+    /// returns the session's [`Stream`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if the handshake fails or isn't done by `by`, or a relay's thread can't start.
+    pub fn accept(&self, stream: TcpStream, by: Deadline) -> io::Result<Stream> {
+        let connection =
+            ServerConnection::new(Arc::clone(&self.config)).map_err(|error| tls(&error))?;
+        carry(
+            Connection::Server(connection),
+            stream,
+            by,
+            "expected a client's TLS 1.3",
+        )
+    }
+}
+
+/// The cryptography both ends use: `ring`'s, as the workspace's other TLS uses.
+fn provider() -> Arc<CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+/// `builder` restricted to TLS 1.3.
+fn builder<S: rustls::ConfigSide>(
+    builder: ConfigBuilder<S, rustls::WantsVersions>,
+) -> ConfigBuilder<S, WantsVerifier> {
+    let Ok(builder) = builder.with_protocol_versions(&[&rustls::version::TLS13]) else {
+        unreachable!("ring's provider lacks TLS 1.3, though rustls's ring provider has it")
+    };
+    builder
+}
+
+fn tls(error: &rustls::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("TLS failed: {error}"))
+}
+
+/// The session's end of a TLS connection, a Unix socket, read and written as one.
+///
+/// A read that would give the socket's end fails instead, with why, once the TLS connection has
+/// ended other than by the peer's `close_notify`. Its clones share the socket and that reason.
+#[derive(Debug)]
+pub struct Stream {
+    socket: UnixStream,
+    /// Why the TLS connection ended, set before the relay ends the socket, unset if by the
+    /// peer's `close_notify`. Shared with the relay's thread, which sets it.
+    ended: Arc<OnceLock<(io::ErrorKind, String)>>,
+}
+
+impl Stream {
+    /// # Errors
+    ///
+    /// Fails as [`UnixStream::try_clone`] does.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            socket: self.socket.try_clone()?,
+            ended: Arc::clone(&self.ended),
+        })
+    }
+
+    /// Ends the session's stream both ways, for every clone, which closes the TLS connection, as
+    /// the [crate doc](crate) says.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`UnixStream::shutdown`] does.
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.socket.shutdown(Shutdown::Both)
+    }
+
+    /// # Errors
+    ///
+    /// Fails as [`UnixStream::set_nonblocking`] does.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.socket.set_nonblocking(nonblocking)
+    }
+
+    /// # Errors
+    ///
+    /// Fails as [`UnixStream::set_write_timeout`] does.
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_write_timeout(timeout)
+    }
+}
+
+impl Read for &Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = (&self.socket).read(buf)?;
+        if read == 0
+            && !buf.is_empty()
+            && let Some((kind, why)) = self.ended.get()
+        {
+            return Err(io::Error::new(*kind, why.clone()));
+        }
+        Ok(read)
+    }
+}
+
+impl Write for &Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&self.socket).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Completes `tls`'s handshake on `tcp` by `by`, or fails saying what was `expected`, then
+/// starts its relay, as the [crate doc](crate) says, and returns the session's [`Stream`].
+fn carry(
+    mut tls: Connection,
+    mut tcp: TcpStream,
+    by: Deadline,
+    expected: &str,
+) -> io::Result<Stream> {
+    let late = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("the TLS handshake wasn't done by its deadline: {expected}"),
+        )
+    };
+    let failed = |error: io::Error| match error.kind() {
+        // How a socket's timeout ends a read or a write.
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => late(),
+        kind => io::Error::new(
+            kind,
+            format!("the TLS handshake failed: {error}: {expected}"),
+        ),
+    };
+    while tls.is_handshaking() || tls.wants_write() {
+        let left = by.remaining().ok_or_else(late)?;
+        tcp.set_read_timeout(Some(left))?;
+        tcp.set_write_timeout(Some(left))?;
+        tls.complete_io(&mut tcp).map_err(failed)?;
+    }
+    tcp.set_read_timeout(None)?;
+    tcp.set_write_timeout(None)?;
+    tcp.set_nonblocking(true)?;
+    let (socket, carried) = UnixStream::pair()?;
+    carried.set_nonblocking(true)?;
+    let ended = Arc::new(OnceLock::new());
+    let relayed = Arc::clone(&ended);
+    thread::Builder::new()
+        .name("tls".to_owned())
+        .spawn(move || relay(tls, &tcp, &carried, &relayed))?;
+    Ok(Stream { socket, ended })
+}
+
+/// Relays between `tcp`, under `tls`, and `carried`, the relay's end of the session's socket,
+/// until either ends, then closes both, having set `ended` unless the peer ended the TLS with its
+/// `close_notify`.
+fn relay(
+    mut tls: Connection,
+    tcp: &TcpStream,
+    carried: &UnixStream,
+    ended: &OnceLock<(io::ErrorKind, String)>,
+) {
+    let mut closing = None;
+    if let Err(error) = moved(&mut tls, tcp, carried, &mut closing) {
+        // Set once, here, before the socket ends, so that the session's read of its end sees it.
+        let _ = ended.set((error.kind(), error.to_string()));
+    }
+    tls.send_close_notify();
+    // What the peer doesn't take by then, it never will: the session is over either way.
+    let by = closing.unwrap_or_else(|| Deadline::after(CLOSE_TIMEOUT));
+    let _ = flushed(&mut tls, tcp, by);
+    let _ = carried.shutdown(Shutdown::Both);
+    let _ = tcp.shutdown(Shutdown::Both);
+}
+
+/// Moves bytes both ways, waiting on whichever side has room or bytes, until the session's end of
+/// its socket closes, or the peer's `close_notify` arrives and what came before it has gone to
+/// the session: `Ok` then; or the error that ended the TLS connection. Once the session's end
+/// hangs up, `closing` is set [`CLOSE_TIMEOUT`] on, and the moves end by then.
+fn moved(
+    tls: &mut Connection,
+    mut tcp: &TcpStream,
+    mut carried: &UnixStream,
+    closing: &mut Option<Deadline>,
+) -> io::Result<()> {
+    let mut chunk = vec![0; CHUNK_BYTES];
+    // Plaintext for the session, of which `sent` bytes have gone to it.
+    let (mut inbound, mut sent) = (Vec::new(), 0);
+    let mut closed = drain(tls, &mut inbound)?;
+    loop {
+        if closed && inbound.is_empty() {
+            return Ok(());
+        }
+        // The session's bytes are taken only once the records of those before them have gone,
+        // and the peer's once the session has taken those before them: so each way holds at most
+        // a chunk, and each waits on its own side alone.
+        let (tcp_read, tcp_write) = (inbound.is_empty() && !closed, tls.wants_write());
+        let (session_read, session_write) = (!tls.wants_write(), !inbound.is_empty());
+        let mut polled = [
+            watch(tcp, tcp_read, tcp_write),
+            watch(carried, session_read, session_write),
+        ];
+        // An entry watched for nothing is left out of the wait. The session's socket is watched
+        // for its hang-up, which wakes a wait that watches it for nothing else, until it has hung
+        // up: then it would wake every wait, and the wait is bounded by `closing` instead. The
+        // TCP connection's hang-up shows in the read or the write that it is watched for.
+        let first = usize::from(!tcp_read && !tcp_write);
+        let watched = session_read || session_write || closing.is_none();
+        let last = if watched { 2 } else { 1 };
+        wait(&mut polled[first..last], *closing)?;
+        if closing.is_some_and(|by| by.remaining().is_none()) {
+            return Ok(());
+        }
+        if watched && polled[1].revents().contains(PollFlags::HUP) {
+            closing.get_or_insert_with(|| Deadline::after(CLOSE_TIMEOUT));
+        }
+        // Each is tried as it is watched for, whatever the wait reported, as a try that would
+        // block gives way.
+        if tcp_write {
+            match tls.write_tls(&mut tcp) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(context("sending to the peer failed", &error)),
+            }
+        }
+        if tcp_read {
+            closed = received(tls, tcp, &mut inbound)?;
+        }
+        if session_write {
+            match carried.write(&inbound[sent..]) {
+                Ok(written) => sent += written,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                // The session has closed its end, which ends the relay as a close does.
+                Err(_) => return Ok(()),
+            }
+            if sent == inbound.len() {
+                inbound.clear();
+                sent = 0;
+            }
+        }
+        if session_read {
+            match carried.read(&mut chunk) {
+                Ok(0) => return Ok(()),
+                Ok(read) => tls.writer().write_all(&chunk[..read])?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return Ok(()),
+            }
+        }
+    }
+}
+
+/// Reads what has arrived on `tcp` into `tls`, and moves its plaintext to `inbound`: whether the
+/// peer's `close_notify` has arrived.
+fn received(tls: &mut Connection, mut tcp: &TcpStream, inbound: &mut Vec<u8>) -> io::Result<bool> {
+    match tls.read_tls(&mut tcp) {
+        Ok(0) => Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the peer's TCP connection ended without TLS's close_notify, as a connection cut \
+             short does: expected the peer to close it with one",
+        )),
+        Ok(_) => {
+            tls.process_new_packets()
+                .map_err(|error| self::tls(&error))?;
+            drain(tls, inbound)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(context("receiving from the peer failed", &error)),
+    }
+}
+
+/// Moves the plaintext `tls` holds to `inbound`: whether the peer's `close_notify` has arrived.
+fn drain(tls: &mut Connection, inbound: &mut Vec<u8>) -> io::Result<bool> {
+    match tls.reader().read_to_end(inbound) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(context("reading the peer's records failed", &error)),
+    }
+}
+
+/// Sends what `tls` holds to send on `tcp`, which doesn't block, by `by`.
+fn flushed(tls: &mut Connection, mut tcp: &TcpStream, by: Deadline) -> io::Result<()> {
+    while tls.wants_write() && by.remaining().is_some() {
+        match tls.write_tls(&mut tcp) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait(&mut [watch(tcp, false, true)], Some(by))?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// `fd`'s entry for [`wait`], watched for a read if `read` and a write if `write`.
+fn watch(fd: &impl AsFd, read: bool, write: bool) -> PollFd<'_> {
+    let mut events = PollFlags::empty();
+    events.set(PollFlags::IN, read);
+    events.set(PollFlags::OUT, write);
+    PollFd::new(fd, events)
+}
+
+/// Waits until `by`, if any, for one of `polled` to be ready as it is watched, or to hang up, and
+/// fills in what each reported.
+fn wait(polled: &mut [PollFd<'_>], by: Option<Deadline>) -> io::Result<()> {
+    loop {
+        // No timeout waits without end.
+        let timeout = match by.map(Deadline::remaining) {
+            None => None,
+            Some(None) => return Ok(()),
+            Some(Some(left)) => Some(Timespec::try_from(left).unwrap_or(Timespec {
+                tv_sec: i64::MAX,
+                tv_nsec: 0,
+            })),
+        };
+        match event::poll(polled, timeout.as_ref()) {
+            Ok(_) => return Ok(()),
+            Err(Errno::INTR) => {}
+            Err(error) => return Err(context("waiting on the connection failed", &error.into())),
+        }
+    }
+}
+
+fn context(what: &str, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{what}: {error}"))
+}

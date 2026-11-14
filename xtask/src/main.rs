@@ -70,8 +70,9 @@ mod flags {
             cmd sandboxd {}
 
             /// Builds `pumpkin`, the static sandboxd and ec2-boot, and installs them side by side
-            /// in `<root>/bin`, with the pinned buildifier, which `pumpkin fmt` and `pumpkin check`
-            /// run, where `pumpkin` finds that sandboxd by default; prints each path.
+            /// in `<root>/bin`, with the Modal provider's helper and its lock, where `pumpkin`
+            /// finds that sandboxd by default, and that helper, and with the pinned buildifier,
+            /// which `pumpkin fmt` and `pumpkin check` run; prints each path.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
@@ -474,32 +475,43 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin`, the static `sandboxd` and `ec2-boot`, and installs them, with the pinned
-/// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
-/// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and says if
-/// `<root>/bin` is not on `PATH`.
+/// Builds `pumpkin`, the static `sandboxd` and `ec2-boot`, and installs them, with the Modal
+/// provider's helper and its lock, and the pinned buildifier ([`star::buildifier`]), in
+/// `<root>/bin`, made if need be, replacing what is there: `root` made absolute, or this
+/// checkout's `.pumpkin`. Prints each one's path, and says if `<root>/bin` is not on `PATH`.
 fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
     let bin = std::path::absolute(&bin)
         .map_err(|error| format!("making {} absolute failed: {error}", bin.display()))?;
-    let sandboxd = sandboxd(cargo)?;
-    let built = [
-        ("pumpkin", release(cargo, "pumpkin", &[])?),
-        ("buildifier", star::buildifier(cargo)?),
-        ("ec2-boot", sandboxd.with_file_name("ec2-boot")),
-        ("sandboxd", sandboxd),
+    // The Modal provider's helper and its lock, which `pumpkin` finds beside it, under the
+    // names it looks for.
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
+    let mut built = vec![
+        ("pumpkin", release(cargo, "pumpkin", &[])?, 0o755),
+        ("buildifier", star::buildifier(cargo)?, 0o755),
     ];
+    let sandboxd = sandboxd(cargo)?;
+    built.extend([
+        ("ec2-boot", sandboxd.with_file_name("ec2-boot"), 0o755),
+        ("sandboxd", sandboxd, 0o755),
+        ("pumpkin-modal.py", helper.join("pumpkin-modal.py"), 0o644),
+        (
+            "pumpkin-modal.py.lock",
+            helper.join("pumpkin-modal.py.lock"),
+            0o644,
+        ),
+    ]);
     fs::create_dir_all(&bin)
         .map_err(|error| format!("making {} failed: {error}", bin.display()))?;
-    for (name, from) in built {
+    for (name, from, mode) in built {
         let to = bin.join(name);
         // Copied beside it, then renamed over it: a copy over a `pumpkin` that runs would fail,
         // as Linux refuses to write a file that a process executes.
         let copy = bin.join(format!(".{name}.xtask-install"));
         // Each sandbox's processes run as its role's user, who must execute `sandboxd`.
         let installed = (fs::copy(from, &copy))
-            .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(0o755)))
+            .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(mode)))
             .and_then(|()| fs::rename(&copy, &to));
         installed.map_err(|error| format!("installing {} failed: {error}", to.display()))?;
         println!("{}", to.display());

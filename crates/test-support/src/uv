@@ -1,0 +1,32 @@
+#!/bin/sh
+# A stand-in for `uv`, for the tests of the Modal provider and of `pumpkin`, which find it on `PATH`
+# through a link to it, named `uv`, in a directory of their own. As `uv run --frozen --quiet
+# --no-config --script <script>` does, with the lock beside the script, it runs the script, here
+# with the system's `python3`, isolated and writing no bytecode, with `modal-sdk/` beside this file,
+# the stand-in for Modal's SDK, first on its path, which reads and writes its files in the test's
+# directory. It records in that directory each call, in `calls`, its command and then its
+# arguments, a line each, and the call ended by an empty line, and the names in its environment, in
+# `uv-env`. A file there named `helper` is run in place of the script, so that a test can change
+# what it does.
+dir=${0%/*}
+{ echo uv; printf '%s\n' "$@"; echo; } >>"$dir/calls"
+tr '\0' '\n' <"/proc/$$/environ" | sed 's/=.*//' | sort | tr '\n' ' ' >"$dir/uv-env"
+case "$*" in
+"run --frozen --quiet --no-config --script "*) ;;
+*)
+    echo "the stand-in uv doesn't know \`$*\`" >&2
+    exit 2 ;;
+esac
+script=$6
+if [ ! -e "$script.lock" ]; then
+    echo "error: \`$script.lock\` doesn't exist: run \`uv lock --script $script\`" >&2
+    exit 2
+fi
+if [ -e "$dir/helper" ]; then exec sh "$dir/helper"; fi
+sdk=$(dirname "$(readlink --canonicalize "$0")")/modal-sdk
+FAKE_MODAL_DIR=$dir exec python3 -I -B -c '
+import runpy, sys
+sys.path.insert(0, sys.argv[1])
+sys.argv = sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+' "$sdk" "$script"

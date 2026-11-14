@@ -2,7 +2,8 @@
 //! request with frames of its choosing, ops and model requests among them, waiting where it
 //! chooses for an op's reply or a model response's end, for a while or for the gateway to hang
 //! up, and then ends the session: it sends what a buggy `sandboxd` might. Other fakes open their
-//! sessions with first frames of their own. An accept that is stopped takes no connection.
+//! sessions with first frames of their own. An accept that is stopped takes no connection. A
+//! dialer's fakes listen behind the stand-in TLS edge.
 
 #![expect(
     clippy::unwrap_used,
@@ -12,7 +13,7 @@
 
 use std::cell::Cell;
 use std::io::{Read as _, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
@@ -25,17 +26,17 @@ use std::{fs, panic};
 
 use expect_test::{Expect, expect};
 use gateway::{
-    Arrival, GatewayAddress, GrantListener, IncomingModelRequest, IncomingOp, Process, Put,
+    Arrival, Dialer, GatewayAddress, GrantListener, IncomingModelRequest, IncomingOp, Process, Put,
     Registration, Session, Sockets,
 };
 use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
 use schema::sandbox::op::{OpReply, OpsReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    HELLO_TIMEOUT, Hello, HelloReply, Launch, MAX_HELLO_BYTES, MAX_MODEL_REQUEST_BYTES,
-    MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, PROTOCOL_VERSION,
-    REGISTRATION_GRANT_BYTES, RegistrationGrant, RelativePath, SOCKET_NAME, SocketDial, TcpDial,
-    ToSandbox, file_mode, frame,
+    Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Launch, Listening, MAX_HELLO_BYTES,
+    MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit,
+    PROTOCOL_VERSION, REGISTRATION_GRANT_BYTES, RegistrationGrant, RelativePath, SOCKET_NAME,
+    SocketDial, TcpDial, ToSandbox, file_mode, frame,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -165,7 +166,11 @@ fn connect(
         frame::write(&mut connection, &hello(None), &[]).unwrap();
         let reply = frame::read::<HelloReply>(&mut connection).unwrap();
         let reply = reply.map(|(reply, _)| reply);
-        assert_eq!(reply, Some(HelloReply::Accepted), "the answer to the hello");
+        assert_eq!(
+            reply,
+            Some(HelloReply::Accepted { grant: None }),
+            "the answer to the hello"
+        );
         // The gateway sends no request if it ends the session first.
         let Some((request, _)) = frame::read::<ToSandbox>(&mut connection).unwrap() else {
             return Vec::new();
@@ -1843,4 +1848,116 @@ fn registrations() {
             one past the hellos read at once: heard none
             101 hellos, each in turn: {"message":"the hello presents no registration grant: expected the one the gateway issued for the sandbox, at an address that several sandboxes share","type":"refused"}"#]],
     );
+}
+
+#[test]
+fn dials() {
+    check(
+        |_| {
+            let dialer = Dialer::new(test_support::edge::client());
+            let issue = || {
+                let (Listening { grant }, unreached) = dialer.issue().unwrap();
+                (grant, unreached)
+            };
+            let accepted = |registration: Registration, by, stopped: bool| {
+                let (sender, _) = mpsc::channel();
+                let session = registration.accept(by, None, false, sender, |a| a, || stopped);
+                session
+                    .map(drop)
+                    .map_err(|error| format!("{:?}: {error}", error.kind()))
+            };
+            let (grant, unreached) = issue();
+            let (port, sandbox) = listening(true, json!(hello(None)));
+            let session = accepted(unreached.at(endpoint(port)), hung(), false);
+            let heard = sandbox.join().unwrap();
+            let presented = heard == Some(HelloReply::Accepted { grant: Some(grant) });
+            let mut lines = vec![format!(
+                "a sandbox that listens once a dial has failed: {session:?}; it heard its grant: \
+                 {presented}"
+            )];
+            let grant = Some(RegistrationGrant::from([7; 16]));
+            let later = json!({ "version": PROTOCOL_VERSION + 1 });
+            for (case, hello) in [("with a grant", json!(hello(grant))), ("later", later)] {
+                let (_, unreached) = issue();
+                let (port, sandbox) = listening(false, hello);
+                let session = accepted(unreached.at(endpoint(port)), hung(), false);
+                let heard = sandbox.join().unwrap();
+                lines.push(format!("a hello {case}: {session:?}; it heard {heard:?}"));
+            }
+            let closed = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let (_, unreached) = issue();
+            let at = Deadline::after(Duration::from_millis(300));
+            let session = accepted(unreached.at(endpoint(closed)), at, false);
+            let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
+            lines.push(format!("nothing listening: {session:?}"));
+            lines.push(format!(
+                "a certificate the dialer doesn't trust: {}",
+                untrusted()
+            ));
+            let (_, unreached) = issue();
+            let session = accepted(unreached.at(endpoint(closed)), hung(), true);
+            let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
+            lines.push(format!("stopped: {session:?}"));
+            lines
+        },
+        &expect![[r#"
+            a sandbox that listens once a dial has failed: Ok(()); it heard its grant: true
+            a hello with a grant: Err("InvalidData: the gateway refused the session: the hello presents a registration grant where the gateway dialed the sandbox, which its endpoint identifies: expected none there"); it heard Some(Refused { message: "the hello presents a registration grant where the gateway dialed the sandbox, which its endpoint identifies: expected none there" })
+            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
+            nothing listening: Err("TimedOut: the gateway didn't reach the sandbox at localhost:$PORT by the deadline: its last dial failed: dialing localhost:$PORT failed: Connection refused (os error 111): expected its sandboxd to listen there while the deadline lasts")
+            a certificate the dialer doesn't trust: Err("InvalidData: the gateway can't trust the sandbox's endpoint localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `localhost`, with a certificate trusted for it"); Err(InvalidData)
+            stopped: Err("Other: the accept was stopped before the gateway reached the sandbox at localhost:$PORT: expected its sandboxd to listen there before the stop")"#]],
+    );
+}
+
+/// How a dialer that trusts Web PKI's roots fares, dialing the stand-in edge, whose certificate
+/// is from a root of its own: what the accept returns, within a deadline that a dial refused at
+/// once keeps far from, and a second dial would not, as it waits a second first; then what the
+/// edge's TLS returns.
+fn untrusted() -> String {
+    let (_, unreached) = Dialer::new(tls::Client::web_pki()).issue().unwrap();
+    let edge = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = edge.local_addr().unwrap().port();
+    let shown = thread::spawn(move || {
+        let (stream, _) = edge.accept().unwrap();
+        let shown = test_support::edge::server().accept(stream, hung());
+        shown.map(drop).map_err(|error| error.kind())
+    });
+    let (sender, _) = mpsc::channel();
+    let by = Deadline::after(Duration::from_millis(900));
+    let registration = unreached.at(endpoint(port));
+    let session = registration.accept(by, None, false, sender, |a| a, || false);
+    let session = session.map(drop).map_err(|error| {
+        format!("{:?}: {error}", error.kind()).replace(&port.to_string(), "$PORT")
+    });
+    format!("{session:?}; {:?}", shown.join().unwrap())
+}
+
+/// The stand-in edge's endpoint at `port`.
+fn endpoint(port: u16) -> Endpoint {
+    Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap()
+}
+
+/// A fake sandbox that listens behind the stand-in edge, at the port it returns: it closes the
+/// first connection it takes at once if `closes_first`, then over the next says `hello`, and
+/// hears the gateway's answer, which its thread returns.
+fn listening(closes_first: bool, hello: Value) -> (u16, JoinHandle<Option<HelloReply>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let sandbox = thread::spawn(move || {
+        if closes_first {
+            drop(listener.accept().unwrap());
+        }
+        let (stream, _) = listener.accept().unwrap();
+        let stream = test_support::edge::server().accept(stream, hung()).unwrap();
+        frame::write(&mut &stream, &hello, &[]).unwrap();
+        frame::read::<HelloReply>(&mut &stream)
+            .unwrap()
+            .map(|(answer, _)| answer)
+    });
+    (port, sandbox)
 }

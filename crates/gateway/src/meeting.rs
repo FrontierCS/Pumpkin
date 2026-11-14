@@ -2,14 +2,15 @@
 //!
 //! A sandbox meets the gateway where its [`Registration`] says: at a socket of its own, which
 //! only it can reach, in its run's [`Sockets`], or at its run's TCP address, a
-//! [`GrantListener`], where the grant its hello presents tells it apart. Either way, the
-//! registration accepts the [`Session`] the sandbox opens with its hello.
+//! [`GrantListener`], where the grant its hello presents tells it apart; or the gateway dials it,
+//! at the endpoint its provider gives, through a [`Dialer`]. Either way, the registration
+//! accepts the [`Session`] the sandbox opens with its hello.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
@@ -21,8 +22,8 @@ use std::time::Duration;
 
 use schema::ir::{GpuModel, Name};
 use schema::sandbox::{
-    Hello, HelloReply, OpPayloadLimit, REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME,
-    SocketDial, TcpDial, frame,
+    Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Listening, OpPayloadLimit,
+    REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial, TcpDial, frame,
 };
 use stdx::Deadline;
 
@@ -38,6 +39,17 @@ const RANDOM: &str = "/dev/urandom";
 /// How long a wait sleeps between its looks: a registration's accept for its sandbox, a hello's
 /// read for its bytes, and a [`GrantListener`] for a connection, or its own drop.
 const POLL: Duration = Duration::from_millis(10);
+
+/// How long a [`Dialer`] waits before it dials a sandbox again, at first; each wait doubles the
+/// last, up to [`REDIAL_MOST`].
+// As gRPC's connection backoff starts (`doc/connection-backoff.md`, INITIAL_BACKOFF): a sandbox's
+// `sandboxd` listens seconds after its create, and the provider's edge may refuse a dial until
+// then.
+const REDIAL_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest a [`Dialer`] waits before it dials a sandbox again.
+// Shorter than gRPC's 120 s, as a start's window is minutes, of which a wait spends little.
+const REDIAL_MOST: Duration = Duration::from_secs(15);
 
 /// The most connections whose hellos a [`GrantListener`] reads at once.
 // Each of a run's sandboxes dials once, and says hello as it connects, so a run needs far fewer.
@@ -184,8 +196,8 @@ struct Met {
 
 impl GrantListener {
     /// Listens at `address`, taking connections on a thread of its own until it drops, and gives
-    /// each `hello_timeout` from when it takes it to say its hello
-    /// ([`HELLO_TIMEOUT`](schema::sandbox::HELLO_TIMEOUT) is the protocol's).
+    /// each `hello_timeout` from when it takes it to say its hello ([`HELLO_TIMEOUT`] is the
+    /// protocol's).
     ///
     /// # Errors
     ///
@@ -359,6 +371,194 @@ fn present(
     Err((met.connection, refused(message)))
 }
 
+/// Where the gateway dials the sandboxes that listen ([`Listening`]), each at the endpoint its
+/// create gives, over TLS with its client, which checks the endpoint's certificate.
+///
+/// A registration's accept dials until its deadline, as often as a dial fails, so a slow start, or
+/// a slow link, makes the accept wait, and only the deadline fails it, saying why the last dial
+/// failed. TLS that the client refuses, as a certificate it doesn't trust for the endpoint's name,
+/// and a hello that the gateway refuses, fail it at once.
+// Each dial waits within `HELLO_TIMEOUT` for its connection, its TLS and its hello, then the next
+// waits a second, then twice the last wait, at most `REDIAL_MOST`. A stop is heeded between a
+// dial's steps, its lookup of the name, which the resolver's own timeouts bound, each connection,
+// and its TLS, and as it waits for the hello.
+#[derive(Debug)]
+pub struct Dialer {
+    client: tls::Client,
+}
+
+impl Dialer {
+    pub fn new(client: tls::Client) -> Self {
+        Self { client }
+    }
+
+    /// Issues a sandbox a grant, of random bytes from the kernel, as the [`Listening`] its
+    /// `sandboxd` listens for, and what makes, of the endpoint its create gives, the registration
+    /// that accepts its session.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the kernel's random source can't be read.
+    pub fn issue(&self) -> io::Result<(Listening, Unreached)> {
+        let grant = random_grant()?;
+        let unreached = Unreached {
+            client: self.client.clone(),
+            grant: grant.clone(),
+        };
+        Ok((Listening { grant }, unreached))
+    }
+}
+
+/// A grant that a [`Dialer`] issued, for a sandbox whose create is yet to give its endpoint.
+#[derive(Debug)]
+pub struct Unreached {
+    client: tls::Client,
+    grant: RegistrationGrant,
+}
+
+impl Unreached {
+    /// The registration that dials the sandbox at `endpoint`, and presents the grant there.
+    pub fn at(self, endpoint: Endpoint) -> Registration {
+        let Self { client, grant } = self;
+        Registration {
+            meeting: Meeting::Dial(Dialed {
+                client,
+                grant,
+                endpoint,
+            }),
+        }
+    }
+}
+
+/// A [`Dialer`]'s registration of one sandbox: where it dials it, and the grant it presents.
+#[derive(Debug)]
+struct Dialed {
+    client: tls::Client,
+    grant: RegistrationGrant,
+    endpoint: Endpoint,
+}
+
+/// What a stopped [`Dialed`] expected of its sandbox.
+const LISTENING: &str = "its sandboxd to listen there";
+
+impl Dialed {
+    /// What a stopped dial awaited.
+    fn awaited(&self) -> impl fmt::Display {
+        format!("the gateway reached the sandbox at {}", self.endpoint)
+    }
+
+    /// Dials the sandbox until `by`, or until `stopped` returns true, as [`Dialer`] says, and
+    /// reads its hello: one that presents no grant, as the endpoint identifies the sandbox.
+    fn connected(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
+        let endpoint = &self.endpoint;
+        let late = |failed: &dyn fmt::Display| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "the gateway didn't reach the sandbox at {endpoint} by the deadline: \
+                     {failed}: expected its sandboxd to listen there while the deadline lasts"
+                ),
+            )
+        };
+        let mut wait = REDIAL_FIRST;
+        let mut failed = None;
+        loop {
+            unstopped(stopped, self.awaited(), LISTENING)?;
+            let Some(left) = by.remaining() else {
+                return Err(match failed {
+                    Some(error) => late(&format_args!("its last dial failed: {error}")),
+                    None => late(&"it passed before the first dial"),
+                });
+            };
+            match self.dial(Deadline::after(left.min(HELLO_TIMEOUT)), stopped) {
+                Ok(met) => return Ok(met),
+                Err(DialError::Again(error)) => failed = Some(error),
+                Err(DialError::Never(error)) => return Err(error),
+            }
+            // Waited out in looks, so that a stop is heeded within one, and none outlasts `by`.
+            let until = Deadline::after(wait);
+            while until.remaining().is_some() && by.remaining().is_some() {
+                unstopped(stopped, self.awaited(), LISTENING)?;
+                thread::sleep(POLL);
+            }
+            wait = (wait * 2).min(REDIAL_MOST);
+        }
+    }
+
+    /// Dials the sandbox once, by `by`, and reads its hello, until then too.
+    fn dial(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> Result<Met, DialError> {
+        let endpoint = &self.endpoint;
+        let stream = self.connect(by, stopped)?;
+        unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
+        let secured = self.client.connect(stream, endpoint.host(), by);
+        let connection = match secured {
+            Ok(stream) => Connection::Tls(stream),
+            // TLS that isn't what the client trusts, which another dial would meet again.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                let what =
+                    format_args!("the gateway can't trust the sandbox's endpoint {endpoint}");
+                return Err(DialError::Never(context(what, &error)));
+            }
+            Err(error) => return Err(DialError::Again(error)),
+        };
+        match read_hello(&connection, by, stopped) {
+            Ok(Hello { grant: None, gpus }) => Ok(Met { connection, gpus }),
+            Ok(Hello { grant: Some(_), .. }) => {
+                let message = "the hello presents a registration grant where the gateway dialed \
+                               the sandbox, which its endpoint identifies: expected none there";
+                let error = io::Error::new(io::ErrorKind::InvalidData, message);
+                Err(DialError::Never(refuse(&connection, by, error)))
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                Err(DialError::Never(refuse(&connection, by, error)))
+            }
+            // A stop among them, which the next look heeds.
+            Err(error) => Err(DialError::Again(error)),
+        }
+    }
+
+    /// The TCP connection to the endpoint, made by `by`, with its options set.
+    fn connect(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> Result<TcpStream, DialError> {
+        let endpoint = &self.endpoint;
+        let dialing = format_args!("dialing {endpoint} failed");
+        // The resolver's own timeouts and attempts (`resolv.conf(5)`) bound the lookup.
+        let addresses = (endpoint.host(), endpoint.port())
+            .to_socket_addrs()
+            .map_err(|error| DialError::Again(context(dialing, &error)))?;
+        let mut failed = io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{endpoint} names no address: expected its name to resolve"),
+        );
+        for address in addresses {
+            unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
+            let Some(left) = by.remaining() else {
+                break;
+            };
+            match TcpStream::connect_timeout(&address, left) {
+                Ok(stream) => {
+                    stdx::net::set_options(&stream).map_err(|error| {
+                        DialError::Never(context(
+                            "the connection's TCP options can't be set",
+                            &error,
+                        ))
+                    })?;
+                    return Ok(stream);
+                }
+                Err(error) => failed = context(dialing, &error),
+            }
+        }
+        Err(DialError::Again(failed))
+    }
+}
+
+/// Why a [`Dialed`]'s dial failed.
+enum DialError {
+    /// Why this dial failed, which another may not.
+    Again(io::Error),
+    /// Why the session can't open, which no other dial changes: the stop among them.
+    Never(io::Error),
+}
+
 /// A grant of random bytes from the kernel.
 fn random_grant() -> io::Result<RegistrationGrant> {
     let mut bytes = [0; REGISTRATION_GRANT_BYTES];
@@ -376,9 +576,10 @@ fn random_grant() -> io::Result<RegistrationGrant> {
 
 /// Where one sandbox meets the gateway, and the accept of the session it opens there.
 ///
-/// [`Sockets::issue`] and [`GrantListener::issue`] issue it. The sandbox meets the gateway as it
-/// connects to its socket, or as its hello presents its grant. Dropping the registration ends the
-/// meeting: it removes the socket, or ends the grant, closing any connection that presented it.
+/// [`Sockets::issue`] and [`GrantListener::issue`] issue it, and [`Unreached::at`] makes it. The
+/// sandbox meets the gateway as it connects to its socket, as its hello presents its grant, or as
+/// the gateway dials it. Dropping the registration ends the meeting: it removes the socket, or
+/// ends the grant, closing any connection that presented it.
 #[derive(Debug)]
 pub struct Registration {
     meeting: Meeting,
@@ -389,6 +590,7 @@ pub struct Registration {
 enum Meeting {
     Socket(Listener),
     Grant(Granted),
+    Dial(Dialed),
 }
 
 impl Registration {
@@ -410,11 +612,12 @@ impl Registration {
         wrap: impl Fn(Arrival) -> T + Send + 'static,
         stopped: impl Fn() -> bool,
     ) -> io::Result<Session> {
-        let Met { connection, gpus } = match self.meeting {
-            Meeting::Socket(listener) => listener.connected(by, &stopped)?,
-            Meeting::Grant(granted) => granted.presented(by, &stopped)?,
+        let (Met { connection, gpus }, grant) = match self.meeting {
+            Meeting::Socket(listener) => (listener.connected(by, &stopped)?, None),
+            Meeting::Grant(granted) => (granted.presented(by, &stopped)?, None),
+            Meeting::Dial(dialed) => (dialed.connected(by, &stopped)?, Some(dialed.grant)),
         };
-        welcome(&connection, by)?;
+        welcome(&connection, by, grant)?;
         // Unbounded, so the reader never waits on its owner; the protocol bounds what each
         // session leaves there: the op in flight, the model requests in flight, at most
         // `MAX_MODEL_REQUESTS_IN_FLIGHT` of them, the exit of each command the owner started, and
@@ -657,8 +860,12 @@ fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error 
 
 /// Accepts the session on `connection`, whose hello opens one, telling the sandbox so while `by`
 /// lasts.
-fn welcome(connection: &Connection, by: Deadline) -> io::Result<()> {
-    let accepted = HelloReply::Accepted;
+fn welcome(
+    connection: &Connection,
+    by: Deadline,
+    grant: Option<RegistrationGrant>,
+) -> io::Result<()> {
+    let accepted = HelloReply::Accepted { grant };
     frame::write(&mut Until { connection, by }, &accepted, &[]).map_err(|error| {
         if !passed(&error) {
             return context("the answer to the sandbox's hello can't be sent", &error);

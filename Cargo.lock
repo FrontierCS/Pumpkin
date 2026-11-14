@@ -248,6 +248,7 @@ dependencies = [
  "stdx",
  "tempfile",
  "test-support",
+ "tls",
 ]
 
 [[package]]
@@ -346,6 +347,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "modal"
+version = "0.0.0"
+dependencies = [
+ "aws",
+ "engine",
+ "expect-test",
+ "gateway",
+ "provider",
+ "schema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stdx",
+ "tempfile",
+ "test-support",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,6 +408,7 @@ dependencies = [
  "gateway",
  "lang",
  "libc",
+ "modal",
  "provider",
  "recipe",
  "route",
@@ -400,6 +420,7 @@ dependencies = [
  "stdx",
  "tempfile",
  "test-support",
+ "tls",
  "toml",
 ]
 
@@ -464,6 +485,7 @@ dependencies = [
  "stdx",
  "tempfile",
  "test-support",
+ "tls",
 ]
 
 [[package]]
@@ -655,10 +677,24 @@ dependencies = [
  "expect-test",
  "gateway",
  "provider",
+ "rustls",
  "schema",
  "serde_json",
  "stdx",
  "tempfile",
+ "tls",
+]
+
+[[package]]
+name = "tls"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "rustix",
+ "rustls",
+ "stdx",
+ "test-support",
+ "webpki-roots",
 ]
 
 [[package]]

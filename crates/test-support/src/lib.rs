@@ -4,9 +4,10 @@
 //! consoles ([`sandboxes`]); a directory's listing ([`files`]); for the tests that need Docker or
 //! the static `sandboxd`, the engine they reach ([`docker`]), the pinned image they build on
 //! ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]); stand-ins for the `aws` and `docker` command
-//! lines ([`aws`], [`stand_in_docker`]) and for the commands an EC2 instance's boot runs
-//! ([`instance`]); the start that an EC2 sandbox's user data holds ([`start_of`]); and a stand-in
-//! HTTP server's end of a connection ([`http`]).
+//! lines ([`aws`], [`stand_in_docker`]), for the commands an EC2 instance's boot runs
+//! ([`instance`]), and for `uv` with Modal's SDK ([`uv`]); the start that an EC2 sandbox's user
+//! data holds ([`start_of`]); a stand-in for a provider's TLS edge ([`edge`]); and a stand-in HTTP
+//! server's end of a connection ([`http`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -27,6 +28,7 @@ use schema::sandbox::command_stdout;
 use stdx::Deadline;
 use stdx::process::Environment;
 
+pub mod edge;
 pub mod http;
 pub mod suite;
 
@@ -193,6 +195,15 @@ pub fn start_of(user_data: &str) -> Option<Start> {
 /// [`aws`]'s, through a link to it, named `docker`, in a directory of the test's own.
 pub fn stand_in_docker() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/docker")
+}
+
+/// The stand-in for `uv`, which runs the Modal provider's helper on a stand-in for Modal's SDK
+/// that reaches nothing.
+///
+/// What it records, and how a test changes what it does, its header says; a test finds it on
+/// `PATH` beside [`aws`]'s, through a link to it, named `uv`, in a directory of the test's own.
+pub fn uv() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/uv")
 }
 
 /// The static `sandboxd` that `PUMPKIN_SANDBOXD` names, by its canonical path.
