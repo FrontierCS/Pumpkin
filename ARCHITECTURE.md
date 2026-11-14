@@ -11,8 +11,8 @@ data, JSON in Pumpkin's IR: its roles, one agent and its judges; the grants each
 agent's judge calls and one submission; the model route of the agent, if it has one; and the
 score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a judge's
 afresh for each call, whose supervisor, `sandboxd`, meets the host, dialing it, and serves one
-session: the host puts and collects files, starts commands and freezes the sandbox, and code in
-the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
+session: the host puts and collects files, starts and kills commands and freezes the sandbox, and
+code in the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
 driver's decision core decides what a run does, and a provider, such as Docker's, makes sandboxes.
 The session is the boundary that matters most: a sandbox may be buggy, and the agent is
 opportunistic and goal-directed, using whatever it can reach to finish its task or raise its
@@ -40,8 +40,11 @@ the IR, as a task repository's Rust factories do.
 Each crate depends only on crates above it, but `test-support`, which only tests use.
 **Architecture Invariant** callouts often name absences.
 
-**`crates/stdx`.** What `std` lacks and several crates share, such as `Context` for errors.
+**`crates/stdx`.** What `std` lacks and several crates share, such as `Context` for errors, and
+the signals a process notes rather than acts on (`signal`).
 - **Architecture Invariant:** it knows nothing of Pumpkin: it depends on no Pumpkin crate.
+- **Architecture Invariant:** it holds the workspace's one `unsafe`, the `sigaction` that
+  `signal::catch` makes: the workspace denies `unsafe_code`, and that function alone expects it.
 
 **`crates/test-support`.** What the tests of more than one crate share, such as the conformance
 suite every provider passes (`suite`), a complete workflow (`WORKFLOW`), and what the tests that
@@ -86,8 +89,8 @@ provider's sandbox is one.
   and on no provider.
 - **Architecture Invariant:** production code reaches Docker only through it, whose `docker` runs
   against the named context alone, so the operator's choice of engine holds. Tests run `docker`
-  directly only to observe containers and images, pause containers, or build, tag and remove
-  images of their own.
+  directly only to observe containers and images, to create and pause containers of their own, or
+  to build, tag and remove images of their own.
 
 **`crates/gateway`.** The host's end of sessions: where a sandbox meets the gateway (`meeting`), a
 `Registration` that its run's `Sockets` issues, makes the sandbox's `Session`, whose one owner moves
@@ -112,8 +115,8 @@ the model endpoint, `ctl` is `sandboxctl`, and `sys` holds the system calls `std
 
 **`crates/provider`.** `Provider`, a run's one handle on a provider for every side effect on it: it
 publishes what the run's sandboxes run, creates, lists and deletes them, and reads their consoles;
-and the values they take and give, such as `Create`. How a provider's sandboxes meet the gateway is
-its `Meeting`, each way of which holds the create, a `Creator`, that takes what that way gives a
+`Sweep`, the part of it that lists and deletes, which a reap needs alone; and the values they take
+and give, such as `Create`. How a provider's sandboxes meet the gateway is its `Meeting`, each way of which holds the create, a `Creator`, that takes what that way gives a
 sandbox: a socket's dial. A provider is `providers/<name>`, crate `<name>`, which holds its
 platform's calls, but those that a crate of its own holds for every provider that makes them, as
 `engine` does the operator's Docker engine's.
@@ -138,7 +141,8 @@ platform's calls, but those that a crate of its own holds for every provider tha
 **`providers/docker`.** `docker`, a sandbox as a container that needs no root to start, on the
 operator's engine: `Docker`, made from an `Engine`, is the `Provider` that makes each sandbox a
 container under the engine's `confinement`, once it has checked that the engine enforces each of
-a container's limits (`Docker::connect`).
+a container's limits (`Docker::connect`). For a reap, it reaches the engine without checking that
+it is fit to run on (`Docker::reach`), as `Reached`, which is only a `Sweep`.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
 
@@ -150,9 +154,9 @@ observes and returns the `Action`s the runtime is to perform, until one ends the
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
   decides when time ends the work phase or the run, the hard end included. The
   crate is `#![no_std]`, so it can name none of `std`'s files, network, processes, environment,
-  threads, clock or hashed collections, and the workspace forbids `unsafe`, which
-  `core::arch`'s clock needs. It depends on `schema` alone of Pumpkin's crates, through which the schema's I/O items
-  (`tree::Writer`, `frame` over `std::io`, and `PathBuf` paths) remain reachable.
+  threads, clock or hashed collections, and the workspace denies `unsafe`, which `core::arch`'s
+  clock needs. It depends on `schema` alone of Pumpkin's crates, through which the schema's I/O
+  items (`tree::Writer`, `frame` over `std::io`, and `PathBuf` paths) remain reachable.
 - **Architecture Invariant:** only the decision core authorizes ops: `sandboxd` carries any op any
   code in the sandbox makes, and the gateway bounds only what ops cost the host.
 - **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
@@ -184,6 +188,9 @@ the work phase ends (`model_requests_allowed`), or the provider refuses the rout
 - **Architecture Invariant:** a record appears in the runs directory only once its `driver.pid`
   is locked (`Lock`), and the lock is held until the run's last write, so a record is ended, live
   or lost, by `outcome.json` and then the lock, and a record without `driver.pid` is not one.
+  Only the lock's holder writes the record, and once it has let go only `Record::reap` does,
+  which records a lost run as failed, and appends each sandbox it removed, or found gone, to
+  `reaps.jsonl`, so that a reap is auditable from the record.
 - **Architecture Invariant:** a run takes its workflow placed (`Placed`), so each role fits the
   class of sandbox it is placed in, and each sandbox is given as long to start as its role's class
   takes.
@@ -191,9 +198,11 @@ the work phase ends (`model_requests_allowed`), or the provider refuses the rout
   provider's crate, not even in its tests, which run on the simulated provider (`Sim`), so a new
   provider changes no runtime code.
 - **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
-  the runtime reaches a run's provider only through `Sandboxes`; and a run's end deletes
-  whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
-  fails, but for one that a create that gave up makes only after that list (`Creator::create`).
+  the runtime calls a run's provider, but for what it declared (`Provider::ready`), only there:
+  through `Sandboxes` for a run, and for a reap through `Record::reap`, which only lists and
+  deletes (`Sweep`); and a run's end deletes whatever its provider still lists of the run, so a
+  run ends with none of its sandboxes left, or fails, but for one that a create that gave up makes
+  only after that list (`Creator::create`), which `Record::reap` deletes.
 
 **`crates/harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
@@ -204,7 +213,7 @@ directory the in-sandbox contract reserves for it, and each with an adapter, suc
   harness therefore reaches an agent alike whichever factory builds its image, and any factory,
   in this repository or outside it, may use it.
 - **Architecture Invariant:** what an adapter writes depends on its arguments alone: the crate is
-  `#![no_std]`, and the workspace forbids `unsafe`, so it can name no file, network, process,
+  `#![no_std]`, and the workspace denies `unsafe`, so it can name no file, network, process,
   environment, thread or clock, though `schema`'s I/O items stay reachable through it.
 
 **`crates/lang`.** Pumpkin's workflow language, a subset of Starlark: `evaluate` runs an entry
@@ -231,15 +240,21 @@ that names them. `run` starts the run of a task on that engine in a driver proce
 which it executes as itself, and returns once the run has started: the driver builds the task's
 images as `build` does, places the workflow's roles in the engine's classes before the record is
 begun, and hands `Run` the provider as a `Provider`, with the static `sandboxd` it has found
-(`Sandboxd`). `wait` follows a run's record (`Record`) to its end. It reads the machine's
-configuration (`config`, TOML): the Docker context, and the model upstreams that a workflow's
-model route may reach, of which it hands `Run` the one that serves the route (`Serving`).
+(`Sandboxd`). `wait` follows a run's record (`Record`) to its end, `cancel` stops a run, and
+`cancel` and `reap` remove what a run that has ended left (`Record::reap`), on each provider that
+its record names (`Reaching`); what a command says of an ending or a refusal ends with the
+commands to run next (`next`). It reads the machine's configuration (`config`, TOML): the Docker
+context, and the model upstreams that a workflow's model route may reach, of which it hands `Run`
+the one that serves the route (`Serving`).
 - **Architecture Invariant:** only `style` runs the formatter, buildifier, and Pumpkin's interface
   holds none of its flags or forms: each file's text goes to it, and `style` reads what it gives
   back, so another formatter can take its place.
 - **Architecture Invariant:** what a task's source names stays below its root on disk, as its
   labels keep it there in name: `Root`, the one `Loader`, reaches each file and directory that
   an evaluation or its images name from the root, and refuses a symbolic link on the way.
+- **Architecture Invariant:** each `pumpkin` process adds 022 to its umask first (`main`), so
+  nothing it makes, a run's record included, is writable by another user, whatever the
+  operator's umask.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
 the check that the repository's `.star` files are formatted in `star`, and with `--docker` the tests

@@ -1,8 +1,10 @@
 //! What the tests of more than one of Pumpkin's crates share: the conformance suite every
-//! provider passes ([`suite`]); a complete workflow ([`WORKFLOW`]); a directory's listing
-//! ([`files`]); for the tests that need Docker or the static `sandboxd`, the engine they reach
-//! ([`docker`]), the pinned image they build on ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]);
-//! and a stand-in HTTP server's end of a connection ([`http`]).
+//! provider passes ([`suite`]); a complete workflow ([`WORKFLOW`]), and what a run's record holds
+//! of its commands' standard output ([`standard_outputs`]) and of its sandboxes, with their
+//! consoles ([`sandboxes`]); a directory's listing ([`files`]); for the tests that need Docker or
+//! the static `sandboxd`, the engine they reach ([`docker`]), the pinned image they build on
+//! ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]); and a stand-in HTTP server's end of a
+//! connection ([`http`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -11,13 +13,14 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use std::{fs, io, iter};
 
+use schema::sandbox::command_stdout;
 use stdx::Deadline;
 use stdx::process::Environment;
 
@@ -120,4 +123,69 @@ pub fn sandboxd() -> PathBuf {
         );
     };
     PathBuf::from(sandboxd).canonicalize().unwrap()
+}
+
+/// The standard output that `record`, a run's record, holds of the agent's command and of each
+/// judge call's, in the order of the jobs' numbers, each after a line that says whose it is.
+///
+/// # Panics
+///
+/// Panics if a job's directory isn't named by its number, or an output can't be read as UTF-8.
+pub fn standard_outputs(record: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (whose, dir) in sandbox_dirs(record) {
+        let stdout = record.join(dir).join(command_stdout().as_str());
+        if let Ok(stdout) = fs::read_to_string(stdout) {
+            lines.push(format!("{whose} standard output:"));
+            lines.extend(stdout.lines().map(str::to_owned));
+        }
+    }
+    lines
+}
+
+/// What `record`, a run's record, keeps of each sandbox, the agent's and each judge call's.
+///
+/// Its `sandbox.json`, on one line, and its console, unless empty, each after whose it is.
+///
+/// # Panics
+///
+/// Panics if a job's directory isn't named by its number, a console can't be read as UTF-8, or
+/// a `sandbox.json` can't be read as JSON.
+pub fn sandboxes(record: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (whose, dir) in sandbox_dirs(record) {
+        let sandbox = fs::read(record.join(&dir).join("sandbox.json"));
+        match sandbox {
+            Ok(sandbox) => {
+                let sandbox: serde_json::Value = serde_json::from_slice(&sandbox).unwrap();
+                lines.push(format!("{whose} sandbox, {dir}/sandbox.json: {sandbox}"));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("{dir}/sandbox.json can't be read: {error}"),
+        }
+        let console = fs::read_to_string(record.join(&dir).join("console.txt"));
+        match console {
+            Ok(console) if console.is_empty() => {}
+            Ok(console) => lines.push(format!("{whose} console, {dir}/console.txt: {console:?}")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("{dir}/console.txt can't be read: {error}"),
+        }
+    }
+    lines
+}
+
+/// Who each sandbox's directory in `record`, a run's record, is of, and the directory, below
+/// `record`: the agent's, then each job's, in the order of their numbers.
+fn sandbox_dirs(record: &Path) -> impl Iterator<Item = (String, String)> {
+    let numbered = |kind: &'static str, whose: &'static str| {
+        let entries = fs::read_dir(record.join(kind)).into_iter().flatten();
+        let number = |entry: fs::DirEntry| entry.file_name().into_string().unwrap().parse();
+        let mut numbers: Vec<u64> = entries
+            .map(|entry| number(entry.unwrap()).unwrap())
+            .collect();
+        numbers.sort_unstable();
+        (numbers.into_iter()).map(move |n| (format!("{whose} {n}'s"), format!("{kind}/{n}")))
+    };
+    let agent = ("the agent's".to_owned(), "agent".to_owned());
+    iter::once(agent).chain(numbered("jobs", "job"))
 }

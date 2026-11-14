@@ -13,7 +13,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, RunTag,
-    SandboxId, SandboxdRef,
+    SandboxId, SandboxdRef, Sweep,
 };
 use schema::ir::{AbsolutePath, Image, Name, Resources, Sha256Digest};
 use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
@@ -51,7 +51,7 @@ pub(crate) const HUNG: &str = "/sim/hung";
 /// The path of a `sandboxd`, or an [`image`]'s name, that never dials, as [`MUTE`]'s.
 ///
 /// The provider frees its sandbox once its `sandboxd` has ended, so the run's list leaves it out,
-/// as [`Provider::list`] lets such a provider.
+/// as [`Sweep::list`] lets such a provider.
 pub(crate) const VANISHING: &str = "/sim/vanishing";
 
 /// The path of a `sandboxd`, or an [`image`]'s name, that hangs without dialing, as
@@ -198,6 +198,9 @@ struct State {
     modes: Vec<u32>,
     /// Whether each create asked for the model endpoint, in the order of the creates.
     models: Vec<bool>,
+    /// What each publish that succeeded published, `sandboxd` or an image, in the order of the
+    /// publishes.
+    published: Vec<String>,
 }
 
 struct Sandbox {
@@ -293,6 +296,7 @@ impl Sim {
                 deleting: 0,
                 modes: Vec::new(),
                 models: Vec::new(),
+                published: Vec::new(),
             })),
             journal: None,
         }
@@ -328,6 +332,12 @@ impl Sim {
     /// Whether each create asked for the model endpoint, in the order of the creates.
     pub(crate) fn models(&self) -> Vec<bool> {
         self.state().models.clone()
+    }
+
+    /// What each publish that succeeded published, in the order of the publishes: `sandboxd`, as
+    /// `sandboxd <path>`, or an image, as `image <digest>`.
+    pub(crate) fn published(&self) -> Vec<String> {
+        self.state().published.clone()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -372,11 +382,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
     }
 }
 
-impl Provider for Sim {
-    fn ready(&self) -> &Ready {
-        &self.ready
-    }
-
+impl Sweep for Sim {
     fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
         let (mut deleted, mut failures) = (Vec::new(), Vec::new());
         let mut state = self.state();
@@ -464,6 +470,12 @@ impl Provider for Sim {
         }
         Ok(listed)
     }
+}
+
+impl Provider for Sim {
+    fn ready(&self) -> &Ready {
+        &self.ready
+    }
 
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
         if *image == self::image(UNPUBLISHED) {
@@ -471,6 +483,7 @@ impl Provider for Sim {
                 "{image} can't be published by the simulated provider: name another image"
             ));
         }
+        self.state().published.push(format!("image {image}"));
         Ok(ImageRef::from(format!("{}:{image}", self.platform)))
     }
 
@@ -481,6 +494,7 @@ impl Provider for Sim {
             ));
         }
         let path = path.display();
+        self.state().published.push(format!("sandboxd {path}"));
         Ok(SandboxdRef::from(format!("{}:{path}", self.platform)))
     }
 
@@ -572,6 +586,7 @@ impl Sim {
         }
         Ok(Created {
             id: SandboxId::from(id),
+            report: Value::Null,
         })
     }
 
@@ -1378,9 +1393,15 @@ fn collect(
 
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more, serving the model endpoint if `model`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm for each request of the protocol"
+)]
 fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let (mut caller, mut files, mut result) = (None::<Caller>, Files::default(), None);
+    // The commands that run until the sandbox is frozen, or a kill ends them, by stream.
+    let mut running = BTreeSet::new();
     // The stream of a freeze that waits for a model response to end.
     let mut freezing = None;
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
@@ -1419,8 +1440,22 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
                         let payload = files.by_path.get(&launch.argv.args()[0]);
                         result = judge(payload, stream, &mut replies, shared);
                     }
-                    _ => {}
+                    _ => {
+                        running.insert(stream);
+                    }
                 }
+            }
+            // As signal 9 kills it.
+            ToSandbox::Kill { stream, command } => {
+                if running.remove(&command) {
+                    let status = ExitStatus::Signal(9);
+                    let exited = FromSandbox::Exited {
+                        stream: command,
+                        status,
+                    };
+                    replies.push((exited, Vec::new()));
+                }
+                replies.push((FromSandbox::Done { stream }, Vec::new()));
             }
             ToSandbox::Collect { stream, dir } => {
                 let stdout = caller.as_ref().map_or("", |caller| &caller.stdout);

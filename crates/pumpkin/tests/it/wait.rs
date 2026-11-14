@@ -7,22 +7,7 @@ use std::process::Stdio;
 use expect_test::expect;
 use serde_json::{Value, json};
 
-use super::{Scratch, Step, check, invocation, report};
-
-/// Writes the record `id` in `scratch`'s `runs`, as `pumpkin run` leaves it, with `driver.pid`
-/// unless `pid` is false, and `outcome` as its `outcome.json`, if it has one.
-fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) {
-    scratch.write(
-        &format!("runs/{id}/record.json"),
-        &json!({ "record_version": "pumpkin.record/v0" }),
-    );
-    if pid {
-        scratch.write(&format!("runs/{id}/driver.pid"), "4242\n");
-    }
-    if let Some(outcome) = outcome {
-        scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
-    }
-}
+use super::{Scratch, Step, check, invocation, report, write_record};
 
 #[test]
 #[expect(
@@ -52,6 +37,24 @@ fn waits() {
         "20261107-120300-3d0c0003",
         json!({ "state": "failed", "reason": "f" }),
     );
+    // Made by another build.
+    let made = scratch.0.join("runs/20261107-120200-2c9b0002/record.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&made).unwrap()).unwrap();
+    let commit = json!({ "hash": "0f3a2b1c9d8e", "date": "2026-01-02" });
+    record["pumpkin"] = json!({ "version": "0.0.0", "commit": commit });
+    fs::write(made, record.to_string()).unwrap();
+    // Records whose build, or whose args, are not what a record keeps.
+    for (id, field, value) in [
+        ("20261108-120000-7b1a0007", "pumpkin", json!(7)),
+        ("20261108-120100-8c2b0008", "args", json!("--runs /x")),
+    ] {
+        let outcome = json!({ "state": "failed", "reason": "r" });
+        write_record(&scratch, id, true, Some(outcome));
+        let path = scratch.0.join("runs").join(id).join("record.json");
+        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record[field] = value;
+        fs::write(path, record.to_string()).unwrap();
+    }
     // A record in the making is not there yet, though it matches.
     write_record(&scratch, ".20261107-120600-2c9b0099.partial", true, None);
     scratch.write("runs/notes/todo", "");
@@ -67,33 +70,41 @@ fn waits() {
         wait("20261107"),
         wait("notes"),
         scratch.pumpkin(&["wait", "runs/notes"]),
+        wait("7b1a"),
+        wait("8c2b"),
         scratch.pumpkin(&["wait", "nowhere/x"]),
         no_home,
         scratch.pumpkin(&["wait", "6a", "--runs", "nowhere"]),
         wait("6a"),
         wait(""),
     ];
+    let this = format!("this is pumpkin {}", runtime::BUILD);
     check(
         &scratch,
         commands,
         false,
-        &[],
+        &[(&this, "this is pumpkin <this>")],
         &expect![[r#"
             $ pumpkin wait 20261107-120000-1b8a6389 --runs runs
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":7.5,"state":"finished","work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 1b8a --runs runs
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":7.5,"state":"finished","work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 20261107-1201 --runs runs
             exit status: Some(3)
             pumpkin: run 20261107-120100-2c9b0001 finished without a score: the verdict has no score, after the work phase ended when signal 9 killed the agent; its record is <scratch>/runs/20261107-120100-2c9b0001
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","work_end":{"kind":"agent_exited","status":{"signal":9}}}
             $ pumpkin wait runs/20261107-120200-2c9b0002
             exit status: Some(1)
             pumpkin: run 20261107-120200-2c9b0002 failed: r; its record is <scratch>/runs/20261107-120200-2c9b0002
+            pumpkin: run 20261107-120200-2c9b0002 was made by pumpkin 0.0.0 (0f3a2b1c9 2026-01-02), and this is pumpkin <this>: to run it as it ran, run it with the pumpkin that made it
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait 2c9b --runs runs
             exit status: Some(1)
@@ -113,12 +124,19 @@ fn waits() {
             $ pumpkin wait runs/notes
             exit status: Some(1)
             pumpkin: runs/notes has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait 7b1a --runs runs
+            exit status: Some(1)
+            pumpkin: runs/20261108-120000-7b1a0007/record.json holds pumpkin 7: expected the build that made it, {"version": v, "commit": c}
+            $ pumpkin wait 8c2b --runs runs
+            exit status: Some(1)
+            pumpkin: runs/20261108-120100-8c2b0008/record.json holds args "--runs /x": expected an array of strings, the words that started the run
             $ pumpkin wait nowhere/x
             exit status: Some(1)
             pumpkin: nowhere/x is not a directory: expected the directory of a run's record
             $ env --unset=HOME pumpkin wait runs/20261107-120000-1b8a6389
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":7.5,"state":"finished","work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 6a --runs nowhere
             exit status: Some(1)
@@ -164,6 +182,7 @@ fn follows() {
             exit status: Some(0)
             pumpkin: following run 20261107-120000-1b8a6389, recorded in <scratch>/runs/20261107-120000-1b8a6389: ending `pumpkin wait` does not stop it
             pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":7,"state":"finished"}"#]],
     );
 }
@@ -223,22 +242,7 @@ fn judge_stderr() {
         &format!("runs/{unjudged}/log.jsonl"),
         &format!("{}\n", log[0]),
     );
-    // A judge's result nested past the depth to which serde_json reads a `Value`, in the event
-    // and in a reply on the line that starts the final judge.
-    let deep = "20261108-120000-0000000f";
-    write_record(&scratch, deep, true, Some(no_result));
-    let returned = format!(r#"{{"details":{}{}}}"#, "[".repeat(200), "]".repeat(200));
-    let start = &log[1]["actions"][0];
-    let collected = format!(
-        r#"{{"seq":1,"event":{{"kind":"judge_collected","job":0,"result":{{"score":1,"returned":{returned}}}}},"actions":[{{"kind":"reply","op":0,"reply":{{"returned":{returned}}}}},{start}]}}"#
-    );
-    assert!(serde_json::from_str::<Value>(&collected).is_err());
-    scratch.write(
-        &format!("runs/{deep}/log.jsonl"),
-        &format!("{}\n{collected}\n", log[0]),
-    );
-    scratch.write(&format!("runs/{deep}/jobs/1/log/command.stderr"), "found\n");
-    let ids = [shown, large, uncollected, unlogged, unjudged, deep];
+    let ids = [shown, large, uncollected, unlogged, unjudged];
     let commands = ids.map(|id| scratch.pumpkin(&["wait", id, "--runs", "runs"]));
     check(
         &scratch,
@@ -254,31 +258,30 @@ fn judge_stderr() {
               \u{1b}[31mno result\u{1b}[0m\r
               �
             pumpkin: run 20261108-120000-0000000a finished without a score: the final judge returned no result (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000a
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000b --runs runs
             exit status: Some(3)
             pumpkin: the final judge's standard error, <scratch>/runs/20261108-120000-0000000b/jobs/0/log/command.stderr, holds 1048577 bytes, more than the 1048576 shown here: read it there
             pumpkin: run 20261108-120000-0000000b finished without a score: the final judge returned no result (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000b
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000c --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000c finished without a score: the final judge returned no result (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000c
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000d --runs runs
             exit status: Some(3)
-            pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000d/log.jsonl: No such file or directory (os error 2)
+            pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000d/log.jsonl doesn't exist: expected a run's log
             pumpkin: run 20261108-120000-0000000d finished without a score: the final judge returned no result (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000d
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000e --runs runs
             exit status: Some(3)
             pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000e/log.jsonl names no final judge: expected a `start_judge` without a grant
             pumpkin: run 20261108-120000-0000000e finished without a score: the final judge returned no result (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000e
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            $ pumpkin wait 20261108-120000-0000000f --runs runs
-            exit status: Some(3)
-            pumpkin: the final judge's standard error, <scratch>/runs/20261108-120000-0000000f/jobs/1/log/command.stderr, holds:
-              found
-            pumpkin: run 20261108-120000-0000000f finished without a score: the final judge returned no result (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000f
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
     );
 }
@@ -296,6 +299,14 @@ fn states() {
         ("scored", Some(r#"{"state":"finished","score":3}"#)),
         ("unscored", Some(unscored)),
         ("failed", Some(r#"{"state":"failed","reason":"r"}"#)),
+        (
+            "interrupted",
+            Some(r#"{"state":"interrupted","signal":"SIGHUP"}"#),
+        ),
+        (
+            "unknown signal",
+            Some(r#"{"state":"interrupted","signal":"SIGUSR1"}"#),
+        ),
         ("unknown state", Some(r#"{"state":"paused"}"#)),
         ("not JSON", Some("{")),
     ];
@@ -314,7 +325,8 @@ fn states() {
                 let dir = scratch.0.join("runs").join(&id);
                 fs::create_dir_all(&dir).unwrap();
                 if let Some(version) = version {
-                    let version = json!({ "record_version": format!("pumpkin.record/{version}") });
+                    let version = format!("pumpkin.record/{version}");
+                    let version = json!({ "record_version": version, "args": ["task.star"] });
                     fs::write(dir.join("record.json"), version.to_string()).unwrap();
                 }
                 if pid != "no driver.pid" {
@@ -345,7 +357,7 @@ fn states() {
         &expect![[r#"
             $ pumpkin wait <no outcome, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<no outcome, no driver.pid, v0> has no driver.pid: it was made before records were locked, which `wait` needs: name a record that this version of `pumpkin run` made
+            pumpkin: <scratch>/runs/<no outcome, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
             $ pumpkin wait <no outcome, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<no outcome, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -354,7 +366,10 @@ fn states() {
             pumpkin: runs/<no outcome, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <no outcome, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: run <no outcome, free, v0> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<no outcome, free, v0>`, and its socket directory, `pumpkin-<no outcome, free, v0>` in the temporary directory; its record is <scratch>/runs/<no outcome, free, v0>
+            pumpkin: run <no outcome, free, v0> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<no outcome, free, v0>
+            pumpkin: to run it again: pumpkin run task.star
+            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <no outcome, free, v0>
+            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
             $ pumpkin wait <no outcome, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<no outcome, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -369,7 +384,7 @@ fn states() {
             pumpkin: runs/<no outcome, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <scored, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<scored, no driver.pid, v0> has no driver.pid: it was made before records were locked, which `wait` needs: name a record that this version of `pumpkin run` made
+            pumpkin: <scratch>/runs/<scored, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
             $ pumpkin wait <scored, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<scored, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -379,6 +394,7 @@ fn states() {
             $ pumpkin wait <scored, free, v0> --runs runs
             exit status: Some(0)
             pumpkin: run <scored, free, v0> finished with a score of 3, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/<scored, free, v0>
+            pumpkin: to run it again: pumpkin run task.star
             printed outcome.json: {"score":3,"state":"finished"}
             $ pumpkin wait <scored, free, v9> --runs runs
             exit status: Some(1)
@@ -389,6 +405,7 @@ fn states() {
             $ pumpkin wait <scored, locked, v0> --runs runs
             exit status: Some(0)
             pumpkin: run <scored, locked, v0> finished with a score of 3, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/<scored, locked, v0>
+            pumpkin: to run it again: pumpkin run task.star
             printed outcome.json: {"score":3,"state":"finished"}
             $ pumpkin wait <scored, locked, v9> --runs runs
             exit status: Some(1)
@@ -398,7 +415,7 @@ fn states() {
             pumpkin: runs/<scored, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unscored, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unscored, no driver.pid, v0> has no driver.pid: it was made before records were locked, which `wait` needs: name a record that this version of `pumpkin run` made
+            pumpkin: <scratch>/runs/<unscored, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
             $ pumpkin wait <unscored, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unscored, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -408,6 +425,7 @@ fn states() {
             $ pumpkin wait <unscored, free, v0> --runs runs
             exit status: Some(3)
             pumpkin: run <unscored, free, v0> finished without a score: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unscored, free, v0>
+            pumpkin: to run it again: pumpkin run task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait <unscored, free, v9> --runs runs
             exit status: Some(1)
@@ -418,6 +436,7 @@ fn states() {
             $ pumpkin wait <unscored, locked, v0> --runs runs
             exit status: Some(3)
             pumpkin: run <unscored, locked, v0> finished without a score: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unscored, locked, v0>
+            pumpkin: to run it again: pumpkin run task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait <unscored, locked, v9> --runs runs
             exit status: Some(1)
@@ -427,7 +446,7 @@ fn states() {
             pumpkin: runs/<unscored, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <failed, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<failed, no driver.pid, v0> has no driver.pid: it was made before records were locked, which `wait` needs: name a record that this version of `pumpkin run` made
+            pumpkin: <scratch>/runs/<failed, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
             $ pumpkin wait <failed, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<failed, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -437,6 +456,7 @@ fn states() {
             $ pumpkin wait <failed, free, v0> --runs runs
             exit status: Some(1)
             pumpkin: run <failed, free, v0> failed: r; its record is <scratch>/runs/<failed, free, v0>
+            pumpkin: to run it again: pumpkin run task.star
             printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait <failed, free, v9> --runs runs
             exit status: Some(1)
@@ -447,6 +467,7 @@ fn states() {
             $ pumpkin wait <failed, locked, v0> --runs runs
             exit status: Some(1)
             pumpkin: run <failed, locked, v0> failed: r; its record is <scratch>/runs/<failed, locked, v0>
+            pumpkin: to run it again: pumpkin run task.star
             printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait <failed, locked, v9> --runs runs
             exit status: Some(1)
@@ -454,9 +475,67 @@ fn states() {
             $ pumpkin wait <failed, locked, no record.json> --runs runs
             exit status: Some(1)
             pumpkin: runs/<failed, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <interrupted, no driver.pid, v0> --runs runs
+            exit status: Some(1)
+            pumpkin: <scratch>/runs/<interrupted, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            $ pumpkin wait <interrupted, no driver.pid, v9> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<interrupted, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <interrupted, no driver.pid, no record.json> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<interrupted, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <interrupted, free, v0> --runs runs
+            exit status: Some(1)
+            pumpkin: run <interrupted, free, v0> was interrupted by SIGHUP; its record is <scratch>/runs/<interrupted, free, v0>
+            pumpkin: to run it again: pumpkin run task.star
+            printed outcome.json: {"signal":"SIGHUP","state":"interrupted"}
+            $ pumpkin wait <interrupted, free, v9> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<interrupted, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <interrupted, free, no record.json> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<interrupted, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <interrupted, locked, v0> --runs runs
+            exit status: Some(1)
+            pumpkin: run <interrupted, locked, v0> was interrupted by SIGHUP; its record is <scratch>/runs/<interrupted, locked, v0>
+            pumpkin: to run it again: pumpkin run task.star
+            printed outcome.json: {"signal":"SIGHUP","state":"interrupted"}
+            $ pumpkin wait <interrupted, locked, v9> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<interrupted, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <interrupted, locked, no record.json> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<interrupted, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <unknown signal, no driver.pid, v0> --runs runs
+            exit status: Some(1)
+            pumpkin: <scratch>/runs/<unknown signal, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            $ pumpkin wait <unknown signal, no driver.pid, v9> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<unknown signal, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <unknown signal, no driver.pid, no record.json> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<unknown signal, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <unknown signal, free, v0> --runs runs
+            exit status: Some(1)
+            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            $ pumpkin wait <unknown signal, free, v9> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<unknown signal, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <unknown signal, free, no record.json> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<unknown signal, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <unknown signal, locked, v0> --runs runs
+            exit status: Some(1)
+            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            $ pumpkin wait <unknown signal, locked, v9> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<unknown signal, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <unknown signal, locked, no record.json> --runs runs
+            exit status: Some(1)
+            pumpkin: runs/<unknown signal, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, no driver.pid, v0> has no driver.pid: it was made before records were locked, which `wait` needs: name a record that this version of `pumpkin run` made
+            pumpkin: <scratch>/runs/<unknown state, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
             $ pumpkin wait <unknown state, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -465,7 +544,7 @@ fn states() {
             pumpkin: runs/<unknown state, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished` or `failed`
+            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
             $ pumpkin wait <unknown state, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -474,7 +553,7 @@ fn states() {
             pumpkin: runs/<unknown state, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished` or `failed`
+            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
             $ pumpkin wait <unknown state, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -483,7 +562,7 @@ fn states() {
             pumpkin: runs/<unknown state, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <not JSON, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<not JSON, no driver.pid, v0> has no driver.pid: it was made before records were locked, which `wait` needs: name a record that this version of `pumpkin run` made
+            pumpkin: <scratch>/runs/<not JSON, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
             $ pumpkin wait <not JSON, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<not JSON, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads

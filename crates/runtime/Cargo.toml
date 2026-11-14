@@ -14,6 +14,7 @@ decision = { path = "../decision" }
 gateway = { path = "../gateway" }
 provider = { path = "../provider" }
 route = { path = "../route" }
+rustix = { workspace = true, features = ["process"] }
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
 serde.workspace = true

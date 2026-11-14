@@ -1,6 +1,6 @@
 //! The simulated provider ([`Sim`]) against the suite every provider passes
 //! ([`test_support::suite`]): as it is, and as a provider that frees an ended sandbox itself, whose
-//! outcomes are the same, as `Provider::list` allows it.
+//! outcomes are the same, as `Sweep::list` allows it.
 
 use std::path::{Path, PathBuf};
 

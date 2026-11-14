@@ -305,6 +305,7 @@ fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
         | ToSandbox::Data { .. }
         | ToSandbox::End { .. }
         | ToSandbox::Start { .. }
+        | ToSandbox::Kill { .. }
         | ToSandbox::Freeze { .. }
         | ToSandbox::Collect { .. } => None,
     }
@@ -359,6 +360,7 @@ fn stream_of(request: &ToSandbox) -> Option<u32> {
         | ToSandbox::Data { stream }
         | ToSandbox::End { stream }
         | ToSandbox::Start { stream, .. }
+        | ToSandbox::Kill { stream, .. }
         | ToSandbox::Freeze { stream }
         | ToSandbox::Collect { stream, .. } => Some(stream),
         ToSandbox::OpReply { .. }

@@ -346,7 +346,8 @@ fn tasks() {
                 1  The task has problems, each said at its place; or another error.
                 2  A usage error.
               Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-              why. On success, `check` prints nothing.
+              why, and an exit of 1 then with the command that checks the task again, its
+              entry's path made absolute. On success, `check` prints nothing.
 
               A problem is said at its file's path below the root, its line and its column,
               then its source line, with carets under what it is about; a recipe's, at the
@@ -390,6 +391,7 @@ fn tasks() {
                   |                            ^
                 the IR's /roles/0/needs/cpu_millis
             pumpkin: tasks/broken/task.star: the task has 3 problems
+            pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/broken/task.star
             $ pumpkin check tasks/bench/task.star --arg mdoel=model-a
             exit status: Some(1)
             lib/bench.star:5:9: `--arg model` is required, as this `arg()` gives it no default: give it as `--arg model=<value>`
@@ -397,17 +399,20 @@ fn tasks() {
                   |         ^^^^^^^^^^^^^^^^^
                 `--arg mdoel` is given, and no `arg()` call before this one declares it
             pumpkin: tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg mdoel=model-a <scratch>/tasks/bench/task.star
             $ pumpkin check tasks/bench/task.star --arg model=model-a --arg deadline=1h
             exit status: Some(1)
             lib/bench.star:7:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
                 7 | DEADLINE = arg("deadline", int, default = 5 * 3600)
                   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
             pumpkin: tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg deadline=1h --arg model=model-a <scratch>/tasks/bench/task.star
             $ pumpkin check tasks/bench/task.star --arg model=model-a --arg mdoel=x --arg effrot=low
             exit status: Some(1)
             tasks/bench/task.star: `--arg effrot` is declared by no `arg()` call: give one of `deadline`, `effort`, `model`, `train_timeout`
             tasks/bench/task.star: `--arg mdoel` is declared by no `arg()` call: give one of `deadline`, `effort`, `model`, `train_timeout`
             pumpkin: tasks/bench/task.star: the task has 2 problems
+            pumpkin: to check it again: pumpkin check --arg effrot=low --arg mdoel=x --arg model=model-a <scratch>/tasks/bench/task.star
             $ pumpkin check tasks/bench/task.star --arg model=model-a --arg=a=1 --arg=b=1 --arg=c=1 --arg=d=1 --arg=e=1 --arg=f=1 --arg=g=1 --arg=h=1 --arg=i=1 --arg=j=1 --arg=k=1 --arg=l=1 --arg=m=1 --arg=n=1 --arg=o=1 --arg=p=1 --arg=q=1 --arg=r=1 --arg=s=1 --arg=t=1 --arg=u=1
             exit status: Some(1)
             tasks/bench/task.star: `--arg a` is declared by no `arg()` call: give one of `deadline`, `effort`, `model`, `train_timeout`
@@ -432,6 +437,7 @@ fn tasks() {
             tasks/bench/task.star: `--arg t` is declared by no `arg()` call: give one of `deadline`, `effort`, `model`, `train_timeout`
             and 1 more problem: fix these first, then run again
             pumpkin: tasks/bench/task.star: the task has 21 problems
+            pumpkin: to check it again: pumpkin check --arg a=1 --arg b=1 --arg c=1 --arg d=1 --arg e=1 --arg f=1 --arg g=1 --arg h=1 --arg i=1 --arg j=1 --arg k=1 --arg l=1 --arg m=1 --arg model=model-a --arg n=1 --arg o=1 --arg p=1 --arg q=1 --arg r=1 --arg s=1 --arg t=1 --arg u=1 <scratch>/tasks/bench/task.star
             $ pumpkin check
             exit status: Some(2)
             error: the following required arguments were not provided:
@@ -445,7 +451,7 @@ fn tasks() {
             pumpkin: to read how to use it: pumpkin help check
             $ pumpkin check tasks/�/task.star --arg model=�
             exit status: Some(2)
-            error: invalid value 'tasks/�/task.star' for '<entry>': it isn't UTF-8: name one that is
+            error: invalid value 'tasks/�/task.star' for '<entry>': it isn't UTF-8, as the commands that `pumpkin` says to run next name it: name one that is
             pumpkin: to read how to use it: pumpkin help check"#]],
     );
 }
@@ -513,7 +519,8 @@ def _helper():
             lib/bench.star:140:1: this is bound, but never used: use it, or drop it
                 140 | def _helper():
                     | ^^^^^^^^^^^^^^
-            pumpkin: tasks/bench/task.star: the task has 9 problems"#]],
+            pumpkin: tasks/bench/task.star: the task has 9 problems
+            pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/bench/task.star"#]],
     );
 }
 
@@ -546,13 +553,15 @@ fn variants() {
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/bench/task.star:5:1
             pumpkin: tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg base=busybox:1.37 --arg model=m <scratch>/tasks/bench/task.star
             $ pumpkin check tasks/bench/task.star --arg model=m --arg toolchain=rust
             exit status: Some(1)
             lib/bench.star:82:17: tasks/bench/toolchain/Dockerfile: the build's target, `rust`, names no stage of the recipe: name one that a `FROM <image> AS <name>` begins
                 82 |     toolchain = image("toolchain/Dockerfile", target = TOOLCHAIN)
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/bench/task.star:5:1
-            pumpkin: tasks/bench/task.star: the task has 1 problem"#]],
+            pumpkin: tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m --arg toolchain=rust <scratch>/tasks/bench/task.star"#]],
     );
 }
 
@@ -674,6 +683,7 @@ fn roots() {
                 3 | load("//escape/bench.star", "bench_task")
                   |      ^^^^^^^^^^^^^^^^^^^^^
             pumpkin: repo/tasks/loads/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/loads/task.star
             $ pumpkin check repo/tasks/linked/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:78:19: `tasks/linked/agent` is a symbolic link, which could lead out of the root: put what it links to there instead
@@ -686,6 +696,7 @@ fn roots() {
                 in `_judge()`, called at lib/bench.star:80:9
                 in `bench_task()`, called at tasks/linked/task.star:5:1
             pumpkin: repo/tasks/linked/task.star: the task has 2 problems
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/linked/task.star
             $ pumpkin check repo/tasks/mounted/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:31:18: shared/judge.Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
@@ -694,6 +705,7 @@ fn roots() {
                 in `_judge()`, called at lib/bench.star:80:9
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
             pumpkin: repo/tasks/mounted/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/mounted/task.star
             $ pumpkin check unshared/tasks/mounted/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:78:19: `shared` is a symbolic link, which could lead out of the root: put what it links to there instead
@@ -706,25 +718,31 @@ fn roots() {
                 in `_judge()`, called at lib/bench.star:80:9
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
             pumpkin: unshared/tasks/mounted/task.star: the task has 2 problems
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/unshared/tasks/mounted/task.star
             $ pumpkin check repo/tasks/none.star --arg=model=m
             exit status: Some(1)
             tasks/none.star: `tasks/none.star` doesn't exist: name a regular file below the root that does
             pumpkin: repo/tasks/none.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/none.star
             $ pumpkin check repo/tasks/marked/task.star --arg=model=m
             exit status: Some(1)
             tasks/marked/task.star:1:6: loading `//lib/dir.star`: `lib/dir.star` is no regular file: name a regular file below the root
                 1 | load("//lib/dir.star", "x")
                   |      ^^^^^^^^^^^^^^^^
             pumpkin: repo/tasks/marked/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/marked/task.star
             $ pumpkin check repo/tasks/my task/task.star --arg=model=m
             exit status: Some(1)
             pumpkin: repo/tasks/my task/task.star: the entry, below the root <scratch>/repo: `//tasks/my task/task.star` is no label: after `//`, write `/`-separated components of ASCII letters, digits, `.`, `_` and `-`, none of them empty, `.` or `..`
+            pumpkin: to check it again: pumpkin check --arg model=m '<scratch>/repo/tasks/my task/task.star'
             $ pumpkin check outside/task.star --arg=model=m
             exit status: Some(1)
             pumpkin: outside/task.star: no directory at or above <scratch>/outside holds `PUMPKIN.star`: put one at the root of the task's repository, where its `//` labels start
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/outside/task.star
             $ pumpkin check newer/task.star --arg=model=m
             exit status: Some(1)
             pumpkin: newer/task.star: <scratch>/newer/PUMPKIN.star:3:3: this pumpkin reads only comments in `PUMPKIN.star`: the repository may need a newer pumpkin
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/newer/task.star
             $ pumpkin check nested/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:31:18: sub/Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
@@ -733,14 +751,17 @@ fn roots() {
                 in `_judge()`, called at lib/bench.star:80:9
                 in `bench_task()`, called at tasks/bench/task.star:5:1
             pumpkin: nested/tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/nested/tasks/bench/task.star
             $ pumpkin check outer/inner/task.star --arg=model=m
             exit status: Some(1)
             task.star:3:6: loading `//lib/bench.star`: `lib/bench.star` doesn't exist: name a regular file below the root that does
                 3 | load("//lib/bench.star", "bench_task")
                   |      ^^^^^^^^^^^^^^^^^^
             pumpkin: outer/inner/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/outer/inner/task.star
             $ pumpkin check linkmark/task.star --arg=model=m
             exit status: Some(1)
-            pumpkin: linkmark/task.star: <scratch>/linkmark/PUMPKIN.star: `PUMPKIN.star` is a symbolic link, which could lead out of the root: put what it links to there instead"#]],
+            pumpkin: linkmark/task.star: <scratch>/linkmark/PUMPKIN.star: `PUMPKIN.star` is a symbolic link, which could lead out of the root: put what it links to there instead
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/linkmark/task.star"#]],
     );
 }

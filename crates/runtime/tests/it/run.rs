@@ -18,7 +18,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use expect_test::{Expect, expect};
 use provider::{Provider, Ready};
 use route::{Key, Serving, Upstream, UpstreamUrl};
-use runtime::{Run, System};
+use runtime::{Record, Recorded, Run, System, new_id};
 use schema::ir::{self, ModelName, Name};
 use schema::workflow::{Placed, Workflow};
 use serde_json::Value;
@@ -56,18 +56,20 @@ impl Drop for Runs {
 }
 
 /// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its
-/// own, with an upstream that serves each model it names, if it names any, and checks what
-/// becomes of each: whether the run is prepared, named by its id, or how it is refused; and its
-/// record, if it has one: its name, its files, and what they hold, with the build it names shown
-/// as `<this build>`. Each is [placed](placed) on the simulated provider.
+/// own, with an upstream that serves each model it names, if it names any, as started with the
+/// args `--config /pumpkin.toml`, and checks what becomes of each: whether the run is prepared,
+/// named by its id, or how it is refused; and its record, if it has one: its name, its files,
+/// and what they hold, with the build it names shown as `<this build>` if it is this one, as
+/// [`Record::other_build`] says. Each is [placed](placed) on the simulated provider.
 fn check(
     cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
     expect: &Expect,
 ) {
     let runs = Runs::new("prepare");
+    let args = ["--config".to_owned(), "/pumpkin.toml".to_owned()];
     let mut lines = Vec::new();
     for (index, (seconds, value, served)) in cases.into_iter().enumerate() {
-        let ir: ir::Workflow = serde_json::from_value(value.clone()).unwrap();
+        let ir: ir::Workflow = serde_json::from_value(value).unwrap();
         let dir = runs.dir.join(index.to_string());
         let from_epoch = Duration::from_secs(seconds.unsigned_abs());
         let now = if seconds < 0 {
@@ -76,9 +78,12 @@ fn check(
             UNIX_EPOCH + from_epoch
         };
         let url = "http://127.0.0.1:9/responses";
-        let serving = served.map(|models| serving(&runs.dir, url, models));
-        let prepared = placed(&ir, Sim::new().ready())
-            .and_then(|placed| Run::prepare(&System, placed, &dir, now, serving));
+        let prepared = new_id(now).and_then(|id| {
+            let placed = placed(&ir, Sim::new().ready())?;
+            let serving = served.map(|models| serving(&runs.dir, url, models));
+            let recorded = Recorded { args: &args };
+            Run::prepare(&System, placed, &dir, id, serving, recorded)
+        });
         let record = fs::read_dir(&dir)
             .ok()
             .and_then(|mut entries| entries.next());
@@ -86,7 +91,7 @@ fn check(
             let made = dir.exists();
             lines.push(format!(
                 "refused: {}; runs directory made: {made}",
-                prepared.unwrap_err()
+                prepared.err().unwrap()
             ));
             continue;
         };
@@ -106,13 +111,14 @@ fn check(
         }
         let files = files(&record).join(", ");
         lines.push(format!("{}: {files}", id_form(name)));
-        let kept: Value =
-            serde_json::from_slice(&fs::read(record.join("ir.json")).unwrap()).unwrap();
-        lines.push(format!("ir.json is the IR: {}", kept == value));
+        let kept = fs::read_to_string(record.join("ir.json")).unwrap();
+        let encoded = Workflow::parse(&ir).map(|workflow| runtime::ir_json(&workflow));
+        lines.push(format!("ir.json is the IR: {}", encoded.ok() == Some(kept)));
         let version = fs::read_to_string(record.join("record.json")).unwrap();
         let mut version: Value = serde_json::from_str(&version).unwrap();
-        // Each record here is this build's, which names the commit it was built from.
-        version["pumpkin"] = "<this build>".into();
+        if Record::open(&record).unwrap().other_build().is_none() {
+            version["pumpkin"] = "<this build>".into();
+        }
         lines.push(format!("record.json: {version}"));
         let outcome = record.join("outcome.json");
         if outcome.exists() {
@@ -122,6 +128,9 @@ fn check(
     }
     expect.assert_eq(&lines.join("\n"));
 }
+
+/// The name of the one provider that a test's run is executed on.
+pub(crate) const PROVIDER: &str = "simulated";
 
 /// `ir`, parsed and placed in the classes that a provider that declares `ready` offers.
 pub(crate) fn placed(ir: &ir::Workflow, ready: &Ready) -> Result<Placed, String> {
@@ -208,7 +217,7 @@ fn prepare() {
             driver.pid holds this process's id: true
             20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
-            record.json: {"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
+            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one; runs directory made: false
             refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows; runs directory made: false
             prepared, named by its id: true
@@ -216,13 +225,13 @@ fn prepare() {
             driver.pid holds this process's id: true
             20251231-235959-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
-            record.json: {"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
+            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
             21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
-            record.json: {"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
+            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false"#]],
     );
 }
@@ -237,4 +246,23 @@ fn id_form(id: &str) -> String {
 /// Pretty-printed JSON on one line.
 pub(crate) fn compact(json: &str) -> String {
     serde_json::from_str::<Value>(json).unwrap().to_string()
+}
+
+/// `outcome`, an `outcome.json`, compact, with the times of its usage, how long its sandboxes
+/// lasted and were charged for, and busy, which a run on the system's clock takes as it goes, as
+/// `<ns>`.
+pub(crate) fn compact_outcome(outcome: &str) -> String {
+    let mut outcome: Value = serde_json::from_str(outcome).unwrap();
+    if let Some(usage) = outcome.get_mut("usage") {
+        usage["ran_ns"] = "<ns>".into();
+        for sandboxes in usage["sandboxes"].as_array_mut().unwrap() {
+            sandboxes["lasted_ns"] = "<ns>".into();
+            for key in ["charged_ns", "busy_ns"] {
+                if let Some(time) = sandboxes.get_mut(key) {
+                    *time = "<ns>".into();
+                }
+            }
+        }
+    }
+    outcome.to_string()
 }

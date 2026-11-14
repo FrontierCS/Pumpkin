@@ -177,6 +177,17 @@ impl Engine {
         Ok(Self { report })
     }
 
+    /// Reaches the engine through `context`, as [`connect`](Self::connect) does, but checks
+    /// nothing of it, for a caller that only lists and removes containers.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the context can't be read, or the engine can't be reached through it, saying
+    /// what to do.
+    pub fn reach(context: &ContextName) -> Result<(), String> {
+        reach(context).map(drop)
+    }
+
     /// The engine, as it was when [`connect`](Self::connect) reached it.
     pub fn report(&self) -> &Report {
         &self.report

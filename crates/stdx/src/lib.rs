@@ -6,6 +6,7 @@ use std::sync::LockResult;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod process;
+pub mod signal;
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
 ///
@@ -97,5 +98,89 @@ impl Deadline {
         };
         let now = Instant::now();
         (now < at).then(|| at.duration_since(now))
+    }
+}
+
+/// A time in UTC, to the second, in the proleptic Gregorian calendar, after the Unix epoch.
+///
+/// ```
+/// let shown = |seconds| stdx::Utc::from_unix(seconds).to_string();
+/// assert_eq!(shown(951_827_696), "2000-02-29T12:34:56");
+/// assert_eq!(shown(4_133_980_799), "2100-12-31T23:59:59");
+/// assert_eq!(stdx::Utc::from_unix(951_827_696).to_unix(), 951_827_696);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Utc {
+    pub year: u64,
+    pub month: u64,
+    pub day: u64,
+    pub hour: u64,
+    pub minute: u64,
+    pub second: u64,
+}
+
+impl Utc {
+    /// The time `seconds` after the Unix epoch.
+    pub fn from_unix(seconds: u64) -> Self {
+        let (days, time) = (seconds / 86_400, seconds % 86_400);
+        // Days to a civil date, after Howard Hinnant's `civil_from_days`, for days from 1970 on.
+        let shifted = days + 719_468;
+        let (era, day_of_era) = (shifted / 146_097, shifted % 146_097);
+        let year_of_era =
+            (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let month_from_march = (5 * day_of_year + 2) / 153;
+        let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+        let month = if month_from_march < 10 {
+            month_from_march + 3
+        } else {
+            month_from_march - 9
+        };
+        Self {
+            year: year_of_era + era * 400 + u64::from(month <= 2),
+            month,
+            day,
+            hour: time / 3600,
+            minute: time % 3600 / 60,
+            second: time % 60,
+        }
+    }
+
+    /// The seconds after the Unix epoch at this time, which is not before it.
+    pub fn to_unix(&self) -> u64 {
+        let Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } = *self;
+        // A civil date to days, after Howard Hinnant's `days_from_civil`, the inverse of the
+        // above.
+        let year = year - u64::from(month <= 2);
+        let (era, year_of_era) = (year / 400, year % 400);
+        let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * 146_097 + day_of_era - 719_468;
+        days * 86_400 + hour * 3600 + minute * 60 + second
+    }
+}
+
+/// As ISO 8601 writes it without its zone: `YYYY-MM-DDThh:mm:ss`.
+impl Display for Utc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } = self;
+        write!(
+            f,
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}"
+        )
     }
 }

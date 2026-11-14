@@ -13,10 +13,11 @@
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
-use rustix::process::{Pid, WaitOptions};
+use rustix::process::{Pid, Signal, WaitOptions};
 use stdx::Deadline;
 use stdx::process::Environment;
 
@@ -186,4 +187,26 @@ fn fed_unread() {
             exited with exit status: 4, after writing 0 bytes to its standard output and 0 to its standard error
             the processes it started: []"#]],
     );
+}
+
+#[test]
+fn caught() {
+    stdx::signal::catch(&[Signal::INT, Signal::TERM]).unwrap();
+    let mut shown = vec![format!("before: {:?}", stdx::signal::caught())];
+    rustix::process::kill_process(rustix::process::getpid(), Signal::TERM).unwrap();
+    // The signal may land on another of this process's threads, after `kill` returns.
+    let by = Instant::now() + Duration::from_secs(60);
+    while stdx::signal::caught().is_none() && Instant::now() < by {
+        thread::yield_now();
+    }
+    shown.push(format!("after SIGTERM: {:?}", stdx::signal::caught()));
+    shown.push(format!(
+        "SIGKILL: {}",
+        stdx::signal::catch(&[Signal::KILL]).unwrap_err()
+    ));
+    expect![[r#"
+        before: None
+        after SIGTERM: Some("Signal::TERM")
+        SIGKILL: Invalid argument (os error 22)"#]]
+    .assert_eq(&shown.join("\n"));
 }

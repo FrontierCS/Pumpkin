@@ -26,6 +26,7 @@ use schema::workflow::Judge;
 use stdx::Context;
 
 use super::host::deadline;
+use super::log::Entry;
 use super::sandbox::{PUMPKIN, Sandboxes, Which, collect, launch};
 use super::{Clock, Host, Inbox, Input};
 
@@ -45,7 +46,7 @@ pub(super) struct Call<'r, H: Host> {
     pub(super) hard_end: UnixTime,
     /// The call's directory in the record, `jobs/<n>`, which exists and is empty.
     pub(super) dir: PathBuf,
-    pub(super) sandboxes: &'r Sandboxes<'r>,
+    pub(super) sandboxes: &'r Sandboxes<'r, H>,
     pub(super) clock: H::Clock,
     /// What reaches the call's thread.
     pub(super) inbox: <H::Clock as Clock>::Inbox<Message>,
@@ -81,8 +82,6 @@ pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a call's time from its
     /// reports' times, which the loop's delays then don't lengthen.
     Event(Duration, Event),
-    /// A note for the run log alone.
-    Note(String),
     /// Why the call's sandbox couldn't be deleted, which fails the run.
     Undeleted(String),
 }
@@ -120,7 +119,12 @@ pub(super) fn run<H: Host>(call: &mut Call<'_, H>) {
         }
     };
     let last = judge(call, &mut sandbox.session);
-    match call.sandboxes.delete(sandbox) {
+    let (logged, deleted) = call.sandboxes.delete(sandbox);
+    for entry in logged {
+        // The loop's inbox outlives every call's thread, which the run's end waits for.
+        let _ = call.reports.send(Input::Logged(entry));
+    }
+    match deleted {
         Ok(()) => call.event(last),
         Err(error) => call.report(Report::Undeleted(error)),
     }
@@ -254,8 +258,10 @@ impl<H: Host> Call<'_, H> {
         self.report(Report::Event(self.clock.now(), event));
     }
 
+    /// Notes `note` in the run log.
     fn note(&self, note: String) {
-        self.report(Report::Note(note));
+        // The loop's inbox outlives every call's thread, which the run's end waits for.
+        let _ = (self.reports).send(Input::Logged(Entry::Note(note)));
     }
 
     fn report(&self, report: Report) {

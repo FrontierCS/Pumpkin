@@ -1,7 +1,7 @@
 //! The system calls the standard library doesn't offer, and the flags it doesn't name: waiting
-//! for any child or finding whether there is one, killing a process group or every process,
-//! making the process non-dumpable, opening only a regular file, at a path the role's code can
-//! write, and finding whether a connection's other end has closed it, without reading from it.
+//! for any child or finding whether there is one, killing every process, making the process
+//! non-dumpable, opening only a regular file, at a path the role's code can write, and finding
+//! whether a connection's other end has closed it, without reading from it.
 //!
 //! Every errno a call returns is the world's, and returned: the kernel's security policy, a
 //! security module's or a seccomp filter's, may fail any call with any errno.
@@ -53,24 +53,12 @@ pub(crate) fn reap() -> io::Result<Option<(i32, i32)>> {
     }
 }
 
-/// Kills the process group `group`, if any of it is left. Fails if this process may kill none
-/// of the group's processes.
-pub(crate) fn kill_group(group: i32) -> io::Result<()> {
-    let Some(group) = Pid::from_raw(group) else {
-        unreachable!(
-            "a command's process group is 0, though each is the process ID that starting the \
-             command gave, which is positive"
-        )
-    };
-    killed(process::kill_process_group(group, Signal::KILL))
-}
-
 /// Kills every other process in this one's PID namespace that it may signal, as the first
 /// process of its namespace, and skips the others: each that `/proc` lists. A process that
 /// another forks while `/proc` is read may be missed; freezing kills again each time a child is
-/// reaped ([`Commands::freeze`](crate::commands::Commands::freeze)). Where something other than the user's rights keeps it from
-/// killing a process, such as a security module's policy, it may fail. Every process is tried,
-/// and the first failure is returned.
+/// reaped ([`Commands::freeze`](crate::commands::Commands::freeze)). Where something other than
+/// the user's rights keeps it from killing a process, such as a security module's policy, it may
+/// fail. Every process is tried, and the first failure is returned.
 pub(crate) fn kill_all_others() -> io::Result<()> {
     let own = process::getpid();
     let mut outcome = Ok(());
@@ -81,12 +69,12 @@ pub(crate) fn kill_all_others() -> io::Result<()> {
         let Some(pid) = pid.and_then(Pid::from_raw).filter(|&pid| pid != own) else {
             continue;
         };
-        // One this process may not signal is skipped.
+        // One this process may not signal is skipped, as is one gone since `/proc` listed it.
         let killed = match process::kill_process(pid, Signal::KILL) {
-            Err(Errno::PERM) => Ok(()),
-            killed => killed,
+            Ok(()) | Err(Errno::PERM | Errno::SRCH) => Ok(()),
+            Err(error) => Err(error.into()),
         };
-        outcome = outcome.and(self::killed(killed));
+        outcome = outcome.and(killed);
     }
     outcome
 }
@@ -139,15 +127,5 @@ pub(crate) fn peer_closed(connection: &UnixStream) -> bool {
     match rustix::net::recv(connection, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
         Ok((read, _)) => read == 0,
         Err(error) => error != Errno::WOULDBLOCK,
-    }
-}
-
-/// The outcome of a kill that sent `SIGKILL` and ended with `result`: finding no process left
-/// to kill is no failure, and any other errno is the world's, as when the user may not kill a
-/// process, or a security module's policy forbids it.
-fn killed(result: rustix::io::Result<()>) -> io::Result<()> {
-    match result {
-        Ok(()) | Err(Errno::SRCH) => Ok(()),
-        Err(error) => Err(error.into()),
     }
 }

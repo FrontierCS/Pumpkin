@@ -427,6 +427,42 @@ fn freezing() {
 }
 
 #[test]
+fn killing() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
+            let group = sandbox.session.start(launch, hung()).unwrap();
+            let timeout = Duration::from_secs(10);
+            let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
+            sandbox.session.kill(group, hung()).unwrap();
+            let exited = sandbox.exit(group, timeout);
+            let left = processes(&sandbox.root, timeout, <[u32]>::is_empty);
+            let next = sandbox.session.start(sandbox.sh("true", &[]), hung());
+            let next = next.unwrap();
+            let next_exited = sandbox.exit(next, timeout);
+            let again = sandbox.session.kill(group, hung());
+            vec![
+                format!("running before the kill: {}", running.len()),
+                format!("exited when killed: {exited:?}"),
+                format!("left after it: {}", left.len()),
+                format!("the next command exited: {next_exited:?}"),
+                format!("killing it again: {again:?}"),
+            ]
+        },
+        &expect![[r#"
+            running before the kill: 3
+            exited when killed: Some(Signal(9))
+            left after it: 0
+            the next command exited: Some(Code(0))
+            killing it again: Ok(())
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
 fn full_sandbox() {
     check(
         Meeting::Socket,

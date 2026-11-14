@@ -448,7 +448,10 @@ pub enum ToSandbox {
     /// Starts a command in a process group of its own. `sandboxd` replies when it has
     /// started, and later sends [`FromSandbox::Exited`] on the same stream.
     Start { stream: u32, launch: Launch },
-
+    /// Kills the process group of the command started on stream `command`, if the command
+    /// still runs, and replies once it has signalled it; the command's exit follows on its own
+    /// stream. A process that left the group runs on until a freeze.
+    Kill { stream: u32, command: u32 },
     /// Kills every process in the sandbox but `sandboxd` and refuses to start more, so that
     /// what is collected afterwards can't change. `sandboxd` replies once they are gone.
     Freeze { stream: u32 },

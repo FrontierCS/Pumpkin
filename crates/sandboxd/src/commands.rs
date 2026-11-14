@@ -114,9 +114,25 @@ impl Commands {
         self.shared.sender.reply(stream, started)
     }
 
+    /// Kills the process group of the command started on stream `command`, if it still runs, so
+    /// that its exit follows as any other's; one that has exited, or never started, is left.
+    pub(crate) fn kill(&self, command: u32) -> Result<(), String> {
+        let state = self.shared.lock();
+        // Under the lock, the command's process is unreaped, so its group's ID is still its own.
+        let pid = state.running.iter().find(|(_, stream)| **stream == command);
+        let Some((&pid, _)) = pid else {
+            return Ok(());
+        };
+        stdx::process::kill_group(pid).context(format_args!(
+            "the command on stream {command} couldn't be killed"
+        ))
+    }
+
     /// Kills every process this sandboxd may kill, refuses further commands, and returns once
     /// no children are left. As a sandbox's first process, that means no process at all but
-    /// `sandboxd`: every other one descends from it.
+    /// `sandboxd`: every other one descends from it. Its time is quadratic in the sandbox's
+    /// processes, which the sandbox's process limit bounds, as it kills every process again each
+    /// time a child is reaped.
     pub(crate) fn freeze(&self) -> Result<(), String> {
         let mut state = self.shared.lock();
         state.frozen = true;
@@ -150,7 +166,7 @@ fn kill_everything(state: &State) -> io::Result<()> {
     if sys::is_first_process() {
         return sys::kill_all_others();
     }
-    let killed = state.running.keys().map(|&group| sys::kill_group(group));
+    let killed = state.running.keys().copied().map(stdx::process::kill_group);
     killed.fold(Ok(()), Result::and)
 }
 

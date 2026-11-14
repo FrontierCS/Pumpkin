@@ -44,11 +44,11 @@ fn files() {
             exit status: Some(1)
             pumpkin: lib/untidy.star: the file isn't formatted
             pumpkin: tasks/broken/task.star:2:4: the file isn't valid Starlark here, so it can't be formatted: make it valid Starlark
-            pumpkin: 2 files failed: fix them and run again
+            pumpkin: to format them: pumpkin fmt <scratch>/lib/untidy.star <scratch>/tasks/broken/task.star
             $ pumpkin fmt
             exit status: Some(1)
             pumpkin: tasks/broken/task.star:2:4: the file isn't valid Starlark here, so it can't be formatted: make it valid Starlark
-            pumpkin: 1 file failed: fix it and run again
+            pumpkin: to format it again: pumpkin fmt <scratch>/tasks/broken/task.star
             $ cat lib/untidy.star
             load("//lib/x.star", "x")
 

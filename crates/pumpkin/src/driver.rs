@@ -8,19 +8,22 @@
 //! reads the configuration and the upstream's key itself: the key never crosses argv, the
 //! environment or the pipe.
 //!
-//! The driver's standard output is a pipe to `run`, which carries at most two lines: the run's
-//! id once its record is locked ([`locked`]), then [`STARTED`] once the run has started
-//! ([`announce`]). Before the second, the driver withdraws the kernel's signal and leaves
-//! `run`'s session, so no signal aimed at `run` reaches a run that `run` says has started.
+//! The driver's first argument is `run`'s process ID, its second the run's id, which `run` mints
+//! ([`runtime::new_id`]), and the rest are `run`'s own: the driver also builds the task's images. Its standard output is a pipe
+//! to `run`, which carries at most two lines: the run's id once its record is locked
+//! ([`locked`]), then [`STARTED`] once the run has started ([`announce`]). Before the second,
+//! the driver withdraws the kernel's signal and leaves `run`'s session, so no signal aimed at
+//! `run` reaches a run that `run` says has started.
 
 use std::ffi::{CStr, OsStr, OsString};
 use std::fs::OpenOptions;
-use std::io::{self, BufRead as _, BufReader, PipeReader, Write as _};
+use std::io::{self, BufRead as _, BufReader, PipeReader};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
 
+use provider::RunTag;
 use runtime::Record;
 use rustix::process::{Signal, set_parent_process_death_signal};
 use rustix::stdio::{dup2_stderr, dup2_stdout};
@@ -50,18 +53,20 @@ pub(crate) enum Handoff {
 }
 
 impl Driver {
-    /// Starts the driver, which takes this process's ID, then parses `args` as `pumpkin run`'s.
+    /// Starts the driver of the run `id`, which takes this process's ID and `id`, then parses
+    /// `args` as `pumpkin run`'s.
     ///
     /// # Errors
     ///
     /// Fails if the pipe can't be made, or the driver started.
-    pub(crate) fn spawn(args: &[OsString]) -> Result<Self, String> {
+    pub(crate) fn spawn(id: &RunTag, args: &[OsString]) -> Result<Self, String> {
         let (pipe, output) = io::pipe().context("making the driver's pipe failed")?;
         // `pumpkin` itself, even if its file is replaced meanwhile.
         let mut command = stdx::process::command("/proc/self/exe", Environment::Inherited);
         command
             .arg0(OsStr::from_bytes(ARGV0.to_bytes()))
             .arg(std::process::id().to_string())
+            .arg(id.as_str())
             .args(args)
             .stdin(Stdio::null())
             .stdout(output);
@@ -144,8 +149,8 @@ pub(crate) fn announce(record: &Path) -> Result<(), String> {
     let outliving = set_parent_process_death_signal(None);
     outliving.context("asking the kernel to let the driver outlive `run` failed")?;
     // From here to the new session, a signal to `run` alone leaves the run going, unannounced,
-    // and one to `run`'s process group ends both before `run` hears of the start: neither has
-    // `run` say that a run started which a signal then ends.
+    // and one to `run`'s process group ends `run` and interrupts the run before `run` hears of
+    // the start: neither has `run` say that a run started which a signal then ends.
     rustix::process::setsid().context("leaving `run`'s session failed")?;
     // A `run` that can't be told has ended, so the run goes on unannounced, as its id was said
     // when the record was locked.
@@ -157,7 +162,5 @@ pub(crate) fn announce(record: &Path) -> Result<(), String> {
 
 /// Sends `line` and its newline to `run`, in one `write`.
 fn send(line: &str) -> io::Result<()> {
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(format!("{line}\n").as_bytes())?;
-    stdout.flush()
+    crate::print(format!("{line}\n").as_bytes())
 }

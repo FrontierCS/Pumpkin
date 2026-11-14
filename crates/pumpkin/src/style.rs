@@ -16,7 +16,7 @@ use lang::Finding;
 use serde::Deserialize;
 use stdx::process::Environment;
 
-use crate::{cli, counted, say};
+use crate::{absolute_utf8, cli, next, say};
 
 /// The formatter's file name, beside `pumpkin`.
 const FORMATTER: &str = "buildifier";
@@ -339,10 +339,22 @@ pub(crate) fn fmt(flags: cli::Fmt) -> Result<ExitCode, String> {
     if failed.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
+    let failed: Result<Vec<String>, String> = (failed.iter())
+        .map(|file| match file.to_str() {
+            Some(file) => absolute_utf8(file, "the file"),
+            None => Err(format!(
+                "{} isn't UTF-8, as the commands that `pumpkin` says to run next name it: give \
+                 it a name that is",
+                file.display()
+            )),
+        })
+        .collect();
+    let failed = failed?;
     let them = if failed.len() == 1 { "it" } else { "them" };
+    let again = if check { "" } else { " again" };
     Err(format!(
-        "{} failed: fix {them} and run again",
-        counted(failed.len(), "file")
+        "to format {them}{again}: {}",
+        next::again("fmt", &[], &failed)
     ))
 }
 
