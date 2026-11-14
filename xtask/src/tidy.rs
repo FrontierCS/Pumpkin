@@ -1,7 +1,14 @@
-//! The checks of the repository's Rust files that `cargo xtask ci` runs: each doc within its
-//! length cap and none on a test, as `docs/dev/writing.md` asks, and each `unreachable!` with a
-//! message and no `debug_assert!`, as `docs/dev/style.md` asks.
+//! The checks of the repository's Rust files that `cargo xtask ci` runs, each for a rule of
+//! `docs/dev/writing.md` or `docs/dev/style.md`: a doc within its length cap, and none on a test;
+//! no marker of work left ([`MARKERS`]) in a comment, and no code in a `//` comment; an
+//! `unreachable!` with a message, and no `debug_assert!`.
+//!
+//! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
+//! doc comment is a token, and any other comment lies between two. Code in a comment is told from
+//! prose by how its line ends, so only some of it is found.
 
+use std::cmp::Reverse;
+use std::ops::Range;
 use std::path::Path;
 
 use proc_macro2::{Delimiter, LineColumn, TokenStream, TokenTree};
@@ -23,7 +30,8 @@ const ITEM_CAP: usize = 9;
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     let mut problems = Vec::new();
     for path in files(sh, "rs")? {
-        let tokens: TokenStream = match sh.read_file(&path)?.parse() {
+        let text = sh.read_file(&path)?;
+        let tokens: TokenStream = match text.parse() {
             Ok(tokens) => tokens,
             Err(error) => {
                 let LineColumn { line, column } = error.span().start();
@@ -37,6 +45,9 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
             }
         };
         let (mut docs, mut banned) = (Vec::new(), Vec::new());
+        for comment in comments(&text, tokens.clone()) {
+            banned.extend(comment.problems(&text));
+        }
         scan(tokens, &mut docs, &mut banned);
         let docs = docs.into_iter().map(|doc| {
             let Doc {
@@ -234,4 +245,144 @@ fn attribute(tokens: &[TokenTree]) -> Option<Attribute> {
         doc,
         test,
     })
+}
+
+const MARKERS: [&str; 3] = ["TODO", "FIXME", "XXX"];
+
+/// A doc comment, or a comment the lexer skips.
+struct Comment<'a> {
+    /// The byte it starts at in its file.
+    at: usize,
+    text: &'a str,
+    doc: bool,
+}
+
+impl Comment<'_> {
+    /// Where the comment, in `file`, holds a word of [`MARKERS`] or, as a `//` comment, a line of
+    /// code, with what is wrong.
+    fn problems(&self, file: &str) -> Vec<(LineColumn, String)> {
+        let mut problems = Vec::new();
+        let part = |c: char| c.is_alphanumeric() || c == '_';
+        for marker in MARKERS {
+            for (at, _) in self.text.match_indices(marker) {
+                let (before, after) = (&self.text[..at], &self.text[at + marker.len()..]);
+                if !before.ends_with(part) && !after.starts_with(part) {
+                    problems.push((
+                        position(file, self.at + at),
+                        format!(
+                            "a comment holds `{marker}`: open an issue for the work left, and \
+                             say a known limit as a why at its code"
+                        ),
+                    ));
+                }
+            }
+        }
+        if let Some(line) = self.text.strip_prefix("//")
+            && !self.doc
+        {
+            // Prose breaks its lines after a `;` too, but not after a call or an index, and
+            // doesn't start a line with `let`.
+            let line = line.trim();
+            let statement = line
+                .strip_suffix(';')
+                .is_some_and(|code| code.starts_with("let ") || code.ends_with([')', ']', '?']));
+            if statement || line.ends_with(['{', '}']) {
+                problems.push((
+                    position(file, self.at),
+                    "a `//` comment holds code: remove it, as Git keeps what was there".to_owned(),
+                ));
+            }
+        }
+        problems
+    }
+}
+
+/// Each comment in `text`, whose tokens are `tokens`, top to bottom.
+fn comments(text: &str, tokens: TokenStream) -> Vec<Comment<'_>> {
+    let mut spans = Vec::new();
+    spans_of(tokens, &mut spans);
+    // An empty span at the end, so that the comments after the last token are found too.
+    spans.push(text.len()..text.len());
+    // A doc comment is several tokens, each spanning all or a part of it, so the whole comes
+    // first and its parts after it are passed over.
+    spans.sort_by_key(|span| (span.start, Reverse(span.end)));
+    let mut comments = Vec::new();
+    let mut end = 0;
+    for span in spans {
+        if span.start < end {
+            continue;
+        }
+        let mut between = &text[end..span.start];
+        while let Some(start) = between.find('/') {
+            let rest = &between[start..];
+            let len = if rest.starts_with("/*") {
+                block_len(rest)
+            } else {
+                rest.find('\n').unwrap_or(rest.len())
+            };
+            let at = span.start - between.len() + start;
+            comments.push(Comment {
+                at,
+                text: &rest[..len],
+                doc: false,
+            });
+            between = &rest[len..];
+        }
+        let token = &text[span.clone()];
+        if token.starts_with("//") || token.starts_with("/*") {
+            comments.push(Comment {
+                at: span.start,
+                text: token,
+                doc: true,
+            });
+        }
+        end = span.end;
+    }
+    comments
+}
+
+/// Adds to `spans` where in its file each of `tokens` lies, a group's delimiters each by itself.
+fn spans_of(tokens: TokenStream, spans: &mut Vec<Range<usize>>) {
+    for token in tokens {
+        if let TokenTree::Group(group) = &token {
+            spans.push(group.span_open().byte_range());
+            spans.push(group.span_close().byte_range());
+            spans_of(group.stream(), spans);
+        } else {
+            spans.push(token.span().byte_range());
+        }
+    }
+}
+
+/// How many bytes the block comment that `text` starts with takes, with those nested in it.
+fn block_len(text: &str) -> usize {
+    let mut depth = 0_usize;
+    let mut at = 0;
+    while let Some(next) = text[at..].find(['/', '*']) {
+        at += next;
+        if text[at..].starts_with("/*") {
+            depth += 1;
+            at += 2;
+        } else if text[at..].starts_with("*/") {
+            depth -= 1;
+            at += 2;
+            if depth == 0 {
+                return at;
+            }
+        } else {
+            at += 1;
+        }
+    }
+    unreachable!("the lexer took the text as tokens, so each block comment in it ends")
+}
+
+/// Where byte `at` of `text` lies, its column counted from 0 in characters, as proc-macro2
+/// counts.
+fn position(text: &str, at: usize) -> LineColumn {
+    let before = &text[..at];
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    LineColumn {
+        line: before.matches('\n').count() + 1,
+        column: before[line_start..].chars().count(),
+    }
 }

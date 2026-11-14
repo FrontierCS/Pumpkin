@@ -270,6 +270,48 @@ fn test_docs() {
 }
 
 #[test]
+fn comments() {
+    use Standing::Tracked;
+    let markers = "//! A TODO.\n/// A FIXME, then an XXX.\nfn f() {\n    // TODO: one.\n    \
+                   let _ = 1; /* a FIXME */\n}\n/** XXX */\n/* Nested /* TODO */ */\nfn g() {}\n\
+                   // TODOS, XXXX, FIXME_ONE, A_TODO and todo are words of their own.\n"
+        .to_owned();
+    let code = "fn f(v: &[u8]) -> Option<u8> {\n    // f(v);\n    // let x = 1;\n    \
+                // if v.is_empty() {\n    // }\n    // v[0];\n    //// f(v)?;\n    \
+                // A clause;\n    // a `v[0]` and its end;\n    Some(v[0])\n}\n\
+                // At the end, with no newline: f(v);"
+        .to_owned();
+    let literals = "/// ```\n/// f(v);\n/// ```\n#[doc = \"A TODO.\"]\n\
+                    fn f() {\n    /* f(v); */\n    let _ = \"// TODO: f(v);\";\n    \
+                    let _ = r#\"\n// let x = 1;\n\"#;\n    let _ = '/';\n    let _ = 1 / 2;\n}\n"
+        .to_owned();
+    check(
+        "comments",
+        &[
+            ("markers.rs", markers, Tracked),
+            ("code.rs", code, Tracked),
+            ("literals.rs", literals, Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            code.rs:2:5: a `//` comment holds code: remove it, as Git keeps what was there
+            code.rs:3:5: a `//` comment holds code: remove it, as Git keeps what was there
+            code.rs:4:5: a `//` comment holds code: remove it, as Git keeps what was there
+            code.rs:5:5: a `//` comment holds code: remove it, as Git keeps what was there
+            code.rs:6:5: a `//` comment holds code: remove it, as Git keeps what was there
+            code.rs:7:5: a `//` comment holds code: remove it, as Git keeps what was there
+            code.rs:12:1: a `//` comment holds code: remove it, as Git keeps what was there
+            markers.rs:1:7: a comment holds `TODO`: open an issue for the work left, and say a known limit as a why at its code
+            markers.rs:2:7: a comment holds `FIXME`: open an issue for the work left, and say a known limit as a why at its code
+            markers.rs:2:22: a comment holds `XXX`: open an issue for the work left, and say a known limit as a why at its code
+            markers.rs:4:8: a comment holds `TODO`: open an issue for the work left, and say a known limit as a why at its code
+            markers.rs:5:21: a comment holds `FIXME`: open an issue for the work left, and say a known limit as a why at its code
+            markers.rs:7:5: a comment holds `XXX`: open an issue for the work left, and say a known limit as a why at its code
+            markers.rs:8:14: a comment holds `TODO`: open an issue for the work left, and say a known limit as a why at its code"#]],
+    );
+}
+
+#[test]
 fn diff() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let again = "cargo xtask mutants --in-diff HEAD";
