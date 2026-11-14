@@ -38,7 +38,7 @@ use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 use tempfile::TempDir;
 
-use crate::job::{BUILDS, JOBS, SENT_CONFIG, SENT_MODAL, TREES};
+use crate::job::{BUILDS, JOBS, SENT_CONFIG, SENT_MODAL, TREES, WAITING};
 use crate::workspace::{self, Workspace};
 use crate::{cli, config, next, say};
 
@@ -1675,7 +1675,8 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
 
 /// `pumpkin ls` on the controller: lists its runs whose ids start with one of `prefixes`, or
 /// every run without any but those that ended over a day ago ([`progress::listed_since`]), the
-/// jobs yet to start one as `building`, or `unstarted` once they have ended, beside the copies in this machine's default runs directory, by id, the
+/// jobs yet to start one as `waiting` for a build slot, or else `building`, or `unstarted` once
+/// they have ended, beside the copies in this machine's default runs directory, by id, the
 /// controller's of a run that both hold. Each run is read here, from the files of its record that
 /// `ls` reads, which the controller sends once the record has ended unless its copy here has.
 /// Then says how many tasks this workspace is sending the controller ([`said_sends`]), if any.
@@ -1710,6 +1711,9 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
                 continue;
             }
             "building" => Ok(crate::progress::Listed::Building {
+                asked: runtime::minted(id),
+            }),
+            "waiting" => Ok(crate::progress::Listed::Waiting {
                 asked: runtime::minted(id),
             }),
             "unstarted" => Ok(crate::progress::Listed::Unstarted),
@@ -1911,7 +1915,8 @@ const LISTED_FILES: &str = "record.json ir.json provider.json log.jsonl outcome.
 /// What a command on the controller runs to list its runs whose ids start with one of
 /// `prefixes`, or every run without any: its health, `up <seconds>`, `boot <property>=<value>`
 /// for each that `systemctl show` gives of its boot's unit, and `disk <used>%`; a line for each
-/// job yet to start its run, `<id> building`, or `<id> unstarted` once it has ended; a line for each run, `<id> live`, or
+/// job yet to start its run, `<id> waiting` while it waits for a build slot, or else
+/// `<id> building`, or `<id> unstarted` once it has ended; a line for each run, `<id> live`, or
 /// `<id> ended` unless its id is one of those its standard input lists; of a run that ended, or a
 /// job, before `since`, in seconds since the Unix epoch, as its `outcome.json`, or its log, was
 /// last written, `<id> old` instead; then `tar`, and an archive of the files of the records of the runs
@@ -1938,7 +1943,8 @@ recent() {{ [ ! -e "$1" ] || [ "$(stat --format=%Y "$1")" -ge {since} ]; }}
 for id in $(ls {JOBS} 2>/dev/null); do
     {picked}
     [ ! -e "$runs/$id" ] || continue
-    if [ -d "$XDG_RUNTIME_DIR/pumpkin/$id" ]; then echo "$id building"
+    if [ -e "$XDG_RUNTIME_DIR/pumpkin/$id/{WAITING}" ]; then echo "$id waiting"
+    elif [ -d "$XDG_RUNTIME_DIR/pumpkin/$id" ]; then echo "$id building"
     elif recent "{JOBS}/$id/log"; then echo "$id unstarted"; else echo "$id old"; fi
 done
 sent=

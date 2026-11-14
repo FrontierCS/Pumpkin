@@ -339,11 +339,12 @@ fn usage() {
               there yet is no runs, if it is the default one.
 
               With [controller] in the configuration, and no --runs, `ls` lists the
-              controller's runs, a job yet to start its run as `building`, or as `unstarted`
-              once it has ended without one, beside the copies in the default runs directory;
-              and says first how long the controller has been up, its jobs, how full its disk
-              is, and whether its boot failed, and last how many tasks this workspace is still
-              sending it, if any: a run's job starts once its task is sent.
+              controller's runs, a job yet to start its run as `waiting` while it waits for a
+              build slot, else as `building`, or as `unstarted` once it has ended without one,
+              beside the copies in the default runs directory; and says first how long the
+              controller has been up, its jobs, how full its disk is, and whether its boot
+              failed, and last how many tasks this workspace is still sending it, if any: a
+              run's job starts once its task is sent.
             $ pumpkin cancel --help
             exit status: Some(0)
             printed:
@@ -2444,7 +2445,7 @@ fn writes_only_in_its_workspace() {
         HOME's new files: []
         TMPDIR holds: []
         .pumpkin holds: bin, docker, runs
-        .pumpkin/docker holds: buildx"#]].assert_eq(&shown);
+        .pumpkin/docker holds: buildx, publish-slots"#]].assert_eq(&shown);
 }
 
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its

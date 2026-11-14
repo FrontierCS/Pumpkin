@@ -36,8 +36,8 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Fails if a file can't be read or holds 8 GiB or more, or if the archive or `docker load`
-    /// fails.
+    /// Fails if a file can't be read or holds 8 GiB or more, or if the archive, `docker load` or
+    /// the publish slot fails.
     pub fn load_sandboxd(&self, binaries: &[(&str, &Path)]) -> Result<Image, String> {
         let mut read = Vec::new();
         for &(in_image, path) in binaries {
@@ -45,6 +45,7 @@ impl Engine {
         }
         let (archive, image) = archive(&read, &Platform::sandboxd())?;
         let context = &self.report.context;
+        let _slot = self.publishing()?;
         in_scratch(&self.dir, "load", |scratch| {
             let file = scratch.join("image.tar");
             fs::write(&file, &archive).context(file.display())?;

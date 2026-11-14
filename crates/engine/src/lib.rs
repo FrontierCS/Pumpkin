@@ -4,19 +4,22 @@
 //! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
 //! operator names ([`ContextName`]), which nothing in the environment overrides, and reports it
 //! ([`Report`]). It builds images ([`Engine::build`]), writes a recipe's fetch stage
-//! ([`Engine::lock`]), loads the image of a `sandboxd` ([`Engine::load_sandboxd`]) and pushes
-//! ([`Pusher::push`]); [`confinement`] confines a
+//! ([`Engine::lock`]), says which of its images a prune removes ([`prune`]), loads the image of a
+//! `sandboxd` ([`Engine::load_sandboxd`]) and pushes ([`Pusher::push`]); [`confinement`] confines a
 //! role's container wherever a provider's sandbox is one. Outside the engine, it writes only in
 //! the directory it is given. It needs Docker 28.0 or later, the first whose `docker image
 //! inspect` says what an image's ID is the digest of ([`Engine::check_platform`]), with the
 //! containerd image store, rootful or rootless ([`Security::rootless`]).
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write as _};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use std::{fmt, io};
+use std::{fmt, fs, io};
 
 use base64::Engine as _;
 use schema::ir::{Image, MILLIS_PER_CPU, Resources, User};
@@ -27,9 +30,10 @@ use stdx::process::Environment;
 
 mod build;
 mod lock;
+pub mod prune;
 mod sandboxd;
 
-pub use build::{BuildContext, Building, Built, Recipe, Started, finish, mounted};
+pub use build::{Admit, BuildContext, Building, Built, Recipe, Started, finish, mounted};
 
 /// How long a `docker` command that is neither a create's nor a removal may run before it is
 /// killed ([`Engine`]).
@@ -56,6 +60,19 @@ const PUSH_TIMEOUT: Duration = Duration::from_hours(2);
 // An older one ignores the variable, and pushes with whatever the operator's own configuration
 // holds for the registry, such as another identity's, from a credential helper.
 const PUSHING_CLI: [u64; 3] = [28, 3, 0];
+
+/// How many of the calls on the engine that publish an image run at once, of every `pumpkin`
+/// whose engine has the same directory, as of a workspace ([`Engine::connect`]): a look at an
+/// image's platform ([`Engine::check_platform`]), a push ([`Pusher::push`]) and a load of
+/// `sandboxd`'s image ([`Engine::load_sandboxd`]). The rest wait for a slot.
+// Few, and the same on any machine, as the engine's API, not its CPUs, is what they wait on: 28
+// runs that looked at their images' platforms in the same second hung an engine until it was
+// restarted, as 16 publishes at once hung another. A push already uploads up to 5 layers at once,
+// dockerd's default `max-concurrent-uploads`, so 4 keep up to 20 uploads going.
+const PUBLISH_SLOTS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+
+/// The directory of the publish slots ([`PUBLISH_SLOTS`]), below the engine's.
+const PUBLISH_SLOTS_DIR: &str = "publish-slots";
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
 /// host's disk, outside the container's other limits, so it is capped whatever writes there,
@@ -199,6 +216,9 @@ pub struct Engine {
     report: Report,
     /// The directory on this machine that [`connect`](Self::connect) was given.
     dir: PathBuf,
+    /// Whether a call has said that it waits for a publish slot, which one says, once.
+    // Atomic, as the run's threads share the engine, through its providers.
+    said_waiting: AtomicBool,
 }
 
 /// The engine, as `docker` describes it before anything starts.
@@ -300,6 +320,7 @@ impl Engine {
         Ok(Self {
             report,
             dir: dir.to_owned(),
+            said_waiting: AtomicBool::new(false),
         })
     }
 
@@ -325,8 +346,8 @@ impl Engine {
     /// # Errors
     ///
     /// Fails if it is for another platform; if the engine has no such image, as it pulls none; if
-    /// `image` names anything but a manifest, such as an index; or if `docker` can't say what it
-    /// is.
+    /// `image` names anything but a manifest, such as an index; if `docker` can't say what it is;
+    /// or if no publish slot can be taken, as `Engine::publishing` says.
     pub fn check_platform(
         &self,
         image: &Image,
@@ -347,6 +368,7 @@ impl Engine {
     /// The platform that `image` is for, or why it can't be told, as
     /// [`check_platform`](Self::check_platform) says.
     fn platform_of(&self, image: &Image) -> Result<Platform, String> {
+        let _slot = self.publishing()?;
         let context = &self.report.context;
         let name = context.as_str();
         let inspect = [
@@ -405,6 +427,123 @@ impl Engine {
         Ok(Platform { os, architecture })
     }
 
+    /// One of the engine's publish slots ([`PUBLISH_SLOTS`]) in its directory, held until the
+    /// file returned is dropped, named by this process, as `stdx::slots::take` takes one; saying,
+    /// the first time that this engine waits for one, that it waits, and which processes hold
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Fails as `stdx::slots::take` does.
+    fn publishing(&self) -> Result<fs::File, String> {
+        let dir = self.dir.join(PUBLISH_SLOTS_DIR);
+        let holder = format!("process {}", std::process::id());
+        stdx::slots::take(&dir, PUBLISH_SLOTS, &holder, |holders| {
+            if !self.said_waiting.swap(true, Ordering::Relaxed) {
+                // As `pumpkin` says everything else: a standard error that can't be written is
+                // left unwritten, as the publish goes on all the same.
+                let _ = writeln!(
+                    io::stderr(),
+                    "pumpkin: waiting for a publish slot: all {PUBLISH_SLOTS} held, by {}",
+                    holders.join(", ")
+                );
+            }
+            Ok(())
+        })
+    }
+
+    /// Each image that the engine has, by its ID, as [`Engine::inspected`] gives it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the images can't be listed, or one can't be inspected.
+    pub fn images(&self) -> Result<Vec<prune::Cached>, String> {
+        let context = &self.report.context;
+        let listed = docker(context, ["image", "ls", "--all", "--no-trunc", "--quiet"]);
+        let listed = listed.map_err(|error| fix_reported(&error))?;
+        // An image of several tags is listed once for each.
+        let listed: BTreeSet<String> = (String::from_utf8_lossy(&listed.stdout).lines())
+            .map(str::to_owned)
+            .collect();
+        let mut images = Vec::new();
+        for id in listed {
+            let image = Image::try_from(id.clone()).map_err(|error| {
+                format!("`docker image ls` listed `{id}`, which is no image's ID: {error}")
+            })?;
+            images.push(image);
+        }
+        self.inspected(&images)
+    }
+
+    /// Each of `images` that the engine has, with its size, as `docker image inspect` gives it,
+    /// and its tags, as they are now; but none the engine has no more.
+    ///
+    /// # Errors
+    ///
+    /// Fails if one can't be inspected.
+    pub fn inspected(&self, images: &[Image]) -> Result<Vec<prune::Cached>, String> {
+        let context = &self.report.context;
+        let mut inspected = Vec::new();
+        for image in images {
+            let id = image.as_str();
+            // One at a time, so that one removed meanwhile is told from a failure.
+            let format = "{{.Size}}{{range .RepoTags}} {{.}}{{end}}";
+            let inspect = ["image", "inspect", "--format", format, "--", id];
+            let printed = match docker(context, inspect) {
+                Ok(printed) => printed,
+                Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => continue,
+                Err(error) => return Err(fix_reported(&error)),
+            };
+            let printed = String::from_utf8_lossy(&printed.stdout);
+            let mut words = printed.split_whitespace();
+            let size = words.next().and_then(|size| size.parse().ok());
+            let Some(size) = size else {
+                return Err(format!(
+                    "`docker image inspect` gave {id} the size and tags `{}`: expected a number \
+                     of bytes, then the tags",
+                    printed.trim().escape_debug()
+                ));
+            };
+            inspected.push(prune::Cached {
+                image: image.clone(),
+                tags: words.map(str::to_owned).collect(),
+                size_bytes: size,
+            });
+        }
+        Ok(inspected)
+    }
+
+    /// Removes each of `images`, with each of its tags.
+    ///
+    /// # Errors
+    ///
+    /// Fails if one can't be removed, as one a container uses.
+    pub fn remove_images(&self, images: &[Image]) -> Result<(), String> {
+        for image in images {
+            let rm = ["image", "rm", "--force", image.as_str()];
+            let removed = docker_to(&self.report.context, rm, Bound::Within(REMOVE_TIMEOUT));
+            removed.map_err(|error| fix_reported(&error))?;
+        }
+        Ok(())
+    }
+
+    /// Removes what the engine's build cache holds, least recently used first, until the
+    /// engine's disk has `free_bytes` free, as the engine's builder counts it, or the cache
+    /// holds nothing that it can remove.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `docker builder prune` does.
+    pub fn prune_build_cache(&self, free_bytes: u64) -> Result<(), String> {
+        let free = free_bytes.to_string();
+        let pruned = docker_to(
+            &self.report.context,
+            ["builder", "prune", "--force", "--min-free-space", &free],
+            Bound::Within(REMOVE_TIMEOUT),
+        );
+        pruned.map(|_| ()).map_err(|error| fix_reported(&error))
+    }
+
     /// The engine, as one that can [push](Pusher::push).
     ///
     /// # Errors
@@ -459,7 +598,8 @@ impl<'e> Pusher<'e> {
     ///
     /// # Errors
     ///
-    /// Fails, naming the push's target, if `docker` can't tag or push the image.
+    /// Fails, naming the push's target, if `docker` can't tag or push the image, or if no
+    /// publish slot can be taken (`Engine::publishing`).
     pub fn push(
         &self,
         image: &Image,
@@ -467,6 +607,7 @@ impl<'e> Pusher<'e> {
         repository: &str,
         tag: &str,
     ) -> Result<(), String> {
+        let _slot = self.engine.publishing()?;
         let context = &self.engine.report.context;
         let target = format!("{}/{repository}:{tag}", login.registry);
         let tagged = docker(context, ["tag", "--", image.as_str(), &target]);

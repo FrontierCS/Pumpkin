@@ -262,9 +262,15 @@ impl Root {
     }
 
     /// The image that `declared` is, found on `engine`, or its build started there, by
-    /// `engine::Engine::start`: a recipe's, with its context and mounts below the root, its target, args and named
+    /// `engine::Engine::start`, which `admit` holds the image and admits the build for: a
+    /// recipe's, with its context and mounts below the root, its target, args and named
     /// contexts; or a layer's, from its recipe's text, given its named context.
-    fn start(&self, engine: &Engine, declared: &Declared<'_, Built>) -> Result<Started, String> {
+    fn start(
+        &self,
+        engine: &Engine,
+        declared: &Declared<'_, Built>,
+        admit: &mut dyn engine::Admit,
+    ) -> Result<Started, String> {
         match *declared {
             Declared::Recipe {
                 recipe,
@@ -272,7 +278,7 @@ impl Root {
             } => {
                 let (context, given) = self.inputs(recipe, contexts);
                 let file = engine::Recipe::File(recipe.recipe.clone());
-                engine.start(&context, &file, &given, &recipe.repository)
+                engine.start(&context, &file, &given, &recipe.repository, admit)
             }
             Declared::Layer {
                 ref recipe,
@@ -284,7 +290,7 @@ impl Root {
                     contexts: named(contexts),
                     ..Given::default()
                 };
-                engine.start(&BuildContext::default(), &recipe, &given, repository)
+                engine.start(&BuildContext::default(), &recipe, &given, repository, admit)
             }
         }
     }
@@ -429,6 +435,20 @@ pub(crate) fn check(
     })
 }
 
+/// What a build of a task's images asks of its caller ([`Task::build`]): what `engine::Admit`
+/// asks, as each build starts, and to hear of each build's end while others run.
+pub(crate) trait Admission: engine::Admit {
+    /// Hears that a build on `engine` has ended, whether it built its image or failed, while
+    /// others run: the next to start is admitted, and the last to end is the caller's to see, as
+    /// [`Task::build`] returns.
+    fn ended(&mut self, engine: &Engine);
+}
+
+/// Holds nothing, admits every build at once, and does nothing as one ends.
+impl Admission for () {
+    fn ended(&mut self, _: &Engine) {}
+}
+
 /// The tag of each image of a built task, by the image's ID: what its build's inputs name
 /// ([`Built::tag`]).
 pub(crate) type Tags = BTreeMap<Image, String>;
@@ -448,20 +468,24 @@ impl Task<'_> {
     }
 
     /// Builds the task's images on `engine`, as `pumpkin build --help` says ([`Root::start`]),
-    /// as many at once as [`jobs`] says, each once those it is built on are, saying each
-    /// repository as its first build starts, and each build, after its output, as it ends. Gives
-    /// the workflow that names them, and their tags.
+    /// as `admission` admits them, as many at once as [`jobs`] says, each once those it is built
+    /// on are, saying each repository as its first build starts, and each build, after its
+    /// output, as it ends. Gives the workflow that names them, and their tags.
     ///
     /// # Errors
     ///
     /// Gives each build that failed, at its place.
-    pub(crate) fn build(self, engine: &Engine) -> Result<(Workflow, Tags), Problems> {
+    pub(crate) fn build(
+        self,
+        engine: &Engine,
+        admission: &mut (dyn Admission + Send),
+    ) -> Result<(Workflow, Tags), Problems> {
         let Self {
             root,
             plan,
             workflow: _,
         } = self;
-        let mut builds = Builds::new();
+        let mut builds = Builds::new(admission);
         let built = plan.build(jobs(), |ready| builds.step(root, engine, ready))?;
         Ok((built, builds.tags))
     }
@@ -495,7 +519,8 @@ pub(crate) fn lock(
         let text = root.bytes(&below)?;
         let fetch = FetchStage::read(&below, &text, stage)?;
         let engine = reach()?;
-        let mut builds = Builds::new();
+        let mut unadmitted = ();
+        let mut builds = Builds::new(&mut unadmitted);
         let step = |ready: Vec<(usize, Declared<'_, Built>)>| builds.step(root, &engine, ready);
         let written = plan.build_for(
             jobs(),
@@ -562,28 +587,31 @@ fn same_inputs<'p>(
 }
 
 /// The builds that [`Task::build`] and [`lock`] run: each running build, by its image's index and how
-/// it is said; and each repository said to be built in, once, though several stages of one
-/// recipe are built there.
-struct Builds {
+/// it is said; each repository said to be built in, once, though several stages of one recipe
+/// are built there; and what admits them.
+struct Builds<'a> {
     building: Vec<((usize, String), Building)>,
     said: BTreeSet<String>,
+    admission: &'a mut (dyn Admission + Send),
     /// The tag of each image that ended, by the image's ID, which the run's record keeps.
     tags: Tags,
 }
 
-impl Builds {
-    /// No build yet.
-    fn new() -> Self {
+impl<'a> Builds<'a> {
+    /// No build yet, each to be admitted by `admission`.
+    fn new(admission: &'a mut (dyn Admission + Send)) -> Self {
         Self {
             building: Vec::new(),
             said: BTreeSet::new(),
+            admission,
             tags: Tags::new(),
         }
     }
 
     /// A step of `Plan::build`: starts the build of each of `ready` on `engine`, from `root`
-    /// ([`Root::start`]), saying each repository as its first build starts, and gives each that
-    /// has ended, waiting for one if none has, said, after its output, as it ends.
+    /// ([`Root::start`]), as the admission admits it, saying each repository as its first build
+    /// starts, and gives each that has ended, waiting for one if none has, said, after its
+    /// output, as it ends, which the admission hears of while others run.
     fn step(
         &mut self,
         root: &Root,
@@ -592,7 +620,7 @@ impl Builds {
     ) -> Vec<(usize, Result<Built, String>)> {
         let mut ended = Vec::new();
         for (index, declared) in ready {
-            match root.start(engine, &declared) {
+            match root.start(engine, &declared, &mut *self.admission) {
                 Ok(Started::Found(built)) => ended.push((index, Ok(built))),
                 Ok(Started::Building(started)) => {
                     let (repository, stage) = image(&declared);
@@ -611,6 +639,9 @@ impl Builds {
             match &built {
                 Ok(_) => say(format_args!("built an image in {image}")),
                 Err(_) => say(format_args!("the build of an image in {image} failed")),
+            }
+            if !self.building.is_empty() {
+                self.admission.ended(engine);
             }
             ended.push((index, built));
         }

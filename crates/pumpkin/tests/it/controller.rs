@@ -1,24 +1,27 @@
 //! `controller`, the controller's own side of the controller target: a job, which writes its
 //! configuration from the controller's settings, the instance's metadata and what the client
-//! sent, and runs its command; and the boot, which reaps. Each runs as the
+//! sent, runs its command, and prunes; and the boot, which reaps. Each runs as the
 //! controller's user would, with a home and a runtime directory of the scratch directory's, on
 //! a stand-in `aws` for the controller's settings ([`AWS`]), a stand-in `curl` for the instance
 //! metadata service, a stand-in `df`, and the stand-in `docker` ([`StandIn`]). And the client's
 //! side: what it refuses before it reaches a controller, and what it sends one, and where.
 
 use std::fs::{self, File, Permissions};
-use std::os::unix::fs::PermissionsExt as _;
+use std::io::{BufRead as _, BufReader, Read};
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use expect_test::{Expect, expect};
 use serde_json::json;
 use stdx::Utc;
 use stdx::process::Environment;
+use test_support::BUSYBOX;
 
 use super::{
-    EC2, LOCAL, MODAL, Scratch, StandIn, docker_table, install, invocation, report, workflow,
+    BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, Scratch, StandIn, cpu_list, docker_table, ended,
+    install, invocation, report, workflow,
 };
 
 /// The controller's settings, as the module renders its SSM parameter: the engine, the provider
@@ -161,7 +164,8 @@ key_file = "gateway.key"
 models = [{ name = "model-a", upstream_name = "provider/model-a" }]
 "#;
 
-/// What the stand-ins noted, `calls`, `aws`'s, `curl`'s and `df`'s, each taken.
+/// What the stand-ins noted, `calls`, `aws`'s, `curl`'s and `df`'s, and `docker.pruned`, each
+/// taken.
 fn noted(scratch: &Scratch) -> Vec<String> {
     let taken = |file: &str| {
         let path = scratch.0.join(file);
@@ -172,7 +176,9 @@ fn noted(scratch: &Scratch) -> Vec<String> {
     let calls = taken("bin/calls");
     let calls =
         (calls.split_terminator("\n\n")).map(|call| call.lines().collect::<Vec<_>>().join(" "));
-    calls.collect()
+    let mut lines: Vec<String> = calls.collect();
+    lines.extend(taken("docker.pruned").lines().map(str::to_owned));
+    lines
 }
 
 /// Checks `text`, with the scratch directory as `<scratch>`, against `expect`.
@@ -205,7 +211,41 @@ fn job() {
     let parameter = format!("{}\n{EC2}\n{modal}", docker_table("default"));
     write_parameter(&scratch, &parameter);
     let id = id_ago(0, "0b000001");
+    let (recent, old) = (id_ago(3, "0b000002"), id_ago(30, "0b000003"));
+    let (built, failed) = (id_ago(1, "0b000007"), id_ago(2, "0b000008"));
     send(&scratch, &id, &format!("{UPSTREAMS}\n{SENT_MODAL}"), true);
+    let ir = |digits: &str| {
+        let roles = digits.chars().map(|digit| json!({ "image": image(digit) }));
+        json!({ "roles": roles.collect::<Vec<_>>() })
+    };
+    // A run of 3 days ago, naming the stand-in's image and another in its record's IR, and one of
+    // 30, naming one; a build of 1 day ago naming one in its `out`, and a failed one of 2, whose
+    // `out` is empty.
+    for (run, digits) in [(&recent, "0a"), (&old, "b")] {
+        scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), "");
+        let record = format!("home/.pumpkin/runs/{run}");
+        scratch.write(&format!("{record}/ir.json"), &ir(digits));
+    }
+    // Jobs of 30 days ago and of 1 that ended before their runs made a record.
+    let (stale, fresh) = (id_ago(30, "0b00000a"), id_ago(1, "0b00000b"));
+    for unstarted in [&stale, &fresh] {
+        scratch.write(&format!("home/jobs/{unstarted}/log"), "");
+    }
+    scratch.write(&format!("home/builds/{built}/out"), &ir("c"));
+    scratch.write(&format!("home/builds/{failed}/out"), "");
+    // Image c bears the tag that the other job below holds.
+    let held = format!("pumpkin/held:{}", "c".repeat(64));
+    let sized = ['0', 'a', 'b', 'c', 'd'].map(|digit| match digit {
+        'c' => format!("{} 100 {held}\n", image(digit)),
+        _ => format!("{} 100\n", image(digit)),
+    });
+    scratch.write("images", &sized.concat());
+    // 850 of its 1000 bytes used.
+    scratch.write("bin/disk", "1000 150\n");
+    for tree in [&recent, &old, &".pumpkin".to_owned()] {
+        scratch.write(&format!("home/trees/tasks/{tree}/pumpkin"), "");
+    }
+    symlink(&recent, scratch.0.join("home/trees/tasks/latest")).unwrap();
     let mut job = on_controller(
         &scratch,
         &[
@@ -237,11 +277,93 @@ fn job() {
     let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
     lines.push(format!("pumpkin.toml:\n{}", config.unwrap()));
     lines.extend(noted(&scratch));
+    let names = |dir: &str| {
+        let entries = fs::read_dir(scratch.0.join(dir)).unwrap();
+        let mut names: Vec<String> = entries
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names.join(", ")
+    };
+    lines.push(format!("trees: {}", names("home/trees/tasks")));
+    lines.push(format!("jobs: {}", names("home/jobs")));
+    // Another job's directory in tmpfs, as while it runs, its run started, with the volume full.
+    send(&scratch, &recent, UPSTREAMS, false);
+    let log = format!("home/.pumpkin/runs/{recent}/log.jsonl");
+    scratch.write(&log, "");
+    scratch.write("bin/disk", "1000 0\n");
+    for started in [true, false] {
+        if !started {
+            fs::remove_file(scratch.0.join(&log)).unwrap();
+            scratch.write(&format!("run/pumpkin/{recent}/held"), &format!("{held}\n"));
+        }
+        send(&scratch, &id, UPSTREAMS, false);
+        let mut again = on_controller(
+            &scratch,
+            &[
+                "controller",
+                "job",
+                &id,
+                "--region",
+                "us-west-1",
+                "--parameter",
+                "/pumpkin-alice/settings",
+                "--",
+                "build",
+                "stand-in/task.star",
+            ],
+        );
+        again.stdout(Stdio::null());
+        let invoked = invocation(&again);
+        lines.push(format!("another job's run started: {started}"));
+        lines.push(report(invoked, &again.output().unwrap(), &scratch.0, false));
+        lines.extend(
+            noted(&scratch)
+                .into_iter()
+                .filter(|line| line.starts_with("docker")),
+        );
+    }
+    // Full as the prune begins, and no longer once it has the lock.
+    scratch.write("bin/disk", "1000 0\n");
+    scratch.write("bin/disk.next", "1000 500\n");
+    send(&scratch, &id, UPSTREAMS, false);
+    let mut freed = on_controller(
+        &scratch,
+        &[
+            "controller",
+            "job",
+            &id,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--",
+            "build",
+            "stand-in/task.star",
+        ],
+    );
+    freed.stdout(Stdio::null());
+    let invoked = invocation(&freed);
+    lines.push("freed while the prune waited for the lock:".to_owned());
+    lines.push(report(invoked, &freed.output().unwrap(), &scratch.0, false));
+    lines.extend(
+        noted(&scratch)
+            .into_iter()
+            .filter(|line| line.starts_with("docker") || line.starts_with("df")),
+    );
     let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
     let config: toml::Table = toml::from_str(&config.unwrap()).unwrap();
     let providers: Vec<&String> = config["providers"].as_table().unwrap().keys().collect();
     lines.push(format!("the providers: {providers:?}"));
-    let shown = [(id.as_str(), "<id>")];
+    let shown = [
+        (id.as_str(), "<id>"),
+        (recent.as_str(), "<recent>"),
+        (old.as_str(), "<old>"),
+        (built.as_str(), "<built>"),
+        (failed.as_str(), "<failed>"),
+        (stale.as_str(), "<stale>"),
+        (fresh.as_str(), "<fresh>"),
+    ];
     check(
         &scratch,
         &lines.join("\n"),
@@ -249,6 +371,7 @@ fn job() {
         &expect![[r#"
             $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
             exit status: Some(0)
+            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             out names the image: true
             current-pumpkin is this pumpkin: true
             pumpkin.toml:
@@ -311,7 +434,36 @@ fn job() {
             curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
-            the providers: ["aws", "gpus"]"#]],
+            df --block-size=1 --output=size,avail -- /
+            df --block-size=1 --output=size,avail -- /
+            docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+            docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
+            docker builder prune --force --min-free-space 400
+            trees: .pumpkin, <recent>, latest
+            jobs: <old>, <recent>, <fresh>
+            another job's run started: true
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(0)
+            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
+            docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+            docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            docker image rm --force sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+            docker builder prune --force --min-free-space 400
+            another job's run started: false
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(0)
+            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
+            docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+            docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            docker image rm --force sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            docker builder prune --force --min-free-space 400
+            freed while the prune waited for the lock:
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            exit status: Some(0)
+            df --block-size=1 --output=size,avail -- /
+            df --block-size=1 --output=size,avail -- /
+            the providers: ["aws"]"#]],
     );
 }
 
@@ -408,10 +560,352 @@ fn job_refusals() {
     );
 }
 
+/// `controller job` `id` of `build built/task.star`, started as the controller's user runs it,
+/// but on one CPU of those the tests may run on, so with one build slot.
+fn on_one_cpu(scratch: &Scratch, id: &str) -> Child {
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"));
+    let cpu = cpu_list(allowed.unwrap()).into_iter().next().unwrap();
+    let job = on_controller(
+        scratch,
+        &[
+            "controller",
+            "job",
+            id,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--",
+            "build",
+            "built/task.star",
+        ],
+    );
+    let mut on_one = stdx::process::command("taskset", Environment::Inherited);
+    on_one.args(["--cpu-list", &cpu.to_string()]);
+    on_one.arg(job.get_program()).args(job.get_args());
+    for (name, value) in job.get_envs() {
+        on_one.env(name, value.unwrap());
+    }
+    on_one.current_dir(job.get_current_dir().unwrap());
+    on_one.stdout(Stdio::piped()).stderr(Stdio::piped());
+    on_one.spawn().unwrap()
+}
+
+/// How `child`, a job that [`on_one_cpu`] started, ended: its exit status; what it said, `said`
+/// and then the rest from `stderr`; and whether it printed an IR that names the image that the
+/// stand-in builds.
+fn job_ended(child: Child, stderr: impl Read, said: String) -> String {
+    let output = ended(child, stderr, said);
+    let mut lines = vec![format!("exit status: {:?}", output.status.code())];
+    lines.extend(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .map(str::to_owned),
+    );
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let built = format!("sha256:{}", "2".repeat(64));
+    lines.push(format!(
+        "printed the IR of the image built: {}",
+        printed.contains(&built)
+    ));
+    lines.join("\n")
+}
+
+/// How `child`, a job that [`on_one_cpu`] started, ended, as [`job_ended`] says.
+fn job_ended_whole(mut child: Child) -> String {
+    let stderr = child.stderr.take().unwrap();
+    job_ended(child, stderr, String::new())
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the jobs' steps and the snapshot"
+)]
+fn job_admission() {
+    let scratch = Scratch::new("controller-job-admission");
+    let stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    scratch.write_task("built", &workflow(&image('0'), &["true"]));
+    let recipe = format!("FROM {BUSYBOX}\n{BUILDS}\n");
+    scratch.write("built/Dockerfile", &recipe);
+    let [first, second, third] =
+        ["0ad00001", "0ad00002", "0ad00003"].map(|random| id_ago(0, random));
+    for id in [&first, &second, &third] {
+        send(&scratch, id, UPSTREAMS, false);
+    }
+    let mut lines = Vec::new();
+    let marks = |id: &str| {
+        let dir = scratch.0.join(format!("run/pumpkin/{id}"));
+        let mut names: Vec<String> = (fs::read_dir(dir).unwrap())
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names.join(", ")
+    };
+    stand_in.hold("build");
+    let building = on_one_cpu(&scratch, &first);
+    stand_in.held("build");
+    let held = scratch.0.join(format!("run/pumpkin/{first}/held"));
+    let held = fs::read_to_string(held).unwrap();
+    lines.push(format!("the first holds: {}", held.trim()));
+    lines.push(format!(
+        "the first's directory while it builds: {}",
+        marks(&first)
+    ));
+    let tag = held.lines().next().unwrap().to_owned();
+    // Image e bears the tag that the first holds, f another, and the stand-in's own none.
+    scratch.write(
+        "images",
+        &format!(
+            "{} 100 {tag}\n{} 100 pumpkin/other:{}\n",
+            image('e'),
+            image('f'),
+            "f".repeat(64)
+        ),
+    );
+    scratch.write("bin/disk", "1000 150\n");
+    let mut waiting = on_one_cpu(&scratch, &second);
+    let mut stderr = BufReader::new(waiting.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("waiting for a build slot") {
+        assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
+    }
+    lines.push(format!(
+        "the second's directory while it waits: {}",
+        marks(&second)
+    ));
+    lines.push("the second's prune, while the first builds:".to_owned());
+    lines.extend(
+        noted(&scratch)
+            .into_iter()
+            .filter(|line| line.starts_with("docker")),
+    );
+    scratch.write("bin/disk", "1000 500\n");
+    stand_in.release("build");
+    lines.push(format!("the first:\n{}", job_ended_whole(building)));
+    let held = scratch.0.join(format!("run/pumpkin/{first}/held"));
+    let held = fs::read_to_string(held).unwrap();
+    lines.push(format!(
+        "the first holds once built: {}",
+        held.trim().replace('\n', " ")
+    ));
+    let waited = job_ended(waiting, stderr, said);
+    lines.push(format!("the second:\n{waited}"));
+    lines.push(format!(
+        "the second's directory once it ended: {}",
+        marks(&second)
+    ));
+    for id in [&first, &second] {
+        fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
+    }
+    fs::remove_file(scratch.0.join("tagged")).unwrap();
+    scratch.write("bin/disk", "1000 100\n");
+    let refused = on_one_cpu(&scratch, &third);
+    lines.push(format!("the third:\n{}", job_ended_whole(refused)));
+    lines.extend(
+        noted(&scratch)
+            .into_iter()
+            .filter(|line| line.starts_with("docker")),
+    );
+    let mut text = lines.join("\n");
+    // How long the second waited.
+    let at = text.find("after waiting ").unwrap() + "after waiting ".len();
+    let seconds = text[at..].split(' ').next().unwrap().to_owned();
+    text.replace_range(at..at + seconds.len(), "<n>");
+    check(
+        &scratch,
+        &text,
+        &[
+            (first.as_str(), "<first>"),
+            (second.as_str(), "<second>"),
+            (third.as_str(), "<third>"),
+            (tag.strip_prefix("pumpkin/built:").unwrap(), "<hex>"),
+        ],
+        &expect![[r#"
+            the first holds: pumpkin/built:<hex>
+            the first's directory while it builds: building, config.toml, gateway.key, held
+            the second's directory while it waits: config.toml, gateway.key, held, waiting
+            the second's prune, while the first builds:
+            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+            docker builder prune --force --min-free-space 400
+            the first:
+            exit status: Some(0)
+            pumpkin: building an image in pumpkin/built
+            pumpkin: built an image in pumpkin/built
+            printed the IR of the image built: true
+            the first holds once built: pumpkin/built:<hex> sha256:2222222222222222222222222222222222222222222222222222222222222222
+            the second:
+            exit status: Some(0)
+            pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
+            pumpkin: waiting for a build slot: all 1 held, by jobs <first>
+            pumpkin: took a build slot after waiting <n> s
+            printed the IR of the image built: true
+            the second's directory once it ended: config.toml, gateway.key, held
+            the third:
+            exit status: Some(1)
+            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
+            pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
+            built/task.star:1:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
+                1 | IMAGE = image("Dockerfile")
+                  |         ^^^^^^^^^^^^^^^^^^^
+            pumpkin: built/task.star: the task has 1 problem
+            printed the IR of the image built: false
+            docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
+            docker image rm --force sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+            docker builder prune --force --min-free-space 400
+            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+            docker builder prune --force --min-free-space 400"#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the jobs' steps and the snapshot"
+)]
+fn job_publish_wait() {
+    let scratch = Scratch::new("controller-job-publish-wait");
+    // Rootful, as the controller's engine is, of which the job says nothing.
+    let rootful = INFO.replace(r#","name=rootless""#, "");
+    let _stand_in = StandIn::with(&scratch, &rootful, IMAGE);
+    set_up(&scratch);
+    write_parameter(
+        &scratch,
+        &format!("{}\n[providers.local.docker]\n", docker_table("default")),
+    );
+    scratch.write_sandboxd(&format!("home/.pumpkin/{PINNED}/bin/sandboxd"));
+    scratch.write_task("built", &workflow(&image('0'), &["true"]));
+    scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
+    let [run, other] = ["0ad00011", "0ad00012"].map(|random| id_ago(0, random));
+    for id in [&run, &other] {
+        send(&scratch, id, UPSTREAMS, false);
+    }
+    // Each of the engine's 4 publish slots held, as by other runs that publish.
+    let slots = scratch.0.join("home/.pumpkin/docker/publish-slots");
+    fs::create_dir_all(&slots).unwrap();
+    let held: Vec<File> = (0..4)
+        .map(|index| {
+            let slot = File::create(slots.join(index.to_string())).unwrap();
+            slot.lock().unwrap();
+            slot
+        })
+        .collect();
+    let mut job = on_controller(
+        &scratch,
+        &[
+            "controller",
+            "job",
+            &run,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--",
+            "run",
+            "built/task.star",
+        ],
+    );
+    let mut publishing = (job.stdout(Stdio::piped()).stderr(Stdio::piped()))
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(publishing.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("waiting for a publish slot") {
+        assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
+    }
+    let mut lines = vec![format!("the run's job, as it waits:\n{}", said.trim_end())];
+    let named = fs::read_to_string(scratch.0.join(format!("run/pumpkin/{run}/held"))).unwrap();
+    lines.push(format!("it holds: {}", named.trim().replace('\n', " ")));
+    let hex = named
+        .lines()
+        .next()
+        .unwrap()
+        .trim_start_matches("pumpkin/built:");
+    let hex = hex.to_owned();
+    // The image the run publishes, which another build's tag has moved off, and one that
+    // another task's tag names, which no job holds, on a volume past 80% used.
+    scratch.write(
+        "images",
+        &format!(
+            "{} 100\n{} 100 pumpkin/other:{}\n",
+            image('2'),
+            image('f'),
+            "f".repeat(64)
+        ),
+    );
+    scratch.write("bin/disk", "1000 150\n");
+    noted(&scratch);
+    let mut pruning = on_controller(
+        &scratch,
+        &[
+            "controller",
+            "job",
+            &other,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--",
+            "build",
+            "stand-in/task.star",
+        ],
+    );
+    let pruned = pruning.stdout(Stdio::null()).output().unwrap();
+    lines.push(format!(
+        "the other job's prune:\n{}",
+        String::from_utf8(pruned.stderr).unwrap().trim_end()
+    ));
+    lines.extend(
+        noted(&scratch)
+            .into_iter()
+            .filter(|line| line.starts_with("docker")),
+    );
+    scratch.write("bin/disk", "1000 500\n");
+    drop(held);
+    let output = ended(publishing, stderr, String::new());
+    let record = scratch.0.join(format!("home/.pumpkin/runs/{run}"));
+    let ir = fs::read_to_string(record.join("ir.json")).unwrap();
+    lines.extend([
+        format!("the run's job: exit status {:?}", output.status.code()),
+        format!("the run started: {}", record.join("log.jsonl").exists()),
+        format!("its IR names the image: {}", ir.contains(&image('2'))),
+    ]);
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[
+            (run.as_str(), "<run>"),
+            (other.as_str(), "<other>"),
+            (&hex, "<hex>"),
+        ],
+        &expect![[r#"
+            the run's job, as it waits:
+            pumpkin: building an image in pumpkin/built
+            pumpkin: built an image in pumpkin/built
+            pumpkin: waiting for a publish slot: all 4 held, by 0, 1, 2, 3
+            it holds: pumpkin/built:<hex> sha256:2222222222222222222222222222222222222222222222222222222222222222
+            the other job's prune:
+            pumpkin: the volume is more than 80% used: the prune removed 2 images, least recently used first
+            docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
+            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+            docker builder prune --force --min-free-space 400
+            the run's job: exit status Some(0)
+            the run started: true
+            its IR names the image: true"#]],
+    );
+}
+
 // The controller's boot, as its unit runs it, with root's runtime directory: it records each
 // run whose driver ended without an outcome as failed, once it has removed what the run left on
 // a provider that it reaches, `local`, or said that what it left on one that it can't, `aws`,
-// ends by the run's hard end; and leaves a run that ended clean.
+// ends by the run's hard end; leaves a run that ended clean; and prunes no image, as a job that
+// a client started as the controller came up may hold one that no IR names yet.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -468,6 +962,8 @@ fn boot() {
         }
         scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
     }
+    // The image of a job that a client started as the controller came up, which no IR names yet.
+    scratch.write("images", &format!("{}\n{}\n", image('a'), image('b')));
     send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
     let mut boot = on_controller(&scratch, &["controller", "boot"]);
     // As its unit has it: systemd's `/run/user/%U` names root's, the system manager's user's.
