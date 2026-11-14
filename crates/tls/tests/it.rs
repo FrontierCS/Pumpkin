@@ -171,7 +171,7 @@ fn backpressure() {
         HUNG,
         |client, server, _| {
             server
-                .set_write_timeout(Some(Duration::from_secs(1)))
+                .set_write_timeout(Some(Duration::from_millis(100)))
                 .unwrap();
             let bytes = pattern();
             let mut written = 0;

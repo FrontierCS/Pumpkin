@@ -1049,8 +1049,8 @@ fn greeted(address: SocketAddr, answer: &HelloReply, peers: &mut Vec<String>) ->
 fn trickled() -> String {
     let address = unlistened();
     let address_text = address.to_string();
-    // Two to three seconds from now, with the minute that `sandboxd` waits past it.
-    let by = unix_seconds(-57);
+    // One to two seconds from now, with the minute that `sandboxd` waits past it.
+    let by = unix_seconds(-58);
     let listen = ["--listen", &address_text, "--by", &by].map(OsStr::new);
     let listening = sandboxd(&listen, Some(OsStr::new(GRANT)));
     let (peer, trickled) = trickling(address);

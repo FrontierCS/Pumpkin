@@ -122,13 +122,6 @@ pub(crate) const REFUSED_ONCE: &str = "/sim/refused-once";
 /// the simulated provider fails to read.
 pub(crate) const UNSHOWN: &str = "/sim/unshown";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, whose sandbox's delete waits `LINGER`
-/// before it deletes it.
-pub(crate) const LINGERING: &str = "/sim/lingering";
-
-// Seconds longer than the hard end of the runs whose tests use it.
-const LINGER: Duration = Duration::from_secs(7);
-
 /// An [`image`]'s name whose sandbox's delete waits `DAWDLE` before it deletes it.
 pub(crate) const DAWDLING: &str = "/sim/dawdling";
 
@@ -998,7 +991,7 @@ struct Faults {
     /// How many deletes it refuses, `u32::MAX` for every one, as [`UNDELETABLE`]'s, or one, as
     /// [`REFUSED_ONCE`]'s.
     refusals: u32,
-    /// How long its delete waits: [`LINGERING`]'s or [`DAWDLING`]'s.
+    /// How long its delete waits: [`DAWDLING`]'s.
     linger: Duration,
     /// [`LAST`]'s.
     last: bool,
@@ -1076,9 +1069,7 @@ impl Faults {
             dialing,
             listing,
             refusals,
-            linger: if names(LINGERING) {
-                LINGER
-            } else if names(DAWDLING) {
+            linger: if names(DAWDLING) {
                 DAWDLE
             } else {
                 Duration::ZERO

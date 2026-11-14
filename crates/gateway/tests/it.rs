@@ -56,12 +56,12 @@ type Opening = fn(&mut UnixStream);
 /// How long the fake sandbox reads and sends nothing where its answer has a [`pause`], as over
 /// a slow link, whose end no event marks. A request by a [`hung`] deadline outlasts it, so no
 /// outcome rests on a margin; a bound of the gateway's own shorter than it would show.
-const PAUSE: Duration = Duration::from_millis(300);
+const PAUSE: Duration = Duration::from_millis(30);
 
 /// How long a grant listener gives a peer to say its hello, where a silent one shows the bound:
 /// each other peer says its hello as it dials, which the listener reads even once the bound has
 /// passed, so no outcome rests on a margin.
-const HELLO_BOUND: Duration = Duration::from_millis(500);
+const HELLO_BOUND: Duration = Duration::from_millis(50);
 
 /// A request's deadline that passes soon, while the fake sandbox waits for the gateway to hang
 /// up ([`until_hang_up`]).
