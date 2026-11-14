@@ -116,7 +116,7 @@ impl<'p> Sandboxes<'p> {
         model: bool,
         by: Deadline,
         arrivals: Sender<T>,
-        wrap: fn(Arrival) -> T,
+        wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, String> {
         let dir = self.sockets.join(name);
         fs::create_dir(&dir).context(dir.display())?;

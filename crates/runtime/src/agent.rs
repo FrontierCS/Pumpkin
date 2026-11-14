@@ -16,8 +16,8 @@ use schema::sandbox::{
 use schema::workflow::{self, Workflow};
 use stdx::{Context, Deadline};
 
-use super::Input;
 use super::sandbox::{PUMPKIN, Sandboxes, Started, collect, launch};
+use super::{Clock, Input};
 
 /// The agent's sandbox, from when it starts until it is deleted.
 pub(super) struct Agent {
@@ -30,19 +30,23 @@ pub(super) struct Agent {
 impl Agent {
     /// Starts the agent's sandbox, whose session takes its ops, and its model requests if
     /// `model`, puts its directories, files and standard input there ([`put`]), then starts its
-    /// command, all by `by`, its session's arrivals sent on `inbox`. Returns the sandbox, if it
-    /// started, and what came of it: [`Event::AgentStarted`] or [`Event::AgentFailed`].
+    /// command, all by `by`, its session's arrivals sent on `inbox`, each at the time `clock`
+    /// reads as the session's reader hands it over. Returns the sandbox, if it started, and what
+    /// came of it: [`Event::AgentStarted`] or [`Event::AgentFailed`].
     pub(super) fn start(
         sandboxes: &Sandboxes<'_>,
         workflow: &Workflow,
         model: bool,
         by: Deadline,
         inbox: Sender<Input>,
+        clock: impl Clock,
     ) -> (Option<Self>, Event) {
         let agent = workflow.agent();
         let ops = Some(op_payload_limit(workflow));
         let sandbox = workflow.sandbox(agent.role);
-        let started = sandboxes.start("agent", sandbox, ops, model, by, inbox, Input::Agent);
+        // Stamped as the reader hands it over, which is when it reached the host.
+        let wrap = move |arrival| Input::Agent(clock.now(), arrival);
+        let started = sandboxes.start("agent", sandbox, ops, model, by, inbox, wrap);
         let mut sandbox = match started {
             Ok(sandbox) => sandbox,
             Err(error) => {

@@ -36,7 +36,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use stdx::Context;
 
-use super::log;
+use super::{Durable, Host, log};
 
 /// The version of the record's form, which a record's `record.json` holds, named as the IR's
 /// version is ([`IrVersion`](schema::ir::IrVersion)): a reader is to check it before it
@@ -60,14 +60,18 @@ pub(super) struct Lock {
 /// Makes a new record directory in `runs`, creating `runs` if need be, and returns the run's
 /// id, which names the directory: `now` as a UTC time, and 8 random hexadecimal digits, as
 /// `20261028-131811-1a2b3c4d`, which sorts by time, with its `record.json` and its locked
-/// `driver.pid`. Syncs each directory that gains an entry, so that the record's directory lasts.
-/// Fails, before it makes anything, if `now` is before the Unix epoch.
+/// `driver.pid`. Syncs each directory that gains an entry on `host`, so that the record's
+/// directory lasts. Fails, before it makes anything, if `now` is before the Unix epoch.
 ///
 /// The record is made as `.<id>.partial` and renamed to `<id>` once it is locked, so that
 /// nothing that reads `runs` sees a record before its lock.
-pub(super) fn create(runs: &Path, now: SystemTime) -> Result<(String, PathBuf, Lock), String> {
+pub(super) fn create(
+    host: &impl Host,
+    runs: &Path,
+    now: SystemTime,
+) -> Result<(String, PathBuf, Lock), String> {
     let seconds = since_epoch(now)?.as_secs();
-    create_dirs(runs)?;
+    create_dirs(host, runs)?;
     let mut random = [0; 4];
     File::open("/dev/urandom")
         .and_then(|mut urandom| urandom.read_exact(&mut random))
@@ -76,7 +80,7 @@ pub(super) fn create(runs: &Path, now: SystemTime) -> Result<(String, PathBuf, L
     let partial = runs.join(format!(".{id}.partial"));
     fs::create_dir(&partial).context(partial.display())?;
     let dir = runs.join(&id);
-    match fill(&partial, &dir, runs) {
+    match fill(host, &partial, &dir, runs) {
         Ok(lock) => Ok((id, dir, lock)),
         // What was made in `partial` is no record, and nothing else would remove it.
         Err(error) => match fs::remove_dir_all(&partial) {
@@ -91,9 +95,10 @@ pub(super) fn create(runs: &Path, now: SystemTime) -> Result<(String, PathBuf, L
 }
 
 /// Writes the files of a new record into `partial`, which is empty, locks its `driver.pid`, and
-/// renames `partial` to `dir`, in `runs`.
-fn fill(partial: &Path, dir: &Path, runs: &Path) -> Result<Lock, String> {
+/// renames `partial` to `dir`, in `runs`, syncing on `host`.
+fn fill(host: &impl Host, partial: &Path, dir: &Path, runs: &Path) -> Result<Lock, String> {
     write_json(
+        host,
         partial,
         "record.json",
         &json!({ "record_version": RECORD_VERSION }),
@@ -104,13 +109,13 @@ fn fill(partial: &Path, dir: &Path, runs: &Path) -> Result<Lock, String> {
     let mut pid = File::create(&pid_path).context(pid_path.display())?;
     pid.lock().context(pid_path.display())?;
     writeln!(pid, "{}", std::process::id())
-        .and_then(|()| pid.sync_all())
+        .and_then(|()| host.sync(&pid, Durable::All))
         .context(pid_path.display())?;
-    sync_dir(partial)?;
+    sync_dir(host, partial)?;
     // A record directory is never empty, so the rename fails rather than replace one that an id
     // collision names.
     fs::rename(partial, dir).context(dir.display())?;
-    sync_dir(runs)?;
+    sync_dir(host, runs)?;
     Ok(Lock { _file: pid })
 }
 
@@ -389,8 +394,8 @@ fn final_judge_stderr(dir: &Path) -> Result<PathBuf, String> {
 }
 
 /// Makes `dir` and those of its ancestors that are missing, as [`fs::create_dir_all`] does,
-/// and syncs the parent of each directory it makes, so that each lasts.
-fn create_dirs(dir: &Path) -> Result<(), String> {
+/// and syncs the parent of each directory it makes on `host`, so that each lasts.
+fn create_dirs(host: &impl Host, dir: &Path) -> Result<(), String> {
     let missing: Vec<&Path> = (dir.ancestors())
         .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
         .collect();
@@ -401,7 +406,7 @@ fn create_dirs(dir: &Path) -> Result<(), String> {
         let parent = made
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty());
-        sync_dir(parent.unwrap_or(Path::new(".")))?;
+        sync_dir(host, parent.unwrap_or(Path::new(".")))?;
     }
     Ok(())
 }
@@ -435,20 +440,25 @@ fn utc_stamp(seconds: u64) -> String {
 }
 
 /// Writes `value` as the file `name` in `dir`, a directory of the record, in pretty-printed
-/// JSON, by [`replace`].
-pub(super) fn write_json(dir: &Path, name: &str, value: &serde_json::Value) -> Result<(), String> {
-    replace(dir, name, format!("{value:#}\n").as_bytes())
+/// JSON, by [`replace`] on `host`.
+pub(super) fn write_json(
+    host: &impl Host,
+    dir: &Path,
+    name: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    replace(host, dir, name, format!("{value:#}\n").as_bytes())
 }
 
 /// Writes `bytes` as the file `name` in `dir`, whole or not at all, even if the machine stops:
-/// to a temporary file in `dir`, synced, then renamed over `name`, and `dir` synced. The
-/// temporary file is removed if it can't be written or renamed.
-fn replace(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+/// to a temporary file in `dir`, synced on `host`, then renamed over `name`, and `dir` synced.
+/// The temporary file is removed if it can't be written or renamed.
+fn replace(host: &impl Host, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
     let temporary = dir.join(format!(".{name}.partial"));
     let path = dir.join(name);
     let written = File::create(&temporary).and_then(|mut file| {
         file.write_all(bytes)?;
-        file.sync_all()
+        host.sync(&file, Durable::All)
     });
     let renamed = (written.context(temporary.display()))
         .and_then(|()| fs::rename(&temporary, &path).context(path.display()));
@@ -463,7 +473,7 @@ fn replace(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
             )),
         };
     }
-    sync_dir(dir)
+    sync_dir(host, dir)
 }
 
 /// The reference to an op's payload: its size and SHA-256.
@@ -476,20 +486,20 @@ pub(super) fn reference(bytes: &[u8]) -> PayloadRef {
 }
 
 /// The payloads of the ops a run accepted, each stored once in `payloads/`, under its SHA-256
-/// in hexadecimal.
-#[derive(Debug)]
-pub(super) struct Payloads {
+/// in hexadecimal, and synced on the run's host, `H`.
+pub(super) struct Payloads<'h, H> {
     dir: PathBuf,
+    host: &'h H,
 }
 
-impl Payloads {
-    /// Makes `payloads/` in the record's directory `record`, and syncs `record`, so that it
-    /// lasts.
-    pub(super) fn create(record: &Path) -> Result<Self, String> {
+impl<'h, H: Host> Payloads<'h, H> {
+    /// Makes `payloads/` in the record's directory `record`, and syncs `record` on `host`, so
+    /// that it lasts.
+    pub(super) fn create(host: &'h H, record: &Path) -> Result<Self, String> {
         let dir = record.join("payloads");
         fs::create_dir(&dir).context(dir.display())?;
-        sync_dir(record)?;
-        Ok(Self { dir })
+        sync_dir(host, record)?;
+        Ok(Self { dir, host })
     }
 
     /// Stores `bytes`, whose reference is `payload`, by [`replace`], unless they are stored
@@ -499,7 +509,7 @@ impl Payloads {
         match fs::symlink_metadata(&path) {
             Ok(_) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                replace(&self.dir, hex(&payload.digest), bytes)
+                replace(self.host, &self.dir, hex(&payload.digest), bytes)
             }
             Err(error) => Err(error).context(path.display()),
         }
@@ -556,9 +566,9 @@ fn tree_size(dir: &Path) -> io::Result<TreeSize> {
     Ok(size)
 }
 
-/// Syncs `dir`, so that the entries made in it, or renamed into it, last.
-pub(super) fn sync_dir(dir: &Path) -> Result<(), String> {
+/// Syncs `dir` on `host`, so that the entries made in it, or renamed into it, last.
+pub(super) fn sync_dir(host: &impl Host, dir: &Path) -> Result<(), String> {
     File::open(dir)
-        .and_then(|dir| dir.sync_all())
+        .and_then(|dir| host.sync(&dir, Durable::All))
         .context(dir.display())
 }

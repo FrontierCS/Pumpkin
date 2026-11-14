@@ -18,7 +18,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use expect_test::{Expect, expect};
 use provider::Provider;
 use route::{Key, Serving, Upstream, UpstreamUrl};
-use runtime::Run;
+use runtime::{Run, System};
 use schema::ir::{self, ModelName, Name};
 use schema::provider::Ready;
 use schema::workflow::{Placed, Workflow};
@@ -78,7 +78,7 @@ fn check(
         let url = "http://127.0.0.1:9/responses";
         let serving = served.map(|models| serving(&runs.dir, url, models));
         let prepared = placed(&ir, Sim::new().ready())
-            .and_then(|placed| Run::prepare(placed, &dir, now, serving));
+            .and_then(|placed| Run::prepare(&System, placed, &dir, now, serving));
         let record = fs::read_dir(&dir)
             .ok()
             .and_then(|mut entries| entries.next());

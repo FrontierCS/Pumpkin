@@ -66,7 +66,8 @@ pub enum OpReply {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpsReply {
-    /// The time left to work, in whole seconds rounded down: until the deadline.
+    /// The time left to work, in whole seconds rounded down: from when the op reached its owner,
+    /// or later, until the deadline.
     pub remaining_seconds: u64,
     /// The caller's CPU and memory limits: its role's.
     pub resources: Resources,
@@ -128,9 +129,9 @@ pub struct Remaining {
 #[serde(deny_unknown_fields)]
 pub struct SubmitReply {
     pub state: SubmitState,
-    /// The time left to work, in whole seconds rounded down: until the deadline, or, once a
-    /// final submission is accepted, until the end of the grace to wind down, if that comes
-    /// first.
+    /// The time left to work, in whole seconds rounded down: from when the op reached its owner,
+    /// or later, until the deadline, or, once a final submission is accepted, until the end of
+    /// the grace to wind down, if that comes first.
     pub remaining_seconds: u64,
 }
 
