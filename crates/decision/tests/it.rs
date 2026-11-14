@@ -200,7 +200,12 @@ impl Run<'_> {
         }
         if self.tick_due != Some(tick_due) {
             self.tick_due = Some(tick_due);
-            writeln!(self.transcript, "  (tick due at {})", tick_due.as_millis()).unwrap();
+            // In milliseconds, as the script gives times, and the nanoseconds past them, if any.
+            let due = match tick_due.subsec_nanos() % 1_000_000 {
+                0 => format!("{}", tick_due.as_millis()),
+                nanos => format!("{}.{nanos:06}", tick_due.as_millis()),
+            };
+            writeln!(self.transcript, "  (tick due at {due})").unwrap();
         }
     }
 
@@ -299,6 +304,7 @@ fn whole_run() {
     check(
         |_| {},
         r#"
+        0 agent_started
         1000 ops
         2000 judge train 10240
         2100 status 0
@@ -317,6 +323,8 @@ fn whole_run() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             1000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
@@ -340,7 +348,7 @@ fn whole_run() {
             12100 agent_exited 0
               tear down the agent
               start job 1 of score on op 7's payload of 10240 bytes, with a timeout of 120s
-              (tick due at 18200000)
+              (tick due at 18210000)
             13500 judge_started 1
             20000 judge_exited 1
             20100 collected 1 {"raw_score": 0, "metrics": {"solved": 0}}
@@ -353,11 +361,12 @@ fn whole_run() {
 fn quotas() {
     check(
         |ir| {
-            let train = &mut ir["main"]["solo_then_judge"]["grants"][0]["judge"];
+            let train = &mut ir["roles"][0]["grants"][0]["judge"];
             train["cumulative_seconds"] = json!(10);
             train["call_timeout_seconds"] = json!(6);
         },
         r#"
+        0 agent_started
         1000 judge train 4194305
         1000 judge nothing 10
         1000 submit train 10
@@ -379,6 +388,8 @@ fn quotas() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             1000 judge train 4194305
               refuse op 1: the payload is 4194305 bytes, over `train`'s limit of 4194304: send a smaller one
@@ -417,8 +428,9 @@ fn quotas() {
 #[test]
 fn one_call_at_a_time() {
     check(
-        |ir| ir["main"]["solo_then_judge"]["grants"][0]["judge"]["calls"] = json!(2),
+        |ir| ir["roles"][0]["grants"][0]["judge"]["calls"] = json!(2),
         r#"
+        0 agent_started
         1000 judge train 10
         1100 judge train 10
         1200 status 0
@@ -435,6 +447,8 @@ fn one_call_at_a_time() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":1,"seconds":12000}}
@@ -463,10 +477,15 @@ fn one_call_at_a_time() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn deadline() {
     check(
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
         r#"
+        0 agent_started
         50000 submit submit 10
         55000 judge train 10
         55500 judge_started 0
@@ -484,6 +503,8 @@ fn deadline() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             50000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":10}
@@ -499,7 +520,7 @@ fn deadline() {
             60000 tick
               stop job 0
               tear down the agent
-              (tick due at 260000)
+              (tick due at 270000)
             60100 status 0
               refuse op 3: the work phase has ended: make no more ops
             60200 agent_exited 137
@@ -512,8 +533,9 @@ fn deadline() {
         "#]],
     );
     check(
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
         r"
+        0 agent_started
         50000 submit submit 10
         59999 judge train 10
         60000 judge_failed 0 this runtime runs no judge call yet
@@ -521,6 +543,8 @@ fn deadline() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             50000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":10}
@@ -531,7 +555,106 @@ fn deadline() {
               stop job 0
               tear down the agent
               start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 260000)
+              (tick due at 270000)
+        "#]],
+    );
+}
+
+#[test]
+fn deadline_from_the_agent_start() {
+    let deadline =
+        |ir: &mut Value| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
+    check(
+        deadline,
+        r"
+        8000 agent_started
+        8000 ops
+        9000 agent_started
+        67999 tick
+        68000 tick
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 70000)
+            8000 agent_started
+              (tick due at 68000)
+            8000 ops
+              reply to op 1: {"kind":"ops","remaining_seconds":60,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+            9000 agent_started
+            67999 tick
+            68000 tick
+              tear down the agent
+              finish: no score; work ended at the deadline; no submission
+              (tick due at 270000)
+        "#]],
+    );
+    check(
+        deadline,
+        r"
+        12000 agent_started
+        12000 ops
+        70000 tick
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 70000)
+            12000 agent_started
+            12000 ops
+              reply to op 1: {"kind":"ops","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+            70000 tick
+              tear down the agent
+              finish: no score; work ended at the deadline; no submission
+              (tick due at 270000)
+        "#]],
+    );
+    check(
+        deadline,
+        r"
+        70000 tick
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 70000)
+            70000 tick
+              tear down the agent
+              finish: no score; work ended at the deadline; no submission
+              (tick due at 270000)
+        "#]],
+    );
+}
+
+#[test]
+fn hard_end_covers_the_run() {
+    // Each step takes as long as it may: the agent starts at its startup and works to the
+    // deadline, its teardown takes the grace and its startup again, and the final judge its own.
+    check(
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
+        r#"
+        10000 agent_started
+        69999 submit submit 10
+        70000 tick
+        150000 judge_started 0
+        269999 judge_exited 0
+        269999 collected 0 {"raw_score": 7}
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 70000)
+            10000 agent_started
+            69999 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":0}
+            70000 tick
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 270000)
+            150000 judge_started 0
+            269999 judge_exited 0
+            269999 collected 0 {"raw_score": 7}
+              finish: score 7; work ended at the deadline; the stored submission, op 1's payload of 10 bytes, judged, returning {"raw_score":7}
         "#]],
     );
 }
@@ -541,6 +664,7 @@ fn agent_ends() {
     check(
         |_| {},
         r#"
+        0 agent_started
         1000 judge train 10
         1500 judge_started 0
         3000 judge_exited 0
@@ -555,6 +679,8 @@ fn agent_ends() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -565,7 +691,7 @@ fn agent_ends() {
               reply to op 2: {"kind":"submit","state":"stored","remaining_seconds":17996}
             3200 agent_exited 0
               tear down the agent
-              (tick due at 18200000)
+              (tick due at 18210000)
             3400 collected 0 {"raw_score": 1}
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
             3500 judge_started 1
@@ -583,56 +709,63 @@ fn agent_ends() {
         &expect![[r#"
             start
               start the agent
-              (tick due at 18000000)
+              (tick due at 18010000)
             30000 agent_failed the agent's sandbox did not connect
               tear down the agent
               finish: no score; work ended at the agent's failure, the agent's sandbox did not connect; no submission
-              (tick due at 18200000)
+              (tick due at 18210000)
         "#]],
     );
 }
 
 #[test]
 fn hard_end() {
-    let deadline = |ir: &mut Value| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60);
+    let deadline =
+        |ir: &mut Value| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
     check(
         deadline,
         r"
+        0 agent_started
         1000 judge train 10
         1500 judge_started 0
-        260000 ops
-        260100 judge_exited 0
+        270000 ops
+        270100 judge_exited 0
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
               start job 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
             1500 judge_started 0
-            260000 ops
+            270000 ops
               abandon the run at its hard end
               refuse op 2: the run has passed its hard end: make no more ops
-              (tick due at 260000)
-            260100 judge_exited 0
+              (tick due at 270000)
+            270100 judge_exited 0
         "#]],
     );
     check(
         deadline,
         r"
+        0 agent_started
         1000 submit submit 10 final
-        260000 tick
+        270000 tick
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             1000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":59}
-            260000 tick
+            270000 tick
               abandon the run at its hard end
-              (tick due at 260000)
+              (tick due at 270000)
         "#]],
     );
 }
@@ -640,17 +773,20 @@ fn hard_end() {
 #[test]
 fn hard_end_after_work() {
     check(
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
         r"
+        0 agent_started
         1000 judge train 10
         1500 judge_started 0
         60000 tick
-        259999 tick
-        260000 tick
+        269999 tick
+        270000 tick
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -659,40 +795,43 @@ fn hard_end_after_work() {
             60000 tick
               stop job 0
               tear down the agent
-              (tick due at 260000)
-            259999 tick
-            260000 tick
+              (tick due at 270000)
+            269999 tick
+            270000 tick
               abandon the run at its hard end
         "#]],
     );
     check(
         |ir| {
-            let pattern = &mut ir["main"]["solo_then_judge"];
-            pattern["deadline_seconds"] = json!(60);
-            pattern["finalize_grace_seconds"] = json!(30);
+            let agent = &mut ir["roles"][0]["runtime"]["agent"];
+            agent["deadline_seconds"] = json!(60);
+            agent["finalize_grace_seconds"] = json!(30);
         },
         r#"
+        0 agent_started
         1000 submit submit 10
         2000 agent_exited 0
         2500 judge_started 0
         122500 judge_timed_out 0
-        229999 tick
-        230000 collected 0 {"raw_score": 7}
+        239999 tick
+        240000 collected 0 {"raw_score": 7}
         "#,
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             1000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":59}
             2000 agent_exited 0
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 230000)
+              (tick due at 240000)
             2500 judge_started 0
             122500 judge_timed_out 0
-            229999 tick
-            230000 collected 0 {"raw_score": 7}
+            239999 tick
+            240000 collected 0 {"raw_score": 7}
               abandon the run at its hard end
         "#]],
     );
@@ -701,120 +840,133 @@ fn hard_end_after_work() {
 #[test]
 fn hard_end_bounds() {
     check(
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
         r"
+        0 agent_started
         1000 agent_exited 0
-        260000 tick
+        270000 tick
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             1000 agent_exited 0
               tear down the agent
               finish: no score; work ended at the agent's exit, Code(0); no submission
-              (tick due at 260000)
-            260000 tick
+              (tick due at 270000)
+            270000 tick
         "#]],
     );
     check(
-        // Shorter than the startup, which then takes the deadline's place.
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(5),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(5),
         r"
+        0 agent_started
         1000 submit submit 10
         5000 tick
-        209999 tick
-        210000 tick
+        214999 tick
+        215000 tick
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 15000)
+            0 agent_started
               (tick due at 5000)
             1000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":4}
             5000 tick
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 210000)
-            209999 tick
-            210000 tick
+              (tick due at 215000)
+            214999 tick
+            215000 tick
               abandon the run at its hard end
         "#]],
     );
     check(
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(u64::MAX),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(u64::MAX),
         r"
+        0 agent_started
         1000 submit submit 10
         2000 agent_exited 0
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 18446744073709551615999.999999)
+            0 agent_started
               (tick due at 18446744073709551615000)
             1000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":18446744073709551614}
             2000 agent_exited 0
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 18446744073709551615999)
+              (tick due at 18446744073709551615999.999999)
         "#]],
     );
 }
 
 #[test]
 fn hard_end_startups() {
-    // In the slow class, the agent's startup counts twice, and stands in for a deadline shorter
-    // than it.
+    // In the slow class, the agent's startup counts twice.
     check(
         |ir| {
-            ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(5);
+            ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(5);
             ir["roles"][0]["needs"]["memory_bytes"] = json!(SLOW_MEMORY_BYTES);
         },
         r"
+        0 agent_started
         1000 submit submit 10
         5000 tick
-        249999 tick
-        250000 tick
+        254999 tick
+        255000 tick
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 35000)
+            0 agent_started
               (tick due at 5000)
             1000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":4}
             5000 tick
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 250000)
-            249999 tick
-            250000 tick
+              (tick due at 255000)
+            254999 tick
+            255000 tick
               abandon the run at its hard end
         "#]],
     );
     // In the slow class, the final judge's startup counts once.
     check(
         |ir| {
-            ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(60);
+            ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
             ir["roles"][2]["needs"]["memory_bytes"] = json!(SLOW_MEMORY_BYTES);
         },
         r"
+        0 agent_started
         1000 submit submit 10
         60000 tick
-        279999 tick
-        280000 tick
+        289999 tick
+        290000 tick
         ",
         &expect![[r#"
             start
               start the agent
+              (tick due at 70000)
+            0 agent_started
               (tick due at 60000)
             1000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":59}
             60000 tick
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 280000)
-            279999 tick
-            280000 tick
+              (tick due at 290000)
+            289999 tick
+            290000 tick
               abandon the run at its hard end
         "#]],
     );
@@ -825,7 +977,7 @@ fn reports_for_the_log() {
     check(
         |_| {},
         r#"
-        500 agent_started
+        0 agent_started
         1000 judge train 10
         1500 judge_started 0
         3000 judge_exited 0 1
@@ -835,8 +987,9 @@ fn reports_for_the_log() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
-            500 agent_started
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
               start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
@@ -850,10 +1003,15 @@ fn reports_for_the_log() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn finalize_lock() {
     check(
         |_| {},
         r"
+        0 agent_started
         1000 judge train 10
         1500 judge_started 0
         2000 submit submit 10 final
@@ -869,6 +1027,8 @@ fn finalize_lock() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -891,14 +1051,15 @@ fn finalize_lock() {
             62000 tick
               stop job 0
               tear down the agent
-              (tick due at 18200000)
+              (tick due at 18210000)
             62200 judge_failed 0 stopped
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
     check(
-        |ir| ir["main"]["solo_then_judge"]["finalize_grace_seconds"] = json!(0),
+        |ir| ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0),
         r"
+        0 agent_started
         2000 submit submit 10 final
         2000 model
         2100 ops
@@ -906,12 +1067,14 @@ fn finalize_lock() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             2000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":0}
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 18140000)
+              (tick due at 18150000)
             2000 model
               model requests refused
             2100 ops
@@ -927,8 +1090,9 @@ fn finalize_lock() {
 )]
 fn finalize_near_deadline() {
     check(
-        |ir| ir["main"]["solo_then_judge"]["deadline_seconds"] = json!(30),
+        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30),
         r"
+        0 agent_started
         10000 submit submit 10 final
         29999 model
         30000 model
@@ -936,6 +1100,8 @@ fn finalize_near_deadline() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 40000)
+            0 agent_started
               (tick due at 30000)
             10000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":20}
@@ -946,13 +1112,14 @@ fn finalize_near_deadline() {
         "#]],
     );
     let grace = |ir: &mut Value| {
-        let pattern = &mut ir["main"]["solo_then_judge"];
-        pattern["deadline_seconds"] = json!(30);
-        pattern["finalize_grace_seconds"] = json!(10);
+        let agent = &mut ir["roles"][0]["runtime"]["agent"];
+        agent["deadline_seconds"] = json!(30);
+        agent["finalize_grace_seconds"] = json!(10);
     };
     check(
         grace,
         r#"
+        0 agent_started
         19950 submit submit 10 final
         30100 tick
         30150 ops
@@ -963,6 +1130,8 @@ fn finalize_near_deadline() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 40000)
+            0 agent_started
               (tick due at 30000)
             19950 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":10}
@@ -970,7 +1139,7 @@ fn finalize_near_deadline() {
             30100 tick
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 180000)
+              (tick due at 190000)
             30150 ops
               refuse op 2: a final submission was accepted: make no more ops
             30200 judge_started 0
@@ -982,6 +1151,7 @@ fn finalize_near_deadline() {
     check(
         grace,
         r"
+        0 agent_started
         20000 submit submit 10 final
         30000 tick
         30000 ops
@@ -989,13 +1159,15 @@ fn finalize_near_deadline() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 40000)
+            0 agent_started
               (tick due at 30000)
             20000 submit submit 10 final
               reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":10}
             30000 tick
               tear down the agent
               start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 180000)
+              (tick due at 190000)
             30000 ops
               refuse op 2: the work phase has ended: make no more ops
         "#]],
@@ -1007,6 +1179,7 @@ fn unknown_jobs() {
     check(
         |_| {},
         r"
+        0 agent_started
         1000 judge train 10
         1400 status 2
         1500 status 1
@@ -1014,6 +1187,8 @@ fn unknown_jobs() {
         &expect![[r#"
             start
               start the agent
+              (tick due at 18010000)
+            0 agent_started
               (tick due at 18000000)
             1000 judge train 10
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}

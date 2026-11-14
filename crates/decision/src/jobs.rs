@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use schema::sandbox::op::{self, FailureCode};
-use schema::workflow::JudgeGrantId;
+use schema::workflow::{JudgeCall, JudgeGrantId};
 
 use super::{JobId, JudgeResult};
 
@@ -60,16 +60,15 @@ impl Failure {
     }
 }
 
-/// The agent's jobs, each numbered by its index, in the order they were added. The score's job
-/// takes the number after theirs, and the final phase holds it, so a number the agent asks about
-/// never names it.
+/// The run's jobs, each numbered by its index, in the order they were added: the agent's calls',
+/// then the score's, last.
 #[derive(Debug, Default)]
 pub(super) struct Jobs(Vec<Job>);
 
 #[derive(Debug)]
 pub(super) struct Job {
-    /// The agent's grant the call was made under.
-    pub(super) grant: JudgeGrantId,
+    /// What the call was made under.
+    pub(super) call: JudgeCall,
     pub(super) state: State,
 }
 
@@ -81,26 +80,13 @@ pub(super) enum State {
     /// Its command started at `started`.
     Running { started: Duration },
     /// Its command has ended, or the core stopped the job; its sandbox is being collected and
-    /// destroyed. `ran` is when its command ran, if it started.
-    Ending { ran: Option<Span>, end: End },
+    /// destroyed. `used` is how long its command ran, none if it didn't start.
+    Ending { used: Duration, end: End },
     /// Its sandbox is gone.
     Ended {
-        ran: Option<Span>,
+        used: Duration,
         outcome: Result<JudgeResult, Failure>,
     },
-}
-
-/// When a job's command ran, as times since the run started.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Span {
-    started: Duration,
-    ended: Duration,
-}
-
-impl Span {
-    fn duration(self) -> Duration {
-        self.ended.saturating_sub(self.started)
-    }
 }
 
 /// How a job's command ended.
@@ -112,13 +98,6 @@ pub(super) enum End {
     TimedOut,
     /// When the core stopped the job.
     Stopped,
-}
-
-/// A job's last report, once its sandbox is gone.
-#[derive(Debug)]
-pub(super) enum Report {
-    Collected(Result<JudgeResult, String>),
-    Failed(String),
 }
 
 /// What a grant's calls have used.
@@ -143,62 +122,42 @@ impl State {
     /// Notes that a job's command ended. A job whose start wasn't reported ran for no time
     /// the core saw, but ends all the same, so that a timeout still leaves no result.
     pub(super) fn ended(&mut self, at: Duration, end: End) {
-        let ran = match *self {
-            Self::Queued => None,
-            Self::Running { started } => Some(Span { started, ended: at }),
+        let used = match *self {
+            Self::Queued => Duration::ZERO,
+            Self::Running { started } => at.saturating_sub(started),
             Self::Ending { .. } | Self::Ended { .. } => return,
         };
-        *self = Self::Ending { ran, end };
+        *self = Self::Ending { used, end };
     }
 
-    /// Ends a job with its last report. A report that skips a step, such as a failure before
-    /// the command started, ends the job all the same, its command's time running until the
-    /// report if it had started.
-    pub(super) fn report(&mut self, at: Duration, report: Report) {
-        let (ran, end) = match *self {
-            Self::Queued => (None, None),
-            Self::Running { started } => (Some(Span { started, ended: at }), None),
-            Self::Ending { ran, end } => (ran, Some(end)),
+    /// Ends a job with what its last report says came of it. A report that skips a step, such
+    /// as a failure before the command started, ends the job all the same, its command's time
+    /// running until the report if it had started.
+    pub(super) fn report(&mut self, at: Duration, outcome: Result<JudgeResult, Failure>) {
+        let (used, outcome) = match *self {
+            Self::Queued => (Duration::ZERO, outcome),
+            Self::Running { started } => (at.saturating_sub(started), outcome),
+            // A stopped job ends as its report says, as after an exit: the core stops jobs only
+            // as the work phase ends, after which no status asks what came of them.
+            Self::Ending { used, end } => match end {
+                End::TimedOut => (used, Err(Failure::Timeout)),
+                End::Exited | End::Stopped => (used, outcome),
+            },
             Self::Ended { .. } => return,
         };
-        // A stopped job ends as its report says, as after an exit: the core stops jobs only as
-        // the work phase ends, after which no status asks what came of them.
-        let outcome = match (end, report) {
-            (Some(End::TimedOut), _) => Err(Failure::Timeout),
-            (Some(End::Exited | End::Stopped) | None, Report::Collected(Ok(result))) => Ok(result),
-            (Some(End::Exited | End::Stopped) | None, Report::Collected(Err(reason))) => {
-                Err(Failure::InvalidResult(reason))
-            }
-            (Some(End::Exited | End::Stopped) | None, Report::Failed(reason)) => {
-                Err(Failure::Error(reason))
-            }
-        };
-        *self = Self::Ended { ran, outcome };
-    }
-
-    /// What came of the job, once it has ended.
-    pub(super) fn outcome(&self) -> Option<&Result<JudgeResult, Failure>> {
-        match self {
-            Self::Ended { outcome, .. } => Some(outcome),
-            Self::Queued | Self::Running { .. } | Self::Ending { .. } => None,
-        }
+        *self = Self::Ended { used, outcome };
     }
 }
 
 impl Jobs {
-    /// Adds a job, queued, made under `grant`.
-    pub(super) fn add(&mut self, grant: JudgeGrantId) -> JobId {
+    /// Adds a job, queued, made under `call`.
+    pub(super) fn add(&mut self, call: JudgeCall) -> JobId {
         let job = JobId(self.0.len() as u64);
         self.0.push(Job {
-            grant,
+            call,
             state: State::Queued,
         });
         job
-    }
-
-    /// The number the score's job takes: the one after the agent's jobs'.
-    pub(super) fn score_job(&self) -> JobId {
-        JobId(self.0.len() as u64)
     }
 
     pub(super) fn get(&self, job: JobId) -> Option<&Job> {
@@ -214,19 +173,13 @@ impl Jobs {
     pub(super) fn stop_unfinished(&mut self, now: Duration) -> Vec<JobId> {
         let mut stopped = Vec::new();
         for (index, job) in self.0.iter_mut().enumerate() {
-            let ran = match job.state {
-                State::Queued => None,
-                State::Running { started } => Some(Span {
-                    started,
-                    ended: now,
-                }),
-                State::Ending { .. } | State::Ended { .. } => continue,
-            };
-            job.state = State::Ending {
-                ran,
-                end: End::Stopped,
-            };
-            stopped.push(JobId(index as u64));
+            match job.state {
+                State::Queued | State::Running { .. } => {
+                    job.state.ended(now, End::Stopped);
+                    stopped.push(JobId(index as u64));
+                }
+                State::Ending { .. } | State::Ended { .. } => {}
+            }
         }
         stopped
     }
@@ -240,17 +193,15 @@ impl Jobs {
     /// What `grant`'s calls have used so far.
     pub(super) fn usage(&self, grant: JudgeGrantId) -> Usage {
         let mut usage = Usage::default();
-        for job in (self.0.iter()).filter(|job| job.grant == grant) {
+        for job in (self.0.iter()).filter(|job| job.call == JudgeCall::Grant(grant)) {
             usage.calls += 1;
             match job.state {
                 State::Queued | State::Running { .. } => usage.busy = true,
-                State::Ending { ran, .. } => {
+                State::Ending { used, .. } => {
                     usage.busy = true;
-                    usage.used += ran.map_or(Duration::ZERO, Span::duration);
+                    usage.used += used;
                 }
-                State::Ended { ran, .. } => {
-                    usage.used += ran.map_or(Duration::ZERO, Span::duration);
-                }
+                State::Ended { used, .. } => usage.used += used,
             }
         }
         usage

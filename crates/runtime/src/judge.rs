@@ -21,7 +21,7 @@ use schema::sandbox::{
     RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir, pumpkin_dir,
     result_file, slot_dir, slot_payload,
 };
-use schema::workflow::Judge;
+use schema::workflow::{Judge, Sandbox};
 use stdx::{Context, Deadline};
 
 use super::sandbox::{PUMPKIN, Sandboxes, collect, launch};
@@ -31,6 +31,8 @@ use super::{Clock, Inbox, Input};
 pub(super) struct Call<'r> {
     pub(super) job: JobId,
     pub(super) judge: &'r Judge,
+    /// The judge's sandbox.
+    pub(super) sandbox: &'r Sandbox,
     pub(super) slot: &'r Name,
     /// Where the payload is stored.
     pub(super) payload: PathBuf,
@@ -93,7 +95,7 @@ enum Ended {
 pub(super) fn run(call: &Call<'_>) {
     let job = call.job;
     let name = format!("job-{}", job.0);
-    let (sandbox, by) = (&call.judge.sandbox, call.deadlines.startup);
+    let (sandbox, by) = (call.sandbox, call.deadlines.startup);
     let inbox = call.inbox.sender();
     let started = (call.sandboxes).start(&name, sandbox, None, false, by, inbox, Message::Session);
     let mut sandbox = match started {

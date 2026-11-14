@@ -61,9 +61,9 @@ impl<'p> Sandboxes<'p> {
         workflow: &Workflow,
         sandboxd: &Path,
     ) -> Result<Self, String> {
-        let judges = workflow.judges().map(|(_, judge)| &judge.sandbox);
-        let roles = iter::once(&workflow.agent().sandbox).chain(judges);
-        let images: BTreeSet<&Image> = roles.map(|sandbox| &sandbox.image).collect();
+        let images: BTreeSet<&Image> = (workflow.roles())
+            .map(|(_, sandbox)| &sandbox.image)
+            .collect();
         let sandboxd = Local::Sandboxd {
             path: sandboxd.to_owned(),
         };

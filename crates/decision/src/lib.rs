@@ -3,11 +3,11 @@
 //! [`Core`] holds a run's state, does no I/O and reads no clock, so the same [`Event`]s give the
 //! same [`Action`]s; [`Core`] says how a runtime drives it.
 //!
-//! The core implements [`SoloThenJudge`]. Its [`Action`]s ask the runtime to start the agent,
-//! answer ops, run judge calls, collect outputs and destroy sandboxes, and [`Event`]s report
-//! what the runtime observed. [`WorkEnd`] names why the work phase ended, and
-//! [`Action::Finish`] carries the run's [`Outcome`], or [`Action::Abandon`] ends it without
-//! one.
+//! The core runs a workflow's two phases ([`schema::ir::Workflow`]). Its [`Action`]s ask the
+//! runtime to start the agent, answer ops, run judge calls, collect outputs and destroy
+//! sandboxes, and [`Event`]s report what the runtime observed. [`WorkEnd`]
+//! names why the work phase ended, and [`Action::Finish`] carries the run's [`Outcome`], or
+//! [`Action::Abandon`] ends it without one.
 //!
 //! The rules by which the core authorizes ops and fills in their replies are in its `ops`
 //! module, and how it meters judge calls in its `jobs` module.
@@ -28,7 +28,7 @@ use core::time::Duration;
 use schema::ir::{Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
-use schema::workflow::{JudgeCall, JudgeGrantId, Main, Placed, RoleId, SoloThenJudge, Workflow};
+use schema::workflow::{JudgeCall, Placed, Workflow};
 use serde_json::Number;
 
 mod jobs;
@@ -79,6 +79,11 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The agent's command has started in its sandbox.
+    ///
+    /// The work phase's deadline counts from the first such report while the agent works, so the
+    /// time its sandbox takes to start doesn't count against it, but from the agent's startup
+    /// ([`Placed::startup`]) at the latest: until a report comes, and after one that comes later,
+    /// the deadline is the agent's deadline after the startup.
     AgentStarted,
     /// The agent's command has exited.
     AgentExited { status: ExitStatus },
@@ -149,11 +154,13 @@ pub enum Action {
 /// exit or failure names it only if observed before then ([`Core::handle`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkEnd {
-    /// The pattern's deadline passed.
+    /// The work phase's deadline passed, which counts from the agent's start
+    /// ([`Event::AgentStarted`]).
     Deadline,
     /// The agent finalized a submission, and was still running when the grace after it ran out
-    /// ([`SoloThenJudge::finalize_grace`]). An agent that exits within it ends the work phase
-    /// with [`AgentExited`](Self::AgentExited), and its submission is still the finalized one.
+    /// ([`finalize_grace`](schema::workflow::Agent::finalize_grace)). An agent that exits within
+    /// it ends the work phase with [`AgentExited`](Self::AgentExited), and its submission is
+    /// still the finalized one.
     Finalized,
     /// The agent's command exited.
     AgentExited(ExitStatus),
@@ -206,30 +213,35 @@ pub enum Verdict {
 /// How long a run of `placed` may last from its start: its hard end, which [`Core::start`]
 /// sets, after the deadline.
 ///
-/// It is the sum of five shares: the later of the pattern's deadline and the agent's startup,
-/// its finalize grace, the agent's startup again, its score's timeout, and the final judge's
-/// startup. A role's startup ([`Placed::startup`]) is how long its class may take to start one
-/// of its sandboxes, from when the runtime asks for one to when its session is ready.
+/// It is the sum of six shares: the agent's startup, its deadline, its finalize grace, the
+/// agent's startup again, the score's timeout, and the final judge's startup. A role's
+/// startup ([`Placed::startup`]) is how long its class may take to start one of its sandboxes,
+/// from when the runtime asks for one to when its session is ready.
 pub fn lasts(placed: &Placed) -> Duration {
     let workflow = placed.workflow();
-    let Main::SoloThenJudge(pattern) = workflow.main();
-    let agent = placed.startup(RoleId::Agent);
-    let final_judge = placed.startup(RoleId::Judge(pattern.score.slot.judge()));
+    let score = workflow.score();
+    let agent = placed.startup(workflow.agent().role);
+    let final_judge = placed.startup(score.slot.judge().role());
     // Each start is attempted once (a failed start isn't retried today), which is why the hard
-    // end counts one startup per start. The core ends the work phase by the deadline, but the
-    // agent's teardown waits for its start, which counts against the deadline yet may outrun a
-    // short one: the teardown begins by the later of the deadline and the agent's startup. The
-    // final judge's startup and the score's timeout are the final judge's, the run's last
-    // sandbox: its start and its command. The grace, which the deadline cuts short, and the
-    // agent's startup again are slack for ending the work phase and collecting what it left,
-    // which nothing else bounds: a margin chosen, not derived.
-    pattern
-        .deadline
-        .max(agent)
-        .saturating_add(pattern.finalize_grace)
+    // end counts one startup per start. The core ends the work phase by the first two shares
+    // (`latest_deadline`), and the agent's teardown begins by then. The final judge's startup
+    // and the score's timeout are the final judge's, the run's last sandbox: its start and its
+    // command. The grace, which the deadline cuts short, and the agent's startup again are slack
+    // for ending the work phase and collecting what it left, which nothing else bounds: a margin
+    // chosen, not derived.
+    latest_deadline(placed)
+        .saturating_add(workflow.agent().finalize_grace)
         .saturating_add(agent)
-        .saturating_add(pattern.score.timeout)
+        .saturating_add(score.timeout)
         .saturating_add(final_judge)
+}
+
+/// The latest that the work phase's deadline of a run of `placed` may be, from the run's start:
+/// the agent's startup, then its deadline, which counts from the agent's start, at the latest
+/// from its startup ([`Event::AgentStarted`]).
+fn latest_deadline(placed: &Placed) -> Duration {
+    let agent = placed.workflow().agent();
+    placed.startup(agent.role).saturating_add(agent.deadline)
 }
 
 /// A run's decision core.
@@ -244,7 +256,6 @@ pub fn lasts(placed: &Placed) -> Duration {
 #[derive(Debug)]
 pub struct Core<'w> {
     workflow: &'w Workflow,
-    pattern: &'w SoloThenJudge,
     /// The latest time an event was observed, since the run started.
     now: Duration,
     /// The run's hard end, since it started.
@@ -256,16 +267,18 @@ pub struct Core<'w> {
 /// Where a run is.
 #[derive(Debug)]
 enum Phase {
-    /// The agent works, from when the core asks for it. Whether its command has started yet
-    /// changes no decision.
+    /// The agent works, from when the core asks for it. Its start's report sets the deadline,
+    /// and changes no other decision.
     Work {
-        /// The latest submission.
-        submission: Option<Submission>,
+        /// The latest submission's payload.
+        latest: Option<PayloadRef>,
+        /// The work phase's deadline, since the run started, as [`Event::AgentStarted`] says.
+        deadline: Duration,
     },
-    /// The agent finalized `submission`, which is locked as the selection; unless the agent ends
-    /// it first, the work phase ends at `end`, as `work_end` ([`WorkEnd`]).
+    /// The agent finalized a submission of `payload`, which is locked as the selection; unless
+    /// the agent ends it first, the work phase ends at `end`, as `work_end` ([`WorkEnd`]).
     Finalized {
-        submission: Submission,
+        payload: PayloadRef,
         end: Duration,
         work_end: WorkEnd,
     },
@@ -275,12 +288,12 @@ enum Phase {
         work_end: WorkEnd,
         submission: Option<Submission>,
     },
-    /// The final judge judges the selected submission in job `job`, which is at `state`.
+    /// The final judge judges the selected submission in job `job`, and the run ends once the
+    /// job has ended.
     Final {
         work_end: WorkEnd,
         submission: Submission,
         job: JobId,
-        state: jobs::State,
     },
     Finished {
         work_end: WorkEnd,
@@ -289,17 +302,19 @@ enum Phase {
 }
 
 impl<'w> Core<'w> {
-    /// Starts a run of `placed`: its work phase begins at time 0, and its hard end is
-    /// [`lasts`] after. Returns the core and its first actions.
+    /// Starts a run of `placed`: its work phase begins at time 0, though its deadline counts
+    /// from the agent's start ([`Event::AgentStarted`]), and its hard end is [`lasts`] after.
+    /// Returns the core and its first actions.
     pub fn start(placed: &'w Placed) -> (Self, Vec<Action>) {
         let workflow = placed.workflow();
-        let Main::SoloThenJudge(pattern) = workflow.main();
         let core = Self {
             workflow,
-            pattern,
             now: Duration::ZERO,
             hard_end: lasts(placed),
-            phase: Phase::Work { submission: None },
+            phase: Phase::Work {
+                latest: None,
+                deadline: latest_deadline(placed),
+            },
             jobs: jobs::Jobs::default(),
         };
         (core, vec![Action::StartAgent])
@@ -316,21 +331,11 @@ impl<'w> Core<'w> {
         if self.now >= self.hard_end {
             self.abandon(&mut actions);
         }
-        let due = match &self.phase {
-            Phase::Work { .. } => (self.now >= self.pattern.deadline).then_some(WorkEnd::Deadline),
-            Phase::Finalized { end, work_end, .. } => (self.now >= *end).then(|| work_end.clone()),
-            Phase::Teardown { .. }
-            | Phase::Final { .. }
-            | Phase::Finished { .. }
-            | Phase::Abandoned => None,
-        };
-        if let Some(work_end) = due {
-            self.end_work(work_end, &mut actions);
-        }
+        self.end_due_work(&mut actions);
         match event {
-            // The agent's start is for the run log alone, and a tick only moves the clock, on
-            // which the checks above have acted.
-            Event::AgentStarted | Event::Tick => {}
+            Event::AgentStarted => self.agent_started(),
+            // A tick only moves the clock, on which the checks above have acted.
+            Event::Tick => {}
             Event::AgentExited { status } => {
                 self.end_work(WorkEnd::AgentExited(status), &mut actions);
             }
@@ -347,12 +352,12 @@ impl<'w> Core<'w> {
                 self.on_job(job, |state| state.ended(at, jobs::End::TimedOut));
             }
             Event::JudgeCollected { job, result } => {
-                let report = jobs::Report::Collected(result);
-                self.on_job(job, |state| state.report(at, report));
+                let outcome = result.map_err(Failure::InvalidResult);
+                self.on_job(job, |state| state.report(at, outcome));
             }
             Event::JudgeFailed { job, reason } => {
-                let report = jobs::Report::Failed(reason);
-                self.on_job(job, |state| state.report(at, report));
+                let outcome = Err(Failure::Error(reason));
+                self.on_job(job, |state| state.report(at, outcome));
             }
         }
         self.advance(&mut actions);
@@ -363,31 +368,35 @@ impl<'w> Core<'w> {
     /// agent works, when the work phase ends; then at the hard end, also once the run has ended.
     /// The runtime sends [`Event::Tick`] once that time has come.
     pub fn tick_due(&self) -> Duration {
-        match &self.phase {
-            // These phases end by the deadline, which comes before the hard end.
-            Phase::Work { .. } => self.pattern.deadline,
-            Phase::Finalized { end, .. } => *end,
-            Phase::Teardown { .. }
-            | Phase::Final { .. }
-            | Phase::Finished { .. }
-            | Phase::Abandoned => self.hard_end,
-        }
+        // The work phase ends by the deadline, which comes before the hard end.
+        self.work_end_due().map_or(self.hard_end, |(end, _)| end)
     }
 
     /// Whether the agent's model requests are allowed at `at`, a time since the run started:
     /// until the work phase ends, the grace after a finalize included
-    /// ([`finalize_grace_seconds`](schema::ir::SoloThenJudge::finalize_grace_seconds)). Once
+    /// ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)). Once
     /// they aren't, the runtime refuses each that it takes, and ends those in flight.
     pub fn model_requests_allowed(&self, at: Duration) -> bool {
-        match &self.phase {
-            Phase::Work { .. } => at < self.pattern.deadline,
-            // A harness asks its model once more after each command, the finalize's too, and
-            // fails its turn if refused; the locked selection keeps any answer off the score.
-            Phase::Finalized { end, .. } => at < *end,
-            Phase::Teardown { .. }
+        // A harness asks its model once more after each command, the finalize's too, and
+        // fails its turn if refused; the locked selection keeps any answer off the score.
+        self.work_end_due().is_some_and(|(end, _)| at < end)
+    }
+
+    /// Counts the deadline from now, the agent's start, by [`Event::AgentStarted`]'s rule.
+    fn agent_started(&mut self) {
+        let counted = self.now.saturating_add(self.workflow.agent().deadline);
+        match &mut self.phase {
+            // The deadline after the startup is the latest it may be, and a later report gives
+            // no earlier one, so the least is the first report's, and a report past the startup
+            // changes nothing. The time has not passed the deadline, which would have ended the
+            // work phase, so the least is still to come.
+            Phase::Work { deadline, .. } => *deadline = (*deadline).min(counted),
+            // A finalize has settled the work phase's end, or the work phase has ended.
+            Phase::Finalized { .. }
+            | Phase::Teardown { .. }
             | Phase::Final { .. }
             | Phase::Finished { .. }
-            | Phase::Abandoned => false,
+            | Phase::Abandoned => {}
         }
     }
 
@@ -404,12 +413,40 @@ impl<'w> Core<'w> {
         actions.push(Action::Abandon);
     }
 
+    /// When the work phase ends unless the agent ends it first, and as which [`WorkEnd`], while
+    /// it lasts.
+    fn work_end_due(&self) -> Option<(Duration, WorkEnd)> {
+        match &self.phase {
+            Phase::Work { deadline, .. } => Some((*deadline, WorkEnd::Deadline)),
+            Phase::Finalized { end, work_end, .. } => Some((*end, work_end.clone())),
+            Phase::Teardown { .. }
+            | Phase::Final { .. }
+            | Phase::Finished { .. }
+            | Phase::Abandoned => None,
+        }
+    }
+
+    /// Ends the work phase if the time has reached its end.
+    fn end_due_work(&mut self, actions: &mut Vec<Action>) {
+        if let Some((end, work_end)) = self.work_end_due()
+            && self.now >= end
+        {
+            self.end_work(work_end, actions);
+        }
+    }
+
     /// Ends the work phase, if it hasn't ended: stops the queued and running jobs, then
     /// freezes, collects and destroys the agent.
     fn end_work(&mut self, work_end: WorkEnd, actions: &mut Vec<Action>) {
         let submission = match &mut self.phase {
-            Phase::Work { submission } => submission.take(),
-            Phase::Finalized { submission, .. } => Some(submission.clone()),
+            Phase::Work { latest, .. } => latest.take().map(|payload| Submission {
+                payload,
+                finalized: false,
+            }),
+            Phase::Finalized { payload, .. } => Some(Submission {
+                payload: payload.clone(),
+                finalized: true,
+            }),
             Phase::Teardown { .. }
             | Phase::Final { .. }
             | Phase::Finished { .. }
@@ -438,10 +475,13 @@ impl<'w> Core<'w> {
             Phase::Final {
                 work_end,
                 submission,
-                job: _,
-                state,
+                job,
             } => {
-                let Some(outcome) = state.outcome() else {
+                let Some(jobs::Job {
+                    state: jobs::State::Ended { outcome, .. },
+                    ..
+                }) = self.jobs.get(*job)
+                else {
                     return;
                 };
                 let submission = submission.clone();
@@ -476,36 +516,23 @@ impl<'w> Core<'w> {
             return self.finish(Outcome { work_end, verdict }, actions);
         };
         // The final phase comes after the deadline, so the time left before it doesn't count.
-        let job = self.jobs.score_job();
+        let job = self.jobs.add(JudgeCall::Score);
         actions.push(Action::StartJudge {
             job,
             call: JudgeCall::Score,
             payload: submission.payload.clone(),
-            timeout: self.pattern.score.timeout,
+            timeout: self.workflow.score().timeout,
         });
         self.phase = Phase::Final {
             work_end,
             submission,
             job,
-            state: jobs::State::Queued,
         };
     }
 
-    /// Applies a report on job `job` to its state: the score's job's in the final phase, else
-    /// the agent's job's by that number, if it has one.
+    /// Applies a report on job `job` to its state, if the run has a job by that number.
     fn on_job(&mut self, job: JobId, apply: impl FnOnce(&mut jobs::State)) {
-        let state = match &mut self.phase {
-            Phase::Final {
-                job: score, state, ..
-            } if *score == job => Some(state),
-            Phase::Work { .. }
-            | Phase::Finalized { .. }
-            | Phase::Teardown { .. }
-            | Phase::Final { .. }
-            | Phase::Finished { .. }
-            | Phase::Abandoned => self.jobs.state_mut(job),
-        };
-        if let Some(state) = state {
+        if let Some(state) = self.jobs.state_mut(job) {
             apply(state);
         }
     }
@@ -515,19 +542,5 @@ impl<'w> Core<'w> {
             work_end: outcome.work_end.clone(),
         };
         actions.push(Action::Finish { outcome });
-    }
-
-    /// The longest a new call of `grant` may run: the smaller of the grant's call timeout and
-    /// its cumulative time left.
-    fn call_limit(&self, grant: JudgeGrantId) -> Duration {
-        let call_timeout = self.workflow.judge_grant(grant).call_timeout();
-        self.cumulative_left(grant)
-            .map_or(call_timeout, |left| left.min(call_timeout))
-    }
-
-    /// The judge time `grant` has left: `None` without a cumulative limit.
-    fn cumulative_left(&self, grant: JudgeGrantId) -> Option<Duration> {
-        let total = self.workflow.judge_grant(grant).cumulative()?;
-        Some(total.saturating_sub(self.jobs.usage(grant).used))
     }
 }

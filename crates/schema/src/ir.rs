@@ -1,7 +1,7 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (one agent and its judges, with their [`Slot`]s), and the
-//! pattern, [`Main`], which gives the agent its [`Grant`]s and judges what it submits.
+//! A workflow is data: [`Role`]s (one agent and its judges, with their [`Slot`]s), the
+//! [`Grant`]s each role holds, and the [`Score`], which judges what the agent submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -23,6 +23,12 @@ pub use values::{
 };
 
 /// A workflow.
+///
+/// A run has two phases. In the work phase, the run starts the agent, which works until it
+/// exits, finalizes a submission or reaches its deadline, and calls the judges its grants name. In
+/// the final phase, which starts once the agent's sandbox and every call it made are gone, the
+/// [`Score`] judge judges the selection: the finalized submission, else the latest one stored.
+/// Only the run, which keeps the submissions, lives through both phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
@@ -30,8 +36,8 @@ pub struct Workflow {
     pub name: WorkflowName,
     /// Exactly one of them has an agent runtime: the agent. The others are judges.
     pub roles: Vec<Role>,
-    /// The pattern that drives a run.
-    pub main: Main,
+    /// How the selected submission is judged.
+    pub score: Score,
 }
 
 /// The IR's version. Each version serializes to its own string, so a consumer refuses an IR
@@ -63,6 +69,10 @@ pub struct Role {
     /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
+    /// The ops the role may use while it works; absent, none. The agent holds judge calls and
+    /// exactly one submit grant; a judge holds none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
 }
 
 /// A numeric user and group, neither of them root.
@@ -116,6 +126,20 @@ pub struct AgentRuntime {
     /// [`command_stdin()`](crate::sandbox::command_stdin); absent, its standard input is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin: Option<String>,
+    /// How long the work phase may last.
+    ///
+    /// The clock starts once the agent's sandbox and its command have started, or, at the latest,
+    /// once its class's [`startup_seconds`](crate::provider::Class::startup_seconds) have passed
+    /// since the run's start, so the time the sandbox takes to start, which that startup bounds
+    /// instead, doesn't count against it.
+    /// Judging the selected submission comes after the deadline, bounded instead by the
+    /// score's [`timeout_seconds`](Score::timeout_seconds).
+    pub deadline_seconds: NonZeroU64,
+    /// How long the agent may keep running after its final submission is accepted. Its ops are
+    /// refused meanwhile, while its [model route](ModelRoute) stays open, and the work phase,
+    /// with the route, ends when it exits, when this runs out, or at the deadline, whichever
+    /// comes first. 0 ends the work phase at the final submission.
+    pub finalize_grace_seconds: u64,
 }
 
 /// A directory to make in the agent's sandbox.
@@ -213,41 +237,7 @@ pub struct ModelRoute {
     pub models: Models,
 }
 
-/// The pattern that drives a run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Main {
-    SoloThenJudge(SoloThenJudge),
-}
-
-/// One agent works until it exits, finalizes a submission or reaches the deadline; then the
-/// pattern judges the selected submission with the [`Score`] judge.
-///
-/// A run has two phases. In the work phase, the agent works and calls the judges its grants
-/// name. In the final phase, which starts once the agent's sandbox and every call it made are
-/// gone, the score judge judges the selection: the finalized submission, else the latest one
-/// stored. Only the pattern itself, which keeps the submissions, lives through both phases.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SoloThenJudge {
-    /// The ops the agent may use while it works: judge calls, and exactly one submit grant.
-    pub grants: Vec<Grant>,
-    /// How the selected submission is judged.
-    pub score: Score,
-    /// How long the work phase may last.
-    ///
-    /// The clock starts with the run, so starting the agent's sandbox counts against it.
-    /// Judging the selected submission comes after the deadline, bounded instead by the
-    /// score's [`timeout_seconds`](Score::timeout_seconds).
-    pub deadline_seconds: NonZeroU64,
-    /// How long the agent may keep running after its final submission is accepted. Its ops are
-    /// refused meanwhile, while its [model route](ModelRoute) stays open, and the work phase,
-    /// with the route, ends when it exits, when this runs out, or at the deadline, whichever
-    /// comes first. 0 ends the work phase at the final submission.
-    pub finalize_grace_seconds: u64,
-}
-
-/// Permission for the agent to use an op while it works.
+/// Permission for the role that holds it to use an op while it works.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Grant {
@@ -256,7 +246,7 @@ pub enum Grant {
 }
 
 impl Grant {
-    /// The name the agent uses the grant by. Unique among the agent's grants.
+    /// The name its holder uses the grant by. Unique among the role's grants.
     pub fn name(&self) -> &Name {
         match self {
             Self::Judge(JudgeGrant { name, .. }) | Self::Submit(SubmitGrant { name }) => name,
@@ -289,7 +279,7 @@ pub struct JudgeGrant {
     pub call_timeout_seconds: NonZeroU64,
 }
 
-/// Stores submissions, of which the pattern judges the one selected. A submission may hold as
+/// Stores submissions, of which the [`Score`] judges the one selected. A submission may hold as
 /// many bytes as the [`Score`] slot takes, its [`max_bytes`](Slot::max_bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

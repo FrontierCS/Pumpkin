@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use super::errors::{Errors, Reported};
 use super::{
-    Agent, Judge, JudgeGrant, JudgeId, Main, ParseErrors, RoleId, Sandbox, Score, SlotId,
-    SoloThenJudge, SubmitGrant, Workflow,
+    Agent, Judge, JudgeGrant, JudgeId, ParseErrors, RoleId, Sandbox, Score, SlotId, SubmitGrant,
+    Workflow,
 };
 use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::MAX_OP_PAYLOAD_BYTES;
@@ -23,55 +23,56 @@ impl Workflow {
     }
 }
 
-/// Where a `solo_then_judge` pattern's errors are reported.
-fn pattern() -> JsonPointer {
-    JsonPointer::root().token("main").token("solo_then_judge")
-}
-
 #[derive(Default)]
 struct Parser<'ir> {
     errors: Errors,
     role_ids: BTreeMap<&'ir str, RoleId>,
-    /// Every role with an agent runtime, each at its place in the IR.
-    agents: Vec<(JsonPointer, Agent)>,
-    judges: Vec<Judge>,
+    /// Each role's sandbox, in the IR's order.
+    roles: Vec<Sandbox>,
+    /// Every role with an agent runtime, each at its place in the IR, with the grants it holds.
+    agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
+    judges: BTreeMap<RoleId, Judge>,
 }
 
-/// A parsed `solo_then_judge` pattern, and the grants it gives the agent.
-struct Pattern {
-    judge_grants: Vec<JudgeGrant>,
-    submit_grant: SubmitGrant,
-    main: SoloThenJudge,
-}
+/// The agent's grants, parsed: its judge grants and its one submit grant.
+type Grants = (
+    Result<Vec<JudgeGrant>, Reported>,
+    Result<SubmitGrant, Reported>,
+);
 
 impl<'ir> Parser<'ir> {
     fn workflow(mut self, ir: &'ir ir::Workflow) -> Result<Workflow, ParseErrors> {
         let ir::Workflow {
             ir_version: ir::IrVersion::V0,
-            name,
+            name: _,
             roles,
-            main,
+            score,
         } = ir;
         self.roles(roles);
-        let agent = self.the_agent();
-        let pattern = match main {
-            ir::Main::SoloThenJudge(pattern) => self.solo_then_judge(pattern),
+        // With no agent, it holds no grants, so the score is checked against none.
+        let (agent, grants) = match self.first_agent() {
+            Ok((at, agent, grants)) => (Ok((agent, self.grants(&at, grants))), grants),
+            Err(reported) => (Err(reported), &[][..]),
         };
-        let Self { errors, judges, .. } = self;
-        let (agent, pattern) = errors.finish(agent.and_then(|agent| Ok((agent, pattern?))))?;
-        let Pattern {
-            judge_grants,
-            submit_grant,
-            main,
-        } = pattern;
+        let score = self.score(score, grants);
+        let Self {
+            errors,
+            roles,
+            judges,
+            ..
+        } = self;
+        let parsed = agent.and_then(|(agent, (judge_grants, submit_grant))| {
+            Ok((agent, judge_grants?, submit_grant?, score?))
+        });
+        let (agent, judge_grants, submit_grant, score) = errors.finish(parsed)?;
         Ok(Workflow {
             ir: ir.clone(),
-            name: name.clone(),
+            roles,
             agent,
             judges,
             judge_grants,
             submit_grant,
-            main: Main::SoloThenJudge(main),
+            score,
         })
     }
 
@@ -80,7 +81,7 @@ impl<'ir> Parser<'ir> {
         let names = roles.iter().map(|role| &role.name);
         self.errors.unique(names, |index| list.token(index));
         for (index, role) in roles.iter().enumerate() {
-            let at = list.token(index);
+            let (at, id) = (list.token(index), RoleId(index));
             let ir::Role {
                 name,
                 image,
@@ -88,17 +89,18 @@ impl<'ir> Parser<'ir> {
                 needs,
                 runtime,
                 egress: ir::Egress { model },
+                grants,
             } = role;
-            let sandbox = Sandbox {
+            self.roles.push(Sandbox {
                 name: name.clone(),
                 image: image.clone(),
                 user: *user,
                 needs: *needs,
                 at: at.clone(),
                 model_route: model.clone(),
-            };
-            let id = match runtime {
-                ir::Runtime::Agent(agent) => self.agent(at, sandbox, agent),
+            });
+            match runtime {
+                ir::Runtime::Agent(agent) => self.agent(at, id, agent, grants),
                 ir::Runtime::Judge(judge) => {
                     if model.is_some() {
                         self.errors.report(
@@ -109,32 +111,49 @@ impl<'ir> Parser<'ir> {
                             ),
                         );
                     }
-                    self.judge(&at, sandbox, judge)
+                    if !grants.is_empty() {
+                        self.errors.report(
+                            at.token("grants"),
+                            format!(
+                                "`{name}` is a judge, and judges hold no grants yet: remove them"
+                            ),
+                        );
+                    }
+                    self.judge(&at, id, judge);
                 }
-            };
+            }
             self.role_ids.entry(name.as_str()).or_insert(id);
         }
     }
 
-    fn agent(&mut self, at: JsonPointer, sandbox: Sandbox, agent: &ir::AgentRuntime) -> RoleId {
+    fn agent(
+        &mut self,
+        at: JsonPointer,
+        role: RoleId,
+        agent: &ir::AgentRuntime,
+        grants: &'ir [ir::Grant],
+    ) {
         let ir::AgentRuntime {
             command,
             dirs,
             files,
             stdin,
+            deadline_seconds,
+            finalize_grace_seconds,
         } = agent;
         self.agent_paths(&at.token("runtime").token("agent"), dirs, files);
         let mut dirs = dirs.clone();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
         let agent = Agent {
-            sandbox,
+            role,
             command: command.clone(),
             dirs,
             files: files.clone(),
             stdin: stdin.clone(),
+            deadline: Duration::from_secs(deadline_seconds.get()),
+            finalize_grace: Duration::from_secs(*finalize_grace_seconds),
         };
-        self.agents.push((at, agent));
-        RoleId::Agent
+        self.agents.push((at, agent, grants));
     }
 
     /// Reports each path of the agent's `dirs` and `files`, in the runtime at `runtime`, that
@@ -166,28 +185,29 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    /// The workflow's one agent. Reports a workflow with none, and each agent after the first.
-    fn the_agent(&mut self) -> Result<Agent, Reported> {
+    /// The workflow's first agent, at its place in the IR, with the grants it holds. Reports a
+    /// workflow with none, and each agent after the first, so a workflow has exactly one.
+    fn first_agent(&mut self) -> Result<(JsonPointer, Agent, &'ir [ir::Grant]), Reported> {
         let mut agents = std::mem::take(&mut self.agents).into_iter();
-        let Some((_, agent)) = agents.next() else {
+        let Some(first) = agents.next() else {
             return Err(self.errors.report(
                 JsonPointer::root().token("roles"),
                 "no role is an agent: a workflow has exactly one",
             ));
         };
-        let first = agent.sandbox.name.clone();
-        let mut parsed = Ok(agent);
-        for (at, other) in agents {
+        let name = |agent: &Agent| &self.roles[agent.role.0].name;
+        for (at, other, _) in agents {
             let message = format!(
-                "`{}` is a second agent, after `{first}`: a workflow has exactly one",
-                other.sandbox.name
+                "`{}` is a second agent, after `{}`: a workflow has exactly one",
+                name(&other),
+                name(&first.1)
             );
-            parsed = Err(self.errors.report(at.token("runtime"), message));
+            self.errors.report(at.token("runtime"), message);
         }
-        parsed
+        Ok(first)
     }
 
-    fn judge(&mut self, at: &JsonPointer, sandbox: Sandbox, judge: &ir::JudgeRuntime) -> RoleId {
+    fn judge(&mut self, at: &JsonPointer, role: RoleId, judge: &ir::JudgeRuntime) {
         let ir::JudgeRuntime {
             command,
             slots,
@@ -210,58 +230,23 @@ impl<'ir> Parser<'ir> {
                 );
             }
         }
-        self.judges.push(Judge {
-            sandbox,
+        let judge = Judge {
             command: command.clone(),
             slots: slots.clone(),
             result: result.clone(),
-        });
-        RoleId::Judge(JudgeId(self.judges.len() - 1))
-    }
-
-    fn solo_then_judge(&mut self, pattern: &'ir ir::SoloThenJudge) -> Result<Pattern, Reported> {
-        let ir::SoloThenJudge {
-            grants,
-            score,
-            deadline_seconds,
-            finalize_grace_seconds,
-        } = pattern;
-        let (judge_grants, submit_grant) = self.grants(grants);
-        let score = self.score(score, grants);
-        Ok(Pattern {
-            judge_grants: judge_grants?,
-            submit_grant: submit_grant?,
-            main: SoloThenJudge {
-                score: score?,
-                deadline: Duration::from_secs(deadline_seconds.get()),
-                finalize_grace: Duration::from_secs(*finalize_grace_seconds),
-            },
-        })
-    }
-
-    /// The agent's judge grants, and its one submit grant.
-    fn grants(
-        &mut self,
-        grants: &'ir [ir::Grant],
-    ) -> (
-        Result<Vec<JudgeGrant>, Reported>,
-        Result<SubmitGrant, Reported>,
-    ) {
-        let list = pattern().token("grants");
-        // A grant's fields are below its kind, as in `{"judge": {…}}`.
-        let place = |index: usize| {
-            let kind = match grants[index] {
-                ir::Grant::Judge(_) => "judge",
-                ir::Grant::Submit(_) => "submit",
-            };
-            list.token(index).token(kind)
         };
-        self.errors
-            .unique(grants.iter().map(ir::Grant::name), place);
+        self.judges.insert(role, judge);
+    }
+
+    /// The judge grants of the agent at `agent` and its one submit grant, of its `grants`.
+    fn grants(&mut self, agent: &JsonPointer, grants: &'ir [ir::Grant]) -> Grants {
+        let list = agent.token("grants");
+        let names = grants.iter().map(ir::Grant::name);
+        (self.errors).unique(names, |index| place(&list, index, &grants[index]));
         let mut judge_grants = Vec::new();
         let mut submit_grants = Vec::new();
         for (index, grant) in grants.iter().enumerate() {
-            let at = place(index);
+            let at = place(&list, index, grant);
             match grant {
                 ir::Grant::Judge(grant) => {
                     judge_grants.push(self.judge_grant(&at, grant, &grants[..index]));
@@ -269,8 +254,28 @@ impl<'ir> Parser<'ir> {
                 ir::Grant::Submit(ir::SubmitGrant { name }) => submit_grants.push((at, name)),
             }
         }
-        let judge_grants = judge_grants.into_iter().collect();
-        (judge_grants, self.submit_grant(&list, &submit_grants))
+        // An absent list has no place in the IR's JSON, so its absence is the agent's.
+        let at = if grants.is_empty() { agent } else { &list };
+        let submit_grant = self.submit_grant(at, &submit_grants);
+        (judge_grants.into_iter().collect(), submit_grant)
+    }
+
+    /// The role named `name`, which a reference at `at` names; reports an unknown name.
+    fn resolve(&mut self, at: &JsonPointer, name: &Name) -> Result<RoleId, Reported> {
+        let id = self.role_ids.get(name.as_str()).copied();
+        id.ok_or_else(|| {
+            let message = format!("no role is named `{name}`: name one listed in `roles`");
+            self.errors.report(at.clone(), message)
+        })
+    }
+
+    /// The kind of role `id` is, as a refusal names it, such as `a judge`.
+    fn kind(&self, id: RoleId) -> &'static str {
+        if self.judges.contains_key(&id) {
+            "a judge"
+        } else {
+            "an agent"
+        }
     }
 
     /// A judge grant, at `at`, whose judge none of the `earlier` grants names.
@@ -309,17 +314,17 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// The agent's one submit grant, of those named at their places in the list at `list`.
-    /// Reports none, and each after the first.
+    /// The agent's one submit grant, of those named at their places in its grants. Reports
+    /// none, at `at`, and each after the first.
     fn submit_grant(
         &mut self,
-        list: &JsonPointer,
+        at: &JsonPointer,
         grants: &[(JsonPointer, &Name)],
     ) -> Result<SubmitGrant, Reported> {
         let Some(((_, first), others)) = grants.split_first() else {
             return Err(self
                 .errors
-                .report(list.clone(), "no submit grant: give the agent exactly one"));
+                .report(at.clone(), "no submit grant: give the agent exactly one"));
         };
         let mut parsed = Ok(SubmitGrant {
             name: (*first).clone(),
@@ -341,7 +346,7 @@ impl<'ir> Parser<'ir> {
             slot,
             timeout_seconds,
         } = score;
-        let at = pattern().token("score");
+        let at = JsonPointer::root().token("score");
         let shared = match self.judge_grant_naming(role, grants) {
             Some(grant) => Err(self.errors.report(
                 at.token("role"),
@@ -367,7 +372,8 @@ impl<'ir> Parser<'ir> {
     ) -> Option<&'g ir::JudgeGrant> {
         // The grants are compared by the role they name in the IR, so that a rule about the
         // judges they name holds even where a grant's slot or the score's fails to resolve.
-        if !matches!(self.role_ids.get(role.as_str()), Some(RoleId::Judge(_))) {
+        let id = self.role_ids.get(role.as_str())?;
+        if !self.judges.contains_key(id) {
             return None;
         }
         grants.iter().find_map(|grant| match grant {
@@ -384,27 +390,33 @@ impl<'ir> Parser<'ir> {
         slot: &Name,
     ) -> Result<SlotId, Reported> {
         let role_at = at.token("role");
-        let judge = match self
-            .errors
-            .resolve(&role_at, role, &self.role_ids, "role")?
-        {
-            RoleId::Judge(judge) => judge,
-            RoleId::Agent => {
-                return Err(self
-                    .errors
-                    .report(role_at, format!("`{role}` is an agent: name a judge")));
-            }
+        let id = self.resolve(&role_at, role)?;
+        let Some(judge) = self.judges.get(&id) else {
+            let kind = self.kind(id);
+            return Err(self
+                .errors
+                .report(role_at, format!("`{role}` is {kind}: name a judge")));
         };
-        let index = self.judges[judge.0]
-            .slots
-            .iter()
-            .position(|judge_slot| judge_slot.name == *slot);
+        let index = (judge.slots.iter()).position(|judge_slot| judge_slot.name == *slot);
         match index {
-            Some(index) => Ok(SlotId { judge, index }),
+            Some(index) => Ok(SlotId {
+                judge: JudgeId(id),
+                index,
+            }),
             None => Err(self.errors.report(
                 at.token("slot"),
                 format!("`{role}` has no slot named `{slot}`: name one of its slots"),
             )),
         }
     }
+}
+
+/// The place of `grant`, the `index`th of the list at `list`: its fields are below its kind, as in
+/// `{"judge": {…}}`.
+fn place(list: &JsonPointer, index: usize, grant: &ir::Grant) -> JsonPointer {
+    let kind = match grant {
+        ir::Grant::Judge(_) => "judge",
+        ir::Grant::Submit(_) => "submit",
+    };
+    list.token(index).token(kind)
 }

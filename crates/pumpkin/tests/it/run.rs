@@ -478,7 +478,7 @@ fn refusals() {
             exit status: Some(1)
             pumpkin: broken.json: /roles/1/name: `agent` also names /roles/0: give each a unique name
             pumpkin: broken.json: /roles/1/egress/model: `agent` is a judge, and only the agent has a model route: remove it
-            pumpkin: broken.json: /main/solo_then_judge/grants/0/judge/role: no role is named `train_judge`: name one listed in `roles`
+            pumpkin: broken.json: /roles/0/grants/0/judge/role: no role is named `train_judge`: name one listed in `roles`
             pumpkin: broken.json: the workflow has 3 problems: fix them and run again
             $ pumpkin run workflow.json --sandboxd sandboxd --runs runs --config unserved.toml
             exit status: Some(1)

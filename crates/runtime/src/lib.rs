@@ -26,7 +26,7 @@ use provider::Provider;
 use route::{Answer, Serving};
 use schema::provider::{RunTag, SandboxId};
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
-use schema::workflow::{JudgeCall, Main, Placed, RoleId, Workflow};
+use schema::workflow::{JudgeCall, Placed, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
@@ -468,11 +468,9 @@ impl<'r> Runtime<'r> {
     /// When the agent's teardown is to end, since the run started: the hard end, less the final
     /// judge's startup and timeout, so that the final judge still has both.
     fn teardown_end(&self) -> Duration {
-        let Main::SoloThenJudge(pattern) = self.workflow().main();
-        let startup = self
-            .placed
-            .startup(RoleId::Judge(pattern.score.slot.judge()));
-        let final_judge = startup.saturating_add(pattern.score.timeout);
+        let score = self.workflow().score();
+        let startup = self.placed.startup(score.slot.judge().role());
+        let final_judge = startup.saturating_add(score.timeout);
         self.hard_end().saturating_sub(final_judge)
     }
 
@@ -735,7 +733,7 @@ impl<'r> Runtime<'r> {
                 Action::StartAgent => {
                     // The agent starts at the run's start, so its startup ends long before the
                     // hard end, which counts it.
-                    let by = Deadline::after(self.placed.startup(RoleId::Agent));
+                    let by = Deadline::after(self.placed.startup(self.workflow().agent().role));
                     let (sender, model) = (self.inbox.sender(), self.served.is_some());
                     let (agent, event) =
                         Agent::start(self.sandboxes, self.workflow(), model, by, sender);
@@ -886,6 +884,7 @@ impl<'r> Runtime<'r> {
         let call = judge::Call {
             job,
             judge: self.workflow().judge(slot.judge()),
+            sandbox: self.workflow().sandbox(slot.judge().role()),
             slot: &self.workflow().slot(slot).name,
             payload: self.payloads.path(&payload.digest),
             timeout,
@@ -910,7 +909,7 @@ impl<'r> Runtime<'r> {
     /// By when the steps of a judge call of `call`, whose command runs for at most `timeout`,
     /// starting now, are to be done.
     fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
-        let judge = RoleId::Judge(self.workflow().call_slot(call).judge());
+        let judge = self.workflow().call_slot(call).judge().role();
         let startup = self.clock.now().saturating_add(self.placed.startup(judge));
         let at = |time| self.clock.deadline(time);
         match call {

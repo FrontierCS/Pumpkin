@@ -55,7 +55,7 @@ impl Served {
         workflow: &Workflow,
         serving: Option<Serving>,
     ) -> Result<Option<Self>, String> {
-        let agent = &workflow.agent().sandbox;
+        let agent = workflow.sandbox(workflow.agent().role);
         let Some(route) = &agent.model_route else {
             return Ok(None);
         };

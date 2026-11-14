@@ -14,8 +14,8 @@ use crate::ir::{JsonPointer, Name};
 /// A rule an IR breaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
-    /// Where in the IR, such as `/main/solo_then_judge/grants/0/judge/role`. It resolves in the
-    /// JSON that the [`ir::Workflow`](crate::ir::Workflow) parsed serializes to.
+    /// Where in the IR, such as `/roles/0/grants/0/judge/role`. It resolves in the JSON that
+    /// the [`ir::Workflow`](crate::ir::Workflow) parsed serializes to.
     pub at: JsonPointer,
     pub message: String,
 }
@@ -99,21 +99,5 @@ impl Errors {
                 }
             }
         }
-    }
-
-    /// Resolves one reference, at `at`, reporting an unknown name.
-    pub(super) fn resolve<Id: Copy>(
-        &mut self,
-        at: &JsonPointer,
-        name: &Name,
-        ids: &BTreeMap<&str, Id>,
-        kind: &str,
-    ) -> Result<Id, Reported> {
-        ids.get(name.as_str()).copied().ok_or_else(|| {
-            self.report(
-                at.clone(),
-                format!("no {kind} is named `{name}`: name one listed in `{kind}s`"),
-            )
-        })
     }
 }
