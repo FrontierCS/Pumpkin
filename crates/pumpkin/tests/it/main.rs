@@ -82,8 +82,9 @@ impl Scratch {
 
     /// Writes into the directory the task `name`, whose entry is `<name>/task.star`: the workflow
     /// `ir` gives, but for its images, which every role takes from the recipe `<name>/Dockerfile`
-    /// (`busybox` with a world-writable `/workspace`); and the marker `PUMPKIN.star`, which makes
-    /// the directory the root of its tasks.
+    /// (`busybox` with a world-writable `/workspace`), but a role whose image is [`RUNNER`], from
+    /// `<name>/runner/Dockerfile` (`busybox` with a world-writable `/work`); and the marker
+    /// `PUMPKIN.star`, which makes the directory the root of its tasks.
     fn write_task(&self, name: &str, ir: &Value) {
         self.write_task_in("", name, ir);
     }
@@ -101,7 +102,13 @@ impl Scratch {
         );
         let recipe = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace\n");
         self.write(&at("Dockerfile"), &recipe);
-        let images = "IMAGE = image(\"Dockerfile\")\n";
+        let roles = ir["roles"].as_array().unwrap();
+        let mut images = "IMAGE = image(\"Dockerfile\")\n".to_owned();
+        if roles.iter().any(|role| role["image"] == RUNNER) {
+            let recipe = format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /work\n");
+            self.write(&at("runner/Dockerfile"), &recipe);
+            images.push_str("RUNNER = image(\"runner/Dockerfile\")\n");
+        }
         let task = format!(
             "{images}\nworkflow(\n    name = {},\n    roles = {},\n    score = {},\n)\n",
             starlark(&ir["name"]),
@@ -168,6 +175,9 @@ fn starlark(value: &Value) -> String {
             let fields = fields
                 .iter()
                 .map(|(key, value)| match (key.as_str(), value) {
+                    ("image", Value::String(image)) if image == RUNNER => {
+                        "\"image\": RUNNER".to_owned()
+                    }
                     ("image", Value::String(_)) => "\"image\": IMAGE".to_owned(),
                     _ => format!(
                         "{}: {}",
@@ -179,6 +189,10 @@ fn starlark(value: &Value) -> String {
         }
     }
 }
+
+/// The image that a role of a task that [`Scratch::write_task`] writes runs in place of the task's
+/// one, `IMAGE`: one of its own, `RUNNER`, as a runner needs, which no judge's image may be.
+const RUNNER: &str = "runner";
 
 /// A command whose end [`check`] shows: one for it to run, or one that a test ran itself, to act
 /// on it as it ran, and showed as [`report`] does, with what it found.

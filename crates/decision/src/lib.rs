@@ -4,13 +4,14 @@
 //! same [`Action`]s; [`Core`] says how a runtime drives it.
 //!
 //! The core runs a workflow's two phases ([`schema::ir::Workflow`]). Its [`Action`]s ask the
-//! runtime to start the agent, answer ops, run judge calls, collect outputs and destroy
-//! sandboxes, and [`Event`]s report what the runtime observed. [`WorkEnd`]
+//! runtime to start the agent, answer ops, run judge calls, open, drive and close leases, collect
+//! outputs and destroy sandboxes, and [`Event`]s report what the runtime observed. [`WorkEnd`]
 //! names why the work phase ended, and [`Action::Finish`] carries the run's [`Outcome`], or
 //! [`Action::Abandon`] ends it without one.
 //!
 //! The rules by which the core authorizes ops and fills in their replies are in its `ops`
-//! module, and how it meters judge calls in its `jobs` module.
+//! module, how it meters judge calls in its `jobs` module, and how it meters and ends leases in
+//! its `leases` module.
 
 // Without `std`, the core can name none of its files, network, processes, environment, threads
 // or clock; `alloc` gives it what else it uses, such as `Vec` and `String`. It still reaches the
@@ -23,15 +24,17 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 use core::time::Duration;
 
-use schema::ir::{Name, Sha256Digest};
+use schema::ir::{AbsolutePath, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
-use schema::sandbox::op::OpReply;
-use schema::workflow::{JudgeCall, Placed, Workflow};
+use schema::sandbox::op::{CommandEnd, OpReply, TransferEnd};
+use schema::workflow::{JudgeCall, LeaseGrantId, Placed, Workflow};
 use serde_json::Number;
 
 mod jobs;
+mod leases;
 mod ops;
 mod result;
 
@@ -46,6 +49,18 @@ pub struct OpId(pub u64);
 /// ask about their jobs by these numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobId(pub u64);
+
+/// A lease. The core numbers leases from 0, in the order it opens them, and callers ask about
+/// their leases by these numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LeaseId(pub u64);
+
+/// Who made an op, whose grants it may use, and who holds the leases it opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Caller {
+    /// The agent, from its sandbox.
+    Agent,
+}
 
 /// A payload the runtime holds, named by its digest.
 ///
@@ -73,6 +88,34 @@ pub enum Request {
     },
     /// See [`OpCall::Status`](schema::sandbox::op::OpCall::Status).
     Status { job: u64 },
+    /// See [`OpCall::LeaseOpen`](schema::sandbox::op::OpCall::LeaseOpen).
+    LeaseOpen {
+        grant: Name,
+        instance_seconds: Option<NonZeroU64>,
+    },
+    /// See [`OpCall::LeaseRun`](schema::sandbox::op::OpCall::LeaseRun).
+    LeaseRun {
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    },
+    /// See [`OpCall::LeasePut`](schema::sandbox::op::OpCall::LeasePut).
+    LeasePut {
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+        replace: bool,
+    },
+    /// See [`OpCall::LeaseGet`](schema::sandbox::op::OpCall::LeaseGet).
+    LeaseGet {
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    },
+    /// See [`OpCall::LeaseStatus`](schema::sandbox::op::OpCall::LeaseStatus).
+    LeaseStatus { lease: u64 },
+    /// See [`OpCall::LeaseClose`](schema::sandbox::op::OpCall::LeaseClose).
+    LeaseClose { lease: u64 },
 }
 
 /// What the runtime observed.
@@ -89,9 +132,12 @@ pub enum Event {
     AgentExited { status: ExitStatus },
     /// The agent's sandbox or its command could not start, or its session ended.
     AgentFailed { reason: String },
-    /// The agent's sandbox made an op. The core answers it with an [`Action::Reply`] naming
-    /// `op`.
-    OpArrived { op: OpId, request: Request },
+    /// `caller`'s sandbox made an op. The core answers it with an [`Action::Reply`] naming `op`.
+    OpArrived {
+        op: OpId,
+        caller: Caller,
+        request: Request,
+    },
     /// A job's command has started.
     JudgeStarted { job: JobId },
     /// A job's command has exited by itself.
@@ -108,6 +154,29 @@ pub enum Event {
     /// A job failed, or was stopped as [`Action::StopJudge`] asked, and its sandbox has been
     /// destroyed.
     JudgeFailed { job: JobId, reason: String },
+    /// A lease's runner has started, and runs the commands it is given from now.
+    LeaseReady { lease: LeaseId },
+    /// A command of a lease's, its `command`th, has ended, and what it wrote has been collected:
+    /// the ends of its standard output and error, of at most
+    /// [`OUTPUT_TAIL_BYTES`](schema::sandbox::op::OUTPUT_TAIL_BYTES) each, as JSON writes them.
+    CommandEnded {
+        lease: LeaseId,
+        command: u64,
+        end: CommandEnd,
+        stdout: String,
+        stderr: String,
+    },
+    /// A transfer of a lease's, its `transfer`th command or transfer, has ended, as `end` says,
+    /// and what the host held of it is gone.
+    TransferEnded {
+        lease: LeaseId,
+        transfer: u64,
+        end: TransferEnd,
+    },
+    /// A lease that [`Action::CloseLease`] closed has ended: its runner has been destroyed.
+    LeaseEnded { lease: LeaseId },
+    /// A lease's runner failed to start, or failed as it ran, and has been destroyed.
+    LeaseFailed { lease: LeaseId, reason: String },
     /// Time passed.
     Tick,
 }
@@ -135,6 +204,43 @@ pub enum Action {
     },
     /// Stops a job wherever it is, and destroys its sandbox. Its last report follows as usual.
     StopJudge { job: JobId },
+    /// Opens lease `lease` of grant `grant` for `holder`: starts a fresh sandbox of the grant's
+    /// runner, as instance `instance` of its role
+    /// (`provider::Create::instance`). The runtime reports
+    /// [`Event::LeaseReady`] once it has started, then each command's end as
+    /// [`Event::CommandEnded`], and last [`Event::LeaseEnded`] once [`Action::CloseLease`]
+    /// closes it, or [`Event::LeaseFailed`] at any point, once the lease's sandbox is gone.
+    /// Its runner is to have started by `start_by`, since the run started: its holder's end, the
+    /// work phase's for the agent, past which nothing could use it; else the start is given up,
+    /// and the lease fails.
+    StartLease {
+        lease: LeaseId,
+        holder: Caller,
+        grant: LeaseGrantId,
+        instance: u32,
+        start_by: Duration,
+    },
+    /// Runs `argv` as lease `lease`'s `command`th command, killing it once it has run for
+    /// `timeout`, from its start, if given; without one, it runs until the lease is closed.
+    RunCommand {
+        lease: LeaseId,
+        command: u64,
+        argv: Argv,
+        timeout: Option<Duration>,
+    },
+    /// Copies a tree between the sandbox of the lease's holder, `holder`, and lease `lease`'s
+    /// runner, as `direction` says, as the lease's `transfer`th command or transfer, failing once
+    /// its files hold more than `max_bytes`. The runtime reports [`Event::TransferEnded`] once it
+    /// has ended, which [`Action::CloseLease`] makes come early, cut short.
+    Transfer {
+        lease: LeaseId,
+        holder: Caller,
+        transfer: u64,
+        direction: Direction,
+        max_bytes: NonZeroU64,
+    },
+    /// Closes lease `lease` wherever it is, and destroys its sandbox with whatever runs in it.
+    CloseLease { lease: LeaseId },
     /// Freezes the agent's sandbox, collects its outputs and destroys it, before the runtime
     /// performs the next action: the core takes the agent as gone once it asks.
     TearDownAgent,
@@ -145,6 +251,24 @@ pub enum Action {
     /// and stops whatever of it still runs. After it, the core only refuses the ops that still
     /// arrive.
     Abandon,
+}
+
+/// Which way a transfer copies a tree, and between which paths: the tree's root becomes `to`,
+/// which must not exist, unless a put is to `replace` it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// From the holder's `tree` to the runner's `to`, whatever is there removed first if
+    /// `replace`.
+    Put {
+        tree: AbsolutePath,
+        to: AbsolutePath,
+        replace: bool,
+    },
+    /// From the runner's `from` to the holder's `to`.
+    Get {
+        from: AbsolutePath,
+        to: AbsolutePath,
+    },
 }
 
 /// Why the work phase ended.
@@ -262,6 +386,7 @@ pub struct Core<'w> {
     hard_end: Duration,
     phase: Phase,
     jobs: jobs::Jobs,
+    leases: leases::Leases,
 }
 
 /// Where a run is.
@@ -283,13 +408,12 @@ enum Phase {
         work_end: WorkEnd,
     },
     /// The work phase has ended, and the agent has been torn down. The jobs it left, stopped or
-    /// collecting, are ending.
+    /// collecting, and its leases, closed, are ending.
     Teardown {
         work_end: WorkEnd,
         submission: Option<Submission>,
     },
-    /// The final judge judges the selected submission in job `job`, and the run ends once the
-    /// job has ended.
+    /// The final judge judges the selected submission in job `job`.
     Final {
         work_end: WorkEnd,
         submission: Submission,
@@ -316,6 +440,7 @@ impl<'w> Core<'w> {
                 deadline: latest_deadline(placed),
             },
             jobs: jobs::Jobs::default(),
+            leases: leases::Leases::default(),
         };
         (core, vec![Action::StartAgent])
     }
@@ -323,8 +448,9 @@ impl<'w> Core<'w> {
     /// Takes in `event`, observed `at` after the run started, and returns the actions it calls
     /// for, in the order to perform them.
     ///
-    /// The time acts before the event: an `at` that reaches the hard end, or the work phase's
-    /// end, abandons the run or ends the work phase first, and the event then finds it so.
+    /// The time acts before the event: an `at` that reaches the hard end, the work phase's end,
+    /// or a lease's, abandons the run, ends the work phase or closes the lease first, and the
+    /// event then finds it so.
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
         let mut actions = Vec::new();
@@ -332,6 +458,7 @@ impl<'w> Core<'w> {
             self.abandon(&mut actions);
         }
         self.end_due_work(&mut actions);
+        self.expire_leases(&mut actions);
         match event {
             Event::AgentStarted => self.agent_started(),
             // A tick only moves the clock, on which the checks above have acted.
@@ -342,7 +469,11 @@ impl<'w> Core<'w> {
             Event::AgentFailed { reason } => {
                 self.end_work(WorkEnd::AgentFailed(reason), &mut actions);
             }
-            Event::OpArrived { op, request } => self.op(op, request, &mut actions),
+            Event::OpArrived {
+                op,
+                caller,
+                request,
+            } => self.op(op, caller, request, &mut actions),
             Event::JudgeStarted { job } => self.on_job(job, |state| state.started(at)),
             // The run log keeps the status; whether a call scored is its result's to say.
             Event::JudgeExited { job, status: _ } => {
@@ -359,15 +490,47 @@ impl<'w> Core<'w> {
                 let outcome = Err(Failure::Error(reason));
                 self.on_job(job, |state| state.report(at, outcome));
             }
+            Event::LeaseReady { lease } => self.on_lease(lease, |lease| lease.state.ready(at)),
+            Event::CommandEnded {
+                lease,
+                command,
+                end,
+                stdout,
+                stderr,
+            } => self.on_lease(lease, |lease| {
+                lease.command_ended(command, (end, stdout, stderr), at);
+            }),
+            Event::TransferEnded {
+                lease,
+                transfer,
+                end,
+            } => self.on_lease(lease, |lease| lease.transfer_ended(transfer, end, at)),
+            Event::LeaseEnded { lease } => {
+                self.on_lease(lease, |lease| lease.report(at, leases::End::Closed));
+            }
+            Event::LeaseFailed { lease, reason } => {
+                self.on_lease(lease, |lease| {
+                    lease.report(at, leases::End::Failed(reason));
+                });
+            }
         }
         self.advance(&mut actions);
         actions
     }
 
-    /// When the core next acts without another event, as a time since the run started: while the
-    /// agent works, when the work phase ends; then at the hard end, also once the run has ended.
-    /// The runtime sends [`Event::Tick`] once that time has come.
+    /// When the core next acts without another event, as a time since the run started: at the
+    /// end of a lease ([`Core::handle`]) or of the phase ([`Core::phase_due`]), whichever comes
+    /// first. The runtime sends [`Event::Tick`] once that time has come.
     pub fn tick_due(&self) -> Duration {
+        // Leases are ready only while the agent works, as its work's end closes them.
+        let phase = self.phase_due();
+        self.leases_due().map_or(phase, |lease| phase.min(lease))
+    }
+
+    /// When the core next ends a phase, or the run, without another event, as a time since the
+    /// run started: while the agent works, when the work phase ends; then at the hard end, also
+    /// once the run has ended.
+    pub fn phase_due(&self) -> Duration {
         // The work phase ends by the deadline, which comes before the hard end.
         self.work_end_due().map_or(self.hard_end, |(end, _)| end)
     }
@@ -435,8 +598,8 @@ impl<'w> Core<'w> {
         }
     }
 
-    /// Ends the work phase, if it hasn't ended: stops the queued and running jobs, then
-    /// freezes, collects and destroys the agent.
+    /// Ends the work phase, if it hasn't ended: stops the queued and running jobs, closes the
+    /// leases, then freezes, collects and destroys the agent.
     fn end_work(&mut self, work_end: WorkEnd, actions: &mut Vec<Action>) {
         let submission = match &mut self.phase {
             Phase::Work { latest, .. } => latest.take().map(|payload| Submission {
@@ -458,6 +621,8 @@ impl<'w> Core<'w> {
         };
         let stopped = self.jobs.stop_unfinished(self.now);
         actions.extend(stopped.into_iter().map(|job| Action::StopJudge { job }));
+        let closed = self.leases.close_where(self.now, |_| true);
+        actions.extend(closed.into_iter().map(|lease| Action::CloseLease { lease }));
         actions.push(Action::TearDownAgent);
     }
 
@@ -468,7 +633,7 @@ impl<'w> Core<'w> {
             Phase::Teardown {
                 work_end,
                 submission,
-            } if self.jobs.all_ended() => {
+            } if self.jobs.all_ended() && self.leases.all_ended() => {
                 let (work_end, submission) = (work_end.clone(), submission.clone());
                 self.enter_final(work_end, submission, actions);
             }

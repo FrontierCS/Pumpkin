@@ -187,10 +187,9 @@ impl Ops {
         connection: &UnixStream,
         sender: &Sender,
     ) -> Result<OpReply, Unanswered> {
-        let path = match &call {
-            OpCall::Judge { .. } | OpCall::Submit { .. } => Some(payload_path(body)?),
-            OpCall::Ops | OpCall::Status { .. } => None,
-        };
+        let path = (call.takes_payload())
+            .then(|| payload_path(body))
+            .transpose()?;
         let _turn = self.turn();
         // Read in the caller's turn, and before the op opens, since an open op can't be
         // withdrawn: waiting callers hold no payload, and a file that can't be read, or one over

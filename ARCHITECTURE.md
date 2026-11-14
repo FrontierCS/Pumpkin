@@ -7,17 +7,19 @@ Names in backticks are for symbol search.
 ## Bird's-eye view
 
 Pumpkin runs workflows, in which an agent works and judges score what it submits. A workflow is
-data, JSON in Pumpkin's IR: its roles, one agent and its judges; the grants each role holds, the
-agent's judge calls and one submission; the model route of the agent, if it has one; and the
-score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a judge's
-afresh for each call, whose supervisor, `sandboxd`, meets the host, dialing it, and serves one
-session: the host puts and collects files, starts and kills commands and freezes the sandbox, and
-code in the sandbox makes ops with `sandboxctl`. On the host, the gateway holds each session's end, the
-driver's decision core decides what a run does, and a provider, such as Docker's, makes sandboxes.
-The session is the boundary that matters most: a sandbox may be buggy, and the agent is
-opportunistic and goal-directed, using whatever it can reach to finish its task or raise its
-score. So each guard either limits what the agent's code can reach, or keeps a buggy sandbox from
-harming the host or the run.
+data, JSON in Pumpkin's IR: its roles, each an agent, a judge or a runner (one agent, its judges,
+and the runners that it leases); the grants each role holds, the agent's judge calls, leases and
+one submission; the model route of the agent, if it has one; and the
+score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a
+judge's afresh for each call and a runner's for each lease, whose supervisor, `sandboxd`, meets the
+host, dialing it, and serves one session: the host puts and collects files, starts and kills
+commands and freezes the sandbox, and code in the sandbox makes ops with `sandboxctl`, such as a
+lease's command or its transfer of a tree of files. On the host, the gateway holds each session's
+end, the driver's decision core decides what a run does, and a provider, such as Docker's, makes
+sandboxes. The session is the boundary that matters most: a sandbox may be buggy, and the agent is
+opportunistic and goal-directed, using whatever it can reach to finish its task or raise its score.
+So each guard either limits what the agent's code can reach, or keeps a buggy sandbox from harming
+the host or the run.
 
 ## Entry points
 
@@ -68,7 +70,9 @@ Another program's format, such as `docker info`'s, stays with the code that read
   such as no limit; whatever writes the IR picks the defaults.
 - **Architecture Invariant:** the agent never calls the judge that scores it: parsing
   (`Parser::score`) refuses a workflow whose score judge is the role of any of the agent's judge
-  grants, and a judge holds no grants (`Parser::roles`).
+  grants, and a judge holds no grants (`Parser::roles`); nor does it run what a judge
+  runs: parsing (`Parser::agents_runner`) refuses an agent's lease of a runner whose image is a
+  judge's.
 - **Architecture Invariant:** a passive sandbox, one whose role makes no ops (`Create::ops`), has
   no `sandboxctl`, so it can make none.
 
@@ -96,7 +100,8 @@ provider's sandbox is one.
 **`crates/gateway`.** The host's end of sessions: where a sandbox meets the gateway (`meeting`), a
 `Registration` that its run's `Sockets` issues, makes the sandbox's `Session`, whose one owner moves
 trees, runs commands (`Process`) and answers ops, hearing of each op, each model request, each
-command's exit and the session's end as an `Arrival` sent to it.
+command's exit and the session's end as an `Arrival` sent to it, and through whose `Trees` another
+thread moves trees beside the owner, as a lease's does between its holder and its runner.
 - **Architecture Invariant:** a sandbox can't harm the host through its session: anything out of
   protocol ends the session, and a session costs the host only bounded memory and bounded waits,
   as does a peer yet to say which sandbox it is. So a session accepted with no op payload limit
@@ -155,11 +160,11 @@ that makes each sandbox a container under the engine's `confinement`, on CPUs of
 
 **`crates/decision`.** The driver's decision core: `Core` takes each `Event` a runtime
 observes and returns the `Action`s the runtime is to perform, until one ends the run, with its
-`Outcome`, or abandons it at its hard end; its `ops` rules on ops, `jobs` meters judge calls, and
-`result` reads a call's `result.json` (`JudgeResult`).
+`Outcome`, or abandons it at its hard end; its `ops` rules on ops, `jobs` meters judge calls,
+`leases` meters and ends leases, and `result` reads a call's `result.json` (`JudgeResult`).
 - **Architecture Invariant:** the decision core does no I/O, reads no clock and uses no randomly
   seeded hash: time reaches it with each event, so the same events give the same actions, and it
-  decides when time ends the work phase or the run, the hard end included. The
+  decides when time ends the work phase, a lease or the run, the hard end included. The
   crate is `#![no_std]`, so it can name none of `std`'s files, network, processes, environment,
   threads, clock or hashed collections, and the workspace denies `unsafe`, which `core::arch`'s
   clock needs. It depends on `schema` alone of Pumpkin's crates, through which the schema's I/O
@@ -185,13 +190,18 @@ so the model provider's TLS client (`ureq`, with `rustls` and `ring`) is in this
 drives the decision core on the run's `Provider`s, each of whose sandboxes meets the gateway where
 its provider's `Meeting` says, timed by its `Host`, whose clock makes the inboxes the run's threads
 wait on (`System`, the machine's), keeping the run's record, whose files `record` lays out, and
-its run log, whose records `log` does, each synced through the host. `model` serves the agent's model
-requests through `route`'s `Route` and `Upstream`, and judges the model provider's answers, until
-the work phase ends (`model_requests_allowed`), or the provider refuses the route's key.
-- **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
-  are gone, so nothing the agent started runs while its submission is judged.
+its run log, whose records `log` does, each synced through the host. A judge call or a lease is a
+child of the run (`child`), on a thread of its own, which `judge` or `lease` drives. `model`
+serves the agent's model requests through `route`'s `Route` and `Upstream`, and judges the model
+provider's answers, until the work phase ends (`model_requests_allowed`), or the provider refuses
+the route's key.
+- **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs and
+  its leases are gone, so nothing the agent started runs while its submission is judged.
 - **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and
-  nowhere else: no op reply carries a collected file, so only the operator sees it.
+  nowhere else: no op reply carries a file collected from a judge's sandbox, so only the operator
+  sees it; a lease's status carries the ends of its own commands' output to its holder alone, and
+  a lease's transfer moves trees between its holder's sandbox and its runner alone, through the
+  host, which holds each on its disk only while it moves it.
 - **Architecture Invariant:** a run's record is made only once each provider that it places a
   role on holds what its roles need at once (`Provider::reserve`), so a run that doesn't fit is
   refused with no record; the run holds it until its end has deleted its sandboxes.

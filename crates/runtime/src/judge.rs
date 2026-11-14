@@ -1,89 +1,38 @@
-//! Judge calls, each on a thread of its own, in a fresh passive sandbox.
-//!
-//! [`run`] reports a call's end only once its sandbox is deleted; a sandbox that can't be
-//! deleted fails the run. [`start`] puts the call's payload in its slot
-//! ([`slot_payload`](schema::sandbox::slot_payload)), and [`outputs`] collects and
-//! parses the judge's result under its [`ResultSpec`](schema::ir::ResultSpec).
-//!
-//! A call's thread waits on an inbox of its own ([`Message`]), into which its session hands
-//! what its reader reads, and the loop the core's stop. A stop takes effect before the command
-//! starts, as the thread takes what its inbox holds then, and while the command runs.
+//! Judge calls, each a child of the run ([`child`](super::child)): [`call`] puts the call's
+//! payload in its slot ([`slot_payload`](schema::sandbox::slot_payload)), runs the judge's
+//! command until it exits, its timeout passes or the core stops the call, and [`outputs`]
+//! collects and parses the judge's result under its [`ResultSpec`](schema::ir::ResultSpec).
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::convert::Infallible;
+use std::path::Path;
 use std::time::Duration;
-use std::{fs, io, iter};
+use std::{fs, io};
 
 use decision::{Event, JobId, JudgeResult};
 use gateway::{Arrival, Put, Session};
-use provider::UnixTime;
-use schema::ir::Name;
 use schema::sandbox::{
     RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir, pumpkin_dir,
     result_file, slot_dir, slot_payload,
 };
-use schema::workflow::Judge;
+use schema::workflow::{Judge, SlotId};
 use stdx::Context;
 
+use super::child::{Child, Message, Report};
 use super::host::deadline;
-use super::log::Entry;
-use super::sandbox::{PUMPKIN, Sandboxes, Which, collect, launch};
-use super::{Clock, Host, Inbox, Input};
+use super::record::Stored;
+use super::sandbox::{collect, launch};
+use super::{Clock, Host, Inbox};
 
-/// A judge call, as its thread sees it, timed and synced by the host `H`.
-pub(super) struct Call<'r, H: Host> {
+/// A judge call, as its thread drives it, in its child of the run, which takes no orders but the
+/// core's stop.
+pub(super) struct Call {
     pub(super) job: JobId,
-    pub(super) judge: &'r Judge,
-    pub(super) which: Which,
-    pub(super) slot: &'r Name,
-    /// Where the payload is stored.
-    pub(super) payload: PathBuf,
+    /// The slot the payload is put in, whose judge's sandbox and command the call runs, as the
+    /// workflow of its child's sandboxes finds them.
+    pub(super) slot: SlotId,
+    pub(super) payload: Stored,
     /// The longest the judge's command may run.
     pub(super) timeout: Duration,
-    pub(super) deadlines: Deadlines,
-    /// The run's hard end, as its sandbox's create takes it
-    /// ([`Create::hard_end`](provider::Create::hard_end)).
-    pub(super) hard_end: UnixTime,
-    /// The call's directory in the record, `jobs/<n>`, which exists and is empty.
-    pub(super) dir: PathBuf,
-    pub(super) sandboxes: &'r Sandboxes<'r, H>,
-    pub(super) clock: H::Clock,
-    /// What reaches the call's thread.
-    pub(super) inbox: <H::Clock as Clock>::Inbox<Message>,
-    /// A sender into the loop's inbox, which takes the call's reports.
-    pub(super) reports: Sender<Input>,
-}
-
-/// By when each of a judge call's steps is to be done, as times since the run started.
-#[derive(Clone, Copy)]
-pub(super) struct Deadlines {
-    /// Its sandbox's start: created, accepted and set up.
-    pub(super) startup: Duration,
-    /// Its payload's put and its command's start.
-    pub(super) start: Duration,
-    /// Its sandbox's freeze, and the collecting of what it holds.
-    pub(super) collect: Duration,
-}
-
-/// What reaches a judge call's thread through its inbox.
-pub(super) enum Message {
-    /// What its session's reader handed over ([`Registration::accept`]): at most its command's
-    /// exit, as it runs one command, and its end, since a passive session hands out no op, and
-    /// the session takes no model requests.
-    ///
-    /// [`Registration::accept`]: gateway::Registration::accept
-    Session(Arrival),
-    /// The core's stop.
-    Stop,
-}
-
-/// What a judge call's thread reports to the loop.
-pub(super) enum Report {
-    /// An event, at the time the thread observed it: the core meters a call's time from its
-    /// reports' times, which the loop's delays then don't lengthen.
-    Event(Duration, Event),
-    /// Why the call's sandbox couldn't be deleted, which fails the run.
-    Undeleted(String),
 }
 
 /// How a judge's command ended.
@@ -94,64 +43,40 @@ enum Ended {
     Stopped,
 }
 
-/// Runs a judge call to its end, reporting as it goes: one whose start is due by a time that has
-/// passed fails at once, with nothing created.
-pub(super) fn run<H: Host>(call: &mut Call<'_, H>) {
-    let job = call.job;
-    // The loop can be held past a call's start, by the agent's teardown's delete or a sync of the
-    // run log, and a sandbox created for a start already due would only be deleted, at or past
-    // the hard end at worst.
-    if call.clock.now() >= call.deadlines.startup {
-        let reason = "the judge's sandbox wasn't created: the call's start was due by a time that \
-                      had passed"
-            .to_owned();
-        return call.event(Event::JudgeFailed { job, reason });
-    }
-    let by = deadline(&call.clock, call.deadlines.startup);
-    let inbox = call.inbox.sender();
-    let started =
-        (call.sandboxes).start(call.which, None, by, call.hard_end, inbox, Message::Session);
-    let mut sandbox = match started {
-        Ok(sandbox) => sandbox,
-        Err(error) => {
-            let reason = format!("the judge's sandbox didn't start: {error}");
-            return call.event(Event::JudgeFailed { job, reason });
-        }
-    };
-    let last = judge(call, &mut sandbox.session);
-    let (logged, deleted) = call.sandboxes.delete(sandbox);
-    for entry in logged {
-        // The loop's inbox outlives every call's thread, which the run's end waits for.
-        let _ = call.reports.send(Input::Logged(entry));
-    }
-    match deleted {
-        Ok(()) => call.event(last),
-        Err(error) => call.report(Report::Undeleted(error)),
-    }
+/// Runs `call` to its end in `child`, as a child of the run runs ([`child::run`]).
+///
+/// [`child::run`]: super::child::run
+pub(super) fn run<H: Host>(call: &Call, child: &mut Child<'_, H, Infallible>) {
+    super::child::run(child, |child, session| judge(call, child, session));
 }
 
-/// Runs the call in its sandbox, whose session is `session`, and returns the report of its end.
-fn judge<H: Host>(call: &mut Call<'_, H>, session: &mut Session) -> Event {
+/// Runs `call` in `child`'s sandbox, whose session is `session`, and returns the report of its
+/// end.
+fn judge<H: Host>(
+    call: &Call,
+    child: &mut Child<'_, H, Infallible>,
+    session: &mut Session,
+) -> Event {
     let job = call.job;
     let failed = |reason: String| Event::JudgeFailed { job, reason };
-    if call.stopped() {
+    if child.stopped() {
         return failed("the call was stopped before its command started".to_owned());
     }
-    let timeout = match start(call, session) {
+    let timeout = match start(call, child, session) {
         Ok(timeout) => timeout,
         Err(reason) => return failed(reason),
     };
-    let ended = match wait(call, timeout) {
+    let ended = match wait(child, job, timeout) {
         Ok(ended) => ended,
         Err(reason) => return failed(format!("the judge's session ended: {reason}")),
     };
-    let by = deadline(&call.clock, call.deadlines.collect);
+    let by = deadline(&child.clock, child.deadlines.collect);
     if let Err(error) = session.freeze(by) {
         return failed(format!("freezing the judge's sandbox failed: {error}"));
     }
-    let result = outputs(call, session);
-    if let Err(error) = collect(session, &log_dir(), &call.dir, PUMPKIN, by) {
-        call.note(format!("job {}'s log is incomplete: {error}", job.0));
+    let result = outputs(child, judge_of(child, call.slot), session);
+    if let Err(error) = collect(session, &log_dir(), &child.dir, by) {
+        child.note(format!("job {}'s log is incomplete: {error}", job.0));
     }
     match ended {
         Ended::Ran => Event::JudgeCollected { job, result },
@@ -161,38 +86,48 @@ fn judge<H: Host>(call: &mut Call<'_, H>, session: &mut Session) -> Event {
 
 /// Puts the payload in the judge's slot, and the evidence directory, and starts its command,
 /// then reports the start. Returns when the command's timeout ends, since the run started.
-fn start<H: Host>(call: &Call<'_, H>, session: &mut Session) -> Result<Duration, String> {
-    let payload = fs::read(&call.payload).context(call.payload.display())?;
-    let (slot, raw, evidence) = (slot_dir(call.slot), slot_payload(call.slot), evidence_dir());
+fn start<H: Host>(
+    call: &Call,
+    child: &Child<'_, H, Infallible>,
+    session: &mut Session,
+) -> Result<Duration, String> {
+    let payload = call.payload.read()?;
+    let name = &child.sandboxes.workflow().slot(call.slot).name;
+    let (slot_at, raw, evidence) = (slot_dir(name), slot_payload(name), evidence_dir());
     let puts = [
-        Put::Dir(&slot, dir_mode()),
-        Put::File(&raw, file_mode(), &payload),
-        Put::Dir(&evidence, dir_mode()),
+        Put::Dir(slot_at, dir_mode()),
+        Put::File(raw, file_mode(), &payload),
+        Put::Dir(evidence, dir_mode()),
     ];
-    let by = deadline(&call.clock, call.deadlines.start);
-    (session.put(&pumpkin_dir(), &puts, by)).context("putting the payload failed")?;
+    let by = deadline(&child.clock, child.deadlines.start);
+    (session.put(&pumpkin_dir(), puts, by)).context("putting the payload failed")?;
     // The sandbox runs this one command, so its exit needs no `Process` to tell it apart.
-    (session.start(launch(&call.judge.command), by)).context("the judge's command didn't start")?;
+    let launched = launch(&judge_of(child, call.slot).command);
+    (session.start(launched, by)).context("the judge's command didn't start")?;
     // The timeout runs from the start's reported time.
-    let at = call.clock.now();
-    call.report(Report::Event(at, Event::JudgeStarted { job: call.job }));
+    let at = child.clock.now();
+    child.report(Report::Event(at, Event::JudgeStarted { job: call.job }));
     Ok(at.saturating_add(call.timeout))
 }
 
-/// Waits for the command to exit, until `timeout`, a time since the run started, or for a stop,
-/// and reports its exit or its timeout. Fails with the reason the session ended, if it ended
-/// first.
-fn wait<H: Host>(call: &mut Call<'_, H>, timeout: Duration) -> Result<Ended, String> {
-    let job = call.job;
-    match call.inbox.wait(timeout) {
+/// Waits for the command of job `job` to exit, until `timeout`, a time since the run started, or
+/// for a stop, and reports its exit or its timeout. Fails with the reason the session ended, if
+/// it ended first.
+fn wait<H: Host>(
+    child: &mut Child<'_, H, Infallible>,
+    job: JobId,
+    timeout: Duration,
+) -> Result<Ended, String> {
+    match child.inbox.wait(timeout) {
         None => {
-            call.event(Event::JudgeTimedOut { job });
+            child.event(Event::JudgeTimedOut { job });
             Ok(Ended::Ran)
         }
         Some(Message::Stop) => Ok(Ended::Stopped),
+        Some(Message::Order(never)) => match never {},
         // The sandbox runs one command, so the exit is its.
         Some(Message::Session(Arrival::Exited { process: _, status })) => {
-            call.event(Event::JudgeExited { job, status });
+            child.event(Event::JudgeExited { job, status });
             Ok(Ended::Ran)
         }
         Some(Message::Session(Arrival::Ended { reason })) => Err(reason),
@@ -213,13 +148,17 @@ fn wait<H: Host>(call: &mut Call<'_, H>, timeout: Duration) -> Result<Ended, Str
     }
 }
 
-/// Collects [`out_dir()`] into the record, and parses the result the judge wrote there.
-fn outputs<H: Host>(call: &Call<'_, H>, session: &mut Session) -> Result<JudgeResult, String> {
-    let by = deadline(&call.clock, call.deadlines.collect);
-    let collected = collect(session, &out_dir(), &call.dir, PUMPKIN, by);
-    let result = read_result(&call.dir.join(result_file().as_str()));
+/// Collects [`out_dir()`] into the record, and parses the result that `judge` wrote there.
+fn outputs<H: Host>(
+    child: &Child<'_, H, Infallible>,
+    judge: &Judge,
+    session: &mut Session,
+) -> Result<JudgeResult, String> {
+    let by = deadline(&child.clock, child.deadlines.collect);
+    let collected = collect(session, &out_dir(), &child.dir, by);
+    let result = read_result(&child.dir.join(result_file().as_str()));
     collected.context("the judge's outputs are incomplete")?;
-    JudgeResult::parse(&call.judge.result, &result?)
+    JudgeResult::parse(&judge.result, &result?)
 }
 
 /// Reads the collected result, at `path`, or removes it if it is too large.
@@ -245,27 +184,7 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).context(path.display())
 }
 
-impl<H: Host> Call<'_, H> {
-    /// Whether the core has stopped the call, by what its inbox holds, which this takes. Before
-    /// the command starts, the only other message can be its session's end, after which what the
-    /// call asks of the session fails for that reason.
-    fn stopped(&mut self) -> bool {
-        iter::from_fn(|| self.inbox.take()).any(|message| matches!(message, Message::Stop))
-    }
-
-    /// Reports an event, observed now.
-    fn event(&self, event: Event) {
-        self.report(Report::Event(self.clock.now(), event));
-    }
-
-    /// Notes `note` in the run log.
-    fn note(&self, note: String) {
-        // The loop's inbox outlives every call's thread, which the run's end waits for.
-        let _ = (self.reports).send(Input::Logged(Entry::Note(note)));
-    }
-
-    fn report(&self, report: Report) {
-        // The loop's inbox outlives every call's thread, which the run's end waits for.
-        let _ = self.reports.send(Input::Judge(report));
-    }
+/// The judge whose slot `slot` is, as the workflow of `child`'s sandboxes finds it.
+fn judge_of<'r, H: Host>(child: &Child<'r, H, Infallible>, slot: SlotId) -> &'r Judge {
+    child.sandboxes.workflow().judge(slot.judge())
 }

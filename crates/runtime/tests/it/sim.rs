@@ -29,11 +29,14 @@ use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
     Role, RunTag, SandboxId, SandboxdRef, Sweep,
 };
-use schema::ir::{AbsolutePath, CpuModel, Image, Name, Sha256Digest};
-use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
+use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
+use schema::sandbox::op::{
+    JobState, Last, LeaseStatusReply, OpCall, OpReply, StatusReply, TransferStatus,
+};
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, HelloReply, PROTOCOL_VERSION, RESULT_MAX_BYTES, RelativePath,
-    SOCKET_NAME, SocketDial, ToSandbox, frame, log_dir, out_dir, pumpkin_dir,
+    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RESULT_MAX_BYTES,
+    RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, frame, log_dir,
+    out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Offers};
 use serde_json::{Value, json};
@@ -1069,8 +1072,8 @@ enum Step {
         payload: Vec<u8>,
         less: Option<u64>,
     },
-    /// `status` of `job`, made until its reply gives `state`.
-    Await { job: u64, state: String },
+    /// `call`, a `status` or a `lease_status`, made until its reply gives `state`.
+    Await { call: OpCall, state: String },
     /// A model request that names `model`, whose input is `text`, and what of its response the
     /// next step waits for.
     Model {
@@ -1083,6 +1086,12 @@ enum Step {
     /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
     /// process the command left would.
     Exit,
+    /// The answer to the collect of a `held` directory, which waits for it ([`collect`]), and to
+    /// any such collect later.
+    Release,
+    /// A judge's result, `{"raw_score": n}`, where `n` is what the last command of a lease printed,
+    /// as the last `lease_status` reply gives it.
+    Result,
     /// The session's end, which its `sandboxd` makes as [`End`] says.
     End(End),
 }
@@ -1108,6 +1117,10 @@ enum Wait {
 }
 
 /// A command that makes ops.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a fact of the fake command's own, which its steps set apart"
+)]
 struct Caller {
     /// The command's stream, on which it exits.
     stream: u32,
@@ -1119,8 +1132,9 @@ struct Caller {
     less: Option<u64>,
     /// The seconds the last `ops` reply left, once one has come.
     left: Option<u64>,
-    /// The job whose `status` the op in flight asks, and the state it awaits, if it awaits one.
-    awaiting: Option<(u64, String)>,
+    /// The `status` or `lease_status` the op in flight asks, and the state it awaits, if it awaits
+    /// one.
+    awaiting: Option<(OpCall, String)>,
     /// Whether the command has exited.
     exited: bool,
     /// Whether its sandbox serves the model endpoint.
@@ -1134,8 +1148,15 @@ struct Caller {
     waits: Option<Wait>,
     /// What it has printed: each response to its model requests.
     stdout: String,
+    /// What the last command of a lease printed, as the last `lease_status` reply gives it.
+    read: String,
+    /// The result it wrote, if it wrote one.
+    result: Option<Vec<u8>>,
     /// How its `sandboxd` ends the session, once a step has asked it to.
     end: Option<End>,
+    /// Whether a step has released the collects of `held` directories, the one waiting and any
+    /// later.
+    released: bool,
 }
 
 impl Caller {
@@ -1155,7 +1176,10 @@ impl Caller {
             open: false,
             waits: None,
             stdout: String::new(),
+            read: String::new(),
+            result: None,
             end: None,
+            released: false,
         }
     }
 
@@ -1164,6 +1188,13 @@ impl Caller {
     /// steps; if it gives another state than the one awaited, it asks again after
     /// [`AWAIT_POLL`]; else it goes on ([`Caller::next`]).
     fn answered(&mut self, reply: &OpReply, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
+        if let OpReply::LeaseStatus(LeaseStatusReply {
+            last: Some(Last::Command(command)),
+            ..
+        }) = reply
+        {
+            self.read.clone_from(&command.stdout);
+        }
         if let OpReply::Ops(ops) = reply {
             let left = ops.remaining_seconds;
             if let Some(less) = self.less
@@ -1176,12 +1207,12 @@ impl Caller {
             }
             self.left = Some(left);
         }
-        if let Some((job, state)) = self.awaiting.take()
-            && state_name(reply) != state
+        if let Some((call, state)) = self.awaiting.take()
+            && !reached(reply, &state)
         {
             thread::sleep(AWAIT_POLL);
-            self.make(OpCall::Status { job }, Vec::new(), None, replies);
-            self.awaiting = Some((job, state));
+            self.make(call.clone(), Vec::new(), None, replies);
+            self.awaiting = Some((call, state));
             return false;
         }
         self.next(replies)
@@ -1205,9 +1236,9 @@ impl Caller {
                     }
                     continue;
                 }
-                Some(Step::Await { job, state }) => {
-                    self.awaiting = Some((job, state));
-                    (OpCall::Status { job }, Vec::new(), None)
+                Some(Step::Await { call, state }) => {
+                    self.awaiting = Some((call.clone(), state));
+                    (call, Vec::new(), None)
                 }
                 Some(Step::Sleep(seconds)) => {
                     thread::sleep(Duration::from_secs(seconds));
@@ -1215,6 +1246,15 @@ impl Caller {
                 }
                 Some(Step::Exit) => {
                     self.exit(0, replies);
+                    continue;
+                }
+                Some(Step::Release) => {
+                    self.released = true;
+                    continue;
+                }
+                Some(Step::Result) => {
+                    let score: i64 = self.read.trim().parse().unwrap();
+                    self.result = Some(json!({ "raw_score": score }).to_string().into_bytes());
                     continue;
                 }
                 Some(Step::End(end)) => {
@@ -1355,28 +1395,57 @@ impl Caller {
     }
 }
 
-/// The state a status reply gives, as `sandboxctl` prints it, or `""` for any other reply.
-fn state_name(reply: &OpReply) -> &'static str {
-    let OpReply::Status(StatusReply { state, .. }) = reply else {
-        return "";
+/// Whether `reply` gives `state`, a state's name, or `transfer <end>` for a lease's status whose
+/// last is a transfer that ended so, `moved` or `failed`.
+fn reached(reply: &OpReply, state: &str) -> bool {
+    let Some(end) = state.strip_prefix("transfer ") else {
+        return state_name(reply) == state;
     };
-    match state {
-        JobState::Queued => "queued",
-        JobState::Running => "running",
-        JobState::Completed { .. } => "completed",
-        JobState::Errored { .. } => "errored",
+    let OpReply::LeaseStatus(LeaseStatusReply {
+        last: Some(Last::Transfer(TransferStatus {
+            end: Some(ended), ..
+        })),
+        ..
+    }) = reply
+    else {
+        return false;
+    };
+    json!(ended).as_object().unwrap().contains_key(end)
+}
+
+/// The state a status or a lease's status gives, as `sandboxctl` prints it, or `""` for any
+/// other reply.
+fn state_name(reply: &OpReply) -> String {
+    match reply {
+        OpReply::Status(StatusReply { state, .. }) => match state {
+            JobState::Queued => "queued",
+            JobState::Running => "running",
+            JobState::Completed { .. } => "completed",
+            JobState::Errored { .. } => "errored",
+        }
+        .to_owned(),
+        OpReply::LeaseStatus(LeaseStatusReply { state, .. }) => {
+            json!(state).as_str().unwrap().to_owned()
+        }
+        _ => String::new(),
     }
 }
 
-/// The step that `arg` gives: an op, `ops`, which `ops at least <seconds> less` bounds, `status
-/// <job>`, `judge <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant>
-/// <payload>`, a final submission, where a payload that is a number is that many bytes of `x`,
-/// and any other is its own bytes; `await <job> <state>`, which makes `status <job>` until its
-/// reply's state is `state`; `model <model> <text>`, a model request that names `model`, with
-/// `text` as its input, whose response's end the next step waits for, or `ask <model> <text>`,
-/// one whose response's first part it waits for; or `sleep <seconds>`, `exit`, or the session's
-/// end, `crash` or `close`.
+/// The step that `arg` gives, in the form the comment below lays out.
 fn step(arg: &str) -> Step {
+    // A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `judge
+    // <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
+    // submission, where a payload that is a number is that many bytes of `x`, and any other is its
+    // own bytes; `lease_open <grant> [<seconds>]`, `lease_run <lease> <seconds>|- <argv>...`,
+    // without a timeout for `-`, `lease_status <lease>` or `lease_close <lease>`; `await <job>
+    // <state>`, which makes `status <job>` until its reply's state is `state`, or `await_lease
+    // <lease> <state>`, `lease_status <lease>` likewise, or `await_transfer <lease> moved|failed`,
+    // until its last transfer ended so; `lease_put <lease> <tree> <to> [replace]` or `lease_get
+    // <lease> <from> <to>`; `model <model> <text>`, a model request that names `model`, with `text`
+    // as its input, whose response's end the next step waits for, or `ask <model> <text>`, one
+    // whose response's first part it waits for; `result`, a judge's result of what a lease's
+    // command printed ([`Step::Result`]); or `sleep <seconds>`, `exit`, `release`
+    // ([`Step::Release`]), or the session's end, `crash` or `close`.
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {
@@ -1399,8 +1468,27 @@ fn step(arg: &str) -> Step {
             (OpCall::Submit { grant, finalize }, payload(), None)
         }
         ["await", job, state] => {
-            let (job, state) = (job.parse().unwrap(), state.to_owned());
-            return Step::Await { job, state };
+            let (call, state) = (
+                OpCall::Status {
+                    job: job.parse().unwrap(),
+                },
+                state.to_owned(),
+            );
+            return Step::Await { call, state };
+        }
+        [
+            "lease_open" | "lease_run" | "lease_put" | "lease_get" | "lease_status" | "lease_close",
+            ..,
+        ] => (lease_call(&words), Vec::new(), None),
+        ["await_lease", lease, state] => {
+            let lease = lease.parse().unwrap();
+            let (call, state) = (OpCall::LeaseStatus { lease }, state.to_owned());
+            return Step::Await { call, state };
+        }
+        ["await_transfer", lease, end] => {
+            let lease = lease.parse().unwrap();
+            let (call, state) = (OpCall::LeaseStatus { lease }, format!("transfer {end}"));
+            return Step::Await { call, state };
         }
         [kind @ ("model" | "ask"), model, text] => {
             let (model, text) = (model.to_owned(), text.to_owned());
@@ -1413,6 +1501,8 @@ fn step(arg: &str) -> Step {
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["exit"] => return Step::Exit,
+        ["release"] => return Step::Release,
+        ["result"] => return Step::Result,
         ["crash"] => return Step::End(End::Crash),
         ["close"] => return Step::End(End::Close),
         _ => panic!("`{arg}` is no step of the simulated sandboxd's"),
@@ -1424,29 +1514,136 @@ fn step(arg: &str) -> Step {
     }
 }
 
-/// The files put in a sandbox, by path.
+/// The lease op that `words`, a step's, make ([`step`]).
+fn lease_call(words: &[&str]) -> OpCall {
+    let lease = || words[1].parse().unwrap();
+    match words {
+        ["lease_open", grant, seconds @ ..] => OpCall::LeaseOpen {
+            grant: Name::try_from((*grant).to_owned()).unwrap(),
+            instance_seconds: seconds.first().map(|seconds| seconds.parse().unwrap()),
+        },
+        ["lease_run", _, timeout, command @ ..] => {
+            let command = command
+                .iter()
+                .map(|&arg| arg.to_owned())
+                .collect::<Vec<_>>();
+            OpCall::LeaseRun {
+                lease: lease(),
+                argv: Argv::try_from(command).unwrap(),
+                timeout_seconds: timeout.parse().ok(),
+            }
+        }
+        ["lease_put", _, tree, to, replace @ ..] => OpCall::LeasePut {
+            lease: lease(),
+            tree: AbsolutePath::try_from((*tree).to_owned()).unwrap(),
+            to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
+            replace: replace == ["replace"],
+        },
+        ["lease_get", _, from, to] => OpCall::LeaseGet {
+            lease: lease(),
+            from: AbsolutePath::try_from((*from).to_owned()).unwrap(),
+            to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
+        },
+        ["lease_status", _] => OpCall::LeaseStatus { lease: lease() },
+        ["lease_close", _] => OpCall::LeaseClose { lease: lease() },
+        _ => panic!(
+            "`{}` is no lease op of the simulated sandboxd's",
+            words.join(" ")
+        ),
+    }
+}
+
+/// The directories and files put in a sandbox, by path.
 #[derive(Default)]
 struct Files {
     by_path: BTreeMap<String, Vec<u8>>,
-    /// The directory of the tree being put, if one is.
+    dirs: BTreeSet<String>,
+    /// The mode of each directory and file put, by path; one made only as a tree's root has
+    /// [`dir_mode`]'s.
+    modes: BTreeMap<String, Mode>,
+    /// The directory of the tree being put, if one is, unless putting it failed.
     dir: Option<AbsolutePath>,
     /// The path of the file being put, if one is.
     file: Option<String>,
 }
 
 impl Files {
+    /// Begins the tree put in `dir` on `stream`, made as `root` says, which fails, in `replies`,
+    /// if it is made new in a directory that holds what was put before, as `sandboxd` fails it,
+    /// and which first removes what was put there before to replace it.
+    fn begin(
+        &mut self,
+        stream: u32,
+        dir: AbsolutePath,
+        root: Root,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    ) {
+        let below = format!("{dir}/");
+        let inside = |path: &String| *path == dir.as_str() || path.starts_with(&below);
+        if root == Root::Replaced {
+            self.dirs.retain(|path| !inside(path));
+            self.by_path.retain(|path, _| !inside(path));
+            self.modes.retain(|path, _| !inside(path));
+        }
+        let held = self.dirs.contains(dir.as_str())
+            || (self.dirs.iter().chain(self.by_path.keys())).any(|path| path.starts_with(&below));
+        let new = root != Root::Kept;
+        if new && held {
+            let message = format!("{dir}: File exists (os error 17)");
+            replies.push((FromSandbox::Failed { stream, message }, Vec::new()));
+            self.dir = None;
+            return;
+        }
+        if new {
+            self.dirs.insert(dir.to_string());
+        }
+        self.dir = Some(dir);
+    }
+
     fn entry(&mut self, entry: Entry) {
-        let (Some(dir), Entry::File { path, .. }) = (&self.dir, entry) else {
+        let Some(dir) = &self.dir else {
             return;
         };
-        let path = dir.join(&path).to_string();
-        self.by_path.insert(path.clone(), Vec::new());
-        self.file = Some(path);
+        match entry {
+            Entry::Dir { path, mode } => {
+                let path = dir.join(&path).to_string();
+                self.dirs.insert(path.clone());
+                self.modes.insert(path, mode);
+            }
+            Entry::File { path, mode, .. } => {
+                let path = dir.join(&path).to_string();
+                self.modes.insert(path.clone(), mode);
+                self.by_path.insert(path.clone(), Vec::new());
+                self.file = Some(path);
+            }
+        }
     }
 
     fn data(&mut self, body: &[u8]) {
+        if self.dir.is_none() {
+            return;
+        }
         let file = (self.file.as_ref()).and_then(|file| self.by_path.get_mut(file));
         file.unwrap().extend_from_slice(body);
+    }
+
+    /// Ends the tree put on `stream`, answering it in `replies` unless it failed.
+    fn end(&mut self, stream: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        if self.dir.take().is_some() {
+            replies.push((FromSandbox::Done { stream }, Vec::new()));
+        }
+    }
+
+    /// The mode of the directory or file at `path`, or, unless one was put there, `made`.
+    fn mode(&self, path: &str, made: Mode) -> Mode {
+        self.modes.get(path).copied().unwrap_or(made)
+    }
+
+    /// The files put below `dir`, by their paths below it.
+    fn below<'f>(&'f self, dir: &str) -> impl Iterator<Item = (&'f str, &'f [u8])> {
+        let inside = format!("{dir}/");
+        let files = self.by_path.iter();
+        files.filter_map(move |(path, bytes)| Some((path.strip_prefix(&inside)?, &bytes[..])))
     }
 }
 
@@ -1488,26 +1685,62 @@ fn judge(
     }
 }
 
-/// Collects `dir` on `stream`, in `replies`: [`COLLECTED`], from `out` the judge's `result`
-/// too, if it wrote one, and from `log` what the command printed, if anything.
+/// Collects `dir` on `stream`, in `replies`: [`COLLECTED`], unless a file put there is named so,
+/// from `out` the judge's `result`
+/// too, if it wrote one, and from `log` what the command that makes ops printed, if anything;
+/// each file in `dir` that a `print` wrote ([`Served::start`]); and each directory and file put
+/// below `dir`. The collect of a directory named `held` waits for a step to release it
+/// ([`Step::Release`]).
 fn collect(
     stream: u32,
     dir: &AbsolutePath,
-    result: Option<&[u8]>,
-    stdout: &str,
+    served: &mut Served,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
 ) {
-    let mut tree = vec![(COLLECTED, COLLECTED.as_bytes())];
+    if dir.as_str().ends_with("/held") && !served.caller.as_ref().is_some_and(|c| c.released) {
+        served.held = Some((stream, dir.clone()));
+        return;
+    }
+    let inside = format!("{dir}/");
+    for full in &served.files.dirs {
+        if let Some(path) = full.strip_prefix(&inside) {
+            let path = RelativePath::try_from(path.to_owned()).unwrap();
+            let mode = served.files.mode(full, dir_mode());
+            let entry = Entry::Dir { path, mode };
+            replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
+        }
+    }
+    let served = &*served;
+    // A tree put there, as one collected elsewhere first, may hold its own.
+    let put = served
+        .files
+        .below(dir.as_str())
+        .any(|(path, _)| path == COLLECTED);
+    let mut tree = Vec::new();
+    if !put {
+        tree.push((COLLECTED, COLLECTED.as_bytes()));
+    }
     if *dir == pumpkin_dir().join(&out_dir()) {
+        let caller = served.caller.as_ref();
+        let written = caller.and_then(|caller| caller.result.as_deref());
+        let result = served.result.as_deref().or(written);
         tree.extend(result.map(|result| ("result.json", result)));
     }
+    let stdout = served.caller.as_ref().map_or("", |caller| &caller.stdout);
     if *dir == pumpkin_dir().join(&log_dir()) && !stdout.is_empty() {
         tree.push(("command.stdout", stdout.as_bytes()));
     }
+    let printed = (served.printed.iter()).filter_map(|(path, text)| {
+        let name = path.strip_prefix(dir.as_str())?.strip_prefix('/')?;
+        (!name.contains('/')).then_some((name, text.as_bytes()))
+    });
+    tree.extend(printed);
+    tree.extend(served.files.below(dir.as_str()));
     for (path, body) in tree {
+        let mode = served.files.mode(&format!("{dir}/{path}"), file_mode());
         let path = RelativePath::try_from(path.to_owned()).unwrap();
         let size = u64::try_from(body.len()).unwrap();
-        let entry = Entry::File { path, size };
+        let entry = Entry::File { path, size, mode };
         replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
         for data in body.chunks(frame::MAX_BODY_BYTES) {
             replies.push((FromSandbox::Data { stream }, data.to_vec()));
@@ -1516,17 +1749,123 @@ fn collect(
     replies.push((FromSandbox::End { stream }, Vec::new()));
 }
 
+/// What a fake `sandboxd`'s session holds of the commands it started: the one that makes ops, if
+/// one has started, the files put, a judge's result, if one wrote it, what each `print` wrote, by
+/// the path of its standard output, and the commands that run until the sandbox is frozen, or a
+/// kill ends them, by stream.
+#[derive(Default)]
+struct Served {
+    caller: Option<Caller>,
+    files: Files,
+    result: Option<Vec<u8>>,
+    printed: BTreeMap<String, String>,
+    running: BTreeSet<u32>,
+    /// The collect of a `held` directory, by its stream, until a step releases it.
+    held: Option<(u32, AbsolutePath)>,
+}
+
+impl Served {
+    /// Starts `launch` on `stream`, in a sandbox that serves the model endpoint if `model`,
+    /// answering in `replies`, and returns whether its `sandboxd` is to end the session, as its
+    /// program says (the comment below).
+    fn start(
+        &mut self,
+        stream: u32,
+        launch: &Launch,
+        model: bool,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+        shared: &Mutex<Status>,
+    ) -> bool {
+        // By its program: `exit` exits at once with the status its argument gives; `stall` starts,
+        // then stalls the sandbox; `crash` starts, then its `sandboxd` ends the session; `ops`
+        // takes the steps its arguments give (`step`), making each op, or model request, once the
+        // one before it is answered, then exits with 0, once the response to its last model request
+        // has ended, unless it has, or its `sandboxd` ends the session as a step asks, and prints
+        // each response to its model requests, which it makes only with the model endpoint, and
+        // whose end a freeze waits for; `judge` judges the payload put at the path its argument
+        // gives (`judge`); `print` writes its arguments to its standard output, `fill <n> <text>`
+        // that many `x`s and then the text, and `list` each directory and file put below the
+        // directory its argument gives, by path, with its mode, and each file's contents, and each
+        // exits with 0; any other runs until the sandbox is frozen, or a
+        // kill ends it, as signal 9 does.
+        replies.push((FromSandbox::Done { stream }, Vec::new()));
+        match launch.argv.program() {
+            "exit" => {
+                let code = launch.argv.args()[0].parse().unwrap();
+                let status = ExitStatus::Code(code);
+                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+            }
+            "stall" => status(shared).stalled = true,
+            "crash" => return true,
+            "ops" => {
+                let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
+                let made = self.caller.insert(Caller::new(stream, steps, model));
+                return made.next(replies);
+            }
+            "judge" => {
+                let payload = self.files.by_path.get(&launch.argv.args()[0]);
+                self.result = judge(payload, stream, replies, shared);
+            }
+            "list" => {
+                let dir = &launch.argv.args()[0];
+                let inside = format!("{dir}/");
+                // By path, each directory's ending in `/`.
+                let mut lines = BTreeMap::new();
+                for full in &self.files.dirs {
+                    if let Some(path) = full.strip_prefix(&inside) {
+                        let mode = self.files.mode(full, dir_mode());
+                        lines.insert(format!("{path}/"), format!("{mode} {path}/"));
+                    }
+                }
+                for (path, bytes) in self.files.below(dir) {
+                    let mode = self.files.mode(&format!("{inside}{path}"), file_mode());
+                    let text = String::from_utf8_lossy(bytes);
+                    lines.insert(path.to_owned(), format!("{mode} {path}: {text}"));
+                }
+                let text = (lines.into_values()).collect::<Vec<_>>().join("\n");
+                self.printed.insert(launch.stdout.to_string(), text);
+                let status = ExitStatus::Code(0);
+                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+            }
+            "print" | "fill" => {
+                let mut args = launch.argv.args();
+                let mut text = String::new();
+                if launch.argv.program() == "fill" {
+                    text = "x".repeat(args[0].parse().unwrap());
+                    args = &args[1..];
+                }
+                text.push_str(&args.join(" "));
+                self.printed.insert(launch.stdout.to_string(), text);
+                let status = ExitStatus::Code(0);
+                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+            }
+            _ => {
+                self.running.insert(stream);
+            }
+        }
+        false
+    }
+
+    /// Kills the command on stream `command`, if it runs, as signal 9 does, and answers the kill
+    /// on `stream`, in `replies`.
+    fn kill(&mut self, stream: u32, command: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        if self.running.remove(&command) {
+            let status = ExitStatus::Signal(9);
+            let exited = FromSandbox::Exited {
+                stream: command,
+                status,
+            };
+            replies.push((exited, Vec::new()));
+        }
+        replies.push((FromSandbox::Done { stream }, Vec::new()));
+    }
+}
+
 /// Answers the session's requests on `connection` until the session ends, or, once stalled,
 /// reads nothing more, serving the model endpoint if `model`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm for each request of the protocol"
-)]
 fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
-    let (mut caller, mut files, mut result) = (None::<Caller>, Files::default(), None);
-    // The commands that run until the sandbox is frozen, or a kill ends them, by stream.
-    let mut running = BTreeSet::new();
+    let mut served = Served::default();
     // The stream of a freeze that waits for a model response to end.
     let mut freezing = None;
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
@@ -1537,56 +1876,29 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             // session's writes fill the connection's buffers.
             return;
         }
+        let Served {
+            caller,
+            files,
+            result: _,
+            printed: _,
+            running: _,
+            held: _,
+        } = &mut served;
         match request {
-            ToSandbox::Put { dir, .. } => files.dir = Some(dir),
+            ToSandbox::Put { stream, dir, root } => files.begin(stream, dir, root, &mut replies),
             ToSandbox::Entry { entry, .. } => files.entry(entry),
             ToSandbox::Data { .. } => files.data(&body),
-            ToSandbox::End { stream } => replies.push((FromSandbox::Done { stream }, Vec::new())),
+            ToSandbox::End { stream } => files.end(stream, &mut replies),
             // A freeze waits for the response to the model request in flight, if any, to end, so
             // that a run that cuts it short before the agent's teardown, as it must, sees its
             // freeze done, and one that would cut it after waits out its freeze's deadline.
             ToSandbox::Freeze { stream } => freezing = Some(stream),
             ToSandbox::Start { stream, launch } => {
-                replies.push((FromSandbox::Done { stream }, Vec::new()));
-                match launch.argv.program() {
-                    "exit" => {
-                        let code = launch.argv.args()[0].parse().unwrap();
-                        let status = ExitStatus::Code(code);
-                        replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
-                    }
-                    "stall" => status(shared).stalled = true,
-                    "crash" => crashed = true,
-                    "ops" => {
-                        let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
-                        let made = caller.insert(Caller::new(stream, steps, model));
-                        crashed = made.next(&mut replies);
-                    }
-                    "judge" => {
-                        let payload = files.by_path.get(&launch.argv.args()[0]);
-                        result = judge(payload, stream, &mut replies, shared);
-                    }
-                    _ => {
-                        running.insert(stream);
-                    }
-                }
+                crashed = served.start(stream, &launch, model, &mut replies, shared);
             }
-            // As signal 9 kills it.
-            ToSandbox::Kill { stream, command } => {
-                if running.remove(&command) {
-                    let status = ExitStatus::Signal(9);
-                    let exited = FromSandbox::Exited {
-                        stream: command,
-                        status,
-                    };
-                    replies.push((exited, Vec::new()));
-                }
-                replies.push((FromSandbox::Done { stream }, Vec::new()));
-            }
-            ToSandbox::Collect { stream, dir } => {
-                let stdout = caller.as_ref().map_or("", |caller| &caller.stdout);
-                collect(stream, &dir, result.as_deref(), stdout, &mut replies);
-            }
-            ToSandbox::OpReply { op, reply } => match &mut caller {
+            ToSandbox::Kill { stream, command } => served.kill(stream, command, &mut replies),
+            ToSandbox::Collect { stream, dir } => collect(stream, &dir, &mut served, &mut replies),
+            ToSandbox::OpReply { op, reply } => match caller {
                 Some(caller) if caller.op == op => {
                     if let Some(journal) = &status(shared).journal {
                         let kind = json!(reply)["kind"].as_str().unwrap().to_owned();
@@ -1610,13 +1922,19 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
                 crashed = next;
             }
         }
+        if served.caller.as_ref().is_some_and(|caller| caller.released)
+            && let Some((stream, dir)) = served.held.take()
+        {
+            collect(stream, &dir, &mut served, &mut replies);
+        }
+        let caller = served.caller.as_ref();
         if let Some(stream) = freezing
-            && !caller.as_ref().is_some_and(|caller| caller.open)
+            && !caller.is_some_and(|caller| caller.open)
         {
             replies.push((FromSandbox::Done { stream }, Vec::new()));
             freezing = None;
         }
-        let close = caller.as_ref().and_then(|caller| caller.end) == Some(End::Close);
+        let close = caller.and_then(|caller| caller.end) == Some(End::Close);
         if !send(&mut connection, &mut replies, crashed, close) {
             return;
         }

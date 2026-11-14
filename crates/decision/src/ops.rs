@@ -3,18 +3,25 @@
 //! The core authorizes every op from the raw request ([`Request`]) and refuses, with a reason,
 //! one that fails any of these:
 //!
-//! - Ops are taken only during the work phase, and refused once a finalize is accepted
-//!   ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)).
-//! - A judge call names one of the agent's judge grants, and a submission its submit grant.
+//! - The agent's ops are taken only during the work phase, and refused once a finalize is
+//!   accepted ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)).
+//! - An op names a grant its caller's role holds: a judge call one of the agent's judge grants, a
+//!   lease one of its role's lease grants, and a submission the agent's submit grant.
 //! - Its payload isn't empty, and fits its slot's
 //!   [`max_bytes`](schema::ir::Slot::max_bytes), the score's for a submission.
 //! - A judge grant has calls left, none of its calls queued or running, and judge time left.
 //!   A refused call is not charged.
-//! - A status names one of the agent's jobs.
+//! - A lease grant has fewer leases open than its `instances`, and time left, for its caller, and
+//!   a lease asks to last at most its `instance_seconds`; a lease runs a command or a transfer
+//!   once ready, one at a time, while its grant has commands left, a command with a timeout, if
+//!   given, of at most what the lease, and its holder's work, have left.
+//! - A status names one of the caller's jobs, and a lease op one of its leases.
 //!
 //! A judge call that passes becomes a job, run in the background with the timeout that
-//! [`call_timeout_seconds`](schema::ir::JudgeGrant::call_timeout_seconds) describes. Each reply
-//! gives the time left until the agent's deadline.
+//! [`call_timeout_seconds`](schema::ir::JudgeGrant::call_timeout_seconds) describes; a lease, a
+//! command or a transfer runs likewise, as the `leases` module meters it, a transfer within its
+//! grant's [`transfer_bytes`](schema::ir::LeaseGrant::transfer_bytes). Each reply gives the time
+//! left: the agent's until its deadline.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -23,45 +30,94 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::time::Duration;
 
-use schema::ir::Name;
+use schema::ir::{Argv, Name};
 use schema::sandbox::op::{
-    self, Grant, JobState, JudgeReply, OpReply, OpsReply, Remaining, StatusReply, SubmitReply,
-    SubmitState,
+    self, CommandStatus, Grant, JobState, JudgeReply, Last, LeaseRemaining, LeaseReply, LeaseState,
+    LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, Remaining, StatusReply, SubmitReply,
+    SubmitState, TransferEnd, TransferStatus,
 };
-use schema::workflow::{JudgeCall, JudgeGrant, JudgeGrantId};
+use schema::workflow::{JudgeCall, JudgeGrant, JudgeGrantId, LeaseGrant, LeaseGrantId, RoleId};
 
 use super::jobs::{Job, State};
-use super::{Action, Core, JobId, OpId, PayloadRef, Phase, Request, WorkEnd};
+use super::leases::{self, Work};
+use super::{
+    Action, Caller, Core, Direction, JobId, LeaseId, OpId, PayloadRef, Phase, Request, WorkEnd,
+};
 
-/// A grant of the agent's.
+/// A caller whose ops the run takes now ([`Core::working`]), with the role whose grants it
+/// holds, and when its work ends, unless it ends it first, as a time since the run started.
+#[derive(Clone, Copy)]
+pub(super) enum Working {
+    /// The agent, in the work phase, which ends at the deadline.
+    Agent { role: RoleId, deadline: Duration },
+}
+
+impl Working {
+    fn caller(self) -> Caller {
+        match self {
+            Self::Agent { .. } => Caller::Agent,
+        }
+    }
+
+    fn role(self) -> RoleId {
+        match self {
+            Self::Agent { role, .. } => role,
+        }
+    }
+
+    fn end(self) -> Duration {
+        match self {
+            Self::Agent { deadline, .. } => deadline,
+        }
+    }
+}
+
+/// A grant of the caller's. Only the agent holds judge grants and its submit grant, which carry
+/// the work phase's deadline.
 enum Held {
-    Judge(JudgeGrantId),
-    Submit,
+    Judge(JudgeGrantId, Duration),
+    Lease(LeaseGrantId),
+    Submit(Duration),
 }
 
 impl Core<'_> {
-    /// Answers an op, and acts on it: the reply comes first, then the actions the op calls for.
-    pub(super) fn op(&mut self, op: OpId, request: Request, actions: &mut Vec<Action>) {
+    /// Answers `caller`'s op, and acts on it: the reply comes first, then the actions the op
+    /// calls for.
+    pub(super) fn op(
+        &mut self,
+        op: OpId,
+        caller: Caller,
+        request: Request,
+        actions: &mut Vec<Action>,
+    ) {
         let mut then = Vec::new();
         let reply =
-            (self.works_until()).and_then(|deadline| self.take(deadline, request, &mut then));
+            (self.working(caller)).and_then(|working| self.take(working, request, &mut then));
         let reply = reply.unwrap_or_else(|message| OpReply::Refused { message });
         actions.push(Action::Reply { op, reply });
         actions.append(&mut then);
     }
 
-    /// When the agent's work ends, unless it ends it first, as a time since the run started, if
-    /// it works: at the deadline, in the work phase. Else why the run takes no more ops.
-    fn works_until(&self) -> Result<Duration, String> {
-        let work_end = match &self.phase {
-            Phase::Work { deadline, .. } => return Ok(*deadline),
-            Phase::Finalized { .. } => &WorkEnd::Finalized,
-            Phase::Teardown { work_end, .. }
-            | Phase::Final { work_end, .. }
-            | Phase::Finished { work_end } => work_end,
-            Phase::Abandoned => {
+    /// `caller`, if it works: the agent in the work phase. Else why the run takes no more ops of
+    /// `caller`'s.
+    fn working(&self, caller: Caller) -> Result<Working, String> {
+        let work_end = match (&self.phase, caller) {
+            (Phase::Abandoned, _) => {
                 return Err("the run has passed its hard end: make no more ops".to_owned());
             }
+            (Phase::Work { deadline, .. }, Caller::Agent) => {
+                return Ok(Working::Agent {
+                    role: self.workflow.agent().role,
+                    deadline: *deadline,
+                });
+            }
+            (Phase::Finalized { .. }, Caller::Agent) => &WorkEnd::Finalized,
+            (
+                Phase::Teardown { work_end, .. }
+                | Phase::Final { work_end, .. }
+                | Phase::Finished { work_end },
+                Caller::Agent,
+            ) => work_end,
         };
         match work_end {
             WorkEnd::Finalized => {
@@ -73,41 +129,97 @@ impl Core<'_> {
         }
     }
 
-    /// Takes `request`, an op made while the agent works, until the work phase's `deadline`, and
-    /// returns its reply, putting in `then` the actions to follow it; or why it is refused.
+    /// Takes `request`, an op of `working`'s caller, and returns its reply, putting in `then` the
+    /// actions to follow it; or why it is refused.
     fn take(
         &mut self,
-        deadline: Duration,
+        working: Working,
         request: Request,
         then: &mut Vec<Action>,
     ) -> Result<OpReply, String> {
+        let (caller, end) = (working.caller(), working.end());
         match request {
-            Request::Ops => Ok(OpReply::Ops(self.ops(deadline))),
-            Request::Status { job } => self.own_job(job).map(OpReply::Status),
-            Request::Judge { grant, payload } => match self.held(&grant)? {
-                Held::Judge(id) => self.judge(id, payload, deadline, then).map(OpReply::Judge),
-                other @ Held::Submit => Err(other.misnamed(&grant, "a judge grant")),
+            Request::Ops => Ok(OpReply::Ops(self.ops(working))),
+            Request::Status { job } => self.own_job(caller, job).map(OpReply::Status),
+            Request::Judge { grant, payload } => match self.held(working, &grant)? {
+                Held::Judge(id, deadline) => {
+                    self.judge(id, payload, deadline, then).map(OpReply::Judge)
+                }
+                other => Err(other.misnamed(&grant, "a judge grant")),
             },
             Request::Submit {
                 grant,
                 finalize,
                 payload,
-            } => match self.held(&grant)? {
-                Held::Submit => self
+            } => match self.held(working, &grant)? {
+                Held::Submit(deadline) => self
                     .submit(finalize, payload, deadline, then)
                     .map(OpReply::Submit),
-                other @ Held::Judge(_) => Err(other.misnamed(&grant, "a submit grant")),
+                other => Err(other.misnamed(&grant, "a submit grant")),
             },
+            Request::LeaseOpen {
+                grant,
+                instance_seconds,
+            } => match self.held(working, &grant)? {
+                Held::Lease(id) => {
+                    let opened = self.lease_open((caller, id), end, instance_seconds, then);
+                    opened.map(OpReply::Lease)
+                }
+                other => Err(other.misnamed(&grant, "a lease grant")),
+            },
+            Request::LeaseRun {
+                lease,
+                argv,
+                timeout_seconds,
+            } => {
+                let ran = self.lease_run((caller, lease), end, argv, timeout_seconds, then);
+                ran.map(OpReply::Lease)
+            }
+            Request::LeasePut {
+                lease,
+                tree,
+                to,
+                replace,
+            } => {
+                let direction = Direction::Put { tree, to, replace };
+                (self.transfer((caller, lease), direction, then)).map(OpReply::Lease)
+            }
+            Request::LeaseGet { lease, from, to } => {
+                let direction = Direction::Get { from, to };
+                (self.transfer((caller, lease), direction, then)).map(OpReply::Lease)
+            }
+            Request::LeaseStatus { lease } => {
+                let id = self.own_lease(caller, lease)?;
+                Ok(OpReply::LeaseStatus(self.lease_status(id)))
+            }
+            Request::LeaseClose { lease } => {
+                let id = self.own_lease(caller, lease)?;
+                if self.leases[id].close(self.now, leases::End::Closed) {
+                    then.push(Action::CloseLease { lease: id });
+                }
+                Ok(OpReply::Lease(self.lease_reply(id)))
+            }
         }
     }
 
-    /// The reply about the agent's job `number`.
-    fn own_job(&self, number: u64) -> Result<StatusReply, String> {
+    /// `caller`'s lease `number`: one it opened.
+    fn own_lease(&self, caller: Caller, number: u64) -> Result<LeaseId, String> {
+        let lease = self.leases.find(number);
+        (lease.filter(|lease| self.leases[*lease].holder == caller)).ok_or_else(|| {
+            format!("you have no lease {number}: name one that `lease open` returned")
+        })
+    }
+
+    /// The reply about `caller`'s job `number`: one of the agent's calls'.
+    fn own_job(&self, caller: Caller, number: u64) -> Result<StatusReply, String> {
         let job = JobId(number);
-        let found = (self.jobs.get(job)).and_then(|found| match found.call {
-            JudgeCall::Grant(grant) => Some((found, grant)),
-            JudgeCall::Score => None,
-        });
+        let found = self
+            .jobs
+            .get(job)
+            .and_then(|found| match (caller, found.call) {
+                (Caller::Agent, JudgeCall::Grant(grant)) => Some((found, grant)),
+                (Caller::Agent, JudgeCall::Score) => None,
+            });
         let Some((found, grant)) = found else {
             return Err(format!(
                 "you have no job {number}: ask about a job that one of your calls returned"
@@ -122,13 +234,23 @@ impl Core<'_> {
         end.saturating_sub(self.now).as_secs()
     }
 
-    /// The agent's grant named `name`.
-    fn held(&self, name: &Name) -> Result<Held, String> {
-        let judge = (self.workflow.judge_grants())
-            .find(|(_, grant)| grant.name == *name)
-            .map(|(id, _)| Held::Judge(id));
-        let submit = self.workflow.submit_grant().name == *name;
-        let held = judge.or(submit.then_some(Held::Submit));
+    /// The grant named `name` of `working`'s caller.
+    fn held(&self, working: Working, name: &Name) -> Result<Held, String> {
+        let role = working.role();
+        // Only the agent holds judge grants and its submit grant.
+        let deadline = match working {
+            Working::Agent { deadline, .. } => Some(deadline),
+        };
+        let judge = deadline.and_then(|deadline| {
+            (self.workflow.judge_grants())
+                .find(|(_, grant)| grant.name == *name)
+                .map(|(id, _)| Held::Judge(id, deadline))
+        });
+        let lease = (self.workflow.lease_grants())
+            .find(|(_, grant)| grant.holder == role && grant.name == *name)
+            .map(|(id, _)| Held::Lease(id));
+        let submit = deadline.filter(|_| self.workflow.submit_grant().name == *name);
+        let held = judge.or(lease).or(submit.map(Held::Submit));
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
     }
 
@@ -188,6 +310,176 @@ impl Core<'_> {
         })
     }
 
+    /// Opens a lease of grant `id` for `caller`, whose work ends at `end`, to last
+    /// `instance_seconds` once ready, if given, or else the grant's own time, which `then` starts,
+    /// and returns the reply that names it.
+    fn lease_open(
+        &mut self,
+        (caller, id): (Caller, LeaseGrantId),
+        end: Duration,
+        instance_seconds: Option<NonZeroU64>,
+        then: &mut Vec<Action>,
+    ) -> Result<LeaseReply, String> {
+        let grant = self.workflow.lease_grant(id);
+        let (name, usage) = (&grant.name, self.leases.usage(id, caller, self.now));
+        let most = grant.instance_seconds;
+        if let Some(seconds) = instance_seconds
+            && seconds > most
+        {
+            return Err(format!(
+                "the time of {seconds} s is longer than `{name}` lets a lease last, {most} s: \
+                 open it again as `sandboxctl lease open {name} --seconds {most}`"
+            ));
+        }
+        let life = instance_seconds.map_or(grant.instance(), |seconds| {
+            Duration::from_secs(seconds.get())
+        });
+        let instances = grant.instances;
+        if usage.open >= instances.get() {
+            let closing = match usage.closing {
+                0 => String::new(),
+                closing => format!(
+                    ", {closing} of them `closing`, which holds its instance until its runner is \
+                     gone"
+                ),
+            };
+            return Err(format!(
+                "`{name}` has {instances} leases open, as many as it allows at once{closing}: open \
+                 another once `lease status` says one has ended"
+            ));
+        }
+        if let Some(total) = grant.cumulative()
+            && usage.used >= total
+        {
+            return Err(format!(
+                "`{name}` has no time left of the {} s it allows: open no more leases of it",
+                total.as_secs()
+            ));
+        }
+        let lease = self.leases.open((caller, id), life, self.now);
+        let instance = self.leases[lease].instance;
+        then.push(Action::StartLease {
+            lease,
+            holder: caller,
+            grant: id,
+            instance,
+            start_by: end,
+        });
+        Ok(self.lease_reply(lease))
+    }
+
+    /// `caller`'s lease `number`, and since when its runner has been ready, if it may take its
+    /// next command or transfer now, which the caller asked to `act`, as a refusal says it.
+    fn idle_lease(
+        &self,
+        (caller, number): (Caller, u64),
+        act: &str,
+    ) -> Result<(LeaseId, Duration), String> {
+        let id = self.own_lease(caller, number)?;
+        let lease = &self.leases[id];
+        let since = match lease.state {
+            leases::State::Starting => {
+                return Err(format!(
+                    "lease {number} is still starting: {act} once `lease status` says it is ready"
+                ));
+            }
+            leases::State::Ready { since } => since,
+            leases::State::Closing { .. } | leases::State::Ended { .. } => {
+                return Err(format!("lease {number} has ended: open another"));
+            }
+        };
+        if let Some(running) = lease.running() {
+            return Err(format!(
+                "lease {number} runs {}, one at a time: {act} once `lease status` says it has \
+                 ended",
+                running.name()
+            ));
+        }
+        let grant = self.workflow.lease_grant(lease.grant);
+        let usage = self.leases.usage(lease.grant, caller, self.now);
+        if let Some(commands) = grant.commands
+            && usage.commands >= commands.get()
+        {
+            return Err(format!(
+                "`{}` has no commands left of the {commands} it allows, a transfer counting as \
+                 one: run and move no more",
+                grant.name
+            ));
+        }
+        Ok((id, since))
+    }
+
+    /// Copies a tree as `direction` says, between the caller's sandbox and the runner of its
+    /// lease `number`, as the lease's next transfer, which `then` starts, and returns the reply.
+    fn transfer(
+        &mut self,
+        (caller, number): (Caller, u64),
+        direction: Direction,
+        then: &mut Vec<Action>,
+    ) -> Result<LeaseReply, String> {
+        let act = match direction {
+            Direction::Put { .. } => "put a tree",
+            Direction::Get { .. } => "get a tree",
+        };
+        let (id, _) = self.idle_lease((caller, number), act)?;
+        let work = |number| Work::Transfer {
+            number,
+            ended: None,
+        };
+        let transfer = self.leases[id].accept(work, self.now);
+        then.push(Action::Transfer {
+            lease: id,
+            holder: caller,
+            transfer,
+            direction,
+            max_bytes: self
+                .workflow
+                .lease_grant(self.leases[id].grant)
+                .transfer_bytes,
+        });
+        Ok(self.lease_reply(id))
+    }
+
+    /// Runs `argv` in `caller`'s lease `number`, for at most `timeout_seconds`, if given, as its
+    /// next command, which `then` starts, and returns the reply. `caller`'s work ends at
+    /// `work_end`.
+    fn lease_run(
+        &mut self,
+        (caller, number): (Caller, u64),
+        work_end: Duration,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+        then: &mut Vec<Action>,
+    ) -> Result<LeaseReply, String> {
+        let (id, since) = self.idle_lease((caller, number), "run a command")?;
+        let lease = &self.leases[id];
+        let timeout = timeout_seconds.map(|seconds| Duration::from_secs(seconds.get()));
+        // The lease ends by its own time, and by its holder's work's end.
+        let end = self.ready_end(lease, since).min(work_end);
+        let left = self.seconds_left(end);
+        if let Some(timeout) = timeout_seconds
+            && timeout.get() > left
+        {
+            let rerun = rerun(number, NonZeroU64::new(left), &argv);
+            return Err(format!(
+                "the timeout of {timeout} s is longer than lease {number} has left, {left} s: \
+                 run it again as `{rerun}`"
+            ));
+        }
+        let work = |number| Work::Command {
+            number,
+            ended: None,
+        };
+        let command = self.leases[id].accept(work, self.now);
+        then.push(Action::RunCommand {
+            lease: id,
+            command,
+            argv,
+            timeout,
+        });
+        Ok(self.lease_reply(id))
+    }
+
     /// Stores a submission of `payload` as the latest, or locks it as the selection if
     /// `finalize`, settling when the work phase, whose deadline is `deadline`, ends ([`WorkEnd`]),
     /// and returns the reply, with the time left until then; `then` ends the work phase if the
@@ -204,7 +496,7 @@ impl Core<'_> {
             &payload,
             self.submission_max_bytes(),
         )?;
-        // Ops are taken only while the agent works (`works_until`): the phase goes on with the
+        // Ops are taken only while the agent works (`working`): the phase goes on with the
         // latest submission, or a finalize locks it.
         if !finalize {
             self.phase = Phase::Work {
@@ -243,22 +535,46 @@ impl Core<'_> {
         self.workflow.slot(self.workflow.score().slot).max_bytes()
     }
 
-    /// The reply to `ops`, while the agent works, until the work phase's `deadline`.
-    fn ops(&self, deadline: Duration) -> OpsReply {
-        let judges =
-            (self.workflow.judge_grants()).map(|(_, grant)| Grant::Judge(self.judge_grant(grant)));
-        let submit = Grant::Submit(op::SubmitGrant {
-            name: self.workflow.submit_grant().name.clone(),
-            max_bytes: self.submission_max_bytes(),
+    /// The reply to `ops`, of `working`'s caller.
+    fn ops(&self, working: Working) -> OpsReply {
+        let (caller, role, end) = (working.caller(), working.role(), working.end());
+        // Only the agent holds judge grants and its submit grant.
+        let agent = matches!(working, Working::Agent { .. });
+        let judges = (self.workflow.judge_grants())
+            .filter(|_| agent)
+            .map(|(_, grant)| Grant::Judge(self.judge_grant(grant)));
+        let leases = (self.workflow.lease_grants()).filter(|(_, grant)| grant.holder == role);
+        let leases = leases.map(|(id, grant)| {
+            let LeaseGrant {
+                name,
+                holder: _,
+                runner: _,
+                instances,
+                instance_seconds,
+                cumulative_seconds,
+                commands,
+                transfer_bytes,
+            } = grant;
+            Grant::Lease(op::LeaseGrant {
+                name: name.clone(),
+                instances: *instances,
+                instance_seconds: *instance_seconds,
+                cumulative_seconds: *cumulative_seconds,
+                commands: *commands,
+                transfer_bytes: *transfer_bytes,
+                remaining: self.grant_remaining((id, caller), grant.instance()),
+            })
+        });
+        let submit = agent.then(|| {
+            Grant::Submit(op::SubmitGrant {
+                name: self.workflow.submit_grant().name.clone(),
+                max_bytes: self.submission_max_bytes(),
+            })
         });
         OpsReply {
-            remaining_seconds: self.seconds_left(deadline),
-            resources: self
-                .workflow
-                .sandbox(self.workflow.agent().role)
-                .needs
-                .resources(),
-            grants: judges.chain([submit]).collect(),
+            remaining_seconds: self.seconds_left(end),
+            resources: (self.workflow.sandbox(role).needs).resources(),
+            grants: judges.chain(leases).chain(submit).collect(),
         }
     }
 
@@ -302,6 +618,97 @@ impl Core<'_> {
         }
     }
 
+    /// The reply that names lease `id`, with what it and its grant have left.
+    fn lease_reply(&self, id: LeaseId) -> LeaseReply {
+        LeaseReply {
+            lease: id.0,
+            remaining: self.lease_remaining(id),
+        }
+    }
+
+    /// The reply to `lease status`, of lease `id`.
+    fn lease_status(&self, id: LeaseId) -> LeaseStatusReply {
+        let lease = &self.leases[id];
+        let (state, failure) = match &lease.state {
+            leases::State::Starting => (LeaseState::Starting, None),
+            leases::State::Ready { .. } if lease.running().is_some() => (LeaseState::Running, None),
+            leases::State::Ready { .. } => (LeaseState::Ready, None),
+            leases::State::Closing { .. } => (LeaseState::Closing, None),
+            leases::State::Ended { end, .. } => match end {
+                leases::End::Closed => (LeaseState::Closed, None),
+                leases::End::Expired => (LeaseState::Expired, None),
+                leases::End::Failed(reason) => (LeaseState::Failed, Some(cut(reason))),
+            },
+        };
+        let last = lease.last.as_ref().map(|work| match work {
+            Work::Command { number, ended } => {
+                let (end, stdout, stderr) = match ended {
+                    Some((end, stdout, stderr)) => (Some(*end), stdout.clone(), stderr.clone()),
+                    None => (None, String::new(), String::new()),
+                };
+                Last::Command(CommandStatus {
+                    command: *number,
+                    end,
+                    stdout,
+                    stderr,
+                })
+            }
+            Work::Transfer { number, ended } => Last::Transfer(TransferStatus {
+                transfer: *number,
+                end: ended.as_ref().map(|end| match end {
+                    TransferEnd::Moved { entries, bytes } => TransferEnd::Moved {
+                        entries: *entries,
+                        bytes: *bytes,
+                    },
+                    TransferEnd::Failed(reason) => TransferEnd::Failed(cut(reason)),
+                }),
+            }),
+        });
+        let (busy, idle) = lease.busy_idle(self.now);
+        LeaseStatusReply {
+            lease: id.0,
+            state,
+            elapsed_seconds: self.now.saturating_sub(lease.opened).as_secs(),
+            busy_seconds: busy.as_secs(),
+            idle_seconds: idle.as_secs(),
+            failure,
+            last,
+            remaining: self.lease_remaining(id),
+        }
+    }
+
+    /// What lease `id` and its grant have left of their limits.
+    fn lease_remaining(&self, id: LeaseId) -> LeaseRemaining {
+        let lease = &self.leases[id];
+        let own = match lease.state {
+            leases::State::Starting => lease.life,
+            leases::State::Ready { since } => {
+                (lease.life).saturating_sub(self.now.saturating_sub(since))
+            }
+            leases::State::Closing { .. } | leases::State::Ended { .. } => Duration::ZERO,
+        };
+        self.grant_remaining((lease.grant, lease.holder), own)
+    }
+
+    /// What grant `id` has left of its limits for `holder`, with `own` as a lease's own time
+    /// left.
+    fn grant_remaining(
+        &self,
+        (id, holder): (LeaseGrantId, Caller),
+        own: Duration,
+    ) -> LeaseRemaining {
+        let grant = self.workflow.lease_grant(id);
+        let usage = self.leases.usage(id, holder, self.now);
+        let cumulative = grant.cumulative();
+        LeaseRemaining {
+            instances: grant.instances.get().saturating_sub(usage.open),
+            instance_seconds: own.as_secs(),
+            cumulative_seconds: cumulative.map(|total| total.saturating_sub(usage.used).as_secs()),
+            commands: (grant.commands)
+                .map(|commands| commands.get().saturating_sub(usage.commands)),
+        }
+    }
+
     /// What grant `id` has left of its quotas.
     fn remaining(&self, id: JudgeGrantId) -> Remaining {
         let (grant, usage) = (self.workflow.judge_grant(id), self.jobs.usage(id));
@@ -316,11 +723,40 @@ impl Held {
     /// Why naming this grant, `name`, is refused for an op that takes `kind` of grant.
     fn misnamed(&self, name: &Name, kind: &str) -> String {
         let (is, instead) = match self {
-            Self::Judge(_) => ("a judge grant", "judge with it"),
-            Self::Submit => ("a submit grant", "submit to it"),
+            Self::Judge(..) => ("a judge grant", "judge with it"),
+            Self::Lease(_) => ("a lease grant", "open leases of it"),
+            Self::Submit(_) => ("a submit grant", "submit to it"),
         };
         format!("`{name}` is {is}, not {kind}: {instead} instead")
     }
+}
+
+/// The start of `text`, of at most [`REASON_BYTES`], as a lease's status gives a runner's failure.
+fn cut(text: &str) -> String {
+    let mut end = REASON_BYTES.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// The command that runs `argv` in lease `lease`, with `timeout`, if given, as a shell takes it.
+fn rerun(lease: u64, timeout: Option<NonZeroU64>, argv: &Argv) -> String {
+    let quoted = |arg: &str| {
+        let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&byte);
+        if !arg.is_empty() && arg.bytes().all(plain) {
+            arg.to_owned()
+        } else {
+            format!("'{}'", arg.replace('\'', r"'\''"))
+        }
+    };
+    let timeout = timeout.map_or(String::new(), |seconds| format!(" --timeout {seconds}"));
+    let words = core::iter::once(argv.program()).chain(argv.args().iter().map(String::as_str));
+    let words: Vec<String> = words.map(quoted).collect();
+    format!(
+        "sandboxctl lease run {lease}{timeout} -- {}",
+        words.join(" ")
+    )
 }
 
 /// Refuses a payload that is empty, or over `max_bytes`.

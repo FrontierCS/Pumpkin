@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::Shutdown;
+use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,13 +37,13 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 pub use meeting::{Registration, Sockets};
-use schema::ir::{AbsolutePath, GpuModel, Mode, Name};
+use schema::ir::{AbsolutePath, Argv, GpuModel, Mode, Name};
 use schema::sandbox::op::{OpCall, OpReply};
-use schema::sandbox::tree::{self, Limits};
+use schema::sandbox::tree::{self, Limits, Modes};
 use schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
-    MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, ToSandbox, dir_mode, frame, pumpkin_dir,
-    pumpkin_subdirs,
+    MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, frame,
+    pumpkin_dir, pumpkin_subdirs,
 };
 use stdx::Deadline;
 
@@ -54,12 +55,14 @@ mod meeting;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
 /// A sandbox's session, which one owner drives, while the responses to its model requests
-/// stream back beside it ([`IncomingModelRequest::respond`]).
+/// stream back beside it ([`IncomingModelRequest::respond`]), and trees move through its
+/// [`Trees`].
 ///
 /// Requests on it block until `sandboxd` answers, their deadline passes, or the session ends,
 /// and their frames may wait behind other writers' ([deadlines](crate#deadlines)). Dropping it
 /// ends the session, which stops the sandbox, and returns once the reader has sent its last
-/// arrival, the end.
+/// arrival, the end, which waits for a collect through its [`Trees`] to take the part the reader
+/// holds.
 #[derive(Debug)]
 pub struct Session {
     /// The session's number, from [`NEXT_SESSION`], which its ops and commands carry.
@@ -151,10 +154,61 @@ impl Reply {
 }
 
 /// What to put in a sandbox: a directory, or a file with its bytes, each with its mode.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub enum Put<'a> {
-    Dir(&'a RelativePath, Mode),
-    File(&'a RelativePath, Mode, &'a [u8]),
+    Dir(RelativePath, Mode),
+    File(RelativePath, Mode, &'a [u8]),
+    /// A file of the host's, read as it is sent, whose size is its size as the put reaches it:
+    /// one that then reads short, or fails to be read, fails the put.
+    Read(RelativePath, Mode, fs::File),
+}
+
+/// A session's trees, which a thread other than its owner's moves ([`Session::trees`]).
+///
+/// Its requests go beside the owner's, each by its deadline as any request
+/// ([deadlines](crate#deadlines)); once the session has ended, each fails.
+#[derive(Debug)]
+pub struct Trees {
+    // Shared with the session, its reader thread and the responses to its model requests.
+    shared: Arc<Shared>,
+}
+
+impl Trees {
+    /// Writes `entries` below `dir`, made with its missing parents as `root` says, as
+    /// [`Session::put`] writes them.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `dir` exists and `root` is [`Root::New`], or as [`Session::put`] fails;
+    /// whatever was written before a failure stays.
+    pub fn put<'a>(
+        &self,
+        dir: &AbsolutePath,
+        root: Root,
+        entries: impl IntoIterator<Item = Put<'a>>,
+        by: Deadline,
+    ) -> io::Result<()> {
+        self.shared.put(dir, root, entries, by)
+    }
+
+    /// Copies the tree in the sandbox's `dir` into `into`, as [`Session::collect`] does, but cut
+    /// short once `stopped`, which it asks before each part of the tree, returns true, with
+    /// [`io::ErrorKind::Interrupted`], the session still open. Returns the tree's entries, each
+    /// with its mode as the sandbox sent it, which the host's umask may have narrowed in `into`.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Session::collect`] does, or once stopped.
+    pub fn collect(
+        &self,
+        dir: &AbsolutePath,
+        into: &Path,
+        limits: Limits,
+        by: Deadline,
+        stopped: &mut dyn FnMut() -> bool,
+    ) -> io::Result<Vec<Entry>> {
+        self.shared.collect(dir, into, limits, by, stopped)
+    }
 }
 
 /// An op a caller in the sandbox made, whole, and in flight until [`Session::reply`] answers
@@ -186,6 +240,34 @@ pub enum Op {
     },
     /// See [`OpCall::Status`].
     Status { job: u64 },
+    /// See [`OpCall::LeaseOpen`].
+    LeaseOpen {
+        grant: Name,
+        instance_seconds: Option<NonZeroU64>,
+    },
+    /// See [`OpCall::LeaseRun`].
+    LeaseRun {
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    },
+    /// See [`OpCall::LeasePut`].
+    LeasePut {
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+        replace: bool,
+    },
+    /// See [`OpCall::LeaseGet`].
+    LeaseGet {
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    },
+    /// See [`OpCall::LeaseStatus`].
+    LeaseStatus { lease: u64 },
+    /// See [`OpCall::LeaseClose`].
+    LeaseClose { lease: u64 },
 }
 
 /// What the session's reader hands its owner ([`Registration::accept`]), in the order the sandbox
@@ -363,11 +445,8 @@ impl Session {
     /// ends.
     pub fn set_up(&mut self, by: Deadline) -> Result<(), String> {
         let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
-        let puts: Vec<Put<'_>> = subdirs
-            .iter()
-            .map(|dir| Put::Dir(dir, dir_mode()))
-            .collect();
-        self.put(&root, &puts, by).map_err(|error| {
+        let puts = subdirs.into_iter().map(|dir| Put::Dir(dir, dir_mode()));
+        self.put(&root, puts, by).map_err(|error| {
             let failed =
                 format!("the directories under `{root}` can't be put in the sandbox: {error}");
             // A deadline's error says what is expected.
@@ -384,19 +463,19 @@ impl Session {
 
     /// Writes `entries` below `dir` in the sandbox, creating `dir` and its missing parents.
     /// Each entry's parent is `dir` or comes earlier in `entries`, unless it exists already, and
-    /// each gets its mode as it is made ([`ToSandbox::Entry`]).
+    /// each gets its mode as it is made ([`tree::Writer::entry`]).
     ///
     /// # Errors
     ///
     /// Fails if `sandboxd` can't write them, if `by` passes first ([deadlines](crate#deadlines)),
     /// or if the session ends.
-    pub fn put(&mut self, dir: &AbsolutePath, entries: &[Put<'_>], by: Deadline) -> io::Result<()> {
-        let (stream, replies) = self.shared.open(Route::Reply, by)?;
-        let put = (self.shared)
-            .send_tree(stream, dir, entries, by)
-            .and_then(|()| self.shared.done(&replies, by));
-        self.shared.close(stream);
-        put
+    pub fn put<'a>(
+        &mut self,
+        dir: &AbsolutePath,
+        entries: impl IntoIterator<Item = Put<'a>>,
+        by: Deadline,
+    ) -> io::Result<()> {
+        self.shared.put(dir, Root::Kept, entries, by)
     }
 
     /// Starts a command, whose exit arrives naming the [`Process`] this returns.
@@ -476,22 +555,16 @@ impl Session {
         limits: Limits,
         by: Deadline,
     ) -> io::Result<()> {
-        let (stream, parts) = self.shared.open(Route::Tree, by)?;
-        let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
-        let collected = created.and_then(|()| {
-            let tree = tree::Writer::new(into.to_owned(), limits);
-            self.shared.send(
-                &ToSandbox::Collect {
-                    stream,
-                    dir: dir.clone(),
-                },
-                &[],
-                by,
-            )?;
-            self.shared.receive_tree(stream, &parts, tree, by)
-        });
-        self.shared.close(stream);
-        collected
+        let collected = self.shared.collect(dir, into, limits, by, &mut || false);
+        collected.map(drop)
+    }
+
+    /// A handle through which another thread than the owner's moves trees in and out of the
+    /// sandbox, while the owner drives the session as before.
+    pub fn trees(&self) -> Trees {
+        Trees {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Answers an op, promptly, as [the protocol](schema::sandbox) requires.
@@ -584,66 +657,153 @@ impl Session {
 }
 
 impl Shared {
-    fn send_tree(
+    /// Puts `entries` below `dir`, made as `root` says.
+    fn put<'a>(
+        &self,
+        dir: &AbsolutePath,
+        root: Root,
+        entries: impl IntoIterator<Item = Put<'a>>,
+        by: Deadline,
+    ) -> io::Result<()> {
+        let (stream, replies) = self.open(Route::Reply, by)?;
+        let put = self.send_tree(stream, dir, root, entries, &replies, by);
+        self.close(stream);
+        put
+    }
+
+    /// Collects as [`Session::collect`] does, cut short, with [`io::ErrorKind::Interrupted`],
+    /// once `stopped`, which it asks before it takes each part, returns true, and returns the
+    /// tree's entries.
+    fn collect(
+        &self,
+        dir: &AbsolutePath,
+        into: &Path,
+        limits: Limits,
+        by: Deadline,
+        stopped: &mut dyn FnMut() -> bool,
+    ) -> io::Result<Vec<Entry>> {
+        let (stream, parts) = self.open(Route::Tree, by)?;
+        let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
+        let collected = created.and_then(|()| {
+            let tree = tree::Writer::new(into.to_owned(), limits, Modes::Umasked);
+            let dir = dir.clone();
+            self.send(&ToSandbox::Collect { stream, dir }, &[], by)?;
+            self.receive_tree(stream, &parts, tree, by, stopped)
+        });
+        // What `sandboxd` still sends of a tree cut short arrives on a closed stream, which the
+        // reader drops.
+        self.close(stream);
+        collected
+    }
+
+    /// Sends the tree of `entries` on `stream`, and returns `sandboxd`'s reply on `replies`. A
+    /// file that can't be read on the host ends the tree early, which `sandboxd` then fails, and
+    /// fails the put, as does a failure `sandboxd` replies with before the tree's end.
+    fn send_tree<'a>(
         &self,
         stream: u32,
         dir: &AbsolutePath,
-        entries: &[Put<'_>],
+        root: Root,
+        entries: impl IntoIterator<Item = Put<'a>>,
+        replies: &Receiver<Result<(), String>>,
         by: Deadline,
     ) -> io::Result<()> {
-        self.send(
-            &ToSandbox::Put {
-                stream,
-                dir: dir.clone(),
-            },
-            &[],
-            by,
-        )?;
+        let dir = dir.clone();
+        self.send(&ToSandbox::Put { stream, dir, root }, &[], by)?;
         for entry in entries {
-            match *entry {
+            // `sandboxd` replies before the end only to fail the tree, which then takes nothing
+            // more.
+            if let Ok(failed) = replies.try_recv() {
+                self.send(&ToSandbox::End { stream }, &[], by)?;
+                return failed.map_err(io::Error::other);
+            }
+            match entry {
                 Put::Dir(path, mode) => {
-                    let entry = Entry::Dir { path: path.clone() };
-                    let message = ToSandbox::Entry {
-                        stream,
-                        entry,
-                        mode,
-                    };
-                    self.send(&message, &[], by)?;
+                    let entry = Entry::Dir { path, mode };
+                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
                 }
                 Put::File(path, mode, bytes) => {
                     let size = bytes.len() as u64;
-                    let entry = Entry::File {
-                        path: path.clone(),
-                        size,
-                    };
-                    let message = ToSandbox::Entry {
-                        stream,
-                        entry,
-                        mode,
-                    };
-                    self.send(&message, &[], by)?;
+                    let entry = Entry::File { path, size, mode };
+                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
                     for chunk in bytes.chunks(frame::MAX_BODY_BYTES) {
                         self.send(&ToSandbox::Data { stream }, chunk, by)?;
                     }
                 }
+                Put::Read(path, mode, file) => {
+                    if let Err(error) = self.send_file(stream, path, mode, file, by)? {
+                        // The tree ends with the file short, which `sandboxd` fails.
+                        self.send(&ToSandbox::End { stream }, &[], by)?;
+                        let _ = self.receive(replies, by)?;
+                        return Err(error);
+                    }
+                }
             }
         }
-        self.send(&ToSandbox::End { stream }, &[], by)
+        self.send(&ToSandbox::End { stream }, &[], by)?;
+        self.done(replies, by)
     }
 
-    /// Writes the tree whose parts arrive on `stream` with `tree`, until its end.
+    /// Sends `file`, at `path` in the tree on `stream`, with `mode`, reading it as it goes. The
+    /// outer error is the session's; the inner one is the file's, read short or failing to be
+    /// read, after which the tree is to end at once.
+    fn send_file(
+        &self,
+        stream: u32,
+        path: RelativePath,
+        mode: Mode,
+        file: fs::File,
+        by: Deadline,
+    ) -> io::Result<io::Result<()>> {
+        let size = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(error) => return Ok(Err(context(&path, &error))),
+        };
+        let shown = path.clone();
+        let entry = Entry::File { path, size, mode };
+        self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
+        let (mut file, mut left) = (file.take(size), size);
+        let mut buffer =
+            vec![0; frame::MAX_BODY_BYTES.min(usize::try_from(size).unwrap_or(usize::MAX))];
+        while left > 0 {
+            let read = match file.read(&mut buffer) {
+                Ok(0) => {
+                    let error = io::Error::other(format!("{left} of its bytes are missing"));
+                    return Ok(Err(context(&shown, &error)));
+                }
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Ok(Err(context(&shown, &error))),
+            };
+            self.send(&ToSandbox::Data { stream }, &buffer[..read], by)?;
+            left -= read as u64;
+        }
+        Ok(Ok(()))
+    }
+
+    /// Writes the tree whose parts arrive on `stream` with `tree`, until its end, and returns its
+    /// entries, as they arrived.
     fn receive_tree(
         &self,
         stream: u32,
         parts: &Receiver<Result<Part, String>>,
         mut tree: tree::Writer,
         by: Deadline,
-    ) -> io::Result<()> {
+        stopped: &mut dyn FnMut() -> bool,
+    ) -> io::Result<Vec<Entry>> {
+        let mut entries = Vec::new();
         loop {
+            if stopped() {
+                let cut = "stopped before the tree was whole";
+                return Err(io::Error::new(io::ErrorKind::Interrupted, cut));
+            }
             match self.receive(parts, by)? {
-                Ok(Part::Entry(entry)) => self.created(stream, tree.entry(&entry, None))?,
+                Ok(Part::Entry(entry)) => {
+                    self.created(stream, tree.entry(&entry))?;
+                    entries.push(entry);
+                }
                 Ok(Part::Data(bytes)) => self.written(stream, tree.data(&bytes))?,
-                Ok(Part::End) => return self.written(stream, tree.finish()),
+                Ok(Part::End) => return self.written(stream, tree.finish()).map(|()| entries),
                 Err(message) => return Err(io::Error::other(message)),
             }
         }
@@ -789,9 +949,10 @@ impl Drop for Session {
         let reason = "the owner dropped the session".to_owned();
         self.shared.end(reason);
         // Nothing else holds the reader up: its sends to the owner never block; a tree's frames
-        // wait only for a `collect`, which has returned, dropping their queue, before anything
-        // can drop the session; and it takes the routes' lock only around steps that never
-        // block, as every holder does, and this thread holds it no longer.
+        // wait only for a collect, which has returned, dropping their queue, before anything can
+        // drop the session, or which takes them on another thread, through `Trees`; and it takes
+        // the routes' lock only around steps that never block, as every holder does, and this
+        // thread holds it no longer.
         if let Some(reader) = self.reader.take()
             && reader.join().is_err()
         {
@@ -1518,6 +1679,36 @@ fn whole(call: OpCall, payload: Vec<u8>) -> Op {
             payload,
         },
         OpCall::Status { job } => Op::Status { job },
+        OpCall::LeaseOpen {
+            grant,
+            instance_seconds,
+        } => Op::LeaseOpen {
+            grant,
+            instance_seconds,
+        },
+        OpCall::LeaseRun {
+            lease,
+            argv,
+            timeout_seconds,
+        } => Op::LeaseRun {
+            lease,
+            argv,
+            timeout_seconds,
+        },
+        OpCall::LeasePut {
+            lease,
+            tree,
+            to,
+            replace,
+        } => Op::LeasePut {
+            lease,
+            tree,
+            to,
+            replace,
+        },
+        OpCall::LeaseGet { lease, from, to } => Op::LeaseGet { lease, from, to },
+        OpCall::LeaseStatus { lease } => Op::LeaseStatus { lease },
+        OpCall::LeaseClose { lease } => Op::LeaseClose { lease },
     }
 }
 

@@ -143,7 +143,8 @@ pub fn standard_outputs(record: &Path) -> Vec<String> {
     lines
 }
 
-/// What `record`, a run's record, keeps of each sandbox, the agent's and each judge call's.
+/// What `record`, a run's record, keeps of each sandbox, the agent's, each judge call's, each
+/// lease's.
 ///
 /// Its `sandbox.json`, on one line, and its console, unless empty, each after whose it is.
 ///
@@ -175,7 +176,7 @@ pub fn sandboxes(record: &Path) -> Vec<String> {
 }
 
 /// Who each sandbox's directory in `record`, a run's record, is of, and the directory, below
-/// `record`: the agent's, then each job's, in the order of their numbers.
+/// `record`: the agent's, then each job's, then each lease's, each in the order of their numbers.
 fn sandbox_dirs(record: &Path) -> impl Iterator<Item = (String, String)> {
     let numbered = |kind: &'static str, whose: &'static str| {
         let entries = fs::read_dir(record.join(kind)).into_iter().flatten();
@@ -187,5 +188,7 @@ fn sandbox_dirs(record: &Path) -> impl Iterator<Item = (String, String)> {
         (numbers.into_iter()).map(move |n| (format!("{whose} {n}'s"), format!("{kind}/{n}")))
     };
     let agent = ("the agent's".to_owned(), "agent".to_owned());
-    iter::once(agent).chain(numbered("jobs", "job"))
+    iter::once(agent)
+        .chain(numbered("jobs", "job"))
+        .chain(numbered("leases", "lease"))
 }

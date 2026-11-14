@@ -18,7 +18,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, iter};
 
-use decision::JobId;
+use decision::{Event, JobId, LeaseId};
 use gateway::{Arrival, Session, Sockets};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag,
@@ -30,31 +30,32 @@ use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, command_env, command_stderr,
     command_stdout, pumpkin_dir,
 };
-use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, Workflow};
+use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, RunnerId, Workflow};
 use serde_json::Value;
 use stdx::{Context, Deadline};
 
 use super::{Host, Input, Stopped, interruption, log, record};
 
 /// The most entries a collected tree may hold.
-const ENTRIES: u64 = 100_000;
+pub(super) const ENTRIES: u64 = 100_000;
 
 /// What a sandbox's `/pumpkin` holds at most: anything collected from below it fits.
-pub(super) const PUMPKIN: Limits = Limits {
+const PUMPKIN: Limits = Limits {
     bytes: PUMPKIN_BYTES,
     entries: ENTRIES,
 };
 
 /// The roles of `placed` that are placed on `provider`, as [`Provider::reserve`] takes them:
-/// in the work phase, the agent and the judge of each of its judge grants, each grant running one
-/// call at a time; then the score's judge, which starts only once they have gone.
+/// in the work phase, the agent, the judge of each of its judge grants, each grant running one
+/// call at a time, and the runner of each of its lease grants, as many as the grant's leases open
+/// at once; then the score's judge alone, which starts only once they have gone.
 pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
     let workflow = placed.workflow();
-    let scorer = workflow.score().slot.judge().role();
     let judges = (workflow.judge_grants()).map(|(_, grant)| grant.judge().role());
+    let runners = (workflow.lease_grants()).map(|(_, grant)| grant.runner.role());
     let agent = iter::once(workflow.agent().role);
-    let work: Vec<RoleId> = agent.chain(judges).collect();
-    let last = vec![scorer];
+    let work: Vec<RoleId> = agent.chain(judges).chain(runners).collect();
+    let last = vec![workflow.score().slot.judge().role()];
     let on = |roles: Vec<RoleId>| -> Vec<Role> {
         (roles.into_iter())
             .filter(|&role| placed.placement(role).provider == *provider)
@@ -67,14 +68,16 @@ pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
         .collect()
 }
 
-/// `role` of `workflow`, as a provider sees it: one of its sandboxes runs at once.
+/// `role` of `workflow`, as a provider sees it: as many of its sandboxes run at once as the lease
+/// grant that names it opens leases at once, if it is a runner, and else one.
 fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
     let sandbox = workflow.sandbox(role);
+    let leased = (workflow.lease_grants()).find(|(_, grant)| grant.runner.role() == role);
     Role {
         name: sandbox.name.clone(),
         user: sandbox.user,
         resources: sandbox.needs.resources(),
-        instances: NonZeroU32::MIN,
+        instances: leased.map_or(NonZeroU32::MIN, |(_, grant)| grant.instances),
     }
 }
 
@@ -168,6 +171,8 @@ pub(super) enum Which {
     Agent,
     /// Judge call `job`'s, `job-<number>`, of judge `judge`.
     Job(JobId, JudgeId),
+    /// Lease `lease`'s, `lease-<number>`, of runner `runner`, as the given instance of its role.
+    Lease(LeaseId, RunnerId, u32),
 }
 
 impl Which {
@@ -175,6 +180,24 @@ impl Which {
         match self {
             Self::Agent => workflow.agent().role,
             Self::Job(_, judge) => judge.role(),
+            Self::Lease(_, runner, _) => runner.role(),
+        }
+    }
+
+    /// Which instance of its role it is ([`Create::instance`]): a lease's, or else the only one.
+    fn instance(self) -> u32 {
+        match self {
+            Self::Agent | Self::Job(..) => 0,
+            Self::Lease(_, _, instance) => instance,
+        }
+    }
+
+    /// The event that it failed for `reason`.
+    pub(super) fn failed(self, reason: String) -> Event {
+        match self {
+            Self::Agent => Event::AgentFailed { reason },
+            Self::Job(job, _) => Event::JudgeFailed { job, reason },
+            Self::Lease(lease, ..) => Event::LeaseFailed { lease, reason },
         }
     }
 
@@ -183,6 +206,16 @@ impl Which {
         match self {
             Self::Agent => "agent".to_owned(),
             Self::Job(job, _) => format!("jobs/{}", job.0),
+            Self::Lease(lease, ..) => format!("leases/{}", lease.0),
+        }
+    }
+
+    /// What it is, as messages about it name it, such as `the judge's` sandbox.
+    pub(super) fn noun(self) -> &'static str {
+        match self {
+            Self::Agent => "the agent's",
+            Self::Job(..) => "the judge's",
+            Self::Lease(..) => "the runner's",
         }
     }
 
@@ -191,13 +224,15 @@ impl Which {
         let name = match self {
             Self::Agent => "agent".to_owned(),
             Self::Job(job, _) => format!("job-{}", job.0),
+            Self::Lease(lease, ..) => format!("lease-{}", lease.0),
         };
         // A `Name` made of such parts, which couldn't fail, would be a `pub` item of the schema
         // for this one caller.
         let Ok(name) = Name::try_from(name) else {
             unreachable!(
-                "a sandbox's name within its run is no name, though `agent`, and `job-` with a \
-                 number's digits, are names: a letter, then letters, digits and `-`, 24 at most"
+                "a sandbox's name within its run is no name, though `agent`, and `job-` and \
+                 `lease-` with a number's digits, are names: a letter, then letters, digits and \
+                 `-`, 24 at most"
             )
         };
         name
@@ -341,8 +376,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             run: self.run.clone(),
             name,
             role: provider_role(self.workflow(), role),
-            // A run runs one sandbox of each role at a time.
-            instance: 0,
+            instance: which.instance(),
             class: placement.class.clone(),
             image: self.images.get(role).clone(),
             sandboxd: hosting.sandboxd.clone(),
@@ -720,17 +754,16 @@ pub(super) fn launch(command: &Command) -> Launch {
 }
 
 /// Collects the sandbox's `dir`, below [`pumpkin_dir()`], into the same path below `record`, a
-/// new directory there, within `limits`, by `by`. After a failure, it holds what arrived before
-/// it.
+/// new directory there, within [`PUMPKIN`], by `by`. After a failure, it holds what arrived
+/// before it.
 pub(super) fn collect(
     session: &mut Session,
     dir: &RelativePath,
     record: &Path,
-    limits: Limits,
     by: Deadline,
 ) -> Result<(), String> {
     let from = pumpkin_dir().join(dir);
     session
-        .collect(&from, &record.join(dir.as_str()), limits, by)
+        .collect(&from, &record.join(dir.as_str()), PUMPKIN, by)
         .context(format_args!("collecting {from} failed"))
 }

@@ -6,13 +6,12 @@
 //! match their data, and the tree stays within its [`Limits`]. Since no entry creates a missing
 //! parent, each creates at most one directory or file.
 
-use std::fs::{self, File, Permissions};
+use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::{Entry, RelativePath};
-use crate::ir::Mode;
 
 /// The most a tree may hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,11 +30,22 @@ impl Limits {
     };
 }
 
+/// How a [`Writer`] gives each entry its mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Modes {
+    /// Exactly, whatever the umask: in a sandbox, where the session's owner decides each mode.
+    Exact,
+    /// Within the umask, as the kernel applies it to what a process creates: on the host, whose
+    /// umask keeps what it writes from other users.
+    Umasked,
+}
+
 /// Writes the parts of one tree, in the order they arrive, below a directory.
 #[derive(Debug)]
 pub struct Writer {
     root: PathBuf,
     limits: Limits,
+    modes: Modes,
     bytes: u64,
     entries: u64,
     /// The file being written, its path, and the bytes still due for it.
@@ -44,25 +54,27 @@ pub struct Writer {
 
 impl Writer {
     /// A writer into `root`, which exists.
-    pub fn new(root: PathBuf, limits: Limits) -> Self {
+    pub fn new(root: PathBuf, limits: Limits, modes: Modes) -> Self {
         Self {
             root,
             limits,
+            modes,
             bytes: 0,
             entries: 0,
             file: None,
         }
     }
 
-    /// Creates an entry below its parent, which must exist: a directory, unless it exists,
-    /// or a new file, whose bytes [`Writer::data`] then writes. What it creates gets `mode`
-    /// exactly, or the umask's default without one, as a tree collected from a sandbox does.
+    /// Creates an entry below its parent, which must exist: a directory, unless it exists, or a
+    /// new file, whose bytes [`Writer::data`] then writes. It gets the entry's mode as [`Modes`]
+    /// says, but that a directory's owner, the receiving side's user, may always read, write and
+    /// search it, so that it can fill it and remove it. A directory that exists is kept as it is.
     ///
     /// # Errors
     ///
     /// Fails if the previous file is incomplete, if a limit is passed, if the parent is
     /// missing, if a file already exists, or if creating the entry, or giving it its mode, fails.
-    pub fn entry(&mut self, entry: &Entry, mode: Option<Mode>) -> io::Result<()> {
+    pub fn entry(&mut self, entry: &Entry) -> io::Result<()> {
         self.check_file_complete()?;
         self.entries += 1;
         if self.entries > self.limits.entries {
@@ -71,17 +83,18 @@ impl Writer {
                 self.limits.entries
             )));
         }
-        let mode = mode.map(|mode| Permissions::from_mode(mode.bits()));
         match entry {
-            Entry::Dir { path } => {
+            Entry::Dir { path, mode } => {
                 let target = self.root.join(path.as_str());
-                let created = create_dir(&target).map_err(|error| at(path, &error))?;
-                if let Some(mode) = mode.filter(|_| created) {
+                let mode = mode.bits() | 0o700;
+                let created = create_dir(&target, mode).map_err(|error| at(path, &error))?;
+                if created && self.modes == Modes::Exact {
+                    let mode = Permissions::from_mode(mode);
                     fs::set_permissions(&target, mode).map_err(|error| at(path, &error))?;
                 }
                 Ok(())
             }
-            Entry::File { path, size } => {
+            Entry::File { path, size, mode } => {
                 self.bytes = self.bytes.saturating_add(*size);
                 if self.bytes > self.limits.bytes {
                     return Err(over_limit(format!(
@@ -90,9 +103,13 @@ impl Writer {
                     )));
                 }
                 let target = self.root.join(path.as_str());
-                let file = File::create_new(&target).map_err(|error| at(path, &error))?;
-                if let Some(mode) = mode {
-                    file.set_permissions(mode)
+                // The file stays open for writing, whatever its mode.
+                let file = (OpenOptions::new().write(true).create_new(true))
+                    .mode(mode.bits())
+                    .open(&target)
+                    .map_err(|error| at(path, &error))?;
+                if self.modes == Modes::Exact {
+                    (file.set_permissions(Permissions::from_mode(mode.bits())))
                         .map_err(|error| at(path, &error))?;
                 }
                 if *size > 0 {
@@ -153,10 +170,10 @@ impl Writer {
     }
 }
 
-/// Creates the directory at `path`, whose parent exists, unless a directory is already there.
-/// Returns whether it created one.
-fn create_dir(path: &Path) -> io::Result<bool> {
-    match fs::create_dir(path) {
+/// Creates the directory at `path`, whose parent exists, with `mode` within the umask, unless a
+/// directory is already there. Returns whether it created one.
+fn create_dir(path: &Path, mode: u32) -> io::Result<bool> {
+    match DirBuilder::new().mode(mode).create(path) {
         Err(error)
             if error.kind() == io::ErrorKind::AlreadyExists
                 && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) =>
