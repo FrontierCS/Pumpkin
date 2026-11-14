@@ -1,1 +1,0 @@
-{"content":[{"annotations":[],"text":"I’m checking CUDA’s exact FP64 WMMA fragment contract before implementing.","type":"output_text"}],"id":"msg_resp_202611132255177c849b4d3392432b","role":"assistant","status":"completed","type":"message"}

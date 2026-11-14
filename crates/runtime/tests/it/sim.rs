@@ -1202,11 +1202,11 @@ enum Step {
     },
     /// `call`, a `status` or a `lease_status`, made until its reply gives `state`.
     Await { call: OpCall, state: String },
-    /// A model request that names `model`, whose input is `text`, and what of its response the
-    /// next step waits for.
+    /// A model request that names `model`, whose input is what it `said`, and what of its
+    /// response the next step waits for.
     Model {
         model: String,
-        text: String,
+        said: Vec<String>,
         wait: Wait,
     },
     /// A wait, in seconds, before the next step.
@@ -1354,8 +1354,8 @@ impl Caller {
                     payload,
                     less,
                 }) => (call, payload, less),
-                Some(Step::Model { model, text, wait }) => {
-                    if self.request(&model, &text, replies) {
+                Some(Step::Model { model, said, wait }) => {
+                    if self.request(&model, &said, replies) {
                         self.waits = Some(wait);
                         return false;
                     }
@@ -1420,13 +1420,14 @@ impl Caller {
         }
     }
 
-    /// Makes a model request that names `model`, with `text` as its input, in `replies`, and
-    /// returns whether it did: without the model endpoint, the command prints that the
-    /// connection was refused, and exits with 1, taking no more steps.
+    /// Makes a model request that names `model`, in `replies`, whose input is the first of what
+    /// it `said`, then an item for each of the rest whose content is a list that holds it; and
+    /// returns whether it did: without the model endpoint, the command prints that the connection
+    /// was refused, and exits with 1, taking no more steps.
     fn request(
         &mut self,
         model: &str,
-        text: &str,
+        said: &[String],
         replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     ) -> bool {
         if !self.endpoint {
@@ -1440,7 +1441,11 @@ impl Caller {
         self.read.clear();
         // Each request repeats the conversation's first item, as a harness's requests do.
         let item = |text: &str| json!({ "type": "message", "role": "user", "content": text });
-        let input = [item("You are a simulated agent."), item(text)];
+        let mut input = vec![item("You are a simulated agent."), item(&said[0])];
+        input.extend(said[1..].iter().map(|part| {
+            let content = json!([{ "type": "input_text", "text": part }]);
+            json!({ "type": "message", "role": "user", "content": content })
+        }));
         let body = json!({ "model": model, "store": false, "input": input }).to_string();
         let (method, path) = ("POST".to_owned(), "/responses".to_owned());
         let header = |name: &str, value: &str| (name.to_owned(), value.to_owned());
@@ -1568,11 +1573,11 @@ fn step(arg: &str) -> Step {
     // <state>`, which makes `status <job>` until its reply's state is `state`, or `await_lease
     // <lease> <state>`, `lease_status <lease>` likewise, or `await_transfer <lease> moved|failed`,
     // until its last transfer ended so; `lease_put <lease> <tree> <to> [replace]` or `lease_get
-    // <lease> <from> <to>`; `model <model> <text>`, a model request that names `model`, with `text`
-    // as its input, whose response's end the next step waits for, or `ask <model> <text>`, one
-    // whose response's first part it waits for; `result`, a judge's result of what a lease's
-    // command printed, or a model answered ([`Step::Result`]); or `sleep <seconds>`, `exit`,
-    // `release` ([`Step::Release`]), or the session's end, `crash` or `close`.
+    // <lease> <from> <to>`; `model <model> <text> [<part>...]`, a model request that names `model`,
+    // with `text` as its input, then each `part`, whose response's end the next step waits for,
+    // or `ask <model> <text>`, one whose response's first part it waits for; `result`, a judge's
+    // result of what a lease's command printed, or a model answered ([`Step::Result`]); or `sleep
+    // <seconds>`, `exit`, `release` ([`Step::Release`]), or the session's end, `crash` or `close`.
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {
@@ -1617,14 +1622,18 @@ fn step(arg: &str) -> Step {
             let (call, state) = (OpCall::LeaseStatus { lease }, format!("transfer {end}"));
             return Step::Await { call, state };
         }
-        [kind @ ("model" | "ask"), model, text] => {
-            let (model, text) = (model.to_owned(), text.to_owned());
+        [kind @ ("model" | "ask"), model, _, ..] => {
+            let said = words[2..].iter().map(|word| (*word).to_owned()).collect();
             let wait = if kind == "model" {
                 Wait::End
             } else {
                 Wait::Part
             };
-            return Step::Model { model, text, wait };
+            return Step::Model {
+                model: model.to_owned(),
+                said,
+                wait,
+            };
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["exit"] => return Step::Exit,

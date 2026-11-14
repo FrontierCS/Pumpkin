@@ -1,1 +1,0 @@
-{"arguments":"{\"cmd\":\"command -v nvcc; nvcc --version; find /usr /opt -path '*nvcuda/wmma.h' -o -path '*mma.h' 2>/dev/null | head -30\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":10000}","call_id":"call_a937640770424d458374ec40","id":"fc_call_a937640770424d458374ec40","name":"exec_command","status":"completed","type":"function_call"}
