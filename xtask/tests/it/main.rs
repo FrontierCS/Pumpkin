@@ -257,17 +257,26 @@ fn test_docs() {
                  #[doc = \"A doc.\"]\n#[test]\nfn attribute() {}\n\
                  #[test]\n// A comment.\nfn commented() {}\n\
                  /// A doc.\nfn helper() {}\n\
-                 /// A doc.\n#[cfg(test)]\nfn configured() {}\n"
+                 /// A doc.\n#[cfg(test)]\nfn configured() {}\n\
+                 // One.\n// Two.\n#[test]\nfn two_above() {}\n\
+                 // One.\n// Two.\n// Three.\n#[test]\nfn three_above() {}\n\
+                 #[test]\n    // One.\n    // Two.\n// Three.\n\
+                 #[ignore = \"a reason\"]\nfn three_among() {}\n\
+                 // One.\n// Two.\n#[test]\n// Three.\nfn split() {}\n\
+                 // One.\n// Two.\n// Three.\n\n#[test]\nfn apart() {}\n\
+                 // One.\n// Two.\n// Three.\nfn helper_three() {}\n"
         .to_owned();
     check(
         "test-docs",
         &[("tests.rs", tests, Tracked)],
         tidy,
         &expect![[r#"
-        tests.rs:1:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
-        tests.rs:5:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
-        tests.rs:10:5: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
-        tests.rs:13:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains"#]],
+            tests.rs:1:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+            tests.rs:5:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+            tests.rs:10:5: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+            tests.rs:13:1: a test has a doc: remove it, and put a why the test needs in a `//` comment at the line it explains
+            tests.rs:28:1: a test has a `//` block of 3 lines, over the cap of 2: keep to a why of a line or two, at the line it explains
+            tests.rs:34:5: a test has a `//` block of 3 lines, over the cap of 2: keep to a why of a line or two, at the line it explains"#]],
     );
 }
 
@@ -283,6 +292,24 @@ fn comments() {
                 // A clause;\n    // a `v[0]` and its end;\n    Some(v[0])\n}\n\
                 // At the end, with no newline: f(v);"
         .to_owned();
+    // `columns` columns: `start`, then words.
+    let wide = |start: &str, columns: usize| {
+        let words = "ab ".repeat(columns);
+        format!("{start}{}x\n", &words[..columns - start.len() - 1])
+    };
+    let widths = [
+        wide("// ", 100),
+        wide("// ", 101),
+        wide("    /// ", 101),
+        wide("//! ", 120),
+        wide("let _ = 1; // ", 101),
+        "/* A block,\n".to_owned() + &wide(" * ", 101) + " */\n",
+        format!("// | {} |\n", "a | ".repeat(30)),
+        format!("// https://example.com/{}\n", "a".repeat(100)),
+        format!("const S: &str = \"\n{}\";\n", wide("// ", 101)),
+        "fn f() {}\n".to_owned(),
+    ]
+    .concat();
     let literals = "/// ```\n/// f(v);\n/// ```\n#[doc = \"A TODO.\"]\n\
                     fn f() {\n    /* f(v); */\n    let _ = \"// TODO: f(v);\";\n    \
                     let _ = r#\"\n// let x = 1;\n\"#;\n    let _ = '/';\n    let _ = 1 / 2;\n}\n"
@@ -293,6 +320,7 @@ fn comments() {
             ("markers.rs", markers, Tracked),
             ("code.rs", code, Tracked),
             ("literals.rs", literals, Tracked),
+            ("widths.rs", widths, Tracked),
         ],
         tidy,
         &expect![[r#"
@@ -309,7 +337,63 @@ fn comments() {
             markers.rs:4:8: a comment holds `TODO`: open an issue for the work left, and say a known limit as a why at its code
             markers.rs:5:21: a comment holds `FIXME`: open an issue for the work left, and say a known limit as a why at its code
             markers.rs:7:5: a comment holds `XXX`: open an issue for the work left, and say a known limit as a why at its code
-            markers.rs:8:14: a comment holds `TODO`: open an issue for the work left, and say a known limit as a why at its code"#]],
+            markers.rs:8:14: a comment holds `TODO`: open an issue for the work left, and say a known limit as a why at its code
+            widths.rs:2:101: a line of a comment is 101 columns, over the cap of 100: wrap it
+            widths.rs:3:101: a line of a comment is 101 columns, over the cap of 100: wrap it
+            widths.rs:4:101: a line of a comment is 120 columns, over the cap of 100: wrap it
+            widths.rs:5:101: a line of a comment is 101 columns, over the cap of 100: wrap it
+            widths.rs:7:101: a line of a comment is 101 columns, over the cap of 100: wrap it"#]],
+    );
+}
+
+#[test]
+fn restated() {
+    use Standing::Tracked;
+    let docs = "/// A lease.\nstruct LeaseId;\n\
+                /// A lease's id, which it keeps once closed.\nstruct LeaseKey;\n\
+                /// The SHA-256 digest of `bytes`.\nfn digest(bytes: &[u8]) -> Sha256Digest {}\n\
+                /// `/`.\nfn root() {}\n\
+                /// ```\n/// A lease.\n/// ```\nstruct Lease;\n\
+                /// A [lease](https://example.com/lease-id).\n#[derive(Debug)]\n\
+                pub const fn lease_id() {}\n\
+                struct S {\n    /// When it was opened.\n    pub(crate) opened: u64,\n    \
+                /// When it closes, which no lease outlives.\n    closes: u64,\n}\n\
+                enum E {\n    /// At this deadline.\n    Until(Deadline),\n}\n\
+                #[doc = \"A lease.\"]\nstruct LeaseRow;\n"
+        .to_owned();
+    check(
+        "restated",
+        &[("docs.rs", docs, Tracked)],
+        tidy,
+        &expect![[r#"
+            docs.rs:1:1: the doc's first sentence only restates `LeaseId`, its type or its parameters: say what they leave a caller room to get wrong, or remove the doc
+            docs.rs:5:1: the doc's first sentence only restates `digest`, its type or its parameters: say what they leave a caller room to get wrong, or remove the doc
+            docs.rs:13:1: the doc's first sentence only restates `lease_id`, its type or its parameters: say what they leave a caller room to get wrong, or remove the doc
+            docs.rs:17:5: the doc's first sentence only restates `opened`, its type or its parameters: say what they leave a caller room to get wrong, or remove the doc
+            docs.rs:23:5: the doc's first sentence only restates `Until`, its type or its parameters: say what they leave a caller room to get wrong, or remove the doc"#]],
+    );
+}
+
+#[test]
+fn architecture() {
+    use Standing::Tracked;
+    let map = "# Architecture\n\nThe rules are in [`AGENTS.md`](AGENTS.md), as in\n\
+               [rust-analyzer's](https://github.com/rust-lang/rust-analyzer), under\n\
+               [Crates](#crates) and [`style`](docs/dev/style.md#errors), with\n\
+               [`main.rs`](src/main.rs) in [`src`](src/).\n"
+        .to_owned();
+    check(
+        "architecture",
+        &[
+            ("ARCHITECTURE.md", map, Tracked),
+            ("AGENTS.md", "# Agents\n".to_owned(), Tracked),
+            ("src/main.rs", "fn main() {}\n".to_owned(), Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            ARCHITECTURE.md:5:33: a link to `docs/dev/style.md#errors`, which isn't in the repository: link a document that is, or remove the link
+            ARCHITECTURE.md:6:13: a link to `src/main.rs`, code in the repository: name it instead, in backticks
+            ARCHITECTURE.md:6:37: a link to `src/`, code in the repository: name it instead, in backticks"#]],
     );
 }
 
