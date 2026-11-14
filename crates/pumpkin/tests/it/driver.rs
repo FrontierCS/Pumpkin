@@ -590,7 +590,7 @@ fn lost_on_docker() {
     let scratch = Scratch::new("lost");
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
-    let engine = engine(&context);
+    let engine = engine(&scratch, &context);
     let containers = containers(&context);
     scratch.write_task("sleeps", &workflow("", &["sleep", "300"]));
     scratch.write("pumpkin.toml", &machine(&context));

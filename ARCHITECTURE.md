@@ -288,6 +288,15 @@ route may reach, of which it hands `Run` the one that serves each entry of a rou
 - **Architecture Invariant:** what a task's source names stays below its root on disk, as its
   labels keep it there in name: `Root`, the one `Loader`, reaches each file and directory that
   an evaluation or its images name from the root, and refuses a symbolic link on the way.
+- **Architecture Invariant:** all that Pumpkin writes on the operator's machine is below the
+  workspace's `.pumpkin` directory, the one that holds the `pumpkin` that runs (`Workspace`): the
+  runs' records, unless `--runs` names another directory; and a directory of each provider kind's
+  own, which it hands the provider as it connects (`Engine::connect`), as no provider writes on
+  this machine but there. Outside it are only what it reads, the machine's configuration and each
+  tool's credentials, in Docker's configuration, with what those tools keep there of their own,
+  as BuildKit's token seed; the Docker engine's images; the files that `fmt` and `lock` rewrite,
+  which their command lines name; and the engine's ledger of CPUs (`cpus`), which every run on the
+  engine shares, whatever its workspace.
 - **Architecture Invariant:** each `pumpkin` process adds 022 to its umask first (`main`), so
   nothing it makes, a run's record included, is writable by another user, whatever the
   operator's umask.

@@ -54,9 +54,9 @@ const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 const SCORE: &str = r#"printf '{"raw_score": %s}' \
     $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"#;
 
-/// The directory test `name` runs `pumpkin` in, empty but for its `.pumpkin/bin`, which holds
-/// the `pumpkin` it runs ([`Scratch::pumpkin`]). Dropping it removes it, unless the test failed,
-/// when it shows where it is.
+/// The directory test `name` runs `pumpkin` in, empty but for its workspace's `.pumpkin/bin`,
+/// which holds the `pumpkin` it runs ([`Scratch::pumpkin`]). Dropping it removes it, unless the
+/// test failed, when it shows where it is.
 struct Scratch(PathBuf, TempDir);
 
 impl Scratch {
@@ -137,7 +137,8 @@ impl Scratch {
         self.write_executable(name, &header);
     }
 
-    /// `pumpkin` with `args`, to run in the directory, as its `.pumpkin/bin` holds it.
+    /// `pumpkin` with `args`, to run in the directory, as its workspace's `.pumpkin/bin` holds
+    /// it.
     fn pumpkin(&self, args: &[&str]) -> Command {
         self.program(self.0.join(".pumpkin/bin/pumpkin"), args)
     }
@@ -559,7 +560,8 @@ const LOCAL: &str = "[providers.local.docker]\n";
 fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let dir = scratch.0.join(dir);
     fs::create_dir_all(&dir).unwrap();
-    // A link, which writes nothing where a copy would write the whole executable.
+    // A link, which writes nothing where a copy would write the whole executable; `pumpkin` finds
+    // its workspace by the path it runs from, this one.
     fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
     // The formatter that `PUMPKIN_BUILDIFIER` names, as `cargo xtask ci` and `cargo xtask
     // mutants` set it, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin` that
@@ -570,10 +572,10 @@ fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     dir.join("pumpkin")
 }
 
-/// The engine of the Docker context `context`.
-fn engine(context: &str) -> Engine {
+/// The engine of the Docker context `context`, as `scratch`'s `pumpkin` reaches it.
+fn engine(scratch: &Scratch, context: &str) -> Engine {
     let context = ContextName::try_from(context.to_owned()).unwrap();
-    Engine::connect(context).unwrap()
+    Engine::connect(context, &scratch.0.join(".pumpkin/docker")).unwrap()
 }
 
 /// The containers of the Docker context `context`, as a reap reaches them.

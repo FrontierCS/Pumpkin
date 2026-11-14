@@ -10,7 +10,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Output, Stdio};
-use std::{env, fs, io};
+use std::{fs, io};
 
 use lang::Finding;
 use serde::Deserialize;
@@ -172,12 +172,7 @@ impl Formatter {
     ///
     /// Fails if this `pumpkin` can't be found, or no formatter is beside it.
     pub(crate) fn beside() -> Result<Self, String> {
-        let pumpkin = env::current_exe().map_err(|error| {
-            format!(
-                "this `pumpkin`'s executable can't be found ({error}): expected the formatter \
-                 beside it"
-            )
-        })?;
+        let pumpkin = crate::workspace::exe("expected the formatter beside it")?;
         let formatter = pumpkin.with_file_name(FORMATTER);
         if !formatter.is_file() {
             return Err(format!(

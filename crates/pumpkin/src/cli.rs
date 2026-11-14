@@ -22,7 +22,9 @@ use crate::star::Entry;
     name = "pumpkin",
     about = "\
 Run workflows: in each run, an agent works in a sandbox, and judges score what
-it submits.",
+it submits. It keeps what it writes in the .pumpkin directory that it is in: the
+runs' records, but where --runs names another directory, and what its builds and
+providers keep.",
     disable_help_flag = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -197,7 +199,7 @@ pub(crate) struct Run {
     pub(crate) args: TaskArgs,
     #[arg(long, value_name = "dir", value_parser = utf8(RECORDED), help = "\
 The directory runs are recorded in, each in <dir>/<id>.
-Default: $HOME/.local/share/pumpkin/runs")]
+Default: runs/ in the .pumpkin directory that this pumpkin is in")]
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = "\
 The machine's configuration; see `pumpkin help config`.
@@ -248,7 +250,7 @@ has a `/`.";
 /// The help of `--runs` for a command that takes a `<run>`.
 const RUNS_HELP: &str = "\
 The directory that <run> is looked up in.
-Default: $HOME/.local/share/pumpkin/runs";
+Default: runs/ in the .pumpkin directory that this pumpkin is in";
 
 /// What `pumpkin wait` is asked for, as `pumpkin wait --help` says. Its paths are UTF-8, as
 /// those of `cancel` and `reap` are, so that a command that names them names the same
@@ -284,7 +286,7 @@ ended, which `pumpkin reap` removes."
 pub(crate) struct Reap {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to reap.
-Default: $HOME/.local/share/pumpkin/runs")]
+Default: runs/ in the .pumpkin directory that this pumpkin is in")]
     pub(crate) runs: Option<String>,
 }
 
