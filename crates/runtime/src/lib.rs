@@ -58,7 +58,7 @@ pub use log::{
     PlaceUse, Progress, Sandbox, Tokens, Work,
 };
 use log::{Entry, Log};
-use model::Served;
+use model::{Exchange, Served};
 pub use record::{BUILD, Build, Ending, Reaped, Record, ir_json, minted, named, new_id};
 use record::{Lock, Payloads};
 use sandbox::{Published, Sandboxes, Which};
@@ -508,7 +508,7 @@ enum Input {
     Child(Report),
     /// A record for the run log alone, from the thread that observed it: a note, such as a
     /// child's or one on a model request from the thread that answers it; how a route answered a
-    /// model request; the GPUs a sandbox saw; or a sandbox's delete.
+    /// model request ([`Exchange::kept`]); the GPUs a sandbox saw; or a sandbox's delete.
     Logged(Entry),
 }
 
@@ -768,6 +768,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         let by = deadline(&self.clock, by);
         let reports = self.inbox.sender();
+        let exchange = Exchange::new(self.dir, number);
         // A request stays in flight until its thread writes its response's end, the thread's
         // last step, so the session's bound on the requests in flight,
         // `MAX_MODEL_REQUESTS_IN_FLIGHT`, bounds these threads too, but for those writing that
@@ -782,10 +783,15 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     let _ = reports.send(Input::Logged(Entry::Note(note)));
                 };
                 let answered = |answer| {
-                    let answered = Entry::ModelAnswered((caller, number), answer);
+                    let kept = exchange.kept();
+                    let answered = Entry::ModelAnswered((caller, number), answer, kept);
                     let _ = reports.send(Input::Logged(answered));
                 };
-                served.serve(number, incoming, allowed, by, noted, answered);
+                served.serve((number, &exchange), incoming, allowed, by, noted, answered);
+                if let Some(failed) = exchange.finish() {
+                    let note = format!("model request {number} wasn't kept whole: {failed}");
+                    let _ = reports.send(Input::Logged(Entry::Note(note)));
+                }
             });
         match spawned {
             Ok(_) => Ok(()),

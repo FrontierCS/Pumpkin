@@ -15,6 +15,7 @@ use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderValue, Uri};
 
+use super::Keep;
 use super::closure::{Closed, Refusal, Route, Status, refusal};
 use super::usage::{Failure, Scan, Usage};
 
@@ -281,7 +282,7 @@ impl Upstream {
     }
 
     /// Sends `closed` upstream and streams the response back to `client` by its deadline, with
-    /// only the headers a harness reads, giving up at it or
+    /// only the headers a harness reads, keeping both bodies ([`Keep`]), giving up at it or
     /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
     /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
     /// the key or the request is refused, and else the response, cut short if it breaks off.
@@ -292,9 +293,12 @@ impl Upstream {
     pub(crate) fn forward(
         &self,
         closed: &Closed,
-        client: Client,
+        client: Client<'_>,
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
+        client
+            .keep
+            .request(closed.body(), Some(closed.conversation()));
         let call = self.agent.post(self.url.clone()).config();
         let call = call.timeout_global(bound(client.by)).build();
         let call = closed
@@ -316,10 +320,11 @@ impl Upstream {
         let status = response.status().as_u16();
         let request_id = request_id(response.headers());
         if let Some(refusal) = self.refusal(status, response.headers()) {
-            return refuse(refusal, (Some(status), request_id), client, answered);
+            let mut body = response.into_body().into_reader();
+            return replaced(refusal, (status, request_id), &mut body, client, answered);
         }
         let headers = returned(response.headers(), closed);
-        let Client { request, by } = client;
+        let Client { request, by, keep } = client;
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
             Err(error) => {
@@ -335,7 +340,7 @@ impl Upstream {
         let content_type = (response.headers().get("content-type")).and_then(|v| v.to_str().ok());
         let mut scan = Scan::new(content_type, closed.usage());
         let mut body = response.into_body().into_reader();
-        let relayed = relay(&mut body, &mut client, &mut scan);
+        let relayed = relay(&mut body, &mut client, &mut scan, keep);
         let (usage, failed) = scan.finish();
         answered(match relayed {
             Relayed::Whole => Answer::Forwarded {
@@ -385,7 +390,7 @@ impl Upstream {
     fn serve(
         &self,
         route: &Route,
-        client: Client,
+        client: Client<'_>,
         allowed: bool,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
@@ -435,9 +440,9 @@ impl Upstream {
 ///
 /// One that names none is refused with a 404 that names each. The entry's upstream refuses it
 /// unless `allowed`, or once it has shut down ([`Upstream::shutdown`]) or its key was refused,
-/// and else forwards it closed, giving up at `by` too. It calls `forwarding` first, and tells
-/// `answered` how it answered ([`Answer`]) and through which entry's index, before the answer's
-/// end is written.
+/// and else forwards it closed, giving up at `by` too. It calls `forwarding` first, gives `keep`
+/// the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`]) and through which
+/// entry's index, once `keep` has the whole answer and before the answer's end is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
 // too long for a frame, or as the sandbox's session ends, which the run log shows.
 pub fn serve(
@@ -445,13 +450,14 @@ pub fn serve(
     request: IncomingModelRequest,
     allowed: bool,
     by: Deadline,
+    keep: &dyn Keep,
     forwarding: impl FnOnce(),
     answered: impl FnOnce(Option<usize>, Answer),
 ) {
     let taken = entries
         .iter()
         .position(|(route, _)| route.takes(&request.request));
-    let client = Client { request, by };
+    let client = Client { request, by, keep };
     let Some(index) = taken else {
         let path = &client.request.request.path;
         let refusal = Refusal::unserved(path, entries.iter().map(|(route, _)| route));
@@ -463,16 +469,19 @@ pub fn serve(
     upstream.serve(route, client, allowed, forwarding, answered);
 }
 
-/// A request to answer, and by when its answer is due.
-pub(crate) struct Client {
+/// A request to answer, by when its answer is due, and where the exchange is kept.
+pub(crate) struct Client<'k> {
     request: IncomingModelRequest,
     by: Deadline,
+    keep: &'k dyn Keep,
 }
 
-/// Answers `client`'s request with `refusal`, before it reached the upstream, once `answered` is
-/// told so.
-fn barred(refusal: Refusal, client: Client, answered: impl FnOnce(Answer)) -> io::Result<()> {
-    let Client { request, by } = client;
+/// Answers `client`'s request with `refusal`, before it reached the upstream, once the request as
+/// its client sent it and the refusal are kept, and `answered` is told so.
+fn barred(refusal: Refusal, client: Client<'_>, answered: impl FnOnce(Answer)) -> io::Result<()> {
+    let Client { request, by, keep } = client;
+    keep.request(&request.request.body, None);
+    keep.response(refusal.body().as_bytes());
     answered(refusal.barred());
     refusal.answer(request, by)
 }
@@ -488,15 +497,37 @@ fn bound(until: Deadline) -> Option<Duration> {
 }
 
 /// Answers `client`'s request with `refusal`, in place of the upstream's response with the
-/// status and request id `upstream`, if one came, once `answered` is told so.
+/// status and request id `upstream`, if one came, once the refusal is kept and `answered` is
+/// told so.
 fn refuse(
     refusal: Refusal,
     (upstream_status, request_id): (Option<u16>, Option<String>),
-    client: Client,
+    client: Client<'_>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
-    let Client { request, by } = client;
+    let Client { request, by, keep } = client;
+    keep.response(refusal.body().as_bytes());
     answered(refusal.answered(upstream_status, request_id));
+    refusal.answer(request, by)
+}
+
+/// Answers `client`'s request with `refusal` in place of the upstream's response with the status
+/// and request id `upstream`, once `body`, the upstream's, is kept as it came, so that the record
+/// says what the provider answered, and `answered` is told.
+fn replaced(
+    refusal: Refusal,
+    (status, request_id): (u16, Option<String>),
+    body: &mut impl Read,
+    client: Client<'_>,
+    answered: impl FnOnce(Answer),
+) -> io::Result<()> {
+    let Client { request, by, keep } = client;
+    let mut buffer = vec![0; frame::MAX_BODY_BYTES];
+    // A body that breaks off, or is given up on, is kept as far as it came.
+    while let Ok(read @ 1..) = body.read(&mut buffer) {
+        keep.response(&buffer[..read]);
+    }
+    answered(refusal.answered(Some(status), request_id));
     refusal.answer(request, by)
 }
 
@@ -512,7 +543,12 @@ enum Relayed {
 
 /// Streams `body` to `client` as it arrives, showing it to `scan`, until it ends, without writing
 /// its end, and returns how it went.
-fn relay(body: &mut impl Read, client: &mut ModelResponse, scan: &mut Scan) -> Relayed {
+fn relay(
+    body: &mut impl Read,
+    client: &mut ModelResponse,
+    scan: &mut Scan,
+    keep: &dyn Keep,
+) -> Relayed {
     // A read fills at most one frame of the session.
     let mut buffer = vec![0; frame::MAX_BODY_BYTES];
     loop {
@@ -520,6 +556,7 @@ fn relay(body: &mut impl Read, client: &mut ModelResponse, scan: &mut Scan) -> R
             Ok(0) => return Relayed::Whole,
             Ok(read) => {
                 scan.feed(&buffer[..read]);
+                keep.response(&buffer[..read]);
                 if let Err(error) = client.send(&buffer[..read]) {
                     return Relayed::Unsent(error);
                 }

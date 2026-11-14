@@ -87,6 +87,8 @@ struct Rules {
     target: &'static str,
     /// The request headers that pass upstream.
     headers: &'static [&'static str],
+    /// The field of a request's body that holds the conversation.
+    conversation: &'static str,
     /// Where a response's usage gives its tokens.
     usage: usage::Fields,
     /// Refuses a body that keeps state on the provider's side, or refers to state kept there.
@@ -104,6 +106,7 @@ type Tool = fn(&Value) -> Result<(), Refusal>;
 const RESPONSES: Rules = Rules {
     target: "/responses",
     headers: &RESPONSES_HEADERS,
+    conversation: "input",
     usage: usage::RESPONSES_FIELDS,
     stored: stateless,
     feature: picks_no_feature,
@@ -114,6 +117,7 @@ const RESPONSES: Rules = Rules {
 const CHAT: Rules = Rules {
     target: "/v1/chat/completions",
     headers: &CHAT_HEADERS,
+    conversation: "messages",
     usage: usage::CHAT_FIELDS,
     stored: stores_nothing,
     feature: searches_nothing,
@@ -258,6 +262,12 @@ impl Closed {
     /// The request's body, as [`Route::close`] parsed it.
     pub(crate) fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// The field of its body that holds the conversation, in its API: the Responses API's
+    /// `input`, or Chat Completions' `messages`.
+    pub(crate) fn conversation(&self) -> &'static str {
+        self.rules.conversation
     }
 
     /// Where its API's response gives the tokens it used.

@@ -18,7 +18,7 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
-use route::{Key, Route, Upstream, UpstreamUrl};
+use route::{Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox, frame};
 use serde_json::{Value, json};
@@ -42,6 +42,10 @@ fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
 /// session's owner: it shows what the stand-in model
 /// provider received of each that the route admitted, or the refusal that the sandbox heard,
 /// and checks them against `expect`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "it runs a session, a stand-in and each case's exchange in one place"
+)]
 fn check(cases: &[(&str, Request)], expect: &Expect) {
     // Kept if the test fails.
     let dir = tempfile::Builder::new()
@@ -76,7 +80,7 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     // Its sockets fit in a socket's address by this path to their directory.
     let (_sockets, registration, socket) = meeting(&dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
-    let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None));
+    let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
     let by = Deadline::after(HUNG);
     let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
@@ -88,7 +92,15 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
             let mut forwarded = false;
             let by = Deadline::after(HUNG);
             let answered = |_, _| {};
-            route::serve(&entries, incoming, true, by, || forwarded = true, answered);
+            route::serve(
+                &entries,
+                incoming,
+                true,
+                by,
+                &Ignored,
+                || forwarded = true,
+                answered,
+            );
             forwarded.then(|| {
                 let (line, headers, body) = received.recv_timeout(HUNG).unwrap();
                 let body = if &body == sent {
@@ -111,6 +123,15 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// A keeper of exchanges that keeps nothing.
+struct Ignored;
+
+impl Keep for Ignored {
+    fn request(&self, _: &[u8], _: Option<&'static str>) {}
+
+    fn response(&self, _: &[u8]) {}
+}
+
 /// The next of `arrivals`, which must be a model request that arrives within [`HUNG`].
 fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
     match arrivals.recv_timeout(HUNG) {
@@ -131,8 +152,13 @@ fn meeting(dir: &Path) -> (Sockets, Registration, PathBuf) {
 /// Opens a session at `socket` with a hello, then sends each request in turn, waiting for its
 /// response's end before the next, and returns what it heard back for each: the status, the
 /// headers, the body, and whether it was cut short. It tells `parts`, if any, of each part of a
-/// body as it hears it.
-fn fake_sandbox(socket: &Path, requests: Vec<Request>, parts: Option<&Sender<()>>) -> Vec<String> {
+/// body as it hears it, and hangs up as it hears the first of request `hangs_up`'s, if any.
+fn fake_sandbox(
+    socket: &Path,
+    requests: Vec<Request>,
+    parts: Option<&Sender<()>>,
+    hangs_up: Option<u32>,
+) -> Vec<String> {
     let mut connection = UnixStream::connect(socket).unwrap();
     frame::write(
         &mut connection,
@@ -174,6 +200,16 @@ fn fake_sandbox(socket: &Path, requests: Vec<Request>, parts: Option<&Sender<()>
                 ) => response = format!("{status} {headers:?} "),
                 (ToSandbox::ModelData { .. }, bytes) => {
                     response.push_str(&String::from_utf8(bytes).unwrap());
+                    if hangs_up == Some(request) {
+                        // Closed before `parts` hears of the part, so that the next one finds the
+                        // session ended.
+                        drop(connection);
+                        if let Some(parts) = parts {
+                            let _ = parts.send(());
+                        }
+                        heard.push(format!("{response}, then hung up"));
+                        return heard;
+                    }
                     if let Some(parts) = parts {
                         // Whoever listens may have gone.
                         let _ = parts.send(());

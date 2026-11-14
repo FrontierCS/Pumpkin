@@ -134,15 +134,18 @@ impl<'h, H: Host> Log<'h, H> {
 
     /// Appends the record of `answer`, how `caller`'s route answered its model request numbered
     /// `request`: `{"kind": "model_answered", "caller": c, "request": n, "upstream_status": u,
-    /// "answer": a}`, with `"request_id": i` if the upstream named its id for the request,
-    /// `"usage"` if its response reported one ([`Usage`]), and `"failed": {"code": c}` if its
-    /// response stated that it failed, without `"code"` if it gave none ([`route::Failure`]),
-    /// where `u` is the upstream's status, or `null` if no response came, and `a` the
-    /// [`Answer`]'s kind, with a refusal's or a bar's status and message, but never a body.
+    /// "answer": a, "kept": k}`, with `"request_id": i` if the upstream named its id for the
+    /// request, `"usage"` if its response reported one ([`Usage`]), and `"failed": {"code": c}`
+    /// if its response stated that it failed, without `"code"` if it gave none
+    /// ([`route::Failure`]), where `u` is the upstream's status, or `null` if no response came,
+    /// `a` the [`Answer`]'s kind, with a refusal's or a bar's status and message, but never a
+    /// body, and `k` where the record keeps the exchange
+    /// ([`Exchange::kept`](super::Exchange::kept)).
     fn model_answered(
         &mut self,
         (caller, request): (Caller, u64),
         answer: &Answer,
+        kept: Value,
     ) -> Result<(), String> {
         let (upstream_status, request_id, (usage, failed), answer) = match answer {
             Answer::Forwarded {
@@ -200,6 +203,7 @@ impl<'h, H: Host> Log<'h, H> {
                 None => json!({}),
             };
         }
+        event["kept"] = kept;
         self.told(event)
     }
 
@@ -207,7 +211,9 @@ impl<'h, H: Host> Log<'h, H> {
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
-            Entry::ModelAnswered(request, answer) => self.model_answered(request, &answer),
+            Entry::ModelAnswered(request, answer, kept) => {
+                self.model_answered(request, &answer, kept)
+            }
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
@@ -285,9 +291,9 @@ impl<'h, H: Host> Log<'h, H> {
 pub(super) enum Entry {
     /// A note ([`Log::note`]).
     Note(String),
-    /// How a route answered a model request of the caller's, by its number
-    /// ([`Log::model_answered`]).
-    ModelAnswered((Caller, u64), Answer),
+    /// How a route answered a model request of the caller's, by its number, and where the record
+    /// keeps it ([`Log::model_answered`]).
+    ModelAnswered((Caller, u64), Answer, Value),
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as its session says them:
     /// `{"kind": "sandbox_gpus", "sandbox": n, "gpus": [m, ...]}`, where `n` is its name within the
     /// run, and each `m` a GPU's model, as `nvidia-smi` names it. A sandbox whose `sandboxd` saw
