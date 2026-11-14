@@ -668,11 +668,12 @@ name, or `-` if its record has no ir.json yet. A directory of --runs that is not
 there yet is no runs, if it is the default one.
 
 With [controller] in the configuration, and no --runs, `ls` lists the
-controller's runs, a job yet to start its run as `building`, or as `unstarted`
-once it has ended without one, beside the copies in the default runs directory;
-and says first how long the controller has been up, its jobs, how full its disk
-is, and whether its boot failed, and last how many tasks this workspace is still
-sending it, if any: a run's job starts once its task is sent.";
+controller's runs, a job yet to start its run as `waiting` while it waits for a
+build slot, else as `building`, or as `unstarted` once it has ended without one,
+beside the copies in the default runs directory; and says first how long the
+controller has been up, its jobs, how full its disk is, and whether its boot
+failed, and last how many tasks this workspace is still sending it, if any: a
+run's job starts once its task is sent.";
 
 const CANCEL_NOTES: &str = "\
 Examples:
@@ -764,7 +765,11 @@ image() call that declares its image; once one has failed, no other starts but
 those started with it, and each that runs is waited for, and said if it fails.
 
 With [controller] in the configuration, `build` sends the task as `pumpkin run`
-does, follows the build's job on the controller, and prints the IR it printed.";
+does, follows the build's job on the controller, and prints the IR it printed.
+A job there, of `run` or `build`, builds once it takes one of the controller's
+build slots, one for every two of its CPUs, waiting, if each is taken, until one
+is free; and, once a prune has removed what images no job holds, refuses to
+build while more than 85% of the controller's volume is used.";
 
 const REAP_NOTES: &str = "\
 Examples:

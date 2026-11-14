@@ -43,6 +43,8 @@ pub(crate) enum Listed {
     /// A job on the controller that builds the run, which `pumpkin run` asked for at `asked`,
     /// since the Unix epoch.
     Building { asked: Option<Duration> },
+    /// A job on the controller that waits for a build slot, as [`Listed::Building`] says.
+    Waiting { asked: Option<Duration> },
     /// A job on the controller that has ended, whose run has no record in the controller's runs
     /// directory.
     Unstarted,
@@ -74,7 +76,7 @@ impl Listed {
     pub(crate) fn live(&self) -> bool {
         match self {
             Self::Run(run) => run.ending.is_none(),
-            Self::Building { .. } => true,
+            Self::Building { .. } | Self::Waiting { .. } => true,
             Self::Unstarted => false,
         }
     }
@@ -83,13 +85,14 @@ impl Listed {
     pub(crate) fn ended(&self) -> bool {
         match self {
             Self::Run(run) => !matches!(run.ending, None | Some(Ending::Lost)),
-            Self::Building { .. } | Self::Unstarted => false,
+            Self::Building { .. } | Self::Waiting { .. } | Self::Unstarted => false,
         }
     }
 
     /// The state that `ls` counts the run in.
     fn state(&self) -> State {
         match self {
+            Self::Waiting { .. } => State::Waiting,
             Self::Building { .. } => State::Building,
             Self::Unstarted => State::Unstarted,
             Self::Run(run) => match &run.ending {
@@ -108,6 +111,7 @@ impl Listed {
 /// A run's state, as `ls` names it, in the order in which its totals list them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum State {
+    Waiting,
     Building,
     Running,
     Finished,
@@ -120,6 +124,7 @@ enum State {
 impl State {
     fn name(self) -> &'static str {
         match self {
+            Self::Waiting => "waiting",
             Self::Building => "building",
             Self::Running => "running",
             Self::Finished => "finished",
@@ -265,7 +270,7 @@ fn line(id: &str, listed: &Listed, now: Duration, runs: Option<&str>) -> String 
     let since =
         |asked: &Option<Duration>| asked.map(|asked| column_span(now.saturating_sub(asked)));
     let run = match listed {
-        Listed::Building { asked } => {
+        Listed::Building { asked } | Listed::Waiting { asked } => {
             return column(state, since(asked).as_deref().unwrap_or("-"), "", "-", "-");
         }
         Listed::Unstarted => {

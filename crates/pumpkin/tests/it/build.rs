@@ -110,6 +110,10 @@ fn refusals() {
 
               With [controller] in the configuration, `build` sends the task as `pumpkin run`
               does, follows the build's job on the controller, and prints the IR it printed.
+              A job there, of `run` or `build`, builds once it takes one of the controller's
+              build slots, one for every two of its CPUs, waiting, if each is taken, until one
+              is free; and, once a prune has removed what images no job holds, refuses to
+              build while more than 85% of the controller's volume is used.
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
             lib/bench.star:78:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does

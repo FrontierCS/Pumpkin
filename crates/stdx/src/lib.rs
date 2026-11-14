@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub mod net;
 pub mod process;
 pub mod signal;
+pub mod slots;
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
 ///

@@ -1,4 +1,5 @@
-//! The engine, against a real Docker daemon. The tests that need Docker are ignored.
+//! The engine, against a real Docker daemon, but for its prunes' choice and its publish slots,
+//! which need none. The tests that need Docker are ignored.
 
 #![expect(
     clippy::unwrap_used,
@@ -11,10 +12,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::{fs, slice};
 
 use engine::{BuildContext, Built, ContextName, Engine, Recipe, Report};
 use expect_test::{Expect, expect};
@@ -24,6 +25,9 @@ use schema::sandbox::RelativePath;
 use stdx::process::Environment;
 use tempfile::TempDir;
 use test_support::{BUSYBOX, docker};
+
+mod prune;
+mod publish;
 
 /// The scratch of one test: a directory for its builds' contexts.
 struct Fixture {
@@ -280,6 +284,51 @@ fn builds() {
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
             a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
             an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:700c07c0f69ca70bceeae61d7f8c0fb3d3bc44e9e3f4d8a084cf9f706de50dc9` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what Docker reports"#]],
+    );
+}
+
+// The engine lists an image that a build made, with the size that `docker image inspect` gives
+// it and the tag of its build's inputs, and once it is removed, lists it no more.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn images() {
+    check(
+        "images",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            // A content of this test's own, so that no other test's build makes the same image.
+            put(&fixture.dir.path().join("context"), "file", "images", 0o644);
+            builds.build("Dockerfile");
+            let built = Image::try_from(builds.seen[0].clone()).unwrap();
+            let listed = || {
+                let images = engine().images().unwrap();
+                let mut images = images.into_iter();
+                images
+                    .find(|cached| cached.image == built)
+                    .map(|cached| (cached.size_bytes, cached.tags))
+            };
+            let inspect = ["image", "inspect", "--format", "{{.Size}}", built.as_str()];
+            let inspected = docker().args(inspect).output().unwrap();
+            let inspected = String::from_utf8(inspected.stdout).unwrap();
+            let inspected: u64 = inspected.trim().parse().unwrap();
+            let (size, tags) = listed().unwrap();
+            let tagged =
+                (tags.iter()).all(|tag| tag.starts_with(&format!("{}:", builds.repository)));
+            let mut lines = vec![
+                format!("listed with its size: {}", size == inspected),
+                format!(
+                    "listed with its build's tag alone: {}",
+                    tags.len() == 1 && tagged
+                ),
+            ];
+            engine().remove_images(slice::from_ref(&built)).unwrap();
+            lines.push(format!("listed once removed: {}", listed().is_some()));
+            lines
+        },
+        &expect![[r#"
+            listed with its size: true
+            listed with its build's tag alone: true
+            listed once removed: false"#]],
     );
 }
 

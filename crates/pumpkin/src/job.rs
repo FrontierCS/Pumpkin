@@ -1,34 +1,44 @@
 //! The controller's own side of the controller target, as `pumpkin controller --help` says: a
-//! job ([`job`]), which the client starts in a unit of its own, and the controller's boot
-//! ([`boot`]).
+//! job ([`job`]), which the client starts in a unit of its own, and begins with the prune
+//! ([`prune`]), then builds its task's images as its [`Admission`] admits them, and the
+//! controller's boot ([`boot`]).
 //!
 //! What they read and write lies below the controller user's home: the trees the client sent,
 //! `trees/<repo>/<id>/`; each run's job in `jobs/<id>/`, and each build's in `builds/<id>/`,
 //! with its configuration, `pumpkin.toml`, which holds no secret, and its unit's standard error
 //! and output, `log` and `out`; the one workspace, `.pumpkin/` ([`crate::workspace`]), that
 //! every tree's `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs'
-//! records in its runs directory ([`runs`]); and
+//! records in its runs directory ([`runs`]) and the build slots ([`Workspace::slots`]); and
 //! `current-pumpkin`, the `pumpkin` that the last job ran. What the client sent with a job
 //! ([`SENT_CONFIG`], [`SENT_MODAL`] and the upstreams' key files) is in the job's directory
 //! below `$XDG_RUNTIME_DIR/pumpkin/` ([`jobs`]), a tmpfs that the job's unit removes as it
-//! ends, so a job that still runs is one whose directory is there.
+//! ends, so a job that still runs is one whose directory is there, as is what images the job
+//! holds ([`HELD`]), so what a job holds goes with it, however it ends.
 
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::net::Ipv4Addr;
-use std::os::unix::fs::symlink;
+use std::num::NonZeroUsize;
+use std::os::unix::fs::{OpenOptionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
-use std::{fs, io};
+use std::time::{Duration, Instant};
+use std::{fs, io, thread};
 
 use aws::{Bound, Cli};
+use engine::Engine;
+use engine::prune::{Disk, HIGH_PERCENT, Held, REFUSED_PERCENT};
 use provider::RunTag;
 use runtime::Record;
+use schema::ir::Image;
 use serde::Deserialize;
 use stdx::Context as _;
 use stdx::process::Environment;
 
 use crate::controller::bounded;
-use crate::{cli, say, workspace};
+use crate::workspace::{self, Workspace};
+use crate::{cli, say, star};
 
 /// The directory of the runs' jobs, below the home.
 pub(crate) const JOBS: &str = "jobs";
@@ -66,6 +76,30 @@ pub(crate) const SENT_CONFIG: &str = "config.toml";
 /// The copy of the client's Modal configuration file, which the job's Modal providers read.
 pub(crate) const SENT_MODAL: &str = "modal.toml";
 
+/// The file, beside what the client sent, of what images the job holds, a line each, by its tag
+/// or its ID, which no prune removes while the job runs ([`Admission`]).
+const HELD: &str = "held";
+
+/// The file, beside what the client sent, that is there while the job holds a build slot, so
+/// may build an image that no tag names yet, which no prune then removes ([`Slot`]).
+const BUILDING: &str = "building";
+
+/// The file, beside what the client sent, that is there while the job waits for a build slot
+/// ([`take_slot`]), so `ls` lists it as waiting.
+pub(crate) const WAITING: &str = "waiting";
+
+/// How long a job's tree is kept after its start.
+// A run's record names its entry in its tree, to run it again, and a tree is mostly links to
+// the files of the one before it that are unchanged.
+const KEPT: Duration = Duration::from_hours(14 * 24);
+
+/// A path on the controller's one volume, which holds the engine's images and build cache, the
+/// trees and the records, as `deploy/aws` makes it.
+const VOLUME: &str = "/";
+
+/// How long `df` may take to say how much of the volume is used.
+const DF_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The instance metadata service, as its version 2, `IMDSv2`, serves it.
 const IMDS: &str = "http://169.254.169.254/latest";
 
@@ -74,13 +108,14 @@ const IMDS: &str = "http://169.254.169.254/latest";
 const IMDS_SECONDS: u64 = 10;
 
 /// Runs the job that `job` asks for: points [`CURRENT`] at this `pumpkin`, writes the job's
-/// configuration ([`assemble`]), then runs its command with it, a run to its end; returns the
-/// exit status of its command.
+/// configuration ([`assemble`]), prunes, builds its task's images ([`build_first`]), then runs
+/// its command with it, a run to its end, which finds each image by its tag; returns the exit
+/// status of its command.
 ///
 /// # Errors
 ///
-/// Fails if the job's directory, its configuration or [`CURRENT`] can't be made, or its command
-/// fails before it starts.
+/// Fails if the job's directory, its configuration or [`CURRENT`] can't be made, its task's
+/// images can't be built, or its command fails before it starts.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
@@ -92,9 +127,9 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let jobs = jobs()?;
     let sent = jobs.join(id.as_str());
     point_current(&home, &id)?;
-    let kind = match &command {
-        cli::JobCommand::Run(_) => JOBS,
-        cli::JobCommand::Build(_) => BUILDS,
+    let (kind, entry, args) = match &command {
+        cli::JobCommand::Run(run) => (JOBS, &run.entry, &run.args.0),
+        cli::JobCommand::Build(build) => (BUILDS, &build.entry, &build.args.0),
     };
     let dir = home.join(kind).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
@@ -111,6 +146,11 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             path.display()
         ));
     };
+    // Before the build, so that it has room.
+    if let Err(error) = prune(&home, &path, &jobs) {
+        say(format_args!("the prune at the job's start failed: {error}"));
+    }
+    build_first(&id, &home, &path, &jobs, entry, args)?;
     let exit = match command {
         cli::JobCommand::Run(run) => {
             let run = cli::Run {
@@ -146,6 +186,11 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
 ///
 /// Fails if the reap can't begin, as without a runs directory.
 pub(crate) fn boot() -> Result<ExitCode, String> {
+    // No prune, which each job's start makes: a client may start a job as soon as SSM sees the
+    // controller, before the boot is done, and the boot, a unit of the system's, can't see that
+    // it runs, as systemd names the user's runtime directory, which holds each job's directory,
+    // to the user's own units alone. A prune here would remove the images that the job has
+    // built, which no IR that the boot reads names yet.
     let reap = cli::Reap {
         runs: None,
         modal_config: None,
@@ -207,6 +252,48 @@ fn jobs() -> Result<PathBuf, String> {
         );
     };
     Ok(Path::new(&runtime).join("pumpkin"))
+}
+
+/// What the jobs that run hold, of the directories of every job in `jobs`, and their runs'
+/// records in `runs`: the images that the IR of each run that has started names, whose
+/// record has its run log, which a run begins only once it has published every image it runs;
+/// each image or tag in a job's [`HELD`]; and whether one is [`BUILDING`]. A job that runs is
+/// one whose directory is there, as a unit's end removes its directory.
+fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
+    let mut held = Held::default();
+    for id in ids(jobs)? {
+        let job = jobs.join(&id);
+        // Gone, if the job has ended since it was listed.
+        let named = job.join(HELD);
+        match fs::read_to_string(&named) {
+            Ok(named) => {
+                for line in named.lines() {
+                    match Image::try_from(line.to_owned()) {
+                        Ok(image) => held.images.insert(image),
+                        Err(_) => held.tags.insert(line.to_owned()),
+                    };
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", named.display())),
+        }
+        let building = job.join(BUILDING);
+        held.building |= building.try_exists().context(building.display())?;
+        let record = runs.join(&id);
+        let log = record.join("log.jsonl");
+        if log.try_exists().context(log.display())? {
+            held.images.extend(images(&record.join("ir.json"))?);
+        }
+    }
+    Ok(held)
+}
+
+/// The directory of every job's directory in tmpfs, `jobs`, opened to be locked: a prune
+/// locks it while it reads what the jobs hold and removes what they don't ([`collect`]), and a
+/// job shares the lock while it adds to what it holds ([`Admission`]), so that no image a job
+/// has held before it looks it up is removed while the job runs.
+fn open_jobs(jobs: &Path) -> Result<File, String> {
+    File::open(jobs).context(jobs.display())
 }
 
 /// Points [`CURRENT`] in `home` at this `pumpkin`, which job `id` runs.
@@ -407,4 +494,360 @@ fn curl(args: &[&str]) -> Result<String, String> {
         format!("{error}: expected the instance metadata service to answer, as on an EC2 instance")
     })?;
     Ok(String::from_utf8_lossy(&printed).trim().to_owned())
+}
+
+/// The ids below `dir`, each a job's or a tree's, by name, which sort as their starts do; none
+/// if `dir` isn't there.
+fn ids(dir: &Path) -> Result<Vec<String>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", dir.display())),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let name = entry.context(dir.display())?.file_name();
+        // A tree's directory holds the shared `.pumpkin` and the `latest` link beside them.
+        if let Some(name) = name
+            .to_str()
+            .filter(|name| name.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            ids.push(name.to_owned());
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+/// Prunes what the jobs keep on the controller's volume: removes each tree in `home` older than
+/// [`KEPT`], and the directory of each run's job as old whose run has no record, which `ls`
+/// lists until then; then, once the volume is [full](Disk::full), the images and the build cache
+/// of the engine of the configuration at `config` ([`collect`]), sparing what the jobs in `jobs`
+/// hold.
+fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
+    let cutoff = crate::unix_now().saturating_sub(KEPT);
+    let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
+    for repo in fs::read_dir(home.join(TREES)).into_iter().flatten() {
+        let repo = repo.context("listing the trees failed")?.path();
+        for id in ids(&repo)?.into_iter().filter(old) {
+            let tree = repo.join(id);
+            fs::remove_dir_all(&tree).context(tree.display())?;
+        }
+    }
+    let runs = PathBuf::from(crate::default_runs()?);
+    for id in ids(&home.join(JOBS))?.into_iter().filter(old) {
+        // A run's record names its job's configuration, to run it again.
+        let record = runs.join(&id);
+        if !record.try_exists().context(record.display())? {
+            let job = home.join(JOBS).join(id);
+            fs::remove_dir_all(&job).context(job.display())?;
+        }
+    }
+    // The engine is reached only once there may be something to remove.
+    if !disk(VOLUME)?.full() {
+        return Ok(());
+    }
+    collect(home, &engine(config)?, jobs)
+}
+
+/// The Docker engine that the configuration at `config` names, as a job reaches it, for its
+/// follower ([`crate::Reader`]).
+fn engine(config: &Path) -> Result<Engine, String> {
+    crate::configured_engine(config, crate::Reader::Follower)
+}
+
+/// Removes the images of `engine` that `engine::prune::evicted` picks, each last used by the
+/// newest job whose IR names it ([`last_used`]), sparing what the jobs that run hold
+/// ([`held`]), as each image is once picked, then prunes the build cache down to the same mark,
+/// all while the jobs' directory is locked ([`open_jobs`]), and only if the volume is
+/// [full](Disk::full) once it is, so a prune that waited for another's lock removes only what
+/// that one left.
+fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
+    let runs = PathBuf::from(crate::default_runs()?);
+    let last_used = last_used(home, &runs)?;
+    // Before the lock, which the jobs' builds wait for: an image made since is in no list, and
+    // one held since is in what is read under it.
+    let images = engine.images()?;
+    let locked = open_jobs(jobs)?;
+    locked.lock().context(jobs_named(jobs))?;
+    let disk = disk(VOLUME)?;
+    if !disk.full() {
+        return Ok(());
+    }
+    let held = held(jobs, &runs)?;
+    let last_used = |image: &Image| last_used.get(image).cloned();
+    let picked = engine::prune::evicted(disk, images, last_used, &held);
+    // Picked by tags listed before the lock: an image may have been tagged since, as a build
+    // that ended meanwhile tags what it built, so each is looked at again, now that nothing
+    // that a job holds can change, and the pick is made again of what they are now.
+    let evicted = engine::prune::evicted(disk, engine.inspected(&picked)?, last_used, &held);
+    engine.remove_images(&evicted)?;
+    say(format_args!(
+        "the volume is more than {HIGH_PERCENT}% used: the prune removed {}, least recently used \
+         first",
+        crate::counted(evicted.len(), "image")
+    ));
+    engine.prune_build_cache(disk.low_free_bytes())
+}
+
+/// How the jobs' directory, `jobs`, is named in a failure to lock it.
+fn jobs_named(jobs: &Path) -> String {
+    format!("locking {} failed", jobs.display())
+}
+
+/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`, on the
+/// engine of the configuration at `config`, each build as the job's [`Admission`] admits it, so
+/// that the job's command finds each by its tag; then, if it built one, lets go of the build
+/// slot that the admission took, and prunes. What the job holds, it holds until it ends.
+///
+/// # Errors
+///
+/// As `star::checked` and the engine's reach fail; and gives the task's problems, or each build
+/// that failed, said.
+fn build_first(
+    id: &RunTag,
+    home: &Path,
+    config: &Path,
+    jobs: &Path,
+    entry: &star::Entry,
+    args: &lang::Args,
+) -> Result<(), String> {
+    let mut admission = Admission {
+        id,
+        home,
+        jobs,
+        slots: Workspace::find()?.slots(),
+        slot: None,
+    };
+    let built = star::checked(entry, args, |task| {
+        let engine = engine(config)?;
+        let tags = match task.build(&engine, &mut admission) {
+            Ok((_, tags)) => tags,
+            Err(problems) => return Ok(Err(problems)),
+        };
+        // By their IDs too, until the job ends, as its run publishes them, however long it
+        // waits to: their tags are held already, but another build of the same inputs may
+        // move a tag to an image of its own.
+        admission.held(tags.keys().map(Image::as_str))?;
+        // A job that built took a slot, which goes before the prune, as a job that waits for it
+        // needn't wait for that.
+        if admission.slot.take().is_some() {
+            admission.prune(&engine);
+        }
+        Ok(Ok(()))
+    })?;
+    built.map_err(|problems| crate::task_problems(entry, &problems))
+}
+
+/// What admits the builds of job `id` ([`star::Admission`]): it holds each image that they look
+/// up, by its tag, in the job's [`HELD`] in its directory in `jobs`, sharing their lock
+/// ([`open_jobs`]), and once its builds have ended, each image they found or built, by its ID;
+/// takes one of the controller's build slots ([`take_slot`]) as the first build starts, and
+/// keeps it until its holder lets go; and prunes ([`collect`]) as each build starts
+/// and as each ends while others run, then refuses to start one while more than
+/// [`REFUSED_PERCENT`] of the volume is used ([`Disk::refused`]).
+struct Admission<'j> {
+    id: &'j RunTag,
+    home: &'j Path,
+    jobs: &'j Path,
+    /// The directory of the build slots.
+    slots: PathBuf,
+    slot: Option<Slot>,
+}
+
+impl Admission<'_> {
+    /// The job's directory of what the client sent.
+    fn sent(&self) -> PathBuf {
+        self.jobs.join(self.id.as_str())
+    }
+
+    /// Prunes the images and the build cache of `engine`, once the volume is full, saying why
+    /// the prune failed, if it did, as the build goes on.
+    fn prune(&self, engine: &Engine) {
+        let pruned = disk(VOLUME).and_then(|disk| {
+            if disk.full() {
+                collect(self.home, engine, self.jobs)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = pruned {
+            say(format_args!("the prune failed: {error}"));
+        }
+    }
+
+    /// Holds each of `named`, an image's tag or ID, in the job's [`HELD`], sharing the jobs'
+    /// directory's lock.
+    fn held<'n>(&self, named: impl Iterator<Item = &'n str>) -> Result<(), String> {
+        let jobs = open_jobs(self.jobs)?;
+        jobs.lock_shared().context(jobs_named(self.jobs))?;
+        let path = self.sent().join(HELD);
+        // As private as what the client sent beside it.
+        let held = (OpenOptions::new().append(true).create(true))
+            .mode(0o600)
+            .open(&path);
+        let mut lines = String::new();
+        for named in named {
+            lines.push_str(named);
+            lines.push('\n');
+        }
+        let written = held.and_then(|mut held| held.write_all(lines.as_bytes()));
+        written.context(path.display())
+    }
+}
+
+impl engine::Admit for Admission<'_> {
+    fn hold(&mut self, tag: &str) -> Result<(), String> {
+        self.held([tag].into_iter())
+    }
+
+    fn admit(&mut self, engine: &Engine) -> Result<(), String> {
+        if self.slot.is_none() {
+            self.slot = Some(take_slot(&self.slots, self.id, &self.sent())?);
+        }
+        self.prune(engine);
+        let disk = disk(VOLUME)?;
+        if disk.refused() {
+            let used_bytes = disk.size_bytes.saturating_sub(disk.free_bytes);
+            let used = (used_bytes.saturating_mul(100))
+                .checked_div(disk.size_bytes)
+                .unwrap_or(100);
+            return Err(format!(
+                "the controller's volume is {used}% used, past the {REFUSED_PERCENT}% at which a \
+                 build is refused, though the prune has removed what no job holds: free space \
+                 there, or let the jobs that run end, then run the task again"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl star::Admission for Admission<'_> {
+    fn ended(&mut self, engine: &Engine) {
+        self.prune(engine);
+    }
+}
+
+/// A build slot that a job holds, until it is dropped, with the job's [`BUILDING`], which goes
+/// with it.
+struct Slot {
+    _locked: File,
+    building: PathBuf,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // One left by a failure here goes with the job's directory as the job ends; until then,
+        // it only spares untagged images, which no job may need.
+        let _ = fs::remove_file(&self.building);
+    }
+}
+
+/// One of the controller's build slots, files of `dir`, as many as [`slots_count`] gives, taken
+/// as `stdx::slots::take` says, named by job `id`: saying, while each is held, which jobs hold
+/// them, with [`WAITING`] beside `sent`, then how long it waited; then with [`BUILDING`] beside
+/// `sent`.
+fn take_slot(dir: &Path, id: &RunTag, sent: &Path) -> Result<Slot, String> {
+    let count = slots_count();
+    let marked = sent.join(WAITING);
+    let mut waiting = None;
+    let slot = stdx::slots::take(dir, count, id.as_str(), |holders| {
+        waiting = Some(Instant::now());
+        File::create(&marked).context(marked.display())?;
+        say(format_args!(
+            "waiting for a build slot: all {count} held, by jobs {}",
+            holders.join(", ")
+        ));
+        Ok(())
+    })?;
+    if let Some(since) = waiting {
+        fs::remove_file(&marked).context(marked.display())?;
+        let waited = since.elapsed().as_secs();
+        say(format_args!("took a build slot after waiting {waited} s"));
+    }
+    let building = sent.join(BUILDING);
+    File::create(&building).context(building.display())?;
+    Ok(Slot {
+        _locked: slot,
+        building,
+    })
+}
+
+/// How many jobs build at once ([`take_slot`]): one for every two CPUs that this process may run
+/// on, and one at least.
+// Not one for each: a build runs its recipe's independent stages at once, and a step may itself
+// use every CPU; and every build's cache takes from the one volume.
+fn slots_count() -> NonZeroUsize {
+    let cpus = thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    NonZeroUsize::new(cpus / 2).unwrap_or(NonZeroUsize::MIN)
+}
+
+/// The id of the newest job whose IR names each image that one names, a run's in its record's
+/// `ir.json` in `runs` and a build's in its `out` in `home`: ids sort as the jobs' starts do.
+fn last_used(home: &Path, runs: &Path) -> Result<BTreeMap<Image, String>, String> {
+    let mut irs = Vec::new();
+    for id in ids(&home.join(JOBS))? {
+        let ir = runs.join(&id).join("ir.json");
+        irs.push((id, ir));
+    }
+    for id in ids(&home.join(BUILDS))? {
+        let out = home.join(BUILDS).join(&id).join("out");
+        irs.push((id, out));
+    }
+    irs.sort();
+    let mut last_used = BTreeMap::new();
+    for (id, ir) in irs {
+        for image in images(&ir)? {
+            last_used.insert(image, id.clone());
+        }
+    }
+    Ok(last_used)
+}
+
+/// The disk that holds `path`, as `df` says, in bytes: its size, and what an ordinary user may
+/// still write there.
+fn disk(path: &str) -> Result<Disk, String> {
+    // Only `PATH`, so that no locale changes what it prints.
+    let mut df = stdx::process::command("df", Environment::Only(&["PATH"]));
+    df.args(["--block-size=1", "--output=size,avail", "--", path]);
+    let printed = bounded(&mut df, &format!("df {path}"), DF_TIMEOUT)?;
+    let printed = String::from_utf8_lossy(&printed);
+    // A line of headings, then the sizes.
+    let sizes = printed.lines().nth(1).unwrap_or_default();
+    let sizes: Vec<Option<u64>> = (sizes.split_whitespace())
+        .map(|size| size.parse().ok())
+        .collect();
+    let [Some(size_bytes), Some(free_bytes)] = sizes[..] else {
+        return Err(format!(
+            "`df {path}` printed `{}`: expected a line of headings, then the size and what is \
+             available, in bytes, as GNU `df` prints them",
+            printed.trim().escape_debug()
+        ));
+    };
+    Ok(Disk {
+        size_bytes,
+        free_bytes,
+    })
+}
+
+/// The images that the IR at `path` names, none if there is no IR there, as of a job that
+/// ended before its run or build did, or a build's `out` that is empty, as a failed build leaves
+/// it.
+fn images(path: &Path) -> Result<Vec<Image>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) if text.is_empty() => return Ok(Vec::new()),
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let ir: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{} isn't JSON: {error}", path.display()))?;
+    let roles = ir["roles"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let named = roles.iter().filter_map(|role| role["image"].as_str());
+    Ok(named
+        .filter_map(|image| Image::try_from(image.to_owned()).ok())
+        .collect())
 }

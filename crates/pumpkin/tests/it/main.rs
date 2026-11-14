@@ -1010,9 +1010,11 @@ const IMAGE: &str = r#"{"Os":"linux","Architecture":"amd64","Descriptor":{"media
 
 /// A stand-in `docker` in a scratch directory, for the `pumpkin run`s that [`run`](Self::run)
 /// makes: an engine whose one image is that of the task `stand-in`, ID all zeros, which lacks the
-/// task `lacking`'s, ID all ones, and fails to build the task `unbuilt`'s. It builds a recipe
-/// that holds [`BUILDS`] as the image of ID all twos, tagged as it is then asked; creates and
-/// lists no container; and leaves `docker.ran` once run. It holds the driver at each command that [`hold`](Self::hold) names, such as `create`, until
+/// task `lacking`'s, ID all ones, and fails to build the task `unbuilt`'s; others are those that
+/// the directory's `images` lists, by ID, size and tags. It builds a recipe that holds [`BUILDS`]
+/// as the image of ID all twos, tagged as it is then asked; creates and lists no container; notes
+/// each image removal and cache prune in `docker.pruned`; and leaves `docker.ran` once run. It
+/// holds the driver at each command that [`hold`](Self::hold) names, such as `create`, until
 /// [`release`](Self::release) or the driver's end; dropping it releases them all.
 struct StandIn<'a> {
     scratch: &'a Scratch,
@@ -1027,6 +1029,7 @@ impl<'a> StandIn<'a> {
     /// The stand-in for an engine of which `docker info` prints `info`, with the scratch
     /// directory's name as its ID ([`ledger`]), and `docker image inspect` prints `image` of its
     /// image.
+    #[expect(clippy::too_many_lines, reason = "most of it is the stand-in's script")]
     fn with(scratch: &'a Scratch, info: &str, image: &str) -> Self {
         let id = scratch.0.file_name().unwrap().to_str().unwrap();
         let info = info.replace(r#""MemTotal""#, &format!(r#""ID":"{id}","MemTotal""#));
@@ -1044,6 +1047,7 @@ shift
 name=$1
 case "$1 $2 $4" in
     "image inspect "*.Id*) name=lookup ;;
+    "image inspect "*.Size*) name=size ;;
 esac
 if [ -e "{dir}/hold-$name" ]; then
     echo $PPID > "{dir}/at-$name.tmp" && mv "{dir}/at-$name.tmp" "{dir}/at-$name"
@@ -1057,22 +1061,29 @@ case $1 in
     context) echo unix:///stand-in.sock ;;
     info) echo '{info}' ;;
     version) echo linux/amd64 ;;
-    # `image inspect --format <format> -- <image>`, which says it has no image that the engine
-    # lacks, or for the tag `pumpkin/lacking:<digest>`, the image that the engine lacks, `image
-    # inspect --format {{{{.Id}}}} -- <tag>`; and for the tag `pumpkin/unbuilt:<digest>`, no
-    # image, which a build then fails to make
-    image) case $name in
-        lookup) case $6 in
-            pumpkin/lacking:*) echo {absent} ;;
-            pumpkin/built:*) grep -qxF "$6" "{dir}/tagged" 2>/dev/null && echo {built} ||
-                {{ echo "Error: No such image: $6" >&2; exit 1; }} ;;
-            pumpkin/unbuilt:*) echo "Error: No such image: $6" >&2; exit 1 ;;
-            *) echo {digest} ;;
+    # `image ls --all --no-trunc --quiet`, `image inspect --format <format> -- <image>`, which
+    # says it has no image that the engine lacks, or for
+    # the tag `pumpkin/lacking:<digest>`, the image that the engine lacks, `image inspect --format
+    # {{{{.Id}}}} -- <tag>`; for the tag `pumpkin/unbuilt:<digest>`, no image, which a build
+    # then fails to make; and `image inspect --format {{{{.Size}}}} -- <image>`
+    image) case $2 in
+        ls) echo {digest}; cut --delimiter=' ' --fields=1 "{dir}/images" 2>/dev/null || true ;;
+        rm) echo "docker $*" >> "{dir}/docker.pruned" ;;
+        *) case $name in
+            lookup) case $6 in
+                pumpkin/lacking:*) echo {absent} ;;
+                pumpkin/built:*) grep --quiet --line-regexp --fixed-strings "$6" "{dir}/tagged" 2>/dev/null && echo {built} ||
+                    {{ echo "Error: No such image: $6" >&2; exit 1; }} ;;
+                pumpkin/unbuilt:*) echo "Error: No such image: $6" >&2; exit 1 ;;
+                *) echo {digest} ;;
+            esac ;;
+            size) sed --quiet "s/^$6 //p" "{dir}/images" 2>/dev/null | grep . || echo 0 ;;
+            *) if [ "$6" = {absent} ]; then echo "Error response from daemon: No such image: $6" >&2; exit 1; fi
+               echo '{image}' ;;
         esac ;;
-        *) if [ "$6" = {absent} ]; then echo "Error response from daemon: No such image: $6" >&2; exit 1; fi
-           echo '{image}' ;;
     esac ;;
     container) ;;
+    builder) echo "docker $*" >> "{dir}/docker.pruned" ;;
     # `build ... --file <recipe> --iidfile <file> -- <stage>`, which writes the image's ID there.
     build) for arg; do
         case $previous in

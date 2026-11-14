@@ -69,6 +69,12 @@ impl Workspace {
         self.0.join("tmp")
     }
 
+    /// The directory of the build slots, of which a controller's job takes one while it builds
+    /// (`crate::job`).
+    pub(crate) fn slots(&self) -> PathBuf {
+        self.0.join("slots")
+    }
+
     /// The directory of the connections that the commands share to a controller
     /// ([`crate::controller`]).
     pub(crate) fn controller(&self) -> PathBuf {

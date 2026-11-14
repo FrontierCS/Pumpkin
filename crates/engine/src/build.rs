@@ -189,6 +189,38 @@ pub enum Recipe {
     Text(String),
 }
 
+/// What [`Engine::start`] asks of its caller, to hold each image and admit each build.
+///
+/// It holds each image by the tag of its build's inputs before it looks the image up, so that a
+/// prune that spares what the caller holds spares it once found or built; and admits each build
+/// that finds no image before it starts.
+pub trait Admit {
+    /// Holds the image tagged `tag`, from now until the caller lets it go.
+    ///
+    /// # Errors
+    ///
+    /// Says why it can't be held, which fails the build.
+    fn hold(&mut self, tag: &str) -> Result<(), String>;
+
+    /// Admits a build on `engine`, waiting, if need be, for its turn.
+    ///
+    /// # Errors
+    ///
+    /// Says why the build is refused, which fails it.
+    fn admit(&mut self, engine: &Engine) -> Result<(), String>;
+}
+
+/// Holds nothing, and admits every build at once.
+impl Admit for () {
+    fn hold(&mut self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn admit(&mut self, _: &Engine) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl Engine {
     /// The image that `recipe` builds with `context`, given `given`, tagged `<repository>:<hex>`,
     /// as [`Engine::start`] starts its build, once that build has ended ([`finish`]).
@@ -203,32 +235,40 @@ impl Engine {
         given: &Given<&Built>,
         repository: &str,
     ) -> Result<Built, String> {
-        match self.start(context, recipe, given, repository)? {
+        match self.start(context, recipe, given, repository, &mut ())? {
             Started::Found(built) => Ok(built),
             Started::Building(building) => finish(&mut Vec::from([((), building)])).1,
         }
     }
 
     /// Starts the build of the image that `recipe`, once [`recipe::check`] passes it, builds with
-    /// `context` and `given`, tagged `<repository>:<hex>`, the digest of the build's inputs: the
-    /// engine's image under that tag, or a `docker build` of a stage of the context, to be tagged
-    /// once it has ended ([`finish`]).
+    /// `context` and `given`, tagged `<repository>:<hex>`, the digest of the build's inputs: once
+    /// `admit` holds the tag, the engine's image under it, or, once `admit` admits the build, a
+    /// `docker build` of a stage of the context, to be tagged once it has ended ([`finish`]).
     ///
     /// # Errors
     ///
-    /// Fails as [`recipe::check`] does, if `context` isn't as [`BuildContext`] says, if a
-    /// [`Recipe::File`] is no regular file of it, or if `docker` or the stage fails.
+    /// Fails as [`recipe::check`] and `admit` do, if `context` isn't as [`BuildContext`] says, if
+    /// a [`Recipe::File`] is no regular file of it, or if `docker` or the stage fails.
     pub fn start(
         &self,
         context: &BuildContext,
         recipe: &Recipe,
         given: &Given<&Built>,
         repository: &str,
+        admit: &mut dyn Admit,
     ) -> Result<Started, String> {
         // An image found by the tag was built from a stage whose inputs are those the context's
         // own files give now, so only a build needs a stage.
         let inputs = Inputs::checked(read_context(context)?, None, recipe, given)?;
         let tag = format!("{repository}:{}", inputs.digest());
+        // Before the look, so that a prune that would remove what it finds spares it.
+        admit.hold(&tag)?;
+        if let Some(built) = self.tagged(&tag)? {
+            return Ok(Started::Found(built));
+        }
+        admit.admit(self)?;
+        // Another build of the same inputs may have ended while this one waited its turn.
         if let Some(built) = self.tagged(&tag)? {
             return Ok(Started::Found(built));
         }

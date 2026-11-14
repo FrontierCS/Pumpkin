@@ -45,8 +45,9 @@ the IR, as a task repository's Rust factories do.
 Each crate depends only on crates above it, but `test-support`, which only tests use.
 **Architecture Invariant** callouts often name absences.
 
-**`crates/stdx`.** What `std` lacks and several crates share, such as `Context` for errors, and
-the signals a process notes rather than acts on (`signal`).
+**`crates/stdx`.** What `std` lacks and several crates share, such as `Context` for errors,
+slots that processes hold by a lock on a file, at most a count at once (`slots`), and the signals
+a process notes rather than acts on (`signal`).
 - **Architecture Invariant:** it knows nothing of Pumpkin: it depends on no Pumpkin crate.
 - **Architecture Invariant:** it holds the workspace's one `unsafe`, the `sigaction` that
   `signal::catch` makes: the workspace denies `unsafe_code`, and that function alone expects it.
@@ -93,16 +94,18 @@ a step would fetch, and writes the pins into it.
   it is `#![no_std]`, so it reads only the text it is given, and a harness and a provider share
   one check without either depending on the other.
 
-**`crates/engine`.** The operator's Docker engine, on which Pumpkin builds the images that sandboxes
-run, whichever provider runs them, and from which it publishes them: `Engine` reaches the engine of
-a named Docker context (`ContextName`), reports it (`Report`), and builds images, each tagged by its
-build's inputs, from a recipe (`Recipe`) that `recipe::check` passes and a context of directories
-(`BuildContext`) that it stages; it writes a recipe's fetch stage from what a resolver prints, run
-online in a container of the image that the recipe builds up to that step (`Engine::lock`). For the
-providers whose sandboxes pull what they run from a registry, it checks what `Platform` an image is
-for (`Engine::check_platform`), loads the image of a `sandboxd` (`Engine::load_sandboxd`) and
-pushes, with a `Login` that reaches that push alone (`Pusher::push`); and `confinement` confines a
-role's container wherever a provider's sandbox is one.
+**`crates/engine`.** The operator's Docker engine, on which Pumpkin builds the images that
+sandboxes run, whichever provider runs them, and from which it publishes them: `Engine` reaches
+the engine of a named Docker context (`ContextName`), reports it (`Report`), and builds images,
+each tagged by its build's inputs, from a recipe (`Recipe`) that `recipe::check` passes and a
+context of directories (`BuildContext`) that it stages, as whoever starts a build admits it
+(`Admit`); it writes a recipe's fetch stage from what a resolver prints, run online in a
+container of the image that the recipe builds up to that step (`Engine::lock`), and says which of
+its images a prune removes once its disk use passes a high mark (`prune`). For the providers whose
+sandboxes pull what they run from a registry, it checks what `Platform` an image is for
+(`Engine::check_platform`), loads the image of a `sandboxd` (`Engine::load_sandboxd`) and pushes,
+with a `Login` that reaches that push alone (`Pusher::push`); and `confinement` confines a role's
+container wherever a provider's sandbox is one.
 - **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
   `recipe`, `schema` and `stdx`, so a crate that only builds or publishes images depends on it,
   and on no provider.
@@ -381,6 +384,12 @@ controller (`controller`), over `ssh` through SSM, and copy each record that has
 - **Architecture Invariant:** a machine runs its roles either on its own engine or on other
   providers: a configuration that names a provider of kind `docker` names no other
   (`Providers::new`), so the class a role is placed in never turns on this machine's memory.
+- **Architecture Invariant:** no prune on a controller removes an image that a job that runs
+  holds, or that the IR of a run that has started names, nor, while a job builds, an untagged
+  one, as a build's image is until the build tags it: a job holds each image by its tag before
+  it looks it up, and by its ID once found or built, in its directory in tmpfs, which its unit
+  removes as it ends, sharing the lock of the jobs' directory, which a prune holds while it reads
+  what they hold, looks again at what it would remove, and removes what they don't hold.
 - **Architecture Invariant:** a client's keys reach its controller only on a connection's
   standard input, into the job's directory in tmpfs, which the job's unit removes as it ends, so
   no argument, no file on the controller's disk and no record holds one.

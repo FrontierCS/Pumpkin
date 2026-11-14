@@ -460,13 +460,15 @@ fn prepared<'e>(
     let engine = &*engine.insert(crate::engine(context, reader)?);
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
-    Ok(task.build(engine).map(|(workflow, tags)| Prepared {
-        workflow,
-        tags,
-        providers,
-        gateway,
-        servings,
-    }))
+    Ok(task
+        .build(engine, &mut ())
+        .map(|(workflow, tags)| Prepared {
+            workflow,
+            tags,
+            providers,
+            gateway,
+            servings,
+        }))
 }
 
 /// Waits until the run that `flags` name, in their runs directory or [`default_runs`], has
@@ -1058,7 +1060,7 @@ fn built(
 ) -> Result<(), String> {
     let built = star::checked(entry, args, |task| {
         let engine = configured_engine(&config_path(config)?, reader)?;
-        Ok(task.build(&engine))
+        Ok(task.build(&engine, &mut ()))
     })?;
     let (workflow, _) = built.map_err(|problems| task_problems(entry, &problems))?;
     let ir = runtime::ir_json(&workflow);
