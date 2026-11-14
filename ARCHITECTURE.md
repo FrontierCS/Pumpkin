@@ -197,7 +197,8 @@ depends on another's crate; and the IAM roles that providers' settings name (`Ro
 - **Architecture Invariant:** production code reaches AWS only through `Cli`, but for the login to
   ECR that an EC2 sandbox's entry makes with its instance's own `aws`; and every call `Cli` makes
   is in its region, with no variable of this process's environment but those that find `aws`'s
-  own configuration.
+  own configuration, as is the session that `ssh` opens through it (`Cli::ssh_proxy`,
+  `Cli::proxied`).
 
 **`providers/ec2`.** `ec2`, a sandbox as a container on an EC2 instance of its own: `Ec2`
 reaches the envelope the operator made on AWS, which its `Settings` name, reports it, and is the
@@ -364,7 +365,13 @@ its record names (`Reaching`); what a command says of an ending or a refusal end
 commands to run next (`next`). It reads the machine's configuration (`config`, TOML): the Docker
 context; the providers, each by name and kind, `docker`, `ec2` or `modal`; the gateway's address
 for each reach over a network; and the model upstreams that a workflow's model route may reach,
-of which it hands `Run` the one that serves each entry of a route (`Serving`).
+of which it hands `Run` the one that serves each entry of a route (`Serving`). A configuration
+that names the person's controller, `[controller]` (`Client`), names no Docker engine, provider
+or gateway, and `run`, `build`, and without `--runs` `wait`, `ls`, `cancel` and `reap`, go to that
+controller (`controller`), over `ssh` through SSM, and copy each record that has ended here;
+`controller job`, `controller boot`, `controller follow` and `controller cancel`, which
+`pumpkin --help` leaves out and `pumpkin controller --help` lists, are the controller's own side
+(`job`).
 - **Architecture Invariant:** only `style` runs the formatter, buildifier, and Pumpkin's interface
   holds none of its flags or forms: each file's text goes to it, and `style` reads what it gives
   back, so another formatter can take its place.
@@ -374,16 +381,26 @@ of which it hands `Run` the one that serves each entry of a route (`Serving`).
 - **Architecture Invariant:** a machine runs its roles either on its own engine or on other
   providers: a configuration that names a provider of kind `docker` names no other
   (`Providers::new`), so the class a role is placed in never turns on this machine's memory.
+- **Architecture Invariant:** a client's keys reach its controller only on a connection's
+  standard input, into the job's directory in tmpfs, which the job's unit removes as it ends, so
+  no argument, no file on the controller's disk and no record holds one.
 - **Architecture Invariant:** all that Pumpkin writes on the operator's machine is below the
   workspace's `.pumpkin` directory, the one that holds the `pumpkin` that runs (`Workspace`): the
-  runs' records, unless `--runs` names another directory; and a directory of each provider kind's
-  own, which it hands the provider as it connects (`Engine::connect`, `Ec2::connect`,
-  `Modal::connect`), as no provider writes on this machine but there. Outside it are only what it
-  reads, the machine's configuration and each tool's credentials, in `~/.aws`, `~/.modal.toml` and
-  Docker's configuration, with what those tools keep there of their own, as the AWS command line's
-  cache and BuildKit's token seed; the Docker engine's images; the files that `fmt` and `lock`
-  rewrite, which their command lines name; and the engine's ledger of CPUs (`cpus`), which every
-  run on the engine shares, whatever its workspace.
+  runs' records, unless `--runs` names another directory; what a command needs only while it
+  runs; the connections that its commands share to a controller; and a directory of each
+  provider kind's own, which it hands the provider as it connects
+  (`Engine::connect`, `Ec2::connect`, `Modal::connect`), as no provider writes on this machine
+  but there. The consumer entry builds there too, and on a controller every job's Pumpkin is built
+  in its user's one workspace. Outside it are only what it reads, the machine's configuration
+  and each tool's credentials, in `~/.aws`, `~/.modal.toml` and Docker's configuration, with what
+  those tools keep there of their own, as the AWS command line's cache and BuildKit's token
+  seed; the Docker engine's images; the files that `fmt` and `lock` rewrite, which their command
+  lines name; the engine's ledger of CPUs (`cpus`), which every run on the engine shares,
+  whatever its workspace; and, beside the configuration, in
+  `~/.config/pumpkin/ssh/`, the machine's key to its controllers, which the first command that
+  reaches one makes, and the host key that each controller showed first, which it pins
+  (`kept`): a credential that identifies the machine to its controller, so that a controller
+  enrols it once, whatever workspace reaches it.
 - **Architecture Invariant:** each `pumpkin` process adds 022 to its umask first (`main`), so
   nothing it makes, a run's record included, is writable by another user, whatever the
   operator's umask.
@@ -397,6 +414,27 @@ which runs cargo-mutants on the working tree's changes (`diff`), `cargo xtask re
 rewrites a package's snapshots, and `cargo xtask install-tools`, which installs the contributor
 tools that `tools` pins. The formatter is buildifier, pinned by its release's SHA-256, which `star`
 fetches once into the target directory. A check is a step of `ci`.
+
+**`deploy/pumpkin`.** The consumer entry, a POSIX shell script that a repository copies in as
+`./pumpkin`. It fetches the commit that the repository's `.pumpkinversion` names, and a
+checksum-pinned `rustup-init` for Linux on x86-64, installs the toolchain, then runs
+`cargo xtask install --root` and the `pumpkin` it installs, keeping a git bundle of the commit in
+the install, which the controller target sends, so a controller builds the same commit with no
+credentials of its own.
+- **Architecture Invariant:** it fetches and verifies, takes a lock on building, installs the
+  toolchain, runs `cargo xtask install` in a cleared environment, makes the bundle, moves it into
+  the install, and renames the install over any earlier one; building the binaries and laying out
+  `bin` stay in `xtask`, so a consumer builds what a checkout builds.
+
+**`deploy/aws/`.** The Terraform module that makes one person's Pumpkin on AWS, as its README
+says: the EC2 envelope that `ec2` relies on, the repositories that runs push to, Modal's pull
+role, the AMI that the sandboxes boot, and the controller, on Ubuntu, with its role, its
+security group, the SSM parameter of its jobs' settings, which `pumpkin controller job` reads,
+and the units that stop it when idle and reap at its boot. No crate depends on it; its outputs
+are the client's `[controller]` table and IAM policy, and settings of a machine's configuration.
+
+**`examples/`.** Tasks in Pumpkin's workflow language: `hello` needs no model, and `codex` takes
+one as `--arg model`. No crate depends on it, but `pumpkin`'s tests copy `hello`.
 
 ## Cross-cutting concerns
 

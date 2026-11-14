@@ -8,6 +8,7 @@
 //! below the root on disk, as no component on its way from the root may be a symbolic link
 //! ([`Root::reach`]).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
@@ -66,8 +67,10 @@ impl fmt::Display for Entry {
 
 /// The root of a task's repository, by its canonical path: the nearest directory, at or above
 /// its entry file's, that holds [`MARKER`] as anything but a directory. The marker is a regular
-/// file of comments alone, as this pumpkin reads nothing else there.
-struct Root(PathBuf);
+/// file of comments alone, as this pumpkin reads nothing else there. Beside it, each path below it
+/// that [`Root::reach`] has reached.
+// Reached on the one thread that evaluates the task, through `&self`, as a recipe's check is.
+struct Root(PathBuf, RefCell<BTreeSet<String>>);
 
 /// What a path below the root names.
 #[derive(Clone, Copy)]
@@ -141,7 +144,7 @@ impl Root {
             below.push(component);
             at = parent;
         }
-        let root = Self(at.to_owned());
+        let root = Self(at.to_owned(), RefCell::default());
         // A component that isn't UTF-8 is no label's, as the label's parse then says.
         let below: Vec<_> = below
             .iter()
@@ -203,6 +206,7 @@ impl Root {
                 ));
             }
         }
+        self.1.borrow_mut().insert(below.to_owned());
         Ok(path)
     }
 
@@ -388,6 +392,22 @@ fn comments_only(text: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The root of the task whose entry is `entry`, given `args`, and each path below it, of a file
+/// or a directory, that checking it, as [`check`] does, reaches: the files it evaluates, and its
+/// images' contexts and mounts, all that a build of it reads.
+///
+/// # Errors
+///
+/// As [`checked`] fails; and gives the task's problems, if it has any.
+pub(crate) fn reached(
+    entry: &Entry,
+    args: &Args,
+) -> Result<Result<(PathBuf, BTreeSet<String>), Problems>, String> {
+    checked(entry, args, |Task { root, .. }| {
+        Ok(Ok((root.0.clone(), root.1.borrow().clone())))
+    })
 }
 
 /// Checks the task whose entry is `entry`, given `args`, as `pumpkin check --help` says: once it

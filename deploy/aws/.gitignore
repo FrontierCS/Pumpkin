@@ -1,0 +1,4 @@
+# What `terraform init`, `plan` and `apply` leave here; each person's values stay on their machine.
+.terraform/
+*.tfplan
+*.tfvars

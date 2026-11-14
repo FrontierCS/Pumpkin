@@ -72,7 +72,8 @@ mod flags {
             /// Builds `pumpkin`, the static sandboxd and ec2-boot, and installs them side by side
             /// in `<root>/bin`, with the Modal provider's helper and its lock, where `pumpkin`
             /// finds that sandboxd by default, and that helper, and with the pinned buildifier,
-            /// which `pumpkin fmt` and `pumpkin check` run; prints each path.
+            /// which `pumpkin fmt` and `pumpkin check` run; prints each path. It runs on Linux
+            /// on x86-64 alone, the one platform buildifier is pinned for.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
@@ -478,8 +479,10 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
 /// Builds `pumpkin`, the static `sandboxd` and `ec2-boot`, and installs them, with the Modal
 /// provider's helper and its lock, and the pinned buildifier ([`star::buildifier`]), in
 /// `<root>/bin`, made if need be, replacing what is there: `root` made absolute, or this
-/// checkout's `.pumpkin`. Prints each one's path, and says if `<root>/bin` is not on `PATH`.
+/// checkout's `.pumpkin`. Prints each one's path, and, without a `root`, says if `<root>/bin` is
+/// not on `PATH`.
 fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
+    let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
     let bin = std::path::absolute(&bin)
@@ -517,7 +520,7 @@ fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
         println!("{}", to.display());
     }
     let path = env::var_os("PATH").unwrap_or_default();
-    if !env::split_paths(&path).any(|dir| dir == bin) {
+    if default_root && !env::split_paths(&path).any(|dir| dir == bin) {
         eprintln!(
             "xtask: {} is not on PATH: add it there to run `pumpkin` by its name",
             bin.display()

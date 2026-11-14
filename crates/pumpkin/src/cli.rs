@@ -3,15 +3,20 @@
 //! help and errors all read. `-h` or `--help` before `--` asks for the help of the command the
 //! line names, which `pumpkin help` also prints, as it does the topics, such as [`CONFIG`]; `-V`
 //! or `--version` before the command, for the build ([`runtime::BUILD`]). The commands that are
-//! rarely needed ([`RARE`]) are listed apart.
+//! rarely needed ([`RARE`]) are listed apart, and the controller's own side is listed nowhere.
 
 use std::ffi::OsString;
 use std::iter;
 use std::os::unix::ffi::OsStrExt as _;
+use std::path::PathBuf;
 
+use aws::Region;
 use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::error::ErrorKind;
-use clap::{Arg, ArgAction, ArgMatches, Args, CommandFactory as _, FromArgMatches, Parser};
+use clap::{
+    Arg, ArgAction, ArgMatches, Args, CommandFactory as _, FromArgMatches, Parser, Subcommand,
+};
+use provider::RunTag;
 use recipe::Stage;
 
 use crate::star::Entry;
@@ -22,9 +27,9 @@ use crate::star::Entry;
     name = "pumpkin",
     about = "\
 Run workflows: in each run, an agent works in a sandbox, and judges score what
-it submits. It keeps what it writes in the .pumpkin directory that it is in: the
-runs' records, but where --runs names another directory, and what its builds and
-providers keep.",
+it submits. It keeps what it writes in the .pumpkin directory that it is in,
+where a repository's ./pumpkin builds it: the runs' records, but where --runs
+names another directory, and what its builds and providers keep.",
     disable_help_flag = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -101,11 +106,62 @@ Remove what each run in --runs that has ended, or is lost, left, and print the
 id of each run that left something.")]
     #[command(after_help = REAP_NOTES)]
     Reap(Reap),
+    #[command(
+        hide = true,
+        about = "The controller's own side of the controller target"
+    )]
+    #[command(long_about = "\
+On the controller: `job` runs a job of the controller target, which `pumpkin
+run` and `pumpkin build` start there in a unit of its own; `boot` reaps what lost
+runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
+and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
+ending from its copy of the record.")]
+    #[command(after_help = CONTROLLER_NOTES)]
+    #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
+    #[command(subcommand_help_heading = "Actions")]
+    Controller {
+        #[command(subcommand)]
+        action: Action,
+    },
 }
 
 /// The commands that are rarely needed, which `pumpkin --help` lists after the others. Each is
-/// hidden from clap's list of commands.
+/// hidden from clap's list of commands, as the controller's side is from every list.
 const RARE: [&str; 2] = ["build", "reap"];
+
+/// The actions of `pumpkin controller`.
+#[derive(Subcommand)]
+enum Action {
+    #[command(about = "Run a job of the controller target")]
+    Job {
+        #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
+        #[arg(help = "The job's id, which its run takes.")]
+        id: RunTag,
+        #[arg(long, value_name = "region")]
+        #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
+        #[arg(help = "The controller's AWS region.")]
+        region: Region,
+        #[arg(long, value_name = "name")]
+        #[arg(value_parser = utf8(", as every SSM parameter's name is: name one that is"))]
+        #[arg(help = "The SSM parameter that holds the controller's settings.")]
+        parameter: String,
+        #[arg(last = true, required = true, value_name = "command")]
+        #[arg(help = "\
+`run` or `build` and their arguments, but `--config`, which the job
+writes.")]
+        command: Vec<OsString>,
+    },
+    #[command(about = "Reap what lost runs left, at the controller's boot")]
+    Boot,
+    #[command(about = "Cancel a run for a client, which says its ending")]
+    Cancel(Cancel),
+    #[command(about = "Follow a run for a client, saying its milestones until it ends")]
+    Follow {
+        #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
+        #[arg(help = "The run's id.")]
+        id: RunTag,
+    },
+}
 
 /// What a command line asks for.
 pub(crate) enum Command {
@@ -118,6 +174,14 @@ pub(crate) enum Command {
     Fmt(Fmt),
     Build(Build),
     Lock(Lock),
+    /// `pumpkin controller job`, a job on the controller.
+    Job(Job),
+    /// `pumpkin controller boot`, the controller's boot.
+    Boot,
+    /// `pumpkin controller follow`, a client's follow of a run.
+    Follow(RunTag),
+    /// `pumpkin controller cancel`, a client's cancel of a run.
+    CancelFor(Cancel),
     /// Help, or the version, for the standard output.
     Print(String),
 }
@@ -307,6 +371,8 @@ driver had given up on may still make a sandbox after `cancel` has
 ended, which `pumpkin reap` removes."
     )]
     pub(crate) force: bool,
+    #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
+    pub(crate) modal_config: Option<PathBuf>,
 }
 
 /// What `pumpkin reap` is asked for, as `pumpkin reap --help` says.
@@ -316,7 +382,15 @@ pub(crate) struct Reap {
 The directory of the runs to reap.
 Default: runs/ in the .pumpkin directory that this pumpkin is in")]
     pub(crate) runs: Option<String>,
+    #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
+    pub(crate) modal_config: Option<PathBuf>,
 }
+
+/// The help of `--modal-config` of `cancel` and `reap`, which the controller target alone gives
+/// them: a job's Modal configuration file goes with the job, and the client sends it again.
+const MODAL_CONFIG_HELP: &str = "\
+Modal's configuration file, read for each provider of kind modal in place of
+the one that the configuration of the run names.";
 
 /// What `pumpkin check` is asked for, as `pumpkin check --help` says.
 #[derive(Args)]
@@ -384,6 +458,20 @@ the lock rewrites it in place.")]
     pub(crate) args: TaskArgs,
     #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = BUILD_CONFIG)]
     pub(crate) config: Option<String>,
+}
+
+/// What `pumpkin controller job` is asked for, as `pumpkin controller --help` says.
+pub(crate) struct Job {
+    pub(crate) id: RunTag,
+    pub(crate) region: Region,
+    pub(crate) parameter: String,
+    pub(crate) command: JobCommand,
+}
+
+/// The command that a job runs, as `pumpkin` takes it on its own.
+pub(crate) enum JobCommand {
+    Run(Run),
+    Build(Build),
 }
 
 /// A run, as a command's `<run>` names it.
@@ -514,7 +602,14 @@ lost, with its sandboxes, which `pumpkin cancel` removes: its containers,
 labelled pumpkin.run=<id>, its EC2 instances, tagged pumpkin:run=<id>, and its
 Modal sandboxes, tagged pumpkin-run=<id>, which end at the run's hard end all
 the same; and its socket directories in the record's sockets/, which `cancel`
-removes too.";
+removes too.
+
+On a machine whose configuration names [controller], as `pumpkin help config`
+says, `run` takes neither --runs nor --sandboxd: it says the run's id at once,
+starts the controller if it is stopped, sends there the files of the task's
+repository that git lists and the task reaches, and starts the run's job, which
+builds the task, then runs it there, with the id; it then returns, or with
+--wait follows the job.";
 
 const WAIT_NOTES: &str = "\
 Examples:
@@ -544,7 +639,12 @@ a `pumpkin:` line that says why.
 If the final judge returned no result, its standard error is shown first, or,
 if it is long, named.
 
-Ending `pumpkin wait` doesn't stop the run: `pumpkin cancel` does.";
+Ending `pumpkin wait` doesn't stop the run: `pumpkin cancel` does.
+
+With [controller] in the configuration, and no --runs, `wait` follows the run's
+job on the controller, its build included, then the run, and copies its record
+into the default runs directory once it has ended; a run whose copy there has
+ended needs no controller.";
 
 const LS_NOTES: &str = "\
 Examples:
@@ -565,7 +665,14 @@ state, that hasn't ended; a phase past its bound is a bug, which `ls` says. An
 ended run's state is `finished`, `failed`, `interrupted` (by a signal), or
 `lost`, if its driver ended without an outcome.json. Its task is its workflow's
 name, or `-` if its record has no ir.json yet. A directory of --runs that is not
-there yet is no runs, if it is the default one.";
+there yet is no runs, if it is the default one.
+
+With [controller] in the configuration, and no --runs, `ls` lists the
+controller's runs, a job yet to start its run as `building`, or as `unstarted`
+once it has ended without one, beside the copies in the default runs directory;
+and says first how long the controller has been up, its jobs, how full its disk
+is, and whether its boot failed, and last how many tasks this workspace is still
+sending it, if any: a run's job starts once its task is sent.";
 
 const CANCEL_NOTES: &str = "\
 Examples:
@@ -585,7 +692,12 @@ the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
 signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
 provider that it ran on, Docker, EC2 or Modal, as `pumpkin reap --help` says,
 and prints its outcome.json, then says how the run ended, as `pumpkin wait`
-does.";
+does.
+
+With [controller] in the configuration, and no --runs, `cancel` stops the job
+of a run that is yet to start on the controller, and cancels one that has
+started there, sending this machine's Modal configuration file for the reap,
+then copies its record here, as `pumpkin wait` does.";
 
 const LOCK_ABOUT: &str = "\
 Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
@@ -649,7 +761,10 @@ is another machine's, each once those it is built on are built. All that each
 build's `docker build` wrote is said at once when it ends, as `make
 --output-sync` says a job's, then that it ended. A failed build is said at the
 image() call that declares its image; once one has failed, no other starts but
-those started with it, and each that runs is waited for, and said if it fails.";
+those started with it, and each that runs is waited for, and said if it fails.
+
+With [controller] in the configuration, `build` sends the task as `pumpkin run`
+does, follows the build's job on the controller, and prints the IR it printed.";
 
 const REAP_NOTES: &str = "\
 Examples:
@@ -679,7 +794,21 @@ live run to its driver: `pumpkin cancel` stops one.
 Each sandbox that `reap` removes it notes in the record's reaps.jsonl, with the
 time; and each that the record holds undeleted, but that its provider no longer
 lists, as when the configuration now points to another region or profile, it
-says, and notes there as gone.";
+says, and notes there as gone.
+
+With [controller] in the configuration, and no --runs, `reap` reaps the
+controller's runs there, as the controller does at each boot, but with this
+machine's Modal configuration file, which the boot lacks.";
+
+const CONTROLLER_NOTES: &str = "\
+Examples:
+  pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 --parameter /pumpkin-alice/settings -- run tasks/bench/task.star --arg model=model-a
+  pumpkin controller boot
+
+Exit status:
+  0  The job's command, or the boot, has ended as it should.
+  1  An error, which a `pumpkin:` line on the standard error says.
+  2  A usage error.";
 
 /// `pumpkin help config`, the machine's configuration.
 const CONFIG: &str = "\
@@ -687,7 +816,9 @@ pumpkin.toml, the machine's configuration, which every `pumpkin run` and
 `pumpkin build` reads: the file that --config names,
 $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
 Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
-and any other key is refused.
+and any other key is refused. [controller] takes the place of [docker],
+[providers.<name>.<kind>] and [gateway] on a machine whose runs go to the
+person's controller.
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -731,6 +862,21 @@ Example, of a machine whose runs go to EC2 and Modal:
   url = \"https://gateway.example/v1\"
   key_file = \"gateway-key\"
   models = [{ name = \"model-a\", upstream_name = \"provider/model-a\" }]
+
+Example, of a machine whose runs go to the person's controller, and Modal:
+  [controller]
+  name = \"alice\"
+  region = \"us-west-1\"
+
+  [controller.modal]
+  profile = \"pumpkin\"
+
+  [controller.modal.classes.a100]
+  gpu = \"A100-80GB\"
+  gpu_model = \"NVIDIA A100-SXM4-80GB\"
+  cpu_millis = 8000
+  memory_bytes = 68719476736
+  startup_seconds = 1800
 
 [docker], the machine's Docker engine:
   context       The context that reaches it, as `docker context ls` lists it.
@@ -816,6 +962,27 @@ settings:
 
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
+
+[controller], the person's controller, which deploy/aws makes, and to which
+`run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
+Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
+and Modal's configuration file, into a directory of its own in the
+controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
+Session Manager plugin, and `ssh`, `rsync` 3.2.3 or later, `tar`, `ssh-keygen`
+and `git`, from PATH; the controller's settings are the module's, but for
+[controller.modal]. This machine's key to it, which the first command makes
+and enrols through EC2 Instance Connect, and the host key it pins, are in
+$HOME/.config/pumpkin/ssh/.
+  name          The `name` that deploy/aws was applied with.
+  region        The region it was applied in.
+
+[controller.modal], the Modal provider that the controller's runs may place
+roles on, if any: the settings of a provider of kind modal, but `images`, which
+the module's settings give, and `dials_from`, which each run sets:
+  profile       As modal's.
+  config        Modal's configuration file, below this file's directory unless
+                absolute; absent, ~/.modal.toml, if it is there.
+  classes       As modal's.
 ";
 
 /// A usage error, as clap words it, and the command that prints the help of the command it was
@@ -877,8 +1044,64 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
         Parsed::Fmt(fmt) => Command::Fmt(fmt),
         Parsed::Build(build) => Command::Build(build),
         Parsed::Lock(lock) => Command::Lock(lock),
+        Parsed::Controller {
+            action: Action::Boot,
+        } => Command::Boot,
+        Parsed::Controller {
+            action: Action::Follow { id },
+        } => Command::Follow(id),
+        Parsed::Controller {
+            action: Action::Cancel(cancel),
+        } => Command::CancelFor(cancel),
+        Parsed::Controller {
+            action:
+                Action::Job {
+                    id,
+                    region,
+                    parameter,
+                    command,
+                },
+        } => Command::Job(Job {
+            id,
+            region,
+            parameter,
+            command: job_command(&mut cli, command).map_err(refusal)?,
+        }),
         Parsed::Help { topic } => return help_of(&mut cli, topic.as_deref()).map_err(refusal),
     })
+}
+
+/// The command of a job, `command`, as `pumpkin` takes it on its own, if it is `run` or `build`.
+///
+/// # Errors
+///
+/// Fails with the usage problem of `command`, or that it is neither `run` nor `build`.
+fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCommand, clap::Error> {
+    match parse(command).map_err(|refusal| refusal.error)? {
+        Command::Run(run) => Ok(JobCommand::Run(run)),
+        Command::Build(build) => Ok(JobCommand::Build(build)),
+        Command::Wait(_)
+        | Command::Ls(_)
+        | Command::Cancel(_)
+        | Command::Reap(_)
+        | Command::Check(_)
+        | Command::Fmt(_)
+        | Command::Lock(_)
+        | Command::Job(_)
+        | Command::Boot
+        | Command::Follow(_)
+        | Command::CancelFor(_)
+        | Command::Print(_) => {
+            let problem = "the job's command is neither `run` nor `build`: give one";
+            let controller = cli.find_subcommand_mut("controller");
+            Err(
+                match controller.and_then(|it| it.find_subcommand_mut("job")) {
+                    Some(job) => job.error(ErrorKind::InvalidValue, problem),
+                    None => cli.error(ErrorKind::InvalidValue, problem),
+                },
+            )
+        }
+    }
 }
 
 /// `pumpkin help <topic>`: a command's help, a topic, or `pumpkin --help` without one.
@@ -907,7 +1130,7 @@ fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap
     })
 }
 
-/// Whether a help lists `command`: those that clap's list doesn't hide, and the rare ones.
+/// Whether a help lists `command`: all but the controller's side.
 fn listed(command: &clap::Command) -> bool {
     !command.is_hide_set() || RARE.contains(&command.get_name())
 }

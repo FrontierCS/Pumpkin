@@ -1,0 +1,87 @@
+# Pumpkin's settings as TOML lines of dotted keys, which hold under any table's header. TOML's
+# basic strings and arrays take JSON's, so `jsonencode` writes each value.
+locals {
+  modal_images   = "images = { region = ${jsonencode(var.region)}, repository = ${jsonencode(aws_ecr_repository.images["roles"].name)}, role_arn = ${jsonencode(aws_iam_role.modal_pull.arn)} }"
+  controller_arn = "${local.ec2}:instance/${aws_instance.controller.id}"
+  ec2_settings = concat(
+    [
+      "region = ${jsonencode(var.region)}",
+      "repositories = { roles = ${jsonencode(aws_ecr_repository.images["roles"].name)}, sandboxd = ${jsonencode(aws_ecr_repository.images["sandboxd"].name)} }",
+      "timer = { group = ${jsonencode(aws_scheduler_schedule_group.timer.name)}, role_arn = ${jsonencode(aws_iam_role.timer.arn)} }",
+    ],
+    [for class, template in aws_launch_template.class : join("", [
+      "classes.${class} = { template = ${jsonencode(template.id)}, version = ${template.latest_version}",
+      ", vcpus = ${data.aws_ec2_instance_type.class[class].default_vcpus}",
+      ", memory_mib = ${data.aws_ec2_instance_type.class[class].memory_size}",
+      ", cpu_features = ${jsonencode(sort(var.classes[class].cpu_features))}",
+      var.classes[class].cpu_model == null ? "" : ", cpu_model = ${jsonencode(var.classes[class].cpu_model)}",
+      var.classes[class].usd_per_hour == null ? "" : ", usd_per_hour = ${jsonencode(var.classes[class].usd_per_hour)}",
+      " }",
+    ])],
+  )
+}
+
+output "ec2" {
+  description = "The EC2 provider's settings, the body of a `[providers.<name>.ec2]` table."
+  value       = join("\n", local.ec2_settings)
+}
+
+output "modal_images" {
+  description = "Where the Modal provider imports images from, its settings' `images` key."
+  value       = local.modal_images
+}
+
+output "client_config" {
+  description = "The `[controller]` table of the person's machine's `pumpkin.toml`, beside its `[upstreams]`."
+  value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\n"
+}
+
+# What `pumpkin` on the person's machine calls: it finds the controller by its tag, starts it,
+# waits until SSM sees it, pushes the machine's key for the controller's user once, to enrol it,
+# and opens SSH sessions through SSM's `AWS-StartSSHSession` alone, which the access check holds
+# it to.
+resource "aws_iam_policy" "client" {
+  name        = "${local.prefix}-client"
+  description = "What the machine of a person needs to reach its Pumpkin controller"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["ec2:DescribeInstances", "ssm:DescribeInstanceInformation"], Resource = "*" },
+      { Effect = "Allow", Action = "ec2:StartInstances", Resource = local.controller_arn },
+      {
+        Effect    = "Allow"
+        Action    = "ec2-instance-connect:SendSSHPublicKey"
+        Resource  = local.controller_arn
+        Condition = { StringEquals = { "ec2:osuser" = "pumpkin" } }
+      },
+      {
+        Effect    = "Allow"
+        Action    = "ssm:StartSession"
+        Resource  = [local.controller_arn, "${local.arn}:ssm:${var.region}::document/AWS-StartSSHSession"]
+        Condition = { BoolIfExists = { "ssm:SessionDocumentAccessCheck" = "true" } }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:TerminateSession", "ssm:ResumeSession"]
+        Resource = "${local.arn}:ssm:*:${local.account}:session/$${aws:userid}-*"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "client" {
+  for_each   = toset(var.client_roles)
+  role       = each.value
+  policy_arn = aws_iam_policy.client.arn
+}
+
+resource "aws_iam_user_policy_attachment" "client" {
+  for_each   = toset(var.client_users)
+  user       = each.value
+  policy_arn = aws_iam_policy.client.arn
+}
+
+output "client_policy_arn" {
+  description = "The managed IAM policy that the person's machine needs to reach the controller, which the apply attaches to `client_roles` and `client_users`, and an account whose roles live elsewhere attaches by hand."
+  value       = aws_iam_policy.client.arn
+}

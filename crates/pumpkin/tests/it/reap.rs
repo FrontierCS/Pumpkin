@@ -209,8 +209,8 @@ esac
 /// which left a sandbox on each.
 const SPREAD: &str = "20261108-120700-0a000008";
 
-/// A lost run on `aws` and `gpus`, which left a sandbox on each, and which `cancel` reaps on
-/// `aws` alone, as its configuration names a Modal configuration file that is gone.
+/// A lost run on `aws` and `gpus`, which left a sandbox on each, and which `cancel` reaps, whose
+/// configuration names Modal's configuration file in its job's directory, gone with the job.
 const CANCELLED: &str = "20261108-120800-0a000009";
 
 /// A lost run on `aws`, whose configuration is gone.
@@ -268,6 +268,8 @@ esac
         "job.toml",
         &format!("{}\n{EC2}\n{modal}", docker_table("default")),
     );
+    scratch.write("sent/modal.toml", "[pumpkin]\ntoken_id = \"ak-x\"\n");
+    let sent = scratch.0.join("sent/modal.toml");
     scratch.write(
         "bare.toml",
         &format!(
@@ -370,8 +372,10 @@ esac
         command.args(["--runs", "runs"]).env("PATH", &path);
         ran(command, &scratch.0, false)
     };
+    let sent = sent.to_str().unwrap();
     let mut steps = vec![
         command(&installed, &["cancel", CANCELLED]),
+        command(&installed, &["cancel", "--modal-config", sent, CANCELLED]),
         command(&installed, &["reap"]),
     ];
     let states = instances.iter().map(|id| {
@@ -424,6 +428,12 @@ esac
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/job.toml
             pumpkin: to remove what it left once its provider can be reached: pumpkin reap --runs <scratch>/runs
             printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
+            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin cancel --modal-config <scratch>/sent/modal.toml 20261108-120800-0a000009 --runs runs
+            exit status: Some(0)
+            pumpkin: run 20261108-120800-0a000009 left 1 sandbox on provider `gpus`, now removed: sb-9
+            pumpkin: run 20261108-120800-0a000009 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120800-0a000009
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/job.toml
+            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
             $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin reap --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120700-0a000008's sandbox i-0000000000000000f on provider `aws`, which its record holds undeleted, isn't listed there now: it has ended since, or the provider is reached elsewhere than the run reached it, as when the configuration that ran the run, or the Docker context, has moved to another region, profile or engine since; if so, put it back as it was when the run ran, and reap again: pumpkin reap --runs <scratch>/runs
@@ -448,7 +458,7 @@ esac
             i-00000000000000062: running
             the stand-in SDK's sandboxes:
             sb-8: returncode -9, signal: 9 (SIGKILL)
-            sb-9: returncode none, exit status: 0
+            sb-9: returncode -9, signal: 9 (SIGKILL)
             sb-b: returncode none, exit status: 0
             20261108-120700-0a000008's reaps.jsonl:
             {"at_ns":"<at>","id":"i-00000000000000038","provider":"aws","reaped":"removed"}
@@ -457,6 +467,7 @@ esac
             {"at_ns":"<at>","id":"i-0000000000000000f","provider":"aws","reaped":"gone"}
             20261108-120800-0a000009's reaps.jsonl:
             {"at_ns":"<at>","id":"i-00000000000000039","provider":"aws","reaped":"removed"}
+            {"at_ns":"<at>","id":"sb-9","provider":"gpus","reaped":"removed"}
             docker was called with:
             context inspect --format {{.Endpoints.docker.Host}} -- default
             info --format {{json .}}

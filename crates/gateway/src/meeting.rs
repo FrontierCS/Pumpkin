@@ -127,7 +127,8 @@ impl Drop for Sockets {
 /// IPv4-mapped form, which a listener binds but no sandbox can dial. A deployment names the port
 /// that its network admits sandboxes on, such as its security group's, or port 0, for one that the
 /// kernel picks from its ephemeral range as the listener binds, which the listener's dials then
-/// name: so tests on the loopback, and a deployment whose network admits that range.
+/// name: so tests on the loopback, and a deployment whose network admits that range, as
+/// `deploy/aws`'s does.
 #[derive(Debug)]
 pub struct GatewayAddress(SocketAddr);
 

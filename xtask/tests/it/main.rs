@@ -1,5 +1,6 @@
 //! xtask's checks of Rust files ([`tidy`]) and its diff ([`diff`]), on scratch Git
-//! repositories. xtask is a binary, so its test binary compiles their modules itself.
+//! repositories, and the consumer entry `deploy/pumpkin` ([`entry`]). xtask is a binary, so its
+//! test binary compiles their modules itself.
 
 #![expect(
     clippy::unwrap_used,
@@ -11,9 +12,10 @@ use std::error::Error;
 use expect_test::{Expect, expect};
 use xshell::{Shell, cmd};
 
-#[path = "../src/diff.rs"]
+#[path = "../../src/diff.rs"]
 mod diff;
-#[path = "../src/tidy.rs"]
+mod entry;
+#[path = "../../src/tidy.rs"]
 mod tidy;
 
 /// The result the check returns, as xtask's tasks do.

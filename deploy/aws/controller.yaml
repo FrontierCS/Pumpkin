@@ -1,0 +1,121 @@
+#cloud-config
+# The controller's first boot, on Ubuntu 24.04 LTS: the user `pumpkin`, which runs every Pumpkin
+# process, lingering, so that its job units outlive every SSH session; Docker, Buildx, AWS CLI v2
+# and uv at exact versions, and git, gcc and rsync from the snapshot of Ubuntu's archive that
+# controller.tf names, for builds; and two thin units that need no client and no Pumpkin build:
+# the idle stop, and the reap at boot once a job has run.
+groups:
+  - docker
+users:
+  - default
+  - name: pumpkin
+    groups: [docker]
+    shell: /bin/bash
+    lock_passwd: true
+
+# Over HTTPS, the one way out the controller's security group allows.
+apt:
+  primary:
+    - arches: [default]
+      uri: ${ubuntu_snapshot}
+  security:
+    - arches: [default]
+      uri: ${ubuntu_snapshot}
+  sources:
+    docker:
+      source: "deb [arch=amd64 signed-by=$KEY_FILE] https://download.docker.com/linux/ubuntu noble stable"
+      key: |
+        ${indent(8, docker_key)}
+
+package_update: true
+packages:
+  - [docker-ce, "${docker_version}"]
+  - [docker-ce-cli, "${docker_version}"]
+  - [containerd.io, "${containerd_version}"]
+  - [docker-buildx-plugin, "${buildx_version}"]
+  - git
+  - gcc
+  - rsync
+  - unzip
+
+write_files:
+  # Builds find images by their manifests' digests, which only the containerd image store keeps.
+  - path: /etc/docker/daemon.json
+    content: |
+      {"features": {"containerd-snapshotter": true}}
+  - path: /usr/local/sbin/pumpkin-idle
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Stops the controller, which keeps its volume, once it has had no Pumpkin job and no SSH
+      # session for 30 minutes, and has been up for as long.
+      set -o errexit -o nounset -o pipefail
+      busy=/var/lib/pumpkin/busy
+      jobs=$(systemctl --user --machine=pumpkin@ list-units --state=active --no-legend 'pumpkin-job-*')
+      ssh=$(loginctl list-sessions --no-legend | awk '{print $1}' \
+          | xargs --no-run-if-empty --max-args=1 loginctl show-session --property=Service --value \
+          | grep --line-regexp sshd || true)
+      if [ -n "$jobs" ] || [ -n "$ssh" ]; then
+          install --directory /var/lib/pumpkin && touch "$busy"
+      elif [ -z "$(find "$busy" -mmin -30 2>/dev/null)" ] \
+          && [ "$(cut --delimiter=. --fields=1 /proc/uptime)" -ge 1800 ]; then
+          systemctl poweroff
+      fi
+  - path: /etc/systemd/system/pumpkin-idle.service
+    content: |
+      [Unit]
+      Description=Stop the Pumpkin controller once it has been idle for 30 minutes
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/pumpkin-idle
+  - path: /etc/systemd/system/pumpkin-idle.timer
+    content: |
+      [Unit]
+      Description=Check every 5 minutes whether the Pumpkin controller is idle
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+
+      [Install]
+      WantedBy=timers.target
+  # `current-pumpkin` names the Pumpkin that the last job ran, which each job links there.
+  - path: /etc/systemd/system/pumpkin-boot.service
+    content: |
+      [Unit]
+      Description=Remove what lost Pumpkin runs left
+      ConditionPathExists=/home/pumpkin/current-pumpkin
+      Wants=network-online.target
+      After=network-online.target docker.service
+
+      [Service]
+      Type=oneshot
+      User=pumpkin
+      ExecStart=/home/pumpkin/current-pumpkin controller boot
+
+      [Install]
+      WantedBy=multi-user.target
+
+# cloud-init runs these as one script, so the idle stop is armed first: a controller whose
+# install fails below still stops once idle. Then AWS CLI v2's archive, whose SHA-256 is that of
+# the one AWS's signature verifies (key FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C), and
+# uv's, whose SHA-256 is the one its release publishes beside it.
+runcmd:
+  - loginctl enable-linger pumpkin
+  - systemctl daemon-reload
+  - systemctl enable --now pumpkin-idle.timer pumpkin-boot.service
+  - |
+    set -o errexit
+    cd "$(mktemp --directory)"
+    curl --fail --silent --show-error --location --proto '=https' --output awscli.zip \
+        https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${aws_cli_version}.zip
+    echo '${aws_cli_sha256}  awscli.zip' | sha256sum --check --strict
+    unzip -q awscli.zip
+    ./aws/install
+    curl --fail --silent --show-error --location --proto '=https' --output uv.tar.gz \
+        https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-x86_64-unknown-linux-gnu.tar.gz
+    echo '${uv_sha256}  uv.tar.gz' | sha256sum --check --strict
+    tar --extract --gzip --file=uv.tar.gz
+    install --mode=0755 uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv
+  - systemctl restart docker.service

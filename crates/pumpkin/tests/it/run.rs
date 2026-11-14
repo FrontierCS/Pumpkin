@@ -21,6 +21,7 @@ use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
 use test_support::{BUSYBOX, WORKFLOW, docker_context, files, sandboxd, standard_outputs};
 
+use super::build::Labelled;
 use super::{
     EC2, HELD, LOCAL, MODAL, MODAL_HELPER, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first,
     check, containers, cpu_list, docker_table, engine, install, invocation, ledger, machine,
@@ -96,6 +97,7 @@ fn usage() {
             &[b"run", b"--config", b"\xff", b"a.star"],
         ),
         pumpkin(&["help", "bogus"]),
+        pumpkin(&["help", "controller"]),
     ];
     // What `--version` prints: this build, which names its commit if it was made in a git
     // checkout of Pumpkin's repository.
@@ -111,9 +113,9 @@ fn usage() {
             exit status: Some(0)
             printed:
               Run workflows: in each run, an agent works in a sandbox, and judges score what
-              it submits. It keeps what it writes in the .pumpkin directory that it is in: the
-              runs' records, but where --runs names another directory, and what its builds and
-              providers keep.
+              it submits. It keeps what it writes in the .pumpkin directory that it is in,
+              where a repository's ./pumpkin builds it: the runs' records, but where --runs
+              names another directory, and what its builds and providers keep.
 
               Usage: pumpkin <command>
 
@@ -229,6 +231,13 @@ fn usage() {
               Modal sandboxes, tagged pumpkin-run=<id>, which end at the run's hard end all
               the same; and its socket directories in the record's sockets/, which `cancel`
               removes too.
+
+              On a machine whose configuration names [controller], as `pumpkin help config`
+              says, `run` takes neither --runs nor --sandboxd: it says the run's id at once,
+              starts the controller if it is stopped, sends there the files of the task's
+              repository that git lists and the task reaches, and starts the run's job, which
+              builds the task, then runs it there, with the id; it then returns, or with
+              --wait follows the job.
             $ pumpkin wait -h
             exit status: Some(0)
             printed:
@@ -278,6 +287,11 @@ fn usage() {
               if it is long, named.
 
               Ending `pumpkin wait` doesn't stop the run: `pumpkin cancel` does.
+
+              With [controller] in the configuration, and no --runs, `wait` follows the run's
+              job on the controller, its build included, then the run, and copies its record
+              into the default runs directory once it has ended; a run whose copy there has
+              ended needs no controller.
             $ pumpkin ls --help
             exit status: Some(0)
             printed:
@@ -323,6 +337,13 @@ fn usage() {
               `lost`, if its driver ended without an outcome.json. Its task is its workflow's
               name, or `-` if its record has no ir.json yet. A directory of --runs that is not
               there yet is no runs, if it is the default one.
+
+              With [controller] in the configuration, and no --runs, `ls` lists the
+              controller's runs, a job yet to start its run as `building`, or as `unstarted`
+              once it has ended without one, beside the copies in the default runs directory;
+              and says first how long the controller has been up, its jobs, how full its disk
+              is, and whether its boot failed, and last how many tasks this workspace is still
+              sending it, if any: a run's job starts once its task is sent.
             $ pumpkin cancel --help
             exit status: Some(0)
             printed:
@@ -369,6 +390,11 @@ fn usage() {
               provider that it ran on, Docker, EC2 or Modal, as `pumpkin reap --help` says,
               and prints its outcome.json, then says how the run ended, as `pumpkin wait`
               does.
+
+              With [controller] in the configuration, and no --runs, `cancel` stops the job
+              of a run that is yet to start on the controller, and cancels one that has
+              started there, sending this machine's Modal configuration file for the reap,
+              then copies its record here, as `pumpkin wait` does.
             $ pumpkin reap --help
             exit status: Some(0)
             printed:
@@ -413,6 +439,10 @@ fn usage() {
               time; and each that the record holds undeleted, but that its provider no longer
               lists, as when the configuration now points to another region or profile, it
               says, and notes there as gone.
+
+              With [controller] in the configuration, and no --runs, `reap` reaps the
+              controller's runs there, as the controller does at each boot, but with this
+              machine's Modal configuration file, which the boot lacks.
             $ pumpkin help --help
             exit status: Some(0)
             printed:
@@ -440,7 +470,9 @@ fn usage() {
               `pumpkin build` reads: the file that --config names,
               $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
               Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
-              and any other key is refused.
+              and any other key is refused. [controller] takes the place of [docker],
+              [providers.<name>.<kind>] and [gateway] on a machine whose runs go to the
+              person's controller.
 
               Example, of a machine whose runs go to EC2 and Modal:
                 [docker]
@@ -484,6 +516,21 @@ fn usage() {
                 url = "https://gateway.example/v1"
                 key_file = "gateway-key"
                 models = [{ name = "model-a", upstream_name = "provider/model-a" }]
+
+              Example, of a machine whose runs go to the person's controller, and Modal:
+                [controller]
+                name = "alice"
+                region = "us-west-1"
+
+                [controller.modal]
+                profile = "pumpkin"
+
+                [controller.modal.classes.a100]
+                gpu = "A100-80GB"
+                gpu_model = "NVIDIA A100-SXM4-80GB"
+                cpu_millis = 8000
+                memory_bytes = 68719476736
+                startup_seconds = 1800
 
               [docker], the machine's Docker engine:
                 context       The context that reaches it, as `docker context ls` lists it.
@@ -569,6 +616,27 @@ fn usage() {
 
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
+
+              [controller], the person's controller, which deploy/aws makes, and to which
+              `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
+              Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
+              and Modal's configuration file, into a directory of its own in the
+              controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
+              Session Manager plugin, and `ssh`, `rsync` 3.2.3 or later, `tar`, `ssh-keygen`
+              and `git`, from PATH; the controller's settings are the module's, but for
+              [controller.modal]. This machine's key to it, which the first command makes
+              and enrols through EC2 Instance Connect, and the host key it pins, are in
+              $HOME/.config/pumpkin/ssh/.
+                name          The `name` that deploy/aws was applied with.
+                region        The region it was applied in.
+
+              [controller.modal], the Modal provider that the controller's runs may place
+              roles on, if any: the settings of a provider of kind modal, but `images`, which
+              the module's settings give, and `dials_from`, which each run sets:
+                profile       As modal's.
+                config        Modal's configuration file, below this file's directory unless
+                              absolute; absent, ~/.modal.toml, if it is there.
+                classes       As modal's.
             $ pumpkin --version
             exit status: Some(0)
             printed:
@@ -588,9 +656,9 @@ fn usage() {
             $ pumpkin
             exit status: Some(2)
             Run workflows: in each run, an agent works in a sandbox, and judges score what
-            it submits. It keeps what it writes in the .pumpkin directory that it is in: the
-            runs' records, but where --runs names another directory, and what its builds and
-            providers keep.
+            it submits. It keeps what it writes in the .pumpkin directory that it is in,
+            where a repository's ./pumpkin builds it: the runs' records, but where --runs
+            names another directory, and what its builds and providers keep.
 
             Usage: pumpkin <command>
 
@@ -710,6 +778,12 @@ fn usage() {
             error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
+            pumpkin: to read how to use it: pumpkin help help
+            $ pumpkin help controller
+            exit status: Some(2)
+            error: there is no help for `controller`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
+
+            Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help"#]],
     );
 }
@@ -809,10 +883,10 @@ fn unrunnable() {
             pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
             $ <scratch>/alone/pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
-            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` builds, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
             $ <scratch>/alone/pumpkin wait 6a
             exit status: Some(1)
-            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` builds, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
             $ <scratch>/�/.pumpkin/pinned/pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
             pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`
@@ -1755,7 +1829,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/missing.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config undocked.toml
             exit status: Some(1)
-            pumpkin: undocked.toml: `[docker]` is missing: name it, as `pumpkin help config` says
+            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controller]`, as `pumpkin help config` says
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/undocked.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config nameless.toml
             exit status: Some(1)
@@ -1843,7 +1917,7 @@ fn configurations() {
                |
             11 | [placement.agent]
                |  ^^^^^^^^^
-            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`
+            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/placed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config podman.toml
             exit status: Some(1)
@@ -2287,6 +2361,163 @@ fn runs_on_docker() {
     );
     upstream.stop();
     wait_for_each_run(&scratch, &sandboxd);
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the steps and their snapshot"
+)]
+fn writes_only_in_its_workspace() {
+    let scratch = Scratch::new("workspace");
+    let label = format!("pumpkin.test=workspace-{}", std::process::id());
+    let _images = Labelled(label.clone());
+    write_hello(&scratch, &label);
+    fs::hard_link(sandboxd(), scratch.0.join(".pumpkin/bin/sandboxd")).unwrap();
+    let context = docker_context();
+    scratch.write("pumpkin.toml", &machine(&context));
+    let home = test_home(&scratch, &context);
+    let temp = scratch.0.join("tmp");
+    fs::create_dir(&temp).unwrap();
+    let before = files(&home);
+    let config = ["--config", "pumpkin.toml"];
+    // Built first, as a run that waits for room may find its images built by an earlier try.
+    let mut built = at_home(
+        &scratch,
+        &home,
+        &temp,
+        &[&["build", HELLO], &config[..]].concat(),
+    );
+    let built = built.output().unwrap();
+    assert!(built.status.success(), "{built:?}");
+    let mut run = at_home(
+        &scratch,
+        &home,
+        &temp,
+        &[&["run", HELLO, "--wait"], &config[..]].concat(),
+    );
+    let invoked = invocation(&run);
+    let rootful = !engine(&scratch, &context).report().security.rootless;
+    let output = with_room(&mut run);
+    let written: Vec<String> = files(&home)
+        .into_iter()
+        .filter(|file| !before.contains(file))
+        .collect();
+    let lines = [
+        report(invoked, &output, &scratch.0, rootful),
+        format!("HOME's new files: {written:?}"),
+        format!("TMPDIR holds: [{}]", held(&temp)),
+        format!(".pumpkin holds: {}", held(&scratch.0.join(".pumpkin"))),
+        format!(
+            ".pumpkin/docker holds: {}",
+            held(&scratch.0.join(".pumpkin/docker"))
+        ),
+    ];
+    // So that the scratch directory can be removed.
+    fs::set_permissions(home.join(".docker"), Permissions::from_mode(0o755)).unwrap();
+    let shown = lines
+        .join("\n")
+        .replace(scratch.0.to_str().unwrap(), "<scratch>");
+    expect![[r#"
+        $ env --unset=DOCKER_CONFIG HOME=<scratch>/home TMPDIR=<scratch>/tmp env --unset=XDG_CACHE_HOME env --unset=XDG_CONFIG_HOME env --unset=XDG_DATA_HOME pumpkin run examples/hello/task.star --wait --config pumpkin.toml
+        exit status: Some(0)
+        pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
+        pumpkin: run <id> started
+        pumpkin: following run <id>, recorded in <scratch>/.pumpkin/runs/<id>: ending `pumpkin run` does not stop it
+        pumpkin:    <t> the agent started on local/container
+        pumpkin:    <t> the work phase ended
+        pumpkin:    <t> final judge job 0 asked on local/container
+        pumpkin:    <t> final judge job 0 started
+        pumpkin:    <t> final judge job 0 ended: 6
+        pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+             <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
+             <t> final judge job 0 on local/container, started after <t>, ran <t>: 6
+          sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+        pumpkin: run <id> finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/.pumpkin/runs/<id>
+        pumpkin: to run it again: pumpkin run --config <scratch>/pumpkin.toml <scratch>/examples/hello/task.star
+        record: agent/console.txt, agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03, provider.json, record.json
+        the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local","report":null}
+        job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local","report":null}
+        outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        printed outcome.json: true
+        HOME's new files: []
+        TMPDIR holds: []
+        .pumpkin holds: bin, docker, runs
+        .pumpkin/docker holds: buildx"#]].assert_eq(&shown);
+}
+
+/// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its
+/// image.
+fn write_hello(scratch: &Scratch, label: &str) {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for file in ["PUMPKIN.star", "hello/task.star", "hello/Dockerfile"] {
+        let text = fs::read_to_string(examples.join(file)).unwrap();
+        scratch.write(&format!("examples/{file}"), &text);
+    }
+    let recipe = scratch.0.join("examples/hello/Dockerfile");
+    let mut labelled = fs::OpenOptions::new().append(true).open(recipe).unwrap();
+    writeln!(labelled, "LABEL {label}").unwrap();
+}
+
+/// The entry of the task that [`write_hello`] writes.
+const HELLO: &str = "examples/hello/task.star";
+
+/// `scratch`'s `pumpkin` with `args`, with `home` as `HOME` and `temp` as `TMPDIR`, and none of
+/// the variables that would name other directories for them.
+fn at_home(scratch: &Scratch, home: &Path, temp: &Path, args: &[&str]) -> Command {
+    let mut run = scratch.pumpkin(args);
+    run.env("HOME", home).env("TMPDIR", temp);
+    for name in [
+        "DOCKER_CONFIG",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    ] {
+        run.env_remove(name);
+    }
+    run
+}
+
+/// A home of `scratch`'s, whose Docker configuration, `.docker`, is read-only, and holds, for a
+/// Docker context but `default`, `context`, a copy of the contexts of this process's, which
+/// `docker` reads it from.
+fn test_home(scratch: &Scratch, context: &str) -> PathBuf {
+    let home = scratch.0.join("home");
+    let docker = home.join(".docker");
+    fs::create_dir_all(&docker).unwrap();
+    if context != "default" {
+        let real = env::var_os("DOCKER_CONFIG").map_or_else(
+            || PathBuf::from(env::var_os("HOME").unwrap()).join(".docker"),
+            PathBuf::from,
+        );
+        copy_tree(&real.join("contexts"), &docker.join("contexts"));
+    }
+    fs::set_permissions(&docker, Permissions::from_mode(0o555)).unwrap();
+    home
+}
+
+/// The names in `dir`, sorted, between commas.
+fn held(dir: &Path) -> String {
+    let mut names: Vec<String> = (fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names.join(", ")
+}
+
+/// Copies the tree at `from`, whose files are regular ones, to `to`, which doesn't exist yet.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let to = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), to).unwrap();
+        }
+    }
 }
 
 #[test]

@@ -40,7 +40,9 @@ use workspace::Workspace;
 
 mod cli;
 mod config;
+mod controller;
 mod driver;
+mod job;
 mod lock;
 mod next;
 mod progress;
@@ -81,11 +83,15 @@ fn main() -> ExitCode {
         Ok(cli::Command::Wait(flags)) => wait(flags),
         Ok(cli::Command::Ls(flags)) => ls(flags),
         Ok(cli::Command::Cancel(flags)) => cancel(flags),
-        Ok(cli::Command::Reap(flags)) => reap(flags),
+        Ok(cli::Command::Reap(flags)) => reap(flags, Reaper::Command),
         Ok(cli::Command::Check(flags)) => check(flags),
         Ok(cli::Command::Fmt(flags)) => style::fmt(flags),
-        Ok(cli::Command::Build(flags)) => build(flags),
+        Ok(cli::Command::Build(flags)) => build(flags, Reader::Operator),
         Ok(cli::Command::Lock(flags)) => lock::lock(flags),
+        Ok(cli::Command::Job(flags)) => job::job(flags),
+        Ok(cli::Command::Boot) => job::boot(),
+        Ok(cli::Command::Follow(id)) => job::follow(&id),
+        Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
@@ -114,16 +120,49 @@ fn finish(done: Result<ExitCode, String>) -> ExitCode {
     }
 }
 
-/// Starts the run that `flags` ask for, with an id of its own, as [`start`] does.
+/// Starts the run that `flags` ask for, with an id of its own, as [`start`] does, or on the
+/// controller that the configuration names ([`controller::run`]).
 fn run(flags: cli::Run) -> Result<ExitCode, String> {
-    start(&runtime::new_id(SystemTime::now())?, flags, false)
+    if let Some(client) = config::client(flags.config.as_deref())? {
+        return controller::run(&client, flags);
+    }
+    start(
+        &runtime::new_id(SystemTime::now())?,
+        flags,
+        Reader::Operator,
+    )
+}
+
+/// Who reads what a command says of a run or a build: the operator, at this machine, or a
+/// follower of a controller's job, at a client, who follows the run already, and can neither open
+/// this machine's paths nor change its setup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reader {
+    Operator,
+    Follower,
+}
+
+impl Reader {
+    /// The word that names it among the driver's arguments.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Follower => "follower",
+        }
+    }
+
+    fn from_word(word: &str) -> Option<Self> {
+        [Self::Operator, Self::Follower]
+            .into_iter()
+            .find(|reader| reader.word() == word)
+    }
 }
 
 /// Starts the driver of run `id`, which `flags` ask for, recorded in their runs directory
 /// ([`runs_dir`]). Once the run has started, prints its id, or with `wait` follows it and prints
 /// its outcome; returns the exit status that `run`'s help gives. Of how to follow the run, it says
-/// nothing for a `follower`, one who follows it already, the only one to read what it says.
-fn start(id: &RunTag, flags: cli::Run, follower: bool) -> Result<ExitCode, String> {
+/// nothing to a follower ([`Reader`]), nor does its driver say this machine's engine.
+fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<ExitCode, String> {
     // Absolute, so that the record's path, which the driver says and `run` opens, names it from
     // any directory. A runs directory not given is left for the driver to find as `run` does,
     // so that the driver's flags are those that the operator gave.
@@ -143,7 +182,7 @@ fn start(id: &RunTag, flags: cli::Run, follower: bool) -> Result<ExitCode, Strin
     }
     args.extend(arg_flags(&flags.args.0).map(OsString::from));
     args.extend(["--".into(), flags.entry.path().into()]);
-    match Driver::spawn(id, &args)?.started(Path::new(runs))? {
+    match Driver::spawn(id, reader, &args)?.started(Path::new(runs))? {
         Handoff::Started(record) => {
             let id = record.id();
             say(format_args!("run {id} started"));
@@ -154,7 +193,7 @@ fn start(id: &RunTag, flags: cli::Run, follower: bool) -> Result<ExitCode, Strin
                 let ending = followed(&record)?;
                 return end(&record, &ending, named, record.args());
             }
-            if !follower {
+            if reader == Reader::Operator {
                 advise("follow it", &next::of_run("wait", named, id));
             }
             advise("stop it", &next::of_run("cancel", named, id));
@@ -252,9 +291,11 @@ fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
 /// its end.
 /// Fails, before the start, if `run` has ended or anything above fails or is refused.
 fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
-    let (id, run) = driver_started(args)?;
+    let (id, reader, run) = driver_started(args)?;
     let words = recorded_args(&run)?;
-    let again = next::run_again(&words);
+    // A controller's client says how to run it again from its own workspace: from its copy of
+    // the record, or, of a job that made none, from the job's log.
+    let again = (reader == Reader::Operator).then(|| next::run_again(&words));
     let cli::Run {
         entry,
         args: cli::TaskArgs(args),
@@ -275,7 +316,9 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     // Held here once reached, as the providers connected to it outlive the thread that checks and
     // builds the task.
     let mut engine = None;
-    let prepared = star::checked(&entry, &args, |task| prepared(task, &config, &mut engine));
+    let prepared = star::checked(&entry, &args, |task| {
+        prepared(task, &config, &mut engine, reader)
+    });
     let prepared =
         prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
     let Prepared {
@@ -284,16 +327,13 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         providers,
         gateway,
         servings,
-    } = prepared.map_err(|error| {
-        say(error);
-        format!("to run it again: {again}")
-    })?;
+    } = prepared.map_err(|error| refused(error, again.as_deref()))?;
     let (placed, placed_on) = place(
         Path::new(entry.path()),
         workflow,
         &providers,
         &config,
-        &again,
+        again.as_deref(),
     )?;
     let private = listen(&placed_on, &gateway, &config)?;
     // Before the record is begun, so that a signal that comes once it is begun stops the run,
@@ -309,43 +349,55 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     };
     let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
-    // Said before `run` hears of it, so that whatever ends both later, the record is named.
-    say(format_args!("run {id} records into {}", dir.display()));
-    // A push of an image may take minutes, which the run's start waits for.
-    if !names.is_empty() {
-        let providers = if names.len() == 1 {
-            "provider"
-        } else {
-            "providers"
-        };
-        say(format_args!(
-            "publishing run {id}'s images on {providers} {}: it starts once they are there",
-            names.join(", ")
-        ));
-    }
+    begun(&id, &dir, &names, reader);
     driver::locked(&id)?;
     // `execute` records why the run stopped in its `outcome.json`, which `run` prints if the run
-    // didn't start; these lines, the driver's last, then close that ending.
+    // didn't start; these lines, the driver's last, then close that ending, which a controller's
+    // client says from its copy instead.
     // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
     let dialer = Dialer::new(tls::Client::web_pki());
     let executed = run.execute(sandboxd.path(), private.as_ref(), &dialer, || {
         driver::announce(&dir)
     });
     if let Err(stopped) = executed {
-        say(closing(&id, &stopped.to_string(), &dir));
-        advise("run it again", &again);
+        if let Some(again) = &again {
+            say(closing(&id, &stopped.to_string(), &dir));
+            advise("run it again", again);
+        }
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// The run that the driver's `args` ask for, by its id, once the driver has asked to end with
-/// `run` ([`driver::die_with_run`]) and named its process [`ARGV0`].
+/// Says to `reader` that run `id` is begun: to the operator, where it is recorded, `dir`, before
+/// `run` hears of it, so that whatever ends both later, the record is named; and that it is
+/// published on the providers `pushing` names, if any, as a push may take minutes, which the
+/// run's start waits for. A follower is sent the record as the run ends, which names it there.
+fn begun(id: &str, dir: &Path, pushing: &[String], reader: Reader) {
+    if reader == Reader::Operator {
+        say(format_args!("run {id} records into {}", dir.display()));
+    }
+    if pushing.is_empty() {
+        return;
+    }
+    let providers = if pushing.len() == 1 {
+        "provider"
+    } else {
+        "providers"
+    };
+    say(format_args!(
+        "publishing run {id}'s images on {providers} {}: it starts once they are there",
+        pushing.join(", ")
+    ));
+}
+
+/// The run that the driver's `args` ask for, by its id, and who reads what it says, once the
+/// driver has asked to end with `run` ([`driver::die_with_run`]) and named its process [`ARGV0`].
 ///
 /// # Errors
 ///
 /// Fails if `args` aren't what `run` gives the driver, `run` has ended, or the name can't be set.
-fn driver_started(args: Vec<OsString>) -> Result<(RunTag, cli::Run), String> {
+fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), String> {
     // Only `run` starts the driver, with its process ID and the run's id, but an `argv[0]` of
     // the driver's name can come from anyone.
     let refused = || {
@@ -360,8 +412,9 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, cli::Run), String> {
     // path that `run` executes.
     rustix::thread::set_name(ARGV0).context("naming the driver failed")?;
     let id = (args.next().and_then(|id| id.into_string().ok())).map(RunTag::try_from);
-    match (id, cli::parse(args)) {
-        (Some(Ok(id)), Ok(cli::Command::Run(run))) => Ok((id, run)),
+    let reader = (args.next()).and_then(|word| Reader::from_word(word.to_str()?));
+    match (id, reader, cli::parse(args)) {
+        (Some(Ok(id)), Some(reader), Ok(cli::Command::Run(run))) => Ok((id, reader, run)),
         _ => Err(refused()),
     }
 }
@@ -379,9 +432,9 @@ struct Prepared<'e> {
 
 /// What a run of `task`, checked, starts from, on the machine that the configuration at `config`
 /// names, each step refused before the next begins: the configuration read, and an upstream found
-/// to serve each role's model route; the engine reached, and kept in `engine`; each provider
-/// connected to it ([`Connected::new`]), so that an engine that can't run sandboxes is refused
-/// before any image is built; then the task's images built on it ([`star::Task::build`]).
+/// to serve each role's model route; the engine reached, said to `reader` ([`engine()`]), and kept
+/// in `engine`; each provider connected to it ([`Connected::new`]), so that an engine that can't
+/// run sandboxes is refused before any image is built; then the task's images built on it.
 ///
 /// # Errors
 ///
@@ -390,6 +443,7 @@ fn prepared<'e>(
     task: star::Task<'_>,
     config: &Path,
     engine: &'e mut Option<Engine>,
+    reader: Reader,
 ) -> Result<Result<Prepared<'e>, lang::Problems>, String> {
     let config::Config {
         docker: config::Docker { context, cpus },
@@ -403,7 +457,7 @@ fn prepared<'e>(
             Some(route) => upstreams.serving(route).context(config.display()),
             None => Ok(Vec::new()),
         })?;
-    let engine = &*engine.insert(crate::engine(context)?);
+    let engine = &*engine.insert(crate::engine(context, reader)?);
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
     Ok(task.build(engine).map(|(workflow, tags)| Prepared {
@@ -419,6 +473,17 @@ fn prepared<'e>(
 /// ended, and prints its outcome; returns the exit status that `wait`'s help gives.
 fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
     let cli::Wait { run, runs } = flags;
+    if let (cli::RunName::Prefix(prefix), None) = (&run, &runs)
+        && let Some(client) = config::client(None)?
+    {
+        // A run that has ended, whose record is copied here, needs no controller.
+        if let Ok(record) = Record::find(Path::new(&default_runs()?), prefix)
+            && let Some(ending) = record.ending()?
+        {
+            return end(&record, &ending, None, &controller::here(&record, None)?);
+        }
+        return controller::wait(&client, prefix);
+    }
     let (record, named) = found(run, runs)?;
     follow(&record, "wait", named.as_deref())
 }
@@ -429,6 +494,11 @@ fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
 /// not being there yet is no runs.
 fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     let cli::Ls { runs, prefixes } = flags;
+    if runs.is_none()
+        && let Some(client) = config::client(None)?
+    {
+        return controller::ls(&client, &prefixes);
+    }
     let (runs, named) = runs_dir(runs)?;
     let now = unix_now();
     let since = progress::listed_since(&prefixes, now);
@@ -545,7 +615,12 @@ fn found(run: cli::RunName, runs: Option<String>) -> Result<(Record, Option<Stri
 /// removes what it left ([`Record::reap`]), and prints its outcome; returns the exit status that
 /// `cancel`'s help gives.
 fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
-    let (record, named, reached) = cancelled(flags)?;
+    if let (cli::RunName::Prefix(prefix), None) = (&flags.run, &flags.runs)
+        && let Some(client) = config::client(None)?
+    {
+        return controller::cancel(&client, prefix, flags.force);
+    }
+    let (record, named, reached) = cancelled(flags, Reader::Operator)?;
     let named = named.as_deref();
     // `cancel`'s exit says only that the run has ended, however that was, and whether what it
     // left on its provider is gone.
@@ -560,11 +635,17 @@ fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Stops the run that `flags` name, here, as `cancel` does, and reaps what it left once it has
-/// ended; returns its record, its runs directory as commands name it ([`found`]), and whether
-/// its provider was reached.
-fn cancelled(flags: cli::Cancel) -> Result<(Record, Option<String>, bool), String> {
-    let cli::Cancel { run, runs, force } = flags;
+/// Stops the run that `flags` name, here, as `cancel` does, saying so to `reader`, with where it
+/// is recorded to the operator ([`Reader`]), and reaps what it left once it has ended; returns
+/// its record, its runs directory as commands name it ([`found`]), and whether its provider was
+/// reached.
+fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<(Record, Option<String>, bool), String> {
+    let cli::Cancel {
+        run,
+        runs,
+        force,
+        modal_config,
+    } = flags;
     let (record, named) = found(run, runs)?;
     let (id, dir) = (record.id(), record.dir().display());
     if let Some(pid) = record.driver()? {
@@ -592,13 +673,16 @@ fn cancelled(flags: cli::Cancel) -> Result<(Record, Option<String>, bool), Strin
         sent.context(format_args!(
             "signalling run {id}'s driver, process {pid}, failed"
         ))?;
-        say(format_args!("{doing} {id}, recorded in {dir}{until}"));
+        match reader {
+            Reader::Operator => say(format_args!("{doing} {id}, recorded in {dir}{until}")),
+            Reader::Follower => say(format_args!("{doing} {id}{until}")),
+        }
     }
     // Its provider is known for certain only once it has ended: a driver yet to start the run
     // has yet to say which it is.
     record.wait(|| {})?;
-    let reaping = &mut Reaching::new();
-    let reaped = reaped(&record, reaping, named.as_deref())?;
+    let reaping = &mut Reaching::new(modal_config);
+    let reaped = reaped(&record, reaping, named.as_deref(), Reaper::Command)?;
     let Swept { left: _, reached } = reaped;
     Ok((record, named, reached))
 }
@@ -615,21 +699,41 @@ struct Swept {
     reached: bool,
 }
 
+/// Who reaps, which decides the runs that a reap takes, and what it makes of a provider of
+/// theirs that it can't reach.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reaper {
+    /// `pumpkin reap` or `pumpkin cancel`: every run that has ended or is lost; a provider
+    /// that can't be reached fails the reap, which says how to reap again once it can be.
+    Command,
+    /// The controller's boot: only the runs that may have left something, not one that ended
+    /// clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
+    /// credentials reach the controller only with a job, it says leaves what the run left
+    /// there to end by the run's hard end, and goes on.
+    Boot,
+}
+
 /// Removes what each run in the runs directory that `flags` name, or [`default_runs`], left
-/// once it ended or was lost ([`Record::reap`]), printing each such run's id; leaves each live
-/// run to its driver. Returns the exit status that `reap`'s help gives.
-fn reap(flags: cli::Reap) -> Result<ExitCode, String> {
-    let cli::Reap { runs } = flags;
+/// once it ended or was lost ([`Record::reap`]), of the runs that `reaper` takes, printing each
+/// such run's id; leaves each live run to its driver. Returns the exit status that `reap`'s
+/// help gives, but of `reaper` [`Reaper::Boot`], 0 though a provider can't be reached.
+fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String> {
+    let cli::Reap { runs, modal_config } = flags;
+    if runs.is_none()
+        && let Some(client) = config::client(None)?
+    {
+        return controller::reap(&client);
+    }
     let (runs, named) = runs_dir(runs)?;
     let named = named.as_deref();
-    let mut reaching = Reaching::new();
+    let mut reaching = Reaching::new(modal_config);
     let (mut unreaped, mut unreached) = (0, 0);
     for record in Record::all(Path::new(&runs))? {
         let swept = record.and_then(|record| {
-            if record.driver()?.is_some() {
+            if record.driver()?.is_some() || reaper == Reaper::Boot && record.ended_clean()? {
                 return Ok(None);
             }
-            let swept = reaped(&record, &mut reaching, named)?;
+            let swept = reaped(&record, &mut reaching, named, reaper)?;
             Ok(Some((record, swept)))
         });
         match swept {
@@ -657,7 +761,7 @@ fn reap(flags: cli::Reap) -> Result<ExitCode, String> {
         advise("reap again", &next::reap(named));
         return Ok(ExitCode::FAILURE);
     }
-    if unreached > 0 {
+    if unreached > 0 && reaper == Reaper::Command {
         let runs = counted(unreached, "run");
         say(format_args!(
             "{runs} ran on a provider that can't be reached, as said above: what each left \
@@ -676,6 +780,9 @@ fn reap(flags: cli::Reap) -> Result<ExitCode, String> {
 struct Reaching {
     reached: BTreeMap<Reachable, Result<Box<dyn Sweep>, String>>,
     configurations: BTreeMap<PathBuf, Result<config::Providers<config::Kind>, String>>,
+    /// Modal's configuration file for every provider of kind `modal`, in place of the one that
+    /// a run's configuration names, as `--modal-config` gives it.
+    modal_config: Option<PathBuf>,
 }
 
 /// How a reap reaches a provider of a run's: by a Docker context's name, or by the path of the
@@ -687,10 +794,11 @@ enum Reachable {
 }
 
 impl Reaching {
-    fn new() -> Self {
+    fn new(modal_config: Option<PathBuf>) -> Self {
         Self {
             reached: BTreeMap::new(),
             configurations: BTreeMap::new(),
+            modal_config,
         }
     }
 
@@ -763,7 +871,8 @@ impl Reaching {
             }
             Some(config::Kind::Modal(settings)) => (modal_helper())
                 .and_then(|helper| {
-                    Modal::reach(settings, None, &helper, &Workspace::find()?.modal())
+                    let config = self.modal_config.as_deref();
+                    Modal::reach(settings, config, &helper, &Workspace::find()?.modal())
                 })
                 .map(|reached| Box::new(reached) as _),
         };
@@ -793,7 +902,12 @@ fn run_config(record: &Record) -> Result<PathBuf, String> {
 /// Of a provider that can't be reached, it says so, and, as `reaper` has it, how to reap `runs`
 /// again, as commands name it ([`end`]), or that what the run left there ends by its hard end;
 /// and removes the rest.
-fn reaped(record: &Record, reaching: &mut Reaching, runs: Option<&str>) -> Result<Swept, String> {
+fn reaped(
+    record: &Record,
+    reaching: &mut Reaching,
+    runs: Option<&str>,
+    reaper: Reaper,
+) -> Result<Swept, String> {
     let id = record.id();
     let failed = |error| format!("run {id} can't be reaped: {error}");
     let reports = record.provider_reports().map_err(failed)?;
@@ -811,13 +925,19 @@ fn reaped(record: &Record, reaching: &mut Reaching, runs: Option<&str>) -> Resul
             Ok(sweep) => providers.push((name, sweep)),
             // Not the reap's to fail: a record's provider may be gone for good, as on a machine
             // set up again since, and a failure would fail every reap after it.
-            Err(error) => say(format_args!(
-                "run {id}'s sandboxes on provider `{name}`, if it left any, can't be \
-                 removed, as it can't be reached: {error}; once it can be, `{}` removes \
-                 them, and if it is gone for good, remove the record, {}, to stop reaping it",
-                next::reap(runs),
-                record.dir().display()
-            )),
+            Err(error) => match reaper {
+                Reaper::Command => say(format_args!(
+                    "run {id}'s sandboxes on provider `{name}`, if it left any, can't be \
+                     removed, as it can't be reached: {error}; once it can be, `{}` removes \
+                     them, and if it is gone for good, remove the record, {}, to stop reaping it",
+                    next::reap(runs),
+                    record.dir().display()
+                )),
+                Reaper::Boot => say(format_args!(
+                    "run {id}'s sandboxes on provider `{name}`, if it left any, end by the run's \
+                     hard end, as the boot can't reach it: {error}"
+                )),
+            },
         }
     }
     let reached = providers.len() == reports.len();
@@ -908,15 +1028,18 @@ fn check(flags: cli::Check) -> Result<ExitCode, String> {
 
 /// Builds the task that `flags` name, as `pumpkin build --help` says, on the engine that the
 /// configuration names, saying each of its problems if it has any, and else printing its IR;
-/// returns 0 once the IR is printed.
-fn build(flags: cli::Build) -> Result<ExitCode, String> {
+/// returns 0 once the IR is printed. It says the engine to `reader` ([`engine()`]).
+fn build(flags: cli::Build, reader: Reader) -> Result<ExitCode, String> {
+    if let Some(client) = config::client(flags.config.as_deref())? {
+        return controller::build(&client, flags);
+    }
     let cli::Build {
         entry,
         args: cli::TaskArgs(args),
         config,
     } = flags;
     let again = source_again("build", &[&entry], &args, config.as_deref())?;
-    match built(&entry, &args, config) {
+    match built(&entry, &args, config, reader) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(error) => {
             say(error);
@@ -927,9 +1050,14 @@ fn build(flags: cli::Build) -> Result<ExitCode, String> {
 
 /// What [`build`] does, but for the command that ends a failure; with `config`, the
 /// configuration's path, if given ([`config_path`]).
-fn built(entry: &star::Entry, args: &lang::Args, config: Option<String>) -> Result<(), String> {
+fn built(
+    entry: &star::Entry,
+    args: &lang::Args,
+    config: Option<String>,
+    reader: Reader,
+) -> Result<(), String> {
     let built = star::checked(entry, args, |task| {
-        let engine = configured_engine(&config_path(config)?)?;
+        let engine = configured_engine(&config_path(config)?, reader)?;
         Ok(task.build(&engine))
     })?;
     let (workflow, _) = built.map_err(|problems| task_problems(entry, &problems))?;
@@ -1186,15 +1314,15 @@ fn config_path(given: Option<String>) -> Result<PathBuf, String> {
     given.map_or_else(default_config, |config| Ok(PathBuf::from(config)))
 }
 
-/// The Docker engine that the configuration at `path` names ([`engine()`]).
-fn configured_engine(path: &Path) -> Result<Engine, String> {
+/// The Docker engine that the configuration at `path` names, said to `reader` ([`engine()`]).
+fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
     let config::Config {
         docker: config::Docker { context, cpus: _ },
         providers: _,
         gateway: _,
         upstreams: _,
     } = config::read(path)?;
-    engine(context)
+    engine(context, reader)
 }
 
 /// `$HOME/.config/pumpkin/pumpkin.toml`.
@@ -1298,14 +1426,14 @@ fn modal_helper() -> Result<PathBuf, String> {
 /// `workflow`, of the task whose entry is `path`, placed in the classes that `providers`, read
 /// from the configuration at `config`, offer ([`Workflow::place`]), with each provider that it
 /// places a role on. Of one that can't be, says
-/// each problem on a line of its own, as cargo does, then how many, and fails with `again`, the
-/// command that runs it again.
+/// each problem on a line of its own, as cargo does, then fails with how many, as [`refused`]
+/// does with `again`.
 fn place<'p, 'e>(
     path: &Path,
     workflow: Workflow,
     providers: &'p config::Providers<Connected<'e>>,
     config: &Path,
-    again: &str,
+    again: Option<&str>,
 ) -> Result<(Placed, ByProvider<&'p Connected<'e>>), String> {
     let classes = |connected: &'p Connected<'e>| &connected.provider().ready().classes;
     let placed = workflow.place(providers.by_name(), classes);
@@ -1318,9 +1446,19 @@ fn place<'p, 'e>(
             "{path}: placing the workflow's roles in the classes that {}'s providers offer has",
             config.display()
         );
-        say(closing_problems(has, errors.as_slice().len()));
-        format!("to run it again: {again}")
+        refused(closing_problems(has, errors.as_slice().len()), again)
     })
+}
+
+/// What the driver fails with, refused `error` before the record is begun: once it has said
+/// `error`, the command that runs it again, `again`; or `error` alone without one, as a
+/// controller's client says what to do next ([`driver_run`]).
+fn refused(error: String, again: Option<&str>) -> String {
+    let Some(again) = again else {
+        return error;
+    };
+    say(error);
+    format!("to run it again: {again}")
 }
 
 /// The grant listener that the sandboxes of the private providers of `placed_on`, those that a
@@ -1393,12 +1531,12 @@ fn counted<C: Copy + fmt::Display + PartialEq + From<u8>>(count: C, noun: &str) 
 }
 
 /// The Docker engine that `context` reaches, reported, which writes in the workspace's directory
-/// of it ([`Workspace::docker`]). A rootful engine is announced, since its `docker` group is
-/// root-equivalent.
-fn engine(context: ContextName) -> Result<Engine, String> {
+/// of it ([`Workspace::docker`]). A rootful engine is announced to the operator, since its
+/// `docker` group is root-equivalent; a follower can't change it ([`Reader`]).
+fn engine(context: ContextName, reader: Reader) -> Result<Engine, String> {
     let engine = Engine::connect(context, &Workspace::find()?.docker())?;
     let report = engine.report();
-    if !report.security.rootless {
+    if reader == Reader::Operator && !report.security.rootless {
         say(format_args!(
             "the Docker engine that context `{}` reaches runs as root, so its `docker` group is \
              root-equivalent: rootless Docker is recommended",
