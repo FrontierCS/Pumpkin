@@ -23,7 +23,7 @@ use decision::lasts;
 use expect_test::{Expect, expect};
 use provider::Provider;
 use route::Serving;
-use runtime::{Ending, Record, Run};
+use runtime::{Ending, Host, Record, Run, System};
 use schema::ir::{self, ModelName};
 use schema::provider::{Listed, RunTag};
 use schema::sandbox::{SANDBOXCTL_PATH, command_stdout};
@@ -33,8 +33,11 @@ use test_support::http::{read_request, write_chunk};
 use test_support::{WORKFLOW, files};
 
 use crate::docker;
+use crate::host::{LateTake, SimHost, SlowSync};
 use crate::run::{Runs, compact, placed, serving};
-use crate::sim::{self, BRIEF, LINGERING, LOST, MUTE, SLOW, Sim, UNDELETABLE, UNPUBLISHED};
+use crate::sim::{
+    self, BRIEF, Journal, LINGERING, LOST, MUTE, SLOW, Sim, UNDELETABLE, UNPUBLISHED,
+};
 
 /// A `sandboxd` that dials.
 const SANDBOXD: &str = "/sim/sandboxd";
@@ -51,8 +54,8 @@ trait Platform: Provider {
 }
 
 impl Platform for Sim {
-    /// The mode of the directory that held each create's socket directory, and whether each
-    /// create asked for the model endpoint, if one did.
+    /// The mode of the directory that held each create's socket directory, whether each
+    /// create asked for the model endpoint, if one did, and its journal, if it has one.
     fn shown(&self) -> Vec<String> {
         let modes = self.modes().into_iter().map(|mode| format!("{mode:o}"));
         let modes: Vec<String> = modes.collect();
@@ -60,6 +63,15 @@ impl Platform for Sim {
         let endpoints = self.models();
         if endpoints.contains(&true) {
             lines.push(format!("the model endpoint at each create: {endpoints:?}"));
+        }
+        if let Some(journal) = self.journal() {
+            lines.push("the journal:".to_owned());
+            lines.extend(
+                journal
+                    .entries()
+                    .into_iter()
+                    .map(|entry| format!("  {entry}")),
+            );
         }
         lines
     }
@@ -71,9 +83,16 @@ impl Platform for Docker<'_> {
     }
 }
 
-/// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one,
-/// and executes it on `provider`, with `sandboxd`, its roles [placed](placed) there.
-fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect: &Expect) {
+/// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one, on
+/// `host`, and executes it on `provider`, with `sandboxd`, its roles [placed](placed) there.
+fn check<H: Shown>(
+    host: &H,
+    name: &str,
+    provider: &dyn Platform,
+    ir: &Value,
+    sandboxd: &str,
+    expect: &Expect,
+) {
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
     let route = ir.roles.iter().find_map(|role| role.egress.model.as_ref());
@@ -82,9 +101,10 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
         (route.zip(stand_in.as_ref())).map(|(route, stand_in)| stand_in.serving(&runs.dir, route));
     let placed = placed(&ir, provider.ready()).unwrap();
     let hard_end = lasts(&placed);
-    let run = Run::prepare(placed.clone(), &runs.dir, SystemTime::now(), serving).unwrap();
+    let run = Run::prepare(host, placed.clone(), &runs.dir, SystemTime::now(), serving).unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = std::env::temp_dir().join(format!("pumpkin-{}", run.id()));
+    let partial = record.with_file_name(format!(".{}.partial", run.id()));
     let before = unix_ns();
     let executed = run.execute(provider, Path::new(sandboxd), || Ok(()));
     let started = before..=unix_ns();
@@ -107,7 +127,7 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
     ));
     lines.push(format!("outcome.json: {}", compact(&read("outcome.json"))));
     lines.push("log.jsonl:".to_owned());
-    let (log, start, last) = logged(&record, &started);
+    let (log, start, last) = logged(&record, &started, H::SCRIPTED);
     lines.extend(log);
     lines.extend(final_judge_stderr(&record));
     if let Some(last) = last {
@@ -135,11 +155,17 @@ fn check(name: &str, provider: &dyn Platform, ir: &Value, sandboxd: &str, expect
         let at = when(&placed, hung_up);
         lines.push(format!("a stalled stream's client hung up {at}"));
     }
-    let mut shown = lines.join("\n");
-    shown = shown.replace(&sockets.display().to_string(), "<sockets>");
-    if let Some(address) = address {
-        shown = shown.replace(&address, "<stand-in>");
-    }
+    let runs_dir = record.parent().unwrap().display().to_string();
+    let mut names = vec![
+        (sockets.display().to_string(), "<sockets>"),
+        (record.display().to_string(), "<record>"),
+        (partial.display().to_string(), "<partial>"),
+        (runs_dir, "<runs>"),
+    ];
+    names.extend(address.map(|address| (address, "<stand-in>")));
+    let shown = (names.into_iter()).fold(lines.join("\n"), |shown, (path, name)| {
+        shown.replace(&path, name)
+    });
     expect.assert_eq(&shown);
 }
 
@@ -207,7 +233,8 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
     let (line, headers, body) = read_request(&mut BufReader::new(&connection));
     let key = headers.iter().find(|(name, _)| name == "authorization");
     let input: Value = serde_json::from_slice(&body).unwrap();
-    let refused = match input["input"].as_str() {
+    let said = input["input"][1]["content"].as_str();
+    let refused = match said {
         Some("expired") => Some(("401 Unauthorized", "")),
         Some("forbidden") => Some(("403 Forbidden", "")),
         Some("down") => Some(("502 Bad Gateway", "x-request-id: req-502\r\n")),
@@ -231,7 +258,20 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
         "data: {line} {key:?} {}\n\n",
         String::from_utf8(body).unwrap()
     );
-    if input["input"] == "stream" {
+    if said == Some("usage") {
+        let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}"#;
+        write_chunk(
+            &mut connection,
+            "data: {\"type\":\"response.created\",\"response\":{\"usage\":null}}\n\n",
+        );
+        write_chunk(
+            &mut connection,
+            &format!("event: response.completed\ndata: {completed}\n\n"),
+        );
+        write_chunk(&mut connection, "");
+        return None;
+    }
+    if said == Some("stream") {
         write_chunk(&mut connection, &echo);
         write_chunk(&mut connection, "");
         return None;
@@ -242,21 +282,39 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
     Some(unix_ns())
 }
 
-/// The records of the run log in `record`, a run's, one per line; when the run started, in
-/// nanoseconds since the Unix epoch; and the time of its last record, if it has any. `started`
-/// spans the call to `execute`.
+/// A host as a test shows its run: whether its clock reads only the times its script sets, so
+/// that the run's times are the same each time it runs.
+trait Shown: Host {
+    const SCRIPTED: bool;
+}
+
+impl Shown for System {
+    const SCRIPTED: bool = false;
+}
+
+impl Shown for SimHost {
+    const SCRIPTED: bool = true;
+}
+
+/// The records of the run log in `record`, a run's, one per line, once [`in_order`] has checked
+/// them; when the run started, in nanoseconds since the Unix epoch; and its last record's time.
+/// It leaves out the `status` ops answered, alone, while their job was queued or running, whose
+/// number depends on timing, and numbers the rest, and their ops, in turn. The run's start is
+/// shown only if it isn't within `started`, the call to `execute`. Unless the run's times are
+/// `scripted`, a record's times are shown only if 0, and the time left in a reply as `<s>`.
 fn logged(
     record: &Path,
     started: &RangeInclusive<u64>,
+    scripted: bool,
 ) -> (Vec<String>, Option<u64>, Option<Duration>) {
-    let (mut lines, mut start, mut last, mut polls) = (Vec::new(), None, None, 0);
+    let (mut lines, mut start, mut polls) = (Vec::new(), None, 0);
     // A run that fails before it starts has no log.
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
-    for (seq, line) in log.lines().enumerate() {
-        let mut logged: Value = serde_json::from_str(line).unwrap();
-        assert_eq!(logged["seq"], json!(seq), "{logged}");
-        let at = Duration::from_nanos(nanos(&logged["at_ns"]).unwrap());
-        last = last.max(Some(at));
+    let log: Vec<Value> = (log.lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let last = in_order(&log);
+    for mut logged in log {
         let actions = logged["actions"].as_array().map_or(0, Vec::len);
         let state = logged.pointer("/actions/0/reply/state");
         // Their number depends on timing.
@@ -275,8 +333,13 @@ fn logged(
                 *op = json!(op.as_u64().unwrap() - polls);
             }
         }
-        if !at.is_zero() {
-            logged["at_ns"] = json!("<ns>");
+        for time in ["at_ns", "observed_ns"] {
+            if let Some(ns) = logged.get_mut(time)
+                && nanos(ns) != Some(0)
+                && !scripted
+            {
+                *ns = json!("<ns>");
+            }
         }
         if let Some(unix_ns) = logged.pointer_mut("/event/unix_ns") {
             start = nanos(unix_ns);
@@ -286,13 +349,32 @@ fn logged(
         }
         let actions = logged.get_mut("actions").and_then(Value::as_array_mut);
         for action in actions.into_iter().flatten() {
-            if let Some(seconds) = action.pointer_mut("/reply/remaining_seconds") {
+            if let Some(seconds) = action.pointer_mut("/reply/remaining_seconds")
+                && !scripted
+            {
                 *seconds = json!("<s>");
             }
         }
         lines.push(logged.to_string());
     }
     (lines, start, last)
+}
+
+/// The time of the last of `log`'s records, a run log's, once it checks that they are numbered
+/// from 0 with no gap, none timed before the one before it, and no event observed after its
+/// record was written.
+fn in_order(log: &[Value]) -> Option<Duration> {
+    let time = |ns: &Value| Duration::from_nanos(nanos(ns).unwrap());
+    let mut last = None;
+    for (seq, logged) in log.iter().enumerate() {
+        assert_eq!(logged["seq"], json!(seq), "{logged}");
+        let at = Some(time(&logged["at_ns"]));
+        assert!(last <= at, "{logged} comes before the record before it");
+        let observed = logged.get("observed_ns").map(time);
+        assert!(observed <= at, "{logged} was observed after it was written");
+        last = at;
+    }
+    last
 }
 
 /// How long after its start, `start` nanoseconds since the Unix epoch, the log in `record`, a
@@ -407,12 +489,15 @@ fn short_workflow(argv: &[&str], deadline: u64) -> Value {
     ir
 }
 
+// A run whose agent's command exits: its exit ends the work phase without a submission, and
+// the agent's sandbox is collected and deleted, so the run finishes without a score.
 #[test]
 fn exits() {
     // A deadline far later than the exit, so that an exit the run misses ends the work phase.
     let mut ir = workflow(&["exit", "3"]);
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
     check(
+        &System,
         "exits",
         &Sim::new(),
         &ir,
@@ -424,9 +509,9 @@ fn exits() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":3}},"seq":2}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":3}},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             its last record came before the agent's teardown was to end
             socket directories left: false
@@ -442,6 +527,7 @@ fn crashes() {
     let mut ir = workflow(&["crash"]);
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
     check(
+        &System,
         "crashes",
         &Sim::new(),
         &ir,
@@ -453,9 +539,9 @@ fn crashes() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"seq":2}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: the sandbox ended the session","seq":3}
             {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox ended the session","seq":4}
             {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":5}
@@ -474,6 +560,7 @@ fn stalls() {
     agent["deadline_seconds"] = json!(1);
     agent["finalize_grace_seconds"] = json!(0);
     check(
+        &System,
         "stalls",
         &Sim::with_startup(SHORT_STARTUP),
         &ir,
@@ -485,9 +572,9 @@ fn stalls() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":2}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":3}
             {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":4}
             {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":5}
@@ -505,6 +592,7 @@ fn unstarted() {
     // Outlasted by the start, so that the core hears of its failure before the deadline's tick.
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(1);
     check(
+        &System,
         "unstarted",
         &Sim::with_startup(SHORT_STARTUP),
         &ir,
@@ -516,8 +604,8 @@ fn unstarted() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":1}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":1}
             {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
             its last record came before the agent's teardown was to end
             socket directories left: false
@@ -529,6 +617,7 @@ fn unstarted() {
 #[test]
 fn lost() {
     check(
+        &System,
         "lost",
         &Sim::new(),
         &workflow(&["exit", "0"]),
@@ -540,8 +629,8 @@ fn lost() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"seq":1}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":1}
             {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
             {"at_ns":"<ns>","note":"deleted the sandboxes the run left: sim-1","seq":3}
             its last record came before the agent's teardown was to end
@@ -554,6 +643,7 @@ fn lost() {
 #[test]
 fn undeletable() {
     check(
+        &System,
         "undeletable",
         &Sim::new(),
         &workflow(&["exit", "0"]),
@@ -565,9 +655,9 @@ fn undeletable() {
             provider.json is what the provider declared: true
             outcome.json: {"reason":"deleting sandbox sim-1 failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":2}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             {"at_ns":"<ns>","note":"the run failed: deleting sandbox sim-1 failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":4}
             its last record came before the agent's teardown was to end
@@ -580,6 +670,7 @@ fn undeletable() {
 #[test]
 fn unpublished() {
     check(
+        &System,
         "unpublished",
         &Sim::new(),
         &workflow(&["exit", "0"]),
@@ -615,6 +706,7 @@ fn ops() {
     // A deadline far later than the agent's last op, so that a reply the agent misses ends the
     // work phase.
     check(
+        &System,
         "ops",
         &Sim::new(),
         &ops_workflow(&argv, 30),
@@ -626,29 +718,29 @@ fn ops() {
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"seq":2}
-            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"seq":3}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"grant":"nope","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":4}
-            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:a73add1aecea03a894ca65d99bc5e91d21b58cdb728343bbcb6cf6cf38b809f5","size":9}}},"seq":5}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"grant":"nope","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:a73add1aecea03a894ca65d99bc5e91d21b58cdb728343bbcb6cf6cf38b809f5","size":9}}},"observed_ns":"<ns>","seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"judge","payload":{"over":16,"size":17}}},"seq":6}
-            {"actions":[{"kind":"reply","op":4,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":4,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":10}
-            {"actions":[{"kind":"reply","op":5,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":5,"request":{"job":"0","kind":"status"}},"seq":11}
-            {"actions":[{"kind":"reply","op":6,"reply":{"job":1,"kind":"judge","remaining":{"calls":98,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":6,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_timed_out"},"seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":1,"kind":"judge_collected"},"seq":15}
-            {"actions":[{"kind":"reply","op":7,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":7,"request":{"job":"1","kind":"status"}},"seq":16}
-            {"actions":[{"kind":"reply","op":8,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":8,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":17}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":2,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":18}
+            {"actions":[{"kind":"reply","op":4,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":4,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"reply","op":5,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":5,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"reply","op":6,"reply":{"job":1,"kind":"judge","remaining":{"calls":98,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":6,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":1,"kind":"judge_collected"},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"reply","op":7,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":7,"request":{"job":"1","kind":"status"}},"observed_ns":"<ns>","seq":16}
+            {"actions":[{"kind":"reply","op":8,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":8,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":17}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":2,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":18}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_started"},"seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"seq":21}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":22}
+            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
+            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":22}
             its last record came before the agent's teardown was to end
             socket directories left: false
             their directory's mode at each create: ["700", "700", "700", "700"]
@@ -656,9 +748,12 @@ fn ops() {
     );
 }
 
+// A run whose agent finalizes a submission whose final judge writes a result over the most a
+// result may hold: the result is removed from the record, and the run finishes with no score.
 #[test]
 fn result_over_the_limit() {
     check(
+        &System,
         "result-over-the-limit",
         &Sim::new(),
         &ops_workflow(&["ops", "finalize submit large"], 30),
@@ -670,14 +765,14 @@ fn result_over_the_limit() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"seq":2}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":3}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":6}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"invalid":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one","job":0,"kind":"judge_collected"},"seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"invalid":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":7}
             the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
             its last record came before the agent's teardown was to end
             socket directories left: false
@@ -695,6 +790,7 @@ fn crashes_with_an_op_in_flight() {
     ir["roles"][1]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(16);
     ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(8);
     check(
+        &System,
         "crashes-with-an-op",
         &Sim::new(),
         &ir,
@@ -706,16 +802,16 @@ fn crashes_with_an_op_in_flight() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12}}},"seq":2}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12}}},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"op 0's reply failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":3}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"},"seq":4}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"},"observed_ns":"<ns>","seq":4}
             {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":5}
             {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":6}
             {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: writing to the sandbox failed: Broken pipe (os error 32)","seq":7}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":8}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped before its command started"},"seq":9}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: writing to the sandbox failed: Broken pipe (os error 32)"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped before its command started"},"observed_ns":"<ns>","seq":9}
             its last record came before the agent's teardown was to end
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
@@ -723,6 +819,10 @@ fn crashes_with_an_op_in_flight() {
     );
 }
 
+// A run whose agent makes a judge call, then exits, and whose judge's sandbox takes seconds to
+// create, past the deadline: an agent's call starts by the work phase's end, which comes by the
+// deadline, however long the provider's startup, so the create gives up then, leaving the
+// sandbox for the run's end to delete, and the run finishes without a submission.
 #[test]
 fn judge_starts_past_the_deadline() {
     // A deadline that the create, which begins once the agent has started, outlasts, and that
@@ -730,6 +830,7 @@ fn judge_starts_past_the_deadline() {
     let mut ir = ops_workflow(&["ops", "judge train 6", "exit"], 2);
     ir["roles"][1]["image"] = json!(sim::image(SLOW).as_str());
     check(
+        &System,
         "judge-starts-past-the-deadline",
         &Sim::new(),
         &ir,
@@ -741,12 +842,12 @@ fn judge_starts_past_the_deadline() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":3}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: the directories under `/pumpkin` can't be put in the sandbox: the request's deadline passed before it was sent: expected time left to send it"},"seq":5}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: the directories under `/pumpkin` can't be put in the sandbox: the request's deadline passed before it was sent: expected time left to send it"},"observed_ns":"<ns>","seq":5}
             its last record came before the agent's teardown was to end
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
@@ -762,6 +863,7 @@ fn judge_placed_apart() {
     ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
     ir["roles"][1]["needs"] = json!(BRIEF);
     check(
+        &System,
         "judge-placed-apart",
         &Sim::new(),
         &ir,
@@ -773,12 +875,12 @@ fn judge_placed_apart() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":3}
-            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"seq":4}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":5}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
             its last record came before the agent's teardown was to end
             socket directories left: false
@@ -787,6 +889,11 @@ fn judge_placed_apart() {
     );
 }
 
+// A run whose train judge stalls its sandbox once its command has started, which the agent
+// awaits before it finalizes: the work phase ends at once, so the core stops the call, whose
+// sandbox's freeze runs out at the agent's teardown's end, which leaves the final judge its
+// startup and timeout before the hard end. The final judge scores the submission, but its
+// sandbox can't be deleted, which fails the run, and the run's end can't delete it either.
 #[test]
 fn judge_stalls() {
     let argv = [
@@ -803,6 +910,7 @@ fn judge_stalls() {
     ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(2);
     ir["roles"][2]["image"] = json!(sim::image(UNDELETABLE).as_str());
     check(
+        &System,
         "judge-stalls",
         &Sim::with_startup(SHORT_STARTUP),
         &ir,
@@ -814,15 +922,15 @@ fn judge_stalls() {
             provider.json is what the provider declared: true
             outcome.json: {"reason":"deleting sandbox sim-3 failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5},"timeout_ns":"2000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5}}},"seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":3}
-            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":4}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5},"timeout_ns":"2000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"freezing the judge's sandbox failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts"},"seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"seq":8}
+            {"actions":[{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"freezing the judge's sandbox failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts"},"observed_ns":"<ns>","seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":8}
             {"at_ns":"<ns>","note":"the run failed: deleting sandbox sim-3 failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":9}
             its last record came once the agent's teardown was to end, before the hard end
             socket directories left: false
@@ -838,6 +946,7 @@ fn abandoned() {
     let mut ir = short_workflow(&argv, 2);
     ir["roles"][1]["image"] = json!(sim::image(LINGERING).as_str());
     check(
+        &System,
         "abandoned",
         &Sim::with_startup(SHORT_STARTUP),
         &ir,
@@ -849,14 +958,14 @@ fn abandoned() {
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":3}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":4}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"seq":7}
+            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"observed_ns":"<ns>","seq":7}
             {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":8}
             its last record came once the hard end had passed
             its log's last record was written once the hard end had passed
@@ -866,6 +975,13 @@ fn abandoned() {
     );
 }
 
+// A run whose agent's judge call fails once its start runs out, since its judge hangs without
+// dialing, and whose agent's sandbox's delete, as the agent exits, outlasts the run's hard
+// end, so that the loop takes the call's last report only after it, and the judge call that
+// the agent's sandbox makes after the exit, as a process the agent left would, which reaches
+// the host before the report. Each came before the hard end, at the time it carries: the core
+// refuses the op, whose refusal can't be sent, and the report ends the call in time, so the
+// run finishes without a submission rather than be abandoned.
 #[test]
 fn reported_before_the_hard_end() {
     // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
@@ -874,6 +990,7 @@ fn reported_before_the_hard_end() {
     ir["roles"][0]["image"] = json!(sim::image(LINGERING).as_str());
     ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
     check(
+        &System,
         "reported-before-the-hard-end",
         &Sim::with_startup(SHORT_STARTUP),
         &ir,
@@ -885,13 +1002,13 @@ fn reported_before_the_hard_end() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":3}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"seq":5}
-            its last record came before the agent's teardown was to end
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":5}
+            its last record came once the hard end had passed
             its log's last record was written once the hard end had passed
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
@@ -899,26 +1016,109 @@ fn reported_before_the_hard_end() {
     );
 }
 
+// A run on a simulated host, whose agent makes a judge call as the run starts, and whose loop
+// takes it 0.5 s past the deadline, then finds its inbox empty until the call's thread, which
+// finds the call's start due by the deadline, reports the call's failure, at that time: the op
+// reached the host before the deadline, so the core accepts it, and the failure, which reached
+// it after, waits while the deadline's tick ends the work phase, then ends the call, which
+// finishes the run.
+#[test]
+fn reported_past_the_deadline() {
+    let late = LateTake {
+        behind: 0,
+        at: Duration::from_millis(30_500),
+        then: 1,
+    };
+    check(
+        &SimHost::new().late_take(late),
+        "reported-past-the-deadline",
+        &Sim::new(),
+        &short_workflow(&["ops", "judge train 6"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"30500000000","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":2}
+            {"at_ns":"30500000000","note":"op 0's reply wasn't sent: it was due by the core's next act, which has come","seq":3}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"30500000000","event":{"kind":"tick"},"observed_ns":"30500000000","seq":4}
+            {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"30500000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"observed_ns":"30500000000","seq":6}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// [`reported_past_the_deadline`]'s run, with its loop's take an hour in, past the run's hard
+// end: the call's failure waits while the tick abandons the run, and is recorded after it.
+#[test]
+fn reported_past_the_hard_end() {
+    let late = LateTake {
+        behind: 0,
+        at: Duration::from_secs(3600),
+        then: 1,
+    };
+    check(
+        &SimHost::new().late_take(late),
+        "reported-past-the-hard-end",
+        &Sim::new(),
+        &short_workflow(&["ops", "judge train 6"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
+            record: driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"3600000000000","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":2}
+            {"at_ns":"3600000000000","note":"op 0's reply wasn't sent: it was due by the core's next act, which has come","seq":3}
+            {"actions":[{"kind":"abandon"}],"at_ns":"3600000000000","event":{"kind":"tick"},"observed_ns":"3600000000000","seq":4}
+            {"actions":[],"at_ns":"3600000000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"observed_ns":"3600000000000","seq":5}
+            {"at_ns":"3600000000000","note":"deleted the sandboxes the run left: sim-1","seq":6}
+            {"at_ns":"3600000000000","note":"the run failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":7}
+            its last record came once the hard end had passed
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose agent finalizes a submission, and whose agent's sandbox's delete, in the teardown
+// that follows, outlasts the run's hard end: the final judge's start is due by then, so its
+// call fails with no sandbox created, once the hard end has passed, and the hard end's tick,
+// which comes first, abandons the run.
 #[test]
 fn torn_down_past_the_hard_end() {
     check(
+        &System,
         "torn-down-past-the-hard-end",
         &Sim::with_startup(SHORT_STARTUP),
         &short_workflow(&["ops", "finalize submit 6"], 2),
         LINGERING,
         &expect![[r#"
             failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
-            record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             payloads hold: ["xxxxxx"]
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed"}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":2}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
-            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"seq":4}
-            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":5}
+            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"observed_ns":"<ns>","seq":5}
+            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 9 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":6}
             its last record came once the hard end had passed
             its log's last record was written once the hard end had passed
             socket directories left: false
@@ -927,6 +1127,12 @@ fn torn_down_past_the_hard_end() {
     );
 }
 
+// A run whose agent waits 2 s once its first `ops` is answered before it makes its second,
+// timed as it reached the host, so that its reply leaves at least 2 s less than the first's,
+// however long the agent took to start, which the agent checks, exiting with 1 if not. It then
+// exits, and its sandbox makes a judge call after the exit, as a process the agent left would:
+// the call arrives once the core has finished the run, so the core refuses it, and the refusal
+// can't be sent, which the run log notes.
 #[test]
 fn late_ops() {
     let argv = [
@@ -938,6 +1144,7 @@ fn late_ops() {
         "judge train 6",
     ];
     check(
+        &System,
         "late-ops",
         &Sim::new(),
         &ops_workflow(&argv, 30),
@@ -949,13 +1156,13 @@ fn late_ops() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"seq":2}
-            {"actions":[{"kind":"reply","op":1,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"kind":"ops"}},"seq":3}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":4}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":1,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"the work phase has ended: make no more ops"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":6}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"the work phase has ended: make no more ops"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"op 2's reply wasn't sent: the agent's sandbox is gone","seq":7}
             its last record came before the agent's teardown was to end
             socket directories left: false
@@ -964,6 +1171,304 @@ fn late_ops() {
     );
 }
 
+// A run on a simulated host, whose agent makes a judge call, then at once ends its session by
+// closing the connection, both as the run starts, and whose loop takes the op 0.5 s past the
+// deadline, as a slow sync of the run log would hold it, with the session's end queued behind
+// it: each reached the host before the deadline, and counts then, however late the loop takes
+// it, so the core accepts the op, whose reply isn't sent, as it was due by the deadline, and the
+// session's end ends the work phase as the agent's failure, ahead of the call's failure, which
+// its thread reports as the call's start was due by then, and which then finishes the run.
+//
+// The test is deterministic because one thread produces its inputs, the session's reader, so
+// they reach the inbox in a fixed order; the order between producers on different threads, such
+// as a judge's report and the agent's reader, isn't scripted yet.
+#[test]
+fn taken_past_the_deadline() {
+    let late = LateTake {
+        behind: 1,
+        at: Duration::from_millis(30_500),
+        then: 0,
+    };
+    check(
+        &SimHost::new().late_take(late),
+        "taken-past-the-deadline",
+        &Sim::new(),
+        &short_workflow(&["ops", "judge train 6", "close"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"30500000000","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":2}
+            {"at_ns":"30500000000","note":"op 0's reply wasn't sent: it was due by the core's next act, which has come","seq":3}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"30500000000","event":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"observed_ns":"0","seq":4}
+            {"at_ns":"30500000000","note":"freezing the agent's sandbox failed: the sandbox ended the session","seq":5}
+            {"at_ns":"30500000000","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox ended the session","seq":6}
+            {"at_ns":"30500000000","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":7}
+            {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":8}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"30500000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: the call's start was due by a time that had passed"},"observed_ns":"30500000000","seq":9}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run on a simulated host, whose agent makes an `ops`, then at once ends its session by
+// closing the connection, both as the run starts, and whose loop takes the op at once, but
+// whose sync of the op's record lasts until the session's end is queued behind it, and ends
+// 0.5 s past the deadline: the reply is due by the deadline, so it isn't sent; and the
+// session's end, which reached the host at 0, is decided at 0, ahead of the core's tick, so
+// the agent fails.
+#[test]
+fn held_by_a_slow_sync() {
+    let slow = SlowSync {
+        record: 2,
+        queued: 1,
+        at: Duration::from_millis(30_500),
+    };
+    check(
+        &SimHost::new().slow_sync(slow),
+        "held-by-a-slow-sync",
+        &Sim::new(),
+        &short_workflow(&["ops", "ops", "close"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"0","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":2}
+            {"at_ns":"30500000000","note":"op 0's reply wasn't sent: it was due by the core's next act, which has come","seq":3}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"30500000000","event":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"observed_ns":"0","seq":4}
+            {"at_ns":"30500000000","note":"freezing the agent's sandbox failed: the sandbox ended the session","seq":5}
+            {"at_ns":"30500000000","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox ended the session","seq":6}
+            {"at_ns":"30500000000","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":7}
+            {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":8}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run on a simulated host whose agent starts 25 s in, within its startup of 30 s, as a slow
+// sync of the run's first record holds its start back, and whose loop takes the agent's `ops`
+// 55 s in: the deadline of 30 s counts from the agent's start, so the reply leaves the agent
+// the whole 30 s, though it isn't sent, as it was due by the deadline, 55 s in, whose tick
+// then ends the work phase. Held to 35 s, past its startup, which counts from the run's start,
+// the start fails, rather than leaving the agent less than its deadline.
+#[test]
+fn started_late() {
+    let slow = SlowSync {
+        record: 0,
+        queued: 0,
+        at: Duration::from_secs(25),
+    };
+    let late = LateTake {
+        behind: 0,
+        at: Duration::from_secs(55),
+        then: 0,
+    };
+    check(
+        &SimHost::new().slow_sync(slow).late_take(late),
+        "started-late",
+        &Sim::new(),
+        &short_workflow(&["ops", "ops"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"25000000000","event":{"kind":"agent_started"},"observed_ns":"25000000000","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"55000000000","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"25000000000","seq":2}
+            {"at_ns":"55000000000","note":"op 0's reply wasn't sent: it was due by the core's next act, which has come","seq":3}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"55000000000","event":{"kind":"tick"},"observed_ns":"55000000000","seq":4}
+            {"at_ns":"55000000000","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+    let slow = SlowSync {
+        record: 0,
+        queued: 0,
+        at: Duration::from_secs(35),
+    };
+    check(
+        &SimHost::new().slow_sync(slow),
+        "started-past-the-startup",
+        &Sim::new(),
+        &short_workflow(&["ops", "ops"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts"}}}],"at_ns":"35000000000","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts"},"observed_ns":"35000000000","seq":1}
+            {"at_ns":"35000000000","note":"the agent's sandbox never started: nothing was collected","seq":2}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run on a simulated host whose sync of the record of the agent's first op fails: the run
+// fails with the sync's error as its reason, and sends no reply; the run's end deletes the
+// agent's sandbox, which the run log notes, with why the run failed.
+#[test]
+fn sync_fails() {
+    check(
+        &SimHost::new().failed_sync(2),
+        "sync-fails",
+        &Sim::new(),
+        &ops_workflow(&["ops", "ops", "exit"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            failed: <record>/log.jsonl: the simulated host's sync failed
+            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"<record>/log.jsonl: the simulated host's sync failed","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"0","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":2}
+            {"at_ns":"0","note":"deleted the sandboxes the run left: sim-1","seq":3}
+            {"at_ns":"0","note":"the run failed: <record>/log.jsonl: the simulated host's sync failed","seq":4}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run on a simulated host whose agent makes an `ops`, then a judge call whose payload is over
+// the agent's limit, which the gateway refuses, and whose sync of the refused op's record ends
+// 0.5 s past the deadline: the refusal, due by then, comes only after that sync, so it isn't
+// sent, and the core's tick ends the work phase at its deadline.
+#[test]
+fn refusal_held_by_a_slow_sync() {
+    let slow = SlowSync {
+        record: 3,
+        queued: 0,
+        at: Duration::from_millis(30_500),
+    };
+    check(
+        &SimHost::new().slow_sync(slow),
+        "refusal-held-by-a-slow-sync",
+        &Sim::new(),
+        &short_workflow(&["ops", "ops", "judge train 17", "exit"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"0","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":2}
+            {"actions":[],"at_ns":"0","event":{"kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"judge","payload":{"over":16,"size":17}}},"seq":3}
+            {"at_ns":"30500000000","note":"the refusal of an op whose payload was over the agent's limit wasn't sent: it was due by the core's next act, which has come","seq":4}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"30500000000","event":{"kind":"tick"},"observed_ns":"30500000000","seq":5}
+            {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run on a simulated host whose journal shows each sync of its record in order with what the
+// simulated provider sees of the acts that follow: its agent makes an `ops`, then a judge call
+// whose payload is over the agent's limit, which the gateway refuses, then exits. Each record of
+// the run log that leads to an act is synced before it, with every record before it: the run's
+// start before the agent's create, the `ops`'s arrival before its reply reaches the agent's
+// session, the refused op's record before its refusal does, and the agent's exit before its
+// sandbox's delete. The agent's start and the note of what its teardown collected lead to no act,
+// and are synced with the next record that does, or by the run's end, before `outcome.json`.
+#[test]
+fn syncs() {
+    let journal = Journal::default();
+    check(
+        &SimHost::new().journaled(&journal),
+        "syncs",
+        &Sim::new().journaled(&journal),
+        &ops_workflow(&["ops", "ops", "judge train 17", "exit"], 30),
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/log/collected, agent/out/collected, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"0","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":2}
+            {"actions":[],"at_ns":"0","event":{"kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"judge","payload":{"over":16,"size":17}}},"seq":3}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"0","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":4}
+            {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            their directory's mode at each create: ["700"]
+            the journal:
+              fsync <partial>/.record.json.partial
+              fsync <partial>
+              fsync <partial>/driver.pid
+              fsync <partial>
+              fsync <runs>
+              fsync <record>/.ir.json.partial
+              fsync <record>
+              fsync <record>/.provider.json.partial
+              fsync <record>
+              fsync <record>
+              fsync <record>
+              fdatasync <record>/log.jsonl, through record 0
+              created sim-1
+              fdatasync <record>/log.jsonl, through record 2
+              a session read op 0's reply: ops
+              fdatasync <record>/log.jsonl, through record 3
+              a session read op 1's reply: refused
+              fdatasync <record>/log.jsonl, through record 4
+              deleted sim-1
+              fdatasync <record>/log.jsonl, through record 5
+              fsync <record>/.outcome.json.partial
+              fsync <record>
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose agent makes model requests through its route, each once the one before it is
+// answered, which the run log says goes to the stand-in, each model under the name it takes:
+// one goes upstream, its model named as the upstream takes it, with the upstream's key, and its
+// stream reaches the agent, naming the model that answered as the agent named it; one that
+// names a model the route doesn't allow is refused; and once the agent has finalized a
+// submission, one goes upstream too, as the route stays open through the grace after the
+// finalize, until the agent's exit ends the work phase, and so does one whose key the provider
+// refuses, with a 401, which the run log keeps while the run is scored as usual, since the
+// finalize had locked its selection. The run log records how each was answered, before the
+// agent goes on.
 #[test]
 fn model_requests() {
     let argv = [
@@ -971,10 +1476,11 @@ fn model_requests() {
         "model m-large stream",
         "model m-huge stream",
         "finalize submit 6",
-        "model m-large stream",
+        "model m-large usage",
         "model m-large expired",
     ];
     check(
+        &System,
         "model-requests",
         &Sim::new(),
         &routed(ops_workflow(&argv, 30)),
@@ -986,27 +1492,27 @@ fn model_requests() {
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":6}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"upstream_status":200},"seq":8}
             {"at_ns":"<ns>","note":"model request 3 goes upstream","seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":401},"seq":10}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 930 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":14}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":15}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1188 bytes","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
             its last record came before the agent's teardown was to end
             the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
             model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
             model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
             socket directories left: false
             their directory's mode at each create: ["700", "700"]
@@ -1026,6 +1532,7 @@ fn model_upstream_refusals() {
         "finalize submit 6",
     ];
     check(
+        &System,
         "model-upstream-refusals",
         &Sim::new(),
         &routed(ops_workflow(&argv, 30)),
@@ -1037,9 +1544,9 @@ fn model_upstream_refusals() {
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","state":"failed"}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"kind":"model_answered","request":0,"upstream_status":403},"seq":4}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
@@ -1047,17 +1554,17 @@ fn model_upstream_refusals() {
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":10}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 966 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":14}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":15}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1083 bytes","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
             {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":16}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}
-            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
             model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
             model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
             socket directories left: false
@@ -1079,6 +1586,7 @@ fn model_provider_down() {
         "exit",
     ];
     check(
+        &System,
         "model-provider-down",
         &Sim::new(),
         &routed(ops_workflow(&argv, 30)),
@@ -1090,9 +1598,9 @@ fn model_provider_down() {
             provider.json is what the provider declared: true
             outcome.json: {"reason":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","state":"failed"}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
@@ -1101,13 +1609,13 @@ fn model_provider_down() {
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
             {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":11}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 750 bytes","seq":12}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 867 bytes","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":4,"upstream_status":200},"seq":13}
             {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","seq":14}
             its last record came before the agent's teardown was to end
             the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
             model request 1: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
             model request 2: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
             model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
@@ -1124,6 +1632,7 @@ fn model_provider_down() {
 fn model_barred_is_no_failure() {
     let argv = ["ops", "model m-large stream", "model m-huge stream", "exit"];
     check(
+        &System,
         "model-barred",
         &Sim::new(),
         &routed(ops_workflow(&argv, 30)),
@@ -1135,17 +1644,17 @@ fn model_barred_is_no_failure() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":6}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 450 bytes","seq":7}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 567 bytes","seq":7}
             its last record came before the agent's teardown was to end
             the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
             model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
             socket directories left: false
             their directory's mode at each create: ["700"]
@@ -1158,6 +1667,7 @@ fn model_barred_is_no_failure() {
 fn model_provider_recovers() {
     let argv = ["ops", "model m-large down", "model m-large stream"];
     check(
+        &System,
         "model-provider-recovers",
         &Sim::new(),
         &routed(ops_workflow(&argv, 30)),
@@ -1169,19 +1679,19 @@ fn model_provider_recovers() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":7}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 327 bytes","seq":8}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 444 bytes","seq":8}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":"stream","model":"vendor/m-large","store":false}\n\n
+            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
             socket directories left: false
             their directory's mode at each create: ["700"]
             the model endpoint at each create: [true]
@@ -1198,6 +1708,7 @@ fn model_provider_down_at_the_deadline() {
         "model m-large stall",
     ];
     check(
+        &System,
         "model-provider-down-at-the-deadline",
         &Sim::new(),
         &routed(short_workflow(&argv, 2)),
@@ -1209,19 +1720,19 @@ fn model_provider_down_at_the_deadline() {
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":6}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":7}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 217 bytes","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":1,"upstream_status":200},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":11}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":12}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
@@ -1238,6 +1749,7 @@ fn model_provider_down_at_the_deadline() {
 fn model_stream_cut() {
     let argv = ["ops", "submit submit slow", "model m-large stall"];
     check(
+        &System,
         "model-stream-cut",
         &Sim::new(),
         &routed(short_workflow(&argv, 2)),
@@ -1249,17 +1761,17 @@ fn model_stream_cut() {
             provider.json is what the provider declared: true
             outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":5}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"seq":9}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":10}
             the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
             its last record came before the agent's teardown was to end
             the agent's standard output:
@@ -1279,6 +1791,7 @@ fn model_grace_cut() {
     // So that the grace runs out while the agent still waits on the stalled stream.
     ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(1);
     check(
+        &System,
         "model-grace-cut",
         &Sim::new(),
         &ir,
@@ -1290,17 +1803,17 @@ fn model_grace_cut() {
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":4}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"seq":5}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":9}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":10}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
@@ -1386,6 +1899,7 @@ fn docker_workflow() -> Value {
 fn ops_on_docker() {
     let sandboxd = test_support::sandboxd();
     check(
+        &System,
         "ops-on-docker",
         docker::engine(),
         &docker_workflow(),
@@ -1397,31 +1911,31 @@ fn ops_on_docker() {
             provider.json is what the provider declared: true
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"kind":"run_started","unix_ns":"<during execute>"},"seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"seq":2}
-            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"seq":3}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"grant":"nope","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":4}
-            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:a73add1aecea03a894ca65d99bc5e91d21b58cdb728343bbcb6cf6cf38b809f5","size":9}}},"seq":5}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456}}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"grant":"nope","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"reply","op":3,"reply":{"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:a73add1aecea03a894ca65d99bc5e91d21b58cdb728343bbcb6cf6cf38b809f5","size":9}}},"observed_ns":"<ns>","seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"judge","payload":{"over":16,"size":17}}},"seq":6}
-            {"actions":[{"kind":"reply","op":4,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":4,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":10}
-            {"actions":[{"kind":"reply","op":5,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":5,"request":{"job":"0","kind":"status"}},"seq":11}
-            {"actions":[{"kind":"reply","op":6,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":6,"request":{"job":"0","kind":"status"}},"seq":12}
-            {"actions":[{"kind":"reply","op":7,"reply":{"job":1,"kind":"judge","remaining":{"calls":98,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":7,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_timed_out"},"seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":1,"kind":"judge_collected"},"seq":16}
-            {"actions":[{"kind":"reply","op":8,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":8,"request":{"job":"1","kind":"status"}},"seq":17}
-            {"actions":[{"kind":"reply","op":9,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":9,"request":{"job":"1","kind":"status"}},"seq":18}
-            {"actions":[{"kind":"reply","op":10,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":10,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"seq":19}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":2,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"seq":20}
+            {"actions":[{"kind":"reply","op":4,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":4,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"reply","op":5,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":5,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"reply","op":6,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":6,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":12}
+            {"actions":[{"kind":"reply","op":7,"reply":{"job":1,"kind":"judge","remaining":{"calls":98,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":7,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":15}
+            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":1,"kind":"judge_collected"},"observed_ns":"<ns>","seq":16}
+            {"actions":[{"kind":"reply","op":8,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":8,"request":{"job":"1","kind":"status"}},"observed_ns":"<ns>","seq":17}
+            {"actions":[{"kind":"reply","op":9,"reply":{"failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"job":1,"kind":"status","remaining":{"calls":98,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":9,"request":{"job":"1","kind":"status"}},"observed_ns":"<ns>","seq":18}
+            {"actions":[{"kind":"reply","op":10,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":10,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":19}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":2,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":20}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 0 files of 0 bytes; log, 2 files of 1604 bytes","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_started"},"seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"seq":23}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"seq":24}
+            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_started"},"observed_ns":"<ns>","seq":22}
+            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":23}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":24}
             its last record came before the agent's teardown was to end
             the agent's standard output:
             700 .codex

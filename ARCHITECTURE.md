@@ -156,12 +156,13 @@ so the TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
   `gateway`, `schema` and `stdx` only, and the runtime depends on it, never the
   reverse; what the run does with an answer, its health and fault rule, is the runtime's.
 
-**`crates/runtime`.** The host side: the driver's runtime, whose `Run` prepares each
-run, then drives the decision core on the run's `Provider`, keeping the run's record, whose
-files `record` lays out, and its run log, whose records `log` does. `model` serves the agent's
-model requests through `route`'s `Route` and `Upstream`, and judges the model
-provider's answers, until the work phase ends (`model_requests_allowed`), or the provider
-refuses the route's key.
+**`crates/runtime`.** The host side: the driver's runtime, whose `Run` prepares each run, then
+drives the decision core on the run's `Provider`, timed by its `Host`, whose clock makes the
+inboxes the run's threads wait on (`System`, the machine's), keeping the run's record, whose
+files `record` lays out, and its run log, whose records `log` does, each synced through the
+host. `model` serves the agent's model requests through `route`'s `Route` and `Upstream`, and
+judges the model provider's answers, until the work phase ends (`model_requests_allowed`), or
+the provider refuses the route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
 - **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and

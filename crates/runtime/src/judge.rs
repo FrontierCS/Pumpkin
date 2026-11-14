@@ -22,13 +22,14 @@ use schema::sandbox::{
     result_file, slot_dir, slot_payload,
 };
 use schema::workflow::{Judge, Sandbox};
-use stdx::{Context, Deadline};
+use stdx::Context;
 
+use super::host::deadline;
 use super::sandbox::{PUMPKIN, Sandboxes, collect, launch};
-use super::{Clock, Inbox, Input};
+use super::{Clock, Host, Inbox, Input};
 
-/// A judge call, as its thread sees it.
-pub(super) struct Call<'r> {
+/// A judge call, as its thread sees it, timed and synced by the host `H`.
+pub(super) struct Call<'r, H: Host> {
     pub(super) job: JobId,
     pub(super) judge: &'r Judge,
     /// The judge's sandbox.
@@ -42,22 +43,22 @@ pub(super) struct Call<'r> {
     /// The call's directory in the record, `jobs/<n>`, which exists and is empty.
     pub(super) dir: PathBuf,
     pub(super) sandboxes: &'r Sandboxes<'r>,
-    pub(super) clock: Clock,
+    pub(super) clock: H::Clock,
     /// What reaches the call's thread.
-    pub(super) inbox: Inbox<Message>,
+    pub(super) inbox: <H::Clock as Clock>::Inbox<Message>,
     /// A sender into the loop's inbox, which takes the call's reports.
     pub(super) reports: Sender<Input>,
 }
 
-/// By when each of a judge call's steps is to be done.
+/// By when each of a judge call's steps is to be done, as times since the run started.
 #[derive(Clone, Copy)]
 pub(super) struct Deadlines {
     /// Its sandbox's start: created, accepted and set up.
-    pub(super) startup: Deadline,
+    pub(super) startup: Duration,
     /// Its payload's put and its command's start.
-    pub(super) start: Deadline,
+    pub(super) start: Duration,
     /// Its sandbox's freeze, and the collecting of what it holds.
-    pub(super) collect: Deadline,
+    pub(super) collect: Duration,
 }
 
 /// What reaches a judge call's thread through its inbox.
@@ -77,8 +78,8 @@ pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a call's time from its
     /// reports' times, which the loop's delays then don't lengthen.
     Event(Duration, Event),
-    /// A note for the run log, at the time the thread observed it.
-    Note(Duration, String),
+    /// A note for the run log alone.
+    Note(String),
     /// Why the call's sandbox couldn't be deleted, which fails the run.
     Undeleted(String),
 }
@@ -91,11 +92,21 @@ enum Ended {
     Stopped,
 }
 
-/// Runs a judge call to its end, reporting as it goes.
-pub(super) fn run(call: &Call<'_>) {
+/// Runs a judge call to its end, reporting as it goes: one whose start is due by a time that has
+/// passed fails at once, with nothing created.
+pub(super) fn run<H: Host>(call: &mut Call<'_, H>) {
     let job = call.job;
+    // The loop can be held past a call's start, by the agent's teardown's delete or a sync of the
+    // run log, and a sandbox created for a start already due would only be deleted, at or past
+    // the hard end at worst.
+    if call.clock.now() >= call.deadlines.startup {
+        let reason = "the judge's sandbox wasn't created: the call's start was due by a time that \
+                      had passed"
+            .to_owned();
+        return call.event(Event::JudgeFailed { job, reason });
+    }
     let name = format!("job-{}", job.0);
-    let (sandbox, by) = (call.sandbox, call.deadlines.startup);
+    let (sandbox, by) = (call.sandbox, deadline(&call.clock, call.deadlines.startup));
     let inbox = call.inbox.sender();
     let started = (call.sandboxes).start(&name, sandbox, None, false, by, inbox, Message::Session);
     let mut sandbox = match started {
@@ -113,7 +124,7 @@ pub(super) fn run(call: &Call<'_>) {
 }
 
 /// Runs the call in its sandbox, whose session is `session`, and returns the report of its end.
-fn judge(call: &Call<'_>, session: &mut Session) -> Event {
+fn judge<H: Host>(call: &mut Call<'_, H>, session: &mut Session) -> Event {
     let job = call.job;
     let failed = |reason: String| Event::JudgeFailed { job, reason };
     if call.stopped() {
@@ -127,7 +138,7 @@ fn judge(call: &Call<'_>, session: &mut Session) -> Event {
         Ok(ended) => ended,
         Err(reason) => return failed(format!("the judge's session ended: {reason}")),
     };
-    let by = call.deadlines.collect;
+    let by = deadline(&call.clock, call.deadlines.collect);
     if let Err(error) = session.freeze(by) {
         return failed(format!("freezing the judge's sandbox failed: {error}"));
     }
@@ -142,8 +153,8 @@ fn judge(call: &Call<'_>, session: &mut Session) -> Event {
 }
 
 /// Puts the payload in the judge's slot, and the evidence directory, and starts its command,
-/// then reports the start. Returns when the command's timeout ends.
-fn start(call: &Call<'_>, session: &mut Session) -> Result<Deadline, String> {
+/// then reports the start. Returns when the command's timeout ends, since the run started.
+fn start<H: Host>(call: &Call<'_, H>, session: &mut Session) -> Result<Duration, String> {
     let payload = fs::read(&call.payload).context(call.payload.display())?;
     let (slot, raw, evidence) = (slot_dir(call.slot), slot_payload(call.slot), evidence_dir());
     let puts = [
@@ -151,21 +162,20 @@ fn start(call: &Call<'_>, session: &mut Session) -> Result<Deadline, String> {
         Put::File(&raw, file_mode(), &payload),
         Put::Dir(&evidence, dir_mode()),
     ];
-    let by = call.deadlines.start;
+    let by = deadline(&call.clock, call.deadlines.start);
     (session.put(&pumpkin_dir(), &puts, by)).context("putting the payload failed")?;
     // The sandbox runs this one command, so its exit needs no `Process` to tell it apart.
     (session.start(launch(&call.judge.command), by)).context("the judge's command didn't start")?;
-    // The start's time comes first, so that the time the core counts for the command is at
-    // least its timeout once it runs out.
+    // The timeout runs from the start's reported time.
     let at = call.clock.now();
-    let timeout = Deadline::after(call.timeout);
     call.report(Report::Event(at, Event::JudgeStarted { job: call.job }));
-    Ok(timeout)
+    Ok(at.saturating_add(call.timeout))
 }
 
-/// Waits for the command to exit, until `timeout`, or for a stop, and reports its exit or its
-/// timeout. Fails with the reason the session ended, if it ended first.
-fn wait(call: &Call<'_>, timeout: Deadline) -> Result<Ended, String> {
+/// Waits for the command to exit, until `timeout`, a time since the run started, or for a stop,
+/// and reports its exit or its timeout. Fails with the reason the session ended, if it ended
+/// first.
+fn wait<H: Host>(call: &mut Call<'_, H>, timeout: Duration) -> Result<Ended, String> {
     let job = call.job;
     match call.inbox.wait(timeout) {
         None => {
@@ -197,14 +207,9 @@ fn wait(call: &Call<'_>, timeout: Deadline) -> Result<Ended, String> {
 }
 
 /// Collects [`out_dir()`] into the record, and parses the result the judge wrote there.
-fn outputs(call: &Call<'_>, session: &mut Session) -> Result<JudgeResult, String> {
-    let collected = collect(
-        session,
-        &out_dir(),
-        &call.dir,
-        PUMPKIN,
-        call.deadlines.collect,
-    );
+fn outputs<H: Host>(call: &Call<'_, H>, session: &mut Session) -> Result<JudgeResult, String> {
+    let by = deadline(&call.clock, call.deadlines.collect);
+    let collected = collect(session, &out_dir(), &call.dir, PUMPKIN, by);
     let result = read_result(&call.dir.join(result_file().as_str()));
     collected.context("the judge's outputs are incomplete")?;
     JudgeResult::parse(&call.judge.result, &result?)
@@ -233,11 +238,11 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).context(path.display())
 }
 
-impl Call<'_> {
+impl<H: Host> Call<'_, H> {
     /// Whether the core has stopped the call, by what its inbox holds, which this takes. Before
     /// the command starts, the only other message can be its session's end, after which what the
     /// call asks of the session fails for that reason.
-    fn stopped(&self) -> bool {
+    fn stopped(&mut self) -> bool {
         iter::from_fn(|| self.inbox.take()).any(|message| matches!(message, Message::Stop))
     }
 
@@ -247,7 +252,7 @@ impl Call<'_> {
     }
 
     fn note(&self, note: String) {
-        self.report(Report::Note(self.clock.now(), note));
+        self.report(Report::Note(note));
     }
 
     fn report(&self, report: Report) {

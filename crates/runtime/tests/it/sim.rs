@@ -1,7 +1,8 @@
 //! A simulated provider, [`Sim`], which stands in for a platform: each sandbox is a thread of
 //! this process, running a fake `sandboxd` that dials its create's [`Dial`] at once and answers
 //! the session's requests, running each command by its program, which may make ops or judge a
-//! payload ([`Sim`]).
+//! payload ([`Sim`]). What it does that a run acts on may go to a [`Journal`], in order with
+//! what other parts of a test's simulated world tell it.
 
 #![expect(
     clippy::unwrap_used,
@@ -98,6 +99,27 @@ pub(crate) struct Sim {
     ready: Ready,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock.
     state: Mutex<State>,
+    journal: Option<Journal>,
+}
+
+/// What the parts of a test's simulated world saw, in the order they told it, each from the
+/// thread it saw it on, as it saw it.
+#[derive(Clone, Default)]
+pub(crate) struct Journal {
+    // Shared, as each part tells it from its own thread, and the test reads it.
+    entries: Arc<Mutex<Vec<String>>>,
+}
+
+impl Journal {
+    /// Adds `entry` after what it holds.
+    pub(crate) fn tell(&self, entry: String) {
+        stdx::unpoisoned(self.entries.lock()).push(entry);
+    }
+
+    /// What it holds, in the order it was told.
+    pub(crate) fn entries(&self) -> Vec<String> {
+        stdx::unpoisoned(self.entries.lock()).clone()
+    }
 }
 
 struct State {
@@ -136,6 +158,8 @@ struct Status {
     connection: Option<UnixStream>,
     stalled: bool,
     deleted: bool,
+    /// Where its session's reads go, if the provider has a journal.
+    journal: Option<Journal>,
 }
 
 impl Sim {
@@ -173,6 +197,28 @@ impl Sim {
                 modes: Vec::new(),
                 models: Vec::new(),
             }),
+            journal: None,
+        }
+    }
+
+    /// This provider, which tells `journal` each create once it has made its sandbox, as
+    /// `created <id>`, each sandbox a delete deletes, as `deleted <id>`, and each reply to an op
+    /// that a sandbox's session reads, as it reads it, as `a session read op <n>'s reply: <kind>`,
+    /// where `n` numbers the session's ops from 0, as the run log does.
+    #[must_use]
+    pub(crate) fn journaled(mut self, journal: &Journal) -> Self {
+        self.journal = Some(journal.clone());
+        self
+    }
+
+    /// The journal it tells, if it has one.
+    pub(crate) fn journal(&self) -> Option<&Journal> {
+        self.journal.as_ref()
+    }
+
+    fn tell(&self, entry: impl FnOnce() -> String) {
+        if let Some(journal) = &self.journal {
+            journal.tell(entry());
         }
     }
 
@@ -220,7 +266,10 @@ impl Provider for Sim {
             (lost || names(MUTE), names(UNDELETABLE), names(LINGERING));
         let parent = fs::metadata(dir.parent().unwrap()).unwrap();
         let mode = parent.permissions().mode() & 0o777;
-        let shared = Arc::new(Mutex::default());
+        let shared = Arc::new(Mutex::new(Status {
+            journal: self.journal.clone(),
+            ..Status::default()
+        }));
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
@@ -243,6 +292,8 @@ impl Provider for Sim {
             thread,
         };
         state.sandboxes.insert(id.clone(), sandbox);
+        drop(state);
+        self.tell(|| format!("created {id}"));
         if lost {
             return Err(
                 "the simulated create failed, and can't name what it made: expected the run's \
@@ -262,13 +313,19 @@ impl Provider for Sim {
             let ours = (state.sandboxes.get(id.as_str())).filter(|sandbox| sandbox.of(run));
             match ours.map(|sandbox| sandbox.undeletable) {
                 Some(true) => kept.push(id.as_str()),
-                Some(false) => deleted.extend(state.sandboxes.remove(id.as_str())),
+                Some(false) => {
+                    let removed = state.sandboxes.remove(id.as_str());
+                    deleted.extend(removed.map(|sandbox| (id.as_str(), sandbox)));
+                }
                 None => unknown.push(id.clone()),
             }
         }
         // Each thread ends once told, and joining it waits for nothing the lock holds.
         drop(state);
-        deleted.into_iter().for_each(stop);
+        for (id, sandbox) in deleted {
+            stop(sandbox);
+            self.tell(|| format!("deleted {id}"));
+        }
         if !kept.is_empty() {
             return Err(format!(
                 "{} can't be deleted by the simulated provider: create one with another `sandboxd`",
@@ -402,9 +459,20 @@ enum Step {
     /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
     /// process the command left would.
     Exit,
-    /// The session's end, which its `sandboxd` makes: right after an op, by the op's reply
-    /// failing; otherwise by closing the connection.
+    /// The session's end, which its `sandboxd` makes as [`End`] says.
+    End(End),
+}
+
+/// How a fake `sandboxd` ends its session.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// Right after an op, by reading nothing more as the op goes out, so that the op's reply
+    /// ends it, as it can't be written; otherwise by closing the connection.
     Crash,
+    /// By closing the connection, right after an op too, so that the end reaches the gateway
+    /// behind the op, whatever its owner does: a reply then races the gateway's reader to the
+    /// close, unless the run's loop takes the op only once the end has reached it.
+    Close,
 }
 
 /// What of a model response a command waits for.
@@ -442,6 +510,8 @@ struct Caller {
     waits: Option<Wait>,
     /// What it has printed: each response to its model requests.
     stdout: String,
+    /// How its `sandboxd` ends the session, once a step has asked it to.
+    end: Option<End>,
 }
 
 impl Caller {
@@ -461,6 +531,7 @@ impl Caller {
             open: false,
             waits: None,
             stdout: String::new(),
+            end: None,
         }
     }
 
@@ -522,7 +593,10 @@ impl Caller {
                     self.exit(0, replies);
                     continue;
                 }
-                Some(Step::Crash) => return true,
+                Some(Step::End(end)) => {
+                    self.end = Some(end);
+                    return true;
+                }
                 None if self.open => {
                     self.waits = Some(Wait::End);
                     return false;
@@ -533,7 +607,10 @@ impl Caller {
                 }
             };
             self.make(call, payload, less, replies);
-            return matches!(self.steps.front(), Some(Step::Crash));
+            if let Some(&Step::End(end)) = self.steps.front() {
+                self.end = Some(end);
+            }
+            return self.end.is_some();
         }
     }
 
@@ -571,7 +648,10 @@ impl Caller {
         }
         let request = self.model.map_or(0, |request| request + 1);
         (self.model, self.open) = (Some(request), true);
-        let body = json!({ "model": model, "store": false, "input": text }).to_string();
+        // Each request repeats the conversation's first item, as a harness's requests do.
+        let item = |text: &str| json!({ "type": "message", "role": "user", "content": text });
+        let input = [item("You are a simulated agent."), item(text)];
+        let body = json!({ "model": model, "store": false, "input": input }).to_string();
         let (method, path) = ("POST".to_owned(), "/responses".to_owned());
         let header = |name: &str, value: &str| (name.to_owned(), value.to_owned());
         let headers = vec![
@@ -670,7 +750,8 @@ fn state_name(reply: &OpReply) -> &'static str {
 /// and any other is its own bytes; `await <job> <state>`, which makes `status <job>` until its
 /// reply's state is `state`; `model <model> <text>`, a model request that names `model`, with
 /// `text` as its input, whose response's end the next step waits for, or `ask <model> <text>`,
-/// one whose response's first part it waits for; or `sleep <seconds>`, `exit` or `crash`.
+/// one whose response's first part it waits for; or `sleep <seconds>`, `exit`, or the session's
+/// end, `crash` or `close`.
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
@@ -708,7 +789,8 @@ fn step(arg: &str) -> Step {
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["exit"] => return Step::Exit,
-        ["crash"] => return Step::Crash,
+        ["crash"] => return Step::End(End::Crash),
+        ["close"] => return Step::End(End::Close),
         _ => panic!("`{arg}` is no step of the simulated sandboxd's"),
     };
     Step::Op {
@@ -861,7 +943,14 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
                 collect(stream, &dir, result.as_deref(), stdout, &mut replies);
             }
             ToSandbox::OpReply { op, reply } => match &mut caller {
-                Some(caller) if caller.op == op => crashed = caller.answered(&reply, &mut replies),
+                Some(caller) if caller.op == op => {
+                    if let Some(journal) = &status(shared).journal {
+                        let kind = json!(reply)["kind"].as_str().unwrap().to_owned();
+                        // The session numbers its ops from 1 (`Caller::op`), the run log from 0.
+                        journal.tell(format!("a session read op {}'s reply: {kind}", op - 1));
+                    }
+                    crashed = caller.answered(&reply, &mut replies);
+                }
                 // A reply to no op in flight breaks the protocol, which ends the session.
                 Some(_) | None => return,
             },
@@ -883,23 +972,30 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
             replies.push((FromSandbox::Done { stream }, Vec::new()));
             freezing = None;
         }
-        if !send(&mut connection, &mut replies, crashed) {
+        let close = caller.as_ref().and_then(|caller| caller.end) == Some(End::Close);
+        if !send(&mut connection, &mut replies, crashed, close) {
             return;
         }
     }
 }
 
-/// Sends `replies` on `connection`, then ends the session if `crashed`, as [`Step::Crash`]
-/// says. Returns whether the session goes on.
+/// Sends `replies` on `connection`, in order, then ends the session if `crashed`, as
+/// [`End::Close`] says if `close`, and else as [`End::Crash`] does. Returns whether the session
+/// goes on.
 fn send(
     connection: &mut UnixStream,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     crashed: bool,
+    close: bool,
 ) -> bool {
-    // Not closed as well: the session's end would then race between the close and the reply's
-    // failed write.
-    let op_out =
-        crashed && (replies.iter()).any(|(reply, _)| matches!(reply, FromSandbox::Op { .. }));
+    // An op that goes out as the session ends goes out after reading has stopped, so that its
+    // reply, which follows its arrival, can't be written, and that failure alone ends the
+    // session: were the connection closed too, its end's reason would be whichever of the close
+    // and the failed write the gateway saw first, which its threads race to, and the reply could
+    // be written before the close, so that no failure of it is noted.
+    let op_out = crashed
+        && !close
+        && (replies.iter()).any(|(reply, _)| matches!(reply, FromSandbox::Op { .. }));
     if op_out {
         let _ = connection.shutdown(Shutdown::Read);
     }

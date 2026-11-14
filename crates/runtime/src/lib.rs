@@ -5,19 +5,19 @@
 //! [`Run::prepare`] begins the record of a placed workflow, and [`Run::execute`] runs it to
 //! its outcome, one thread driving the core as [`Core`] says, while each judge call runs on a
 //! thread of its own, the `judge` module's. Between the core's ticks, the driving thread waits
-//! on one inbox, into which the agent's session hands what it reads, and each judge call's
-//! thread its reports. Its sandboxes start on one path, the `sandbox` module's, and the agent's
-//! is the `agent` module's. Each model request of the agent's is answered on a thread of its
-//! own, as the `model` module serves the agent's route, until the core stops allowing them
-//! ([`Core::model_requests_allowed`]), which ends the route's exchanges. The record's files and
-//! the run log's records, and when each is written, are laid out in the `record` and `log`
-//! modules.
+//! on one inbox of the run's [`Host`], into which the agent's session hands what it reads, and
+//! each judge call's thread its reports. Its sandboxes start on one path, the `sandbox`
+//! module's, and the agent's is the `agent` module's. Each model request of the agent's is
+//! answered on a thread of its own, as the `model` module serves the agent's route, until the
+//! core stops allowing them ([`Core::model_requests_allowed`]), which ends the route's
+//! exchanges. The record's files and the run log's records, and when each is written, are laid
+//! out in the `record` and `log` modules.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::Sender;
 use std::thread::{self, Scope};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use std::{fs, io, mem};
 
 use decision::{Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, lasts};
@@ -31,6 +31,7 @@ use serde_json::json;
 use stdx::{Context, Deadline};
 
 mod agent;
+mod host;
 mod judge;
 mod log;
 mod model;
@@ -38,6 +39,8 @@ mod record;
 mod sandbox;
 
 use agent::Agent;
+use host::deadline;
+pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 use judge::{Deadlines, Message, Report};
 use log::Log;
 use model::Served;
@@ -45,9 +48,10 @@ pub use record::{Ending, Record};
 use record::{Lock, Payloads};
 use sandbox::Sandboxes;
 
-/// A run, prepared: its workflow placed, and its record begun.
+/// A run, prepared on its host, `H`: its workflow placed, and its record begun.
 #[derive(Debug)]
-pub struct Run {
+pub struct Run<'h, H> {
+    host: &'h H,
     placed: Placed,
     /// The agent's model route, as the run serves it, if it has one.
     served: Option<Served>,
@@ -57,26 +61,28 @@ pub struct Run {
     lock: Lock,
 }
 
-impl Run {
-    /// Makes the record of `placed`'s run in `runs`, which is created if need be, with its IR
-    /// in `ir.json`. The run's id holds `now`, the time by the caller's clock. The agent's model
-    /// route, if it has one, is served as `serving` says, which goes unused for a workflow
-    /// without one. A workflow whose route is not served is refused before any record is made.
+impl<'h, H: Host> Run<'h, H> {
+    /// Makes the record of `placed`'s run in `runs`, on `host`, which then executes it: `runs` is
+    /// created if need be, and the record holds its IR in `ir.json`. The run's id holds `now`,
+    /// the time by the caller's clock. The agent's model route, if it has one, is served as
+    /// `serving` says; a workflow whose route is not served is refused before any record is made.
     ///
     /// # Errors
     ///
     /// Fails if the workflow is refused, if `now` is before 1970, or if the record can't be
     /// written.
     pub fn prepare(
+        host: &'h H,
         placed: Placed,
         runs: &Path,
         now: SystemTime,
         serving: Option<Serving>,
     ) -> Result<Self, String> {
         let served = Served::new(placed.workflow(), serving)?;
-        let (id, dir, lock) = record::create(runs, now)?;
-        record::write_json(&dir, "ir.json", &json!(placed.workflow().ir()))?;
+        let (id, dir, lock) = record::create(host, runs, now)?;
+        record::write_json(host, &dir, "ir.json", &json!(placed.workflow().ir()))?;
         Ok(Self {
+            host,
             placed,
             served,
             id,
@@ -95,9 +101,9 @@ impl Run {
         &self.dir
     }
 
-    /// Runs the workflow on `provider`, with `sandboxd`, a static binary, in every sandbox, and
-    /// calls `started` once what they run is published, before the run's clock starts. However
-    /// it ends, it records how in `outcome.json`, and deletes what `provider` still lists of it.
+    /// Runs the workflow on its host and `provider`, with `sandboxd`, a static binary, in every
+    /// sandbox, calling `started` once what they run is published, before the clock starts;
+    /// records how it ended in `outcome.json`, and deletes what `provider` still lists of it.
     ///
     /// # Errors
     ///
@@ -119,34 +125,37 @@ impl Run {
             }
             Err(reason) => json!({ "state": "failed", "reason": reason }),
         };
-        let written = record::write_json(&self.dir, "outcome.json", &recorded);
+        let written = record::write_json(self.host, &self.dir, "outcome.json", &recorded);
         drop(self.lock);
         failed_also(outcome, written)
     }
 
     /// Records what `provider` declared and publishes what the run's sandboxes run, calls
-    /// `started`, then starts the run's clock and drives the run, keeping its log, and deletes
-    /// what the provider still lists of it.
+    /// `started`, then starts the run's clock on its host and drives the run, keeping its log,
+    /// deletes what the provider still lists of it, and syncs the log.
     fn run_on(
         &self,
         provider: &dyn Provider,
         sandboxd: &Path,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, String> {
-        record::write_json(&self.dir, "provider.json", &json!(provider.ready()))?;
+        let host = self.host;
+        record::write_json(host, &self.dir, "provider.json", &json!(provider.ready()))?;
         let workflow = self.placed.workflow();
         let sandboxes = Sandboxes::create(provider, self.tag(), workflow, sandboxd)?;
         started()?;
-        let clock = Clock::start();
-        let unix = record::since_epoch(clock.unix)?;
+        let clock = host.start();
+        let unix = record::since_epoch(clock.unix())?;
+        let inbox = clock.inbox();
+        let log = Log::create(host, clock.clone(), &self.dir)?;
         let mut runtime = Runtime {
             placed: &self.placed,
             served: self.served.as_ref(),
             dir: &self.dir,
             sandboxes: &sandboxes,
             clock,
-            log: Log::create(&self.dir)?,
-            payloads: Payloads::create(&self.dir)?,
+            log,
+            payloads: Payloads::create(host, &self.dir)?,
             agent: None,
             unanswered: None,
             next_op: 0,
@@ -154,7 +163,8 @@ impl Run {
             finalized_first: false,
             stops: BTreeMap::new(),
             pending: VecDeque::new(),
-            inbox: Inbox::new(),
+            inbox,
+            held: None,
         };
         let outcome = runtime.drive(unix);
         // What the agent did with a route whose key the provider refused before a finalize
@@ -166,9 +176,12 @@ impl Run {
         let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
         let noted = match &outcome {
             Ok(_) => Ok(()),
-            Err(reason) => (runtime.log).note(clock.now(), &format!("the run failed: {reason}")),
+            Err(reason) => (runtime.log).note(&format!("the run failed: {reason}")),
         };
-        failed_also(outcome, noted)
+        // The log's last records may have led to no act, and so be unsynced: they last before
+        // `outcome.json` says the run has ended, or the run fails.
+        let synced = runtime.log.sync();
+        failed_also(failed_also(outcome, noted), synced)
     }
 
     /// The tag its sandboxes carry: its id.
@@ -184,33 +197,6 @@ impl Run {
                 self.id
             ),
         }
-    }
-}
-
-/// A run's clock: the time since the run started, which the core takes with each event, and
-/// when that was by the machine's clock.
-#[derive(Clone, Copy, Debug)]
-struct Clock {
-    start: Instant,
-    unix: SystemTime,
-}
-
-impl Clock {
-    /// The clock of a run that starts now.
-    fn start() -> Self {
-        Self {
-            start: Instant::now(),
-            unix: SystemTime::now(),
-        }
-    }
-
-    fn now(self) -> Duration {
-        self.start.elapsed()
-    }
-
-    /// The deadline at `at`, a time since the run started.
-    fn deadline(self, at: Duration) -> Deadline {
-        Deadline::after(at.saturating_sub(self.now()))
     }
 }
 
@@ -301,8 +287,8 @@ fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
     (request, unanswered)
 }
 
-/// The state of a run as it is driven.
-struct Runtime<'r> {
+/// The state of a run as it is driven on its host, `H`.
+struct Runtime<'r, H: Host> {
     /// The run's workflow, placed, which says how long each role's sandboxes take to start.
     placed: &'r Placed,
     /// The agent's model route, which model requests' threads share, if it has one.
@@ -311,9 +297,9 @@ struct Runtime<'r> {
     dir: &'r Path,
     /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
     sandboxes: &'r Sandboxes<'r>,
-    clock: Clock,
-    log: Log,
-    payloads: Payloads,
+    clock: H::Clock,
+    log: Log<'r, H>,
+    payloads: Payloads<'r, H>,
     agent: Option<Agent>,
     /// The op the core is to answer, by the number the runtime gave it, if one is: the agent's
     /// session hands out an op only once the one before it has been answered.
@@ -329,80 +315,50 @@ struct Runtime<'r> {
     stops: BTreeMap<JobId, Sender<Message>>,
     /// Events that performing actions produced, to feed the core next.
     pending: VecDeque<(Duration, Event)>,
-    /// What reaches the loop from other threads, which it waits on until the core's next tick.
-    inbox: Inbox<Input>,
+    /// What reaches the loop ([`Input`]), which it waits on until the core's next tick.
+    inbox: <H::Clock as Clock>::Inbox<Input>,
+    /// What the loop took from the inbox once the core's tick was due, which reached the host at
+    /// or after the tick's time, and so goes to the core after the tick.
+    held: Option<Input>,
 }
 
-/// What reaches the loop through its inbox.
+/// What reaches the loop through its inbox, each at the time it reached the host
+/// ([`Input::reached`]), by which the core decides on it, however long the loop takes to get to
+/// it.
 enum Input {
-    /// What the agent's session's reader handed over ([`Listener::accept`]): at most the op in
-    /// flight, as the session holds one, the model requests in flight, its command's exit, as it
-    /// runs one command, and its end.
+    /// What the agent's session's reader handed over ([`Listener::accept`]), when it did: at most
+    /// the op in flight, as the session holds one, the model requests in flight, its command's
+    /// exit, as it runs one command, and its end.
     ///
     /// [`Listener::accept`]: gateway::Listener::accept
-    Agent(Arrival),
-    /// A note on a model request of the agent's, from the thread that answers it, at the time
-    /// the loop took the request.
-    Model(Duration, String),
-    /// How the route answered a model request of the agent's, by its number, from the thread
-    /// that answered it, at the time the thread observed it.
-    ModelAnswered(Duration, u64, Answer),
-    /// A judge call's report, from its thread: at most its command's start and end, a note, and
-    /// its last report.
+    Agent(Duration, Arrival),
+    /// A note on a model request of the agent's, for the run log alone, from the thread that
+    /// answers it.
+    Model(String),
+    /// How the route answered a model request of the agent's, by its number, for the run log
+    /// alone, from the thread that answered it.
+    ModelAnswered(u64, Answer),
+    /// A judge call's report, from its thread, or from the loop for a call whose thread didn't
+    /// start: at most its command's start and end, a note, and its last report.
     Judge(Report),
 }
 
-/// What other threads send a thread, in the order they sent it, for it to wait on.
-struct Inbox<T> {
-    receiver: Receiver<T>,
-    // Kept, so that the inbox never disconnects while its owner waits on it, whoever else holds
-    // a sender.
-    sender: Sender<T>,
-}
-
-impl<T> Inbox<T> {
-    fn new() -> Self {
-        let (sender, receiver) = mpsc::channel();
-        Self { receiver, sender }
-    }
-
-    /// A sender into the inbox.
-    fn sender(&self) -> Sender<T> {
-        self.sender.clone()
-    }
-
-    /// What arrives first by `until`, or once it has passed, what the inbox holds, if anything.
-    fn wait(&self, until: Deadline) -> Option<T> {
-        let Some(left) = until.remaining() else {
-            return self.take();
-        };
-        match self.receiver.recv_timeout(left) {
-            Ok(item) => Some(item),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => Self::disconnected(),
+impl Input {
+    /// When it reached the host, as a time since the run started, if the core decides on it by
+    /// that time: what the agent's session handed over, and a judge call's event; not what is
+    /// for the run log alone, or a judge call's sandbox that couldn't be deleted, which fails the
+    /// run.
+    fn reached(&self) -> Option<Duration> {
+        match self {
+            Self::Agent(at, _) | Self::Judge(Report::Event(at, _)) => Some(*at),
+            Self::Model(_)
+            | Self::ModelAnswered(..)
+            | Self::Judge(Report::Note(_) | Report::Undeleted(_)) => None,
         }
-    }
-
-    /// What the inbox holds first, if anything.
-    fn take(&self) -> Option<T> {
-        match self.receiver.try_recv() {
-            Ok(item) => Some(item),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Self::disconnected(),
-        }
-    }
-
-    // `std`'s channel reports a disconnection, which a channel with a sender never has, in the
-    // same errors as a timeout and an empty channel.
-    fn disconnected() -> ! {
-        unreachable!(
-            "an inbox disconnected, though it holds a sender of its own, so its channel can't \
-             disconnect while the inbox is borrowed to wait on it"
-        )
     }
 }
 
-impl<'r> Runtime<'r> {
+impl<'r, H: Host + 'r> Runtime<'r, H> {
     fn workflow(&self) -> &'r Workflow {
         self.placed.workflow()
     }
@@ -414,7 +370,7 @@ impl<'r> Runtime<'r> {
         let (mut core, actions) = Core::start(self.placed);
         self.log.start(self.workflow(), unix, &actions)?;
         if let Some(served) = self.served {
-            self.log.note(self.clock.now(), served.started())?;
+            self.log.note(served.started())?;
         }
         // Judge calls' threads borrow the run's workflow and sandboxes, and the scope ends once
         // each has, so that no sandbox starts after the run's end, and the drain takes all they
@@ -474,19 +430,20 @@ impl<'r> Runtime<'r> {
         self.hard_end().saturating_sub(final_judge)
     }
 
-    /// When the answer to an op is due: by the next time the core acts of itself
-    /// ([`Core::tick_due`]).
-    fn answers_due(&self, core: &Core<'_>) -> Deadline {
+    /// When the answer to an op is due, since the run started: the next time the core acts of
+    /// itself ([`Core::tick_due`]).
+    fn answers_due(core: &Core<'_>) -> Duration {
         // An answer the agent doesn't read then holds the loop no later than the time it would
         // act on next anyway.
-        self.clock.deadline(core.tick_due())
+        core.tick_due()
     }
 
     /// Waits for the next event: one that performing an action produced; else what arrives in
-    /// the inbox before the core's tick is due, and else the tick then. A due tick comes before
-    /// what the inbox holds while the agent is held, and after it once the agent is gone. The
-    /// wait ends at the tick's time, which arrivals the core doesn't wait on, handled as they
-    /// come, don't move. The agent's model requests are answered on threads of `scope`.
+    /// the inbox before the core's tick is due, and else the tick then. Once the tick is due,
+    /// what reached the host before its time comes before it, and the tick before what reached
+    /// the host at or after it. The wait ends at the tick's time, which arrivals the core doesn't
+    /// wait on, handled as they come, don't move. The agent's model requests are answered on
+    /// threads of `scope`.
     fn next_event<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -495,53 +452,47 @@ impl<'r> Runtime<'r> {
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
-        let until = self.clock.deadline(core.tick_due());
+        let due = core.tick_due();
         loop {
-            // The agent's arrivals are timed as the loop takes them, after a due tick, so the
-            // tick comes first while the agent is held. Once it is gone, what the inbox holds is
-            // a judge call's report, timed as its thread observed it, or what is left of the
-            // agent's session, so it comes first: a call that ended before the tick, the final
-            // judge's at the hard end included, counts before it, and one that ended after it
-            // meets the core's checks at its own time, as the tick would. An op left of the
-            // session is timed as taken, as every op is, so one taken past the hard end abandons
-            // the run there, ahead of the reports from before it behind the op. Only a run that
-            // would finish without a submission loses by it: with one, the loop is that late
-            // only once the final judge can no longer meet its deadlines.
-            let input = if self.agent.is_some() && until.remaining().is_none() {
-                None
-            } else {
-                self.inbox.wait(until)
-            };
+            let input = self.held.take().or_else(|| self.inbox.wait(due));
             let Some(input) = input else {
                 return Ok((self.clock.now(), Event::Tick));
             };
+            // Once the tick's time has come, what reaches the host is stamped at or after it, so
+            // taking what came first ends, however much the agent sends that the core doesn't
+            // wait on. What reached the host before that time is in the inbox by then, but for an
+            // input whose sender was preempted between stamping and sending it, and a model
+            // request's note, which carries its request's time but is sent as its thread
+            // forwards the request: either may come after the tick, an event then counting at
+            // the tick's time, as the core's clock doesn't go back. Each due tick ends a phase
+            // or the run, so the input held goes on after it.
+            if input.reached().is_some_and(|reached| reached >= due) {
+                self.held = Some(input);
+                return Ok((self.clock.now(), Event::Tick));
+            }
             if let Some(event) = self.arrived(Some(scope), core, input)? {
                 return Ok(event);
             }
         }
     }
 
-    /// The event that `input` brings the core, if the core waits on it: a judge call's report
-    /// at its own time ([`Runtime::report`]), and else at the time the loop took it. The core
-    /// learns of none of these: an op whose payload the gateway refused, which is refused by the
-    /// core's next act ([`Runtime::answers_due`]) and goes to the run log; a model request,
-    /// answered on a thread of `scope` ([`Runtime::model_request`]); and a note on one, or how
-    /// it was answered, which go to the run log.
+    /// The event that `input` brings the core, if the core waits on it, at the time it reached
+    /// the host ([`Input::reached`]). The core learns of none of these: an op whose payload the
+    /// gateway refused, which is refused by the core's next act ([`Runtime::answers_due`]) and
+    /// goes to the run log; a model request, answered on a thread of `scope`
+    /// ([`Runtime::model_request`]); and a note on one, or how it was answered, which go to the
+    /// run log.
     fn arrived<'s>(
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
         core: &Core<'_>,
         input: Input,
     ) -> Result<Option<(Duration, Event)>, String> {
-        let at = self.clock.now();
-        let arrival = match input {
-            Input::Agent(arrival) => arrival,
-            Input::Model(at, note) => return self.log.note(at, &note).map(|()| None),
-            Input::ModelAnswered(at, number, answer) => {
-                let answered = self
-                    .log
-                    .model_answered(self.workflow(), at, number, &answer);
-                return answered.map(|()| None);
+        let (at, arrival) = match input {
+            Input::Agent(at, arrival) => (at, arrival),
+            Input::Model(note) => return self.log.note(&note).map(|()| None),
+            Input::ModelAnswered(number, answer) => {
+                return self.log.model_answered(number, &answer).map(|()| None);
             }
             Input::Judge(report) => return self.report(report),
         };
@@ -551,8 +502,7 @@ impl<'r> Runtime<'r> {
         let event = match arrival {
             Arrival::Op(incoming) => Some(self.op(incoming)),
             Arrival::Refused(refused) => {
-                let by = self.answers_due(core);
-                self.refuse(at, refused, by)?;
+                self.refuse(refused, Self::answers_due(core))?;
                 None
             }
             // With no agent, the core waits on neither. The loop tears the agent down in the
@@ -575,11 +525,11 @@ impl<'r> Runtime<'r> {
         Ok(event.map(|event| (at, event)))
     }
 
-    /// Takes `incoming`, a model request of the agent's, at `at`, under the next number, and
-    /// answers it on a thread of `scope` as the route serves it ([`Served::serve`]), refused
-    /// unless the core allows the agent's model requests then. One taken once the run's threads
-    /// have ended, with no `scope`, is dropped unanswered, since the agent's session has ended
-    /// by then ([`Runtime::drain`]).
+    /// Takes `incoming`, a model request of the agent's that reached the host at `at`, under the
+    /// next number, and answers it on a thread of `scope` as the route serves it
+    /// ([`Served::serve`]), refused unless the core allows the agent's model requests then. One
+    /// taken once the run's threads have ended, with no `scope`, is dropped unanswered, since the
+    /// agent's session has ended by then ([`Runtime::drain`]).
     fn model_request<'s>(
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
@@ -601,14 +551,14 @@ impl<'r> Runtime<'r> {
         let Some(scope) = scope else {
             drop(incoming);
             let note = format!("model request {number} wasn't answered: the run has ended");
-            return self.log.note(at, &note);
+            return self.log.note(&note);
         };
         let allowed = core.model_requests_allowed(at);
         // A response still open at its deadline ends the agent's session, which the teardown
         // needs, so it is due by the teardown's end; the work phase's end ends it before that
         // (`end_route`).
-        let by = self.clock.deadline(self.teardown_end());
-        let (reports, clock) = (self.inbox.sender(), self.clock);
+        let by = deadline(&self.clock, self.teardown_end());
+        let reports = self.inbox.sender();
         // A request stays in flight until its thread writes its response's end, the thread's
         // last step, so the session's bound on the requests in flight,
         // `MAX_MODEL_REQUESTS_IN_FLIGHT`, bounds these threads too, but for those writing that
@@ -620,11 +570,10 @@ impl<'r> Runtime<'r> {
                 // for. Both reports come before the answer's end, and so before what the agent
                 // does next.
                 let noted = |note| {
-                    // At the take time, at which it was allowed, not when the thread gets to it.
-                    let _ = reports.send(Input::Model(at, note));
+                    let _ = reports.send(Input::Model(note));
                 };
                 let answered = |answer| {
-                    let _ = reports.send(Input::ModelAnswered(clock.now(), number, answer));
+                    let _ = reports.send(Input::ModelAnswered(number, answer));
                 };
                 served.serve(number, incoming, allowed, by, noted, answered);
             });
@@ -634,7 +583,7 @@ impl<'r> Runtime<'r> {
                 let note = format!(
                     "model request {number} wasn't answered: its thread didn't start: {error}"
                 );
-                self.log.note(at, &note)
+                self.log.note(&note)
             }
         }
     }
@@ -645,7 +594,7 @@ impl<'r> Runtime<'r> {
     fn report(&mut self, report: Report) -> Result<Option<(Duration, Event)>, String> {
         match report {
             Report::Event(at, event) => Ok(Some((at, event))),
-            Report::Note(at, note) => self.log.note(at, &note).map(|()| None),
+            Report::Note(note) => self.log.note(&note).map(|()| None),
             Report::Undeleted(reason) => Err(reason),
         }
     }
@@ -670,24 +619,24 @@ impl<'r> Runtime<'r> {
         Event::OpArrived { op, request }
     }
 
-    /// Refuses `refused`, an op of the agent's whose payload the gateway refused, taken at `at`,
-    /// by `by`, and records it in the run log.
-    fn refuse(&mut self, at: Duration, refused: RefusedOp, by: Deadline) -> Result<(), String> {
-        self.log.refused(self.workflow(), at, &refused)?;
+    /// Refuses `refused`, an op of the agent's whose payload the gateway refused, by `by`, a time
+    /// since the run started, and records it in the run log.
+    fn refuse(&mut self, refused: RefusedOp, by: Duration) -> Result<(), String> {
+        self.log.refused(&refused)?;
         let what = "the refusal of an op whose payload was over the agent's limit";
         self.answer(what, by, |agent, by| agent.refuse(refused, by))
     }
 
-    /// Takes what is left in the inbox once the core has finished or abandoned the run, and every
-    /// judge call's thread has ended, as the loop does ([`Runtime::arrived`]): the core refuses
-    /// each op, as it does every op after its end, and the run log notes that the refusal wasn't
-    /// sent.
+    /// Takes the input held behind the last tick, if there is one, and what is left in the inbox,
+    /// once the core has finished or abandoned the run, and every judge call's thread has ended,
+    /// as the loop does ([`Runtime::arrived`]): the core refuses each op, as it does every op
+    /// after its end, and the run log notes that the refusal wasn't sent.
     fn drain(&mut self, core: &mut Core<'_>) -> Result<(), String> {
         // Its teardown has dropped the agent's session, unless the run was abandoned first, and
         // this drops it then, its sandbox left to the sweep: either way, its reader has handed
         // over all it will by now.
         self.agent = None;
-        while let Some(input) = self.inbox.take() {
+        while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
             let Some((at, event)) = self.arrived(None, core, input)? else {
                 continue;
             };
@@ -696,8 +645,7 @@ impl<'r> Runtime<'r> {
             for action in actions {
                 match action {
                     Action::Reply { op, reply } => {
-                        let by = self.answers_due(core);
-                        self.reply(op, reply, by)?;
+                        self.reply(op, reply, Self::answers_due(core))?;
                     }
                     // A type excluding these actions here would split the core's actions by the
                     // run's phase.
@@ -731,19 +679,20 @@ impl<'r> Runtime<'r> {
         for action in actions {
             match action {
                 Action::StartAgent => {
-                    // The agent starts at the run's start, so its startup ends long before the
-                    // hard end, which counts it.
-                    let by = Deadline::after(self.placed.startup(self.workflow().agent().role));
+                    // From the run's start, where the core counts the agent's startup from: a
+                    // start past it would silently shorten the agent's deadline, so it fails.
+                    let by = deadline(
+                        &self.clock,
+                        self.placed.startup(self.workflow().agent().role),
+                    );
                     let (sender, model) = (self.inbox.sender(), self.served.is_some());
+                    let clock = self.clock.clone();
                     let (agent, event) =
-                        Agent::start(self.sandboxes, self.workflow(), model, by, sender);
+                        Agent::start(self.sandboxes, self.workflow(), model, by, sender, clock);
                     self.agent = agent;
                     self.pending.push_back((self.clock.now(), event));
                 }
-                Action::Reply { op, reply } => {
-                    let by = self.answers_due(core);
-                    self.reply(op, reply, by)?;
-                }
+                Action::Reply { op, reply } => self.reply(op, reply, Self::answers_due(core))?,
                 Action::StartJudge {
                     job,
                     call,
@@ -788,10 +737,10 @@ impl<'r> Runtime<'r> {
         Ok(end)
     }
 
-    /// Answers op `op` with `reply`, by `by`. An op the core accepted has its payload stored
-    /// first, since a judge call reads it, now or in the final phase; a refused op's bytes are
-    /// never written.
-    fn reply(&mut self, op: OpId, reply: OpReply, by: Deadline) -> Result<(), String> {
+    /// Answers op `op` with `reply`, by `by`, a time since the run started. An op the core
+    /// accepted has its payload stored first, since a judge call reads it, now or in the final
+    /// phase; a refused op's bytes are never written.
+    fn reply(&mut self, op: OpId, reply: OpReply, by: Duration) -> Result<(), String> {
         // A type tying the reply to its op would carry the gateway's `IncomingOp` through the
         // core, which does no I/O.
         let Some((_, unanswered)) = self.unanswered.take().filter(|(id, _)| *id == op) else {
@@ -819,13 +768,13 @@ impl<'r> Runtime<'r> {
         self.answer(&what, by, |agent, by| agent.reply(incoming, reply, by))
     }
 
-    /// Sends an answer to an op of the agent's, `what`, by `by`, with `write`, unless `by` has
-    /// passed or the agent's sandbox is gone. The run log notes an answer that isn't sent, or
-    /// fails.
+    /// Sends an answer to an op of the agent's, `what`, by `by`, a time since the run started,
+    /// with `write`, unless `by` has passed or the agent's sandbox is gone. The run log notes an
+    /// answer that isn't sent, or fails.
     fn answer(
         &mut self,
         what: &str,
-        by: Deadline,
+        by: Duration,
         write: impl FnOnce(&mut Agent, Deadline) -> io::Result<()>,
     ) -> Result<(), String> {
         let sent = match &mut self.agent {
@@ -835,22 +784,24 @@ impl<'r> Runtime<'r> {
             // only until the core's next act: while the agent works, `by` is the end of the work
             // phase (`Core::tick_due`), so that act tears the agent down; after `Abandon`, the
             // run's end drops it.
-            Some(_) if by.remaining().is_none() => Err(format!(
+            Some(_) if self.clock.now() >= by => Err(format!(
                 "{what} wasn't sent: it was due by the core's next act, which has come"
             )),
-            Some(agent) => write(agent, by).context(format_args!("{what} failed")),
+            Some(agent) => {
+                let by = deadline(&self.clock, by);
+                write(agent, by).context(format_args!("{what} failed"))
+            }
             None => Err(format!("{what} wasn't sent: the agent's sandbox is gone")),
         };
         match sent {
             Ok(()) => Ok(()),
-            Err(note) => self.log.note(self.clock.now(), &note),
+            Err(note) => self.log.note(&note),
         }
     }
 
     /// Starts job `job`, a judge call of `call` on `payload` whose command runs for at most
-    /// `timeout`, on a thread of `scope`'s, which reports to the loop. The job fails, with
-    /// nothing started, if its start is due by a time that has passed, or if the thread doesn't
-    /// start.
+    /// `timeout`, on a thread of `scope`'s, which reports to the loop ([`judge::run`]). The job
+    /// fails, with nothing started, if the thread doesn't start.
     fn start_judge<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -863,25 +814,14 @@ impl<'r> Runtime<'r> {
         let deadlines = self.judge_deadlines(core, call, timeout);
         // The core may stop a job before it takes the job's failure to start, so the job's
         // sender is kept first.
-        let inbox = Inbox::new();
+        let inbox = self.clock.inbox();
         self.stops.insert(job, inbox.sender());
-        // The loop can be held past a call's start, by the agent's teardown's delete or a sync of
-        // the run log, and a sandbox created for a start already due would only be deleted, at
-        // or past the hard end at worst.
-        if deadlines.startup.remaining().is_none() {
-            let reason = "the judge's sandbox wasn't created: the call's start was due by a time \
-                          that had passed"
-                .to_owned();
-            let event = Event::JudgeFailed { job, reason };
-            self.pending.push_back((self.clock.now(), event));
-            return Ok(());
-        }
         let slot = self.workflow().call_slot(call);
         let jobs = self.dir.join("jobs");
         fs::create_dir_all(&jobs).context(jobs.display())?;
         let dir = jobs.join(job.0.to_string());
         fs::create_dir(&dir).context(dir.display())?;
-        let call = judge::Call {
+        let mut call = judge::Call::<'_, H> {
             job,
             judge: self.workflow().judge(slot.judge()),
             sandbox: self.workflow().sandbox(slot.judge().role()),
@@ -891,17 +831,19 @@ impl<'r> Runtime<'r> {
             deadlines,
             dir,
             sandboxes: self.sandboxes,
-            clock: self.clock,
+            clock: self.clock.clone(),
             inbox,
             reports: self.inbox.sender(),
         };
         let spawned = thread::Builder::new()
             .name(format!("job-{}", job.0))
-            .spawn_scoped(scope, move || judge::run(&call));
+            .spawn_scoped(scope, move || judge::run(&mut call));
         if let Err(error) = spawned {
+            // Reported as the call's thread would have, behind what reached the host before.
             let reason = format!("the call's thread didn't start: {error}");
-            let event = Event::JudgeFailed { job, reason };
-            self.pending.push_back((self.clock.now(), event));
+            let failed = Report::Event(self.clock.now(), Event::JudgeFailed { job, reason });
+            // The inbox holds its receiver, so the send can't fail.
+            let _ = self.inbox.sender().send(Input::Judge(failed));
         }
         Ok(())
     }
@@ -911,17 +853,16 @@ impl<'r> Runtime<'r> {
     fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
         let judge = self.workflow().call_slot(call).judge().role();
         let startup = self.clock.now().saturating_add(self.placed.startup(judge));
-        let at = |time| self.clock.deadline(time);
         match call {
             // A call of the agent's ends with the work phase, which ends by the core's next act
             // of its own, and what it left is collected by the agent's teardown's end, which
             // leaves the final judge its share of the hard end.
             JudgeCall::Grant(_) => {
-                let start = at(startup.min(core.tick_due()));
+                let start = startup.min(Self::answers_due(core));
                 Deadlines {
                     startup: start,
                     start,
-                    collect: at(self.teardown_end()),
+                    collect: self.teardown_end(),
                 }
             }
             // The final judge's command starts in time to run its whole timeout before the hard
@@ -929,9 +870,9 @@ impl<'r> Runtime<'r> {
             JudgeCall::Score => {
                 let start = self.hard_end().saturating_sub(timeout);
                 Deadlines {
-                    startup: at(startup.min(start)),
-                    start: at(start),
-                    collect: at(self.hard_end()),
+                    startup: startup.min(start),
+                    start,
+                    collect: self.hard_end(),
                 }
             }
         }
@@ -959,7 +900,7 @@ impl<'r> Runtime<'r> {
     fn tear_down_agent(&mut self) -> Result<(), String> {
         let Some(mut agent) = self.agent.take() else {
             let note = "the agent's sandbox never started: nothing was collected";
-            return self.log.note(self.clock.now(), note);
+            return self.log.note(note);
         };
         let collected = self.collect_agent(&mut agent);
         let deleted = agent.delete(self.sandboxes);
@@ -971,11 +912,11 @@ impl<'r> Runtime<'r> {
     fn collect_agent(&mut self, agent: &mut Agent) -> Result<(), String> {
         let dir = self.dir.join("agent");
         fs::create_dir(&dir).context(dir.display())?;
-        let mut notes = agent.freeze_and_collect(&dir, self.clock.deadline(self.teardown_end()));
+        let by = deadline(&self.clock, self.teardown_end());
+        let mut notes = agent.freeze_and_collect(&dir, by);
         let collected = record::collected(&dir);
         notes.push(format!("collected from the agent's sandbox: {collected}"));
-        let at = self.clock.now();
-        notes.iter().try_for_each(|note| self.log.note(at, note))
+        notes.iter().try_for_each(|note| self.log.note(note))
     }
 
     /// Deletes every sandbox the run's provider still lists of it, and notes which.
@@ -986,6 +927,6 @@ impl<'r> Runtime<'r> {
         }
         let ids: Vec<&str> = deleted.iter().map(SandboxId::as_str).collect();
         let note = format!("deleted the sandboxes the run left: {}", ids.join(", "));
-        self.log.note(self.clock.now(), &note)
+        self.log.note(&note)
     }
 }

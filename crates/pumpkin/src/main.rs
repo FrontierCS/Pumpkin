@@ -19,7 +19,7 @@ use docker::Docker;
 use driver::{ARGV0, Driver, Handoff};
 use engine::{ContextName, Engine};
 use provider::Provider;
-use runtime::{Ending, Record, Run};
+use runtime::{Ending, Record, Run, System};
 use sandboxd::Sandboxd;
 use schema::workflow::{ParseErrors, Workflow};
 use stdx::Context;
@@ -214,7 +214,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let placing = "placing the workflow's roles in the engine's classes";
     let path = Path::new(entry.path());
     let placed = placed.map_err(|errors| said(path, &errors, placing))?;
-    let run = Run::prepare(placed, &runs, SystemTime::now(), serving)?;
+    let run = Run::prepare(&System, placed, &runs, SystemTime::now(), serving)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     // Said before `run` hears of it, so that whatever ends both later, the record is named.
     say(format_args!("run {id} records into {}", dir.display()));

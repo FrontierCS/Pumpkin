@@ -73,9 +73,9 @@ impl Listener {
     }
 
     /// Waits until `by` for the sandbox to connect, then removes the socket. The session's
-    /// reader sends each [`Arrival`] on `arrivals` as `wrap`, which runs on it, makes it; only
-    /// [`Arrival::Exited`] names its session, so give each live session a receiver of its own.
-    /// The session takes ops whose payloads hold at most `ops` bytes, if given
+    /// reader sends each [`Arrival`] on `arrivals` as `wrap`, which runs on it, makes it, or reads
+    /// a clock; only [`Arrival::Exited`] names its session, so give each live session a receiver
+    /// of its own. The session takes ops whose payloads hold at most `ops` bytes, if given
     /// ([`Arrival::Refused`]), and model requests if `models`; any other breaks the protocol.
     ///
     /// # Errors
@@ -87,7 +87,7 @@ impl Listener {
         ops: Option<OpPayloadLimit>,
         models: bool,
         arrivals: Sender<T>,
-        wrap: fn(Arrival) -> T,
+        wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> io::Result<Session> {
         let path = self.path.display();
         self.listener

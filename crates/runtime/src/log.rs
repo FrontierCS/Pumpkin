@@ -1,18 +1,17 @@
 //! The run log, `log.jsonl`, and the JSON forms of events, actions and outcomes.
 //!
-//! `log.jsonl` holds one JSON record per line, each written and synced before what it records
-//! is acted on, but for a `model_answered`, which the loop writes once it takes it, before what
-//! the agent does next. A record is one of:
+//! `log.jsonl` holds one JSON record per line, each timed and synced as [`Log`] writes it. A
+//! record is one of:
 //!
-//! - an event: `{"seq": n, "at_ns": "t", "event": e, "actions": [a, ...]}`, which the runtime
-//!   observed `t` nanoseconds after the run started, with the actions the core decided on. A
-//!   judge call's events, its notes and a `model_answered` are at the times their threads
-//!   observed them, which may come before an earlier record's. The first, `seq` 0, is the run's
-//!   start, `{"kind": "run_started", "unix_ns": "u"}`, `u` nanoseconds after the Unix epoch by
-//!   the driving machine's clock. An `op_refused` ([`Log::refused`]) and a `model_answered`
-//!   ([`Log::model_answered`]) are no events of the core's, so they have no actions;
-//! - a note: `{"seq": n, "at_ns": "t", "note": s}`, something the runtime observed that the
-//!   core doesn't decide on, such as why the run failed.
+//! - an event of the core's: `{"seq": n, "at_ns": "t", "observed_ns": "o", "event": e,
+//!   "actions": [a, ...]}`, with the actions the core decided on it, which it took at `o`, when
+//!   the runtime observed it: what the agent's session handed over as it reached the host, a
+//!   judge call's events as its thread saw them, so `o` may be before an earlier record's `t`.
+//!   The first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u"}`,
+//!   observed at 0, `u` nanoseconds after the Unix epoch by the driving machine's clock;
+//! - one that no core decides on: an `op_refused` ([`Log::refused`]) or a `model_answered`
+//!   ([`Log::model_answered`]), `{"seq": n, "at_ns": "t", "event": e, "actions": []}`, or a
+//!   note, `{"seq": n, "at_ns": "t", "note": s}`, such as why the run failed.
 //!
 //! `seq` counts records from 0. Each event and action is an object whose `kind` is its name in
 //! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
@@ -38,31 +37,47 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stdx::Context;
 
-use super::record;
+use super::{Clock, Durable, Host, record};
 
-/// The run log, open for appending.
-#[derive(Debug)]
-pub(super) struct Log {
+/// The run log, open for appending: each record's `at_ns` is when the log wrote it, by the run's
+/// clock, so no record's `at_ns` is before the one's before it; synced on the run's host, `H`.
+///
+/// A record that leads to an act, an event with actions or an `op_refused`, is synced with all
+/// before it ahead of the act; any other is only written, to last with the next sync. An act that
+/// no record leads to is recorded after it: a model exchange, a session's end that the gateway
+/// makes, and what the run's end does after a failure of its own. The run's end syncs the log
+/// before `outcome.json`, and a failed sync fails the run: so a crash cuts a lost run's log only
+/// after its last synced record, and a finished run's only if a sync failed.
+pub(super) struct Log<'h, H: Host> {
     path: PathBuf,
     file: File,
     seq: u64,
+    host: &'h H,
+    clock: H::Clock,
 }
 
-impl Log {
+impl<'h, H: Host> Log<'h, H> {
     /// Creates the log, `log.jsonl`, in the record's directory `dir`, where it must not exist,
-    /// and syncs `dir`, so that the log lasts as each record synced into it does.
-    pub(super) fn create(dir: &Path) -> Result<Self, String> {
+    /// and syncs `dir` on `host`, so that the log lasts as each record synced into it does; each
+    /// record is timed by `clock`, the run's.
+    pub(super) fn create(host: &'h H, clock: H::Clock, dir: &Path) -> Result<Self, String> {
         let path = dir.join("log.jsonl");
         let file = OpenOptions::new()
             .append(true)
             .create_new(true)
             .open(&path)
             .context(path.display())?;
-        record::sync_dir(dir)?;
-        Ok(Self { path, file, seq: 0 })
+        record::sync_dir(host, dir)?;
+        Ok(Self {
+            path,
+            file,
+            seq: 0,
+            host,
+            clock,
+        })
     }
 
-    /// Appends the record of the run's start, at time 0, `unix` after the Unix epoch, with the
+    /// Appends the record of the run's start, observed at 0, `unix` after the Unix epoch, with the
     /// core's first `actions`.
     pub(super) fn start(
         &mut self,
@@ -71,31 +86,27 @@ impl Log {
         actions: &[Action],
     ) -> Result<(), String> {
         let event = json!({ "kind": "run_started", "unix_ns": nanos(unix) });
-        self.record(workflow, Duration::ZERO, event, actions)
+        self.decided(workflow, Duration::ZERO, event, actions)
     }
 
-    /// Appends the record of `event`, observed at `at`, and the `actions` it called for.
+    /// Appends the record of `event`, observed at `observed`, the time the core took it at, and
+    /// the `actions` it called for.
     pub(super) fn event(
         &mut self,
         workflow: &Workflow,
-        at: Duration,
+        observed: Duration,
         event: &Event,
         actions: &[Action],
     ) -> Result<(), String> {
-        self.record(workflow, at, event_json(event), actions)
+        self.decided(workflow, observed, event_json(event), actions)
     }
 
-    /// Appends the record of `refused`, an op of the agent's whose payload the gateway refused,
-    /// observed at `at`: `{"kind": "op_refused", "request": r, "message": m}`, where the request's
-    /// payload is `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without
-    /// a digest, as the gateway kept none of its bytes, and the message is the refusal the agent
-    /// is sent, unless a note after it says it wasn't.
-    pub(super) fn refused(
-        &mut self,
-        workflow: &Workflow,
-        at: Duration,
-        refused: &RefusedOp,
-    ) -> Result<(), String> {
+    /// Appends the record of `refused`, an op of the agent's whose payload the gateway refused:
+    /// `{"kind": "op_refused", "request": r, "message": m}`, where the request's payload is
+    /// `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without a digest,
+    /// as the gateway kept none of its bytes, and the message is the refusal the agent is sent,
+    /// unless a note after it says it wasn't.
+    pub(super) fn refused(&mut self, refused: &RefusedOp) -> Result<(), String> {
         let mut request = json!(refused.call());
         let (size, over) = (refused.size(), refused.payload_limit().bytes());
         request["payload"] = json!({ "size": size, "over": over });
@@ -104,21 +115,17 @@ impl Log {
             "request": request,
             "message": refused.message(),
         });
-        self.record(workflow, at, event, &[])
+        self.told(event)?;
+        // The refusal is sent next, an act that no action lists.
+        self.sync()
     }
 
     /// Appends the record of `answer`, how the route answered the agent's model request
-    /// numbered `request`, observed at `at`: `{"kind": "model_answered", "request": n,
-    /// "upstream_status": u, "answer": a}`, with `"request_id": i` if the upstream named its id
-    /// for the request, where `u` is the upstream's status, or `null` if no response came, and `a`
-    /// the [`Answer`]'s kind, with a refusal's status and message, but never a body.
-    pub(super) fn model_answered(
-        &mut self,
-        workflow: &Workflow,
-        at: Duration,
-        request: u64,
-        answer: &Answer,
-    ) -> Result<(), String> {
+    /// numbered `request`: `{"kind": "model_answered", "request": n, "upstream_status": u,
+    /// "answer": a}`, with `"request_id": i` if the upstream named its id for the request, where
+    /// `u` is the upstream's status, or `null` if no response came, and `a` the [`Answer`]'s kind,
+    /// with a refusal's or a bar's status and message, but never a body.
+    pub(super) fn model_answered(&mut self, request: u64, answer: &Answer) -> Result<(), String> {
         let (upstream_status, request_id, answer) = match answer {
             Answer::Forwarded { status, request_id } => {
                 (Some(*status), request_id, json!({ "kind": "forwarded" }))
@@ -149,13 +156,15 @@ impl Log {
         if let Some(request_id) = request_id {
             event["request_id"] = json!(request_id);
         }
-        self.record(workflow, at, event, &[])
+        self.told(event)
     }
 
-    fn record(
+    /// Appends the record of `event`, an event of the core's observed at `observed`, and the
+    /// `actions` the core decided on, synced if it has any.
+    fn decided(
         &mut self,
         workflow: &Workflow,
-        at: Duration,
+        observed: Duration,
         event: Value,
         actions: &[Action],
     ) -> Result<(), String> {
@@ -163,27 +172,43 @@ impl Log {
             .iter()
             .map(|action| action_json(workflow, action))
             .collect();
-        let mut record = json!({ "actions": actions, "at_ns": nanos(at) });
+        let leads = !actions.is_empty();
+        let mut record = json!({ "observed_ns": nanos(observed), "actions": actions });
+        record["event"] = event;
+        self.append(record)?;
+        if leads { self.sync() } else { Ok(()) }
+    }
+
+    /// Appends the record of `event`, which no core decides on, and so leads to no action.
+    fn told(&mut self, event: Value) -> Result<(), String> {
+        let mut record = json!({ "actions": [] });
         record["event"] = event;
         self.append(record)
     }
 
-    /// Appends a note.
-    pub(super) fn note(&mut self, at: Duration, note: &str) -> Result<(), String> {
-        self.append(json!({ "note": note, "at_ns": nanos(at) }))
+    /// Appends a note: `{"note": s}`.
+    pub(super) fn note(&mut self, note: &str) -> Result<(), String> {
+        self.append(json!({ "note": note }))
     }
 
+    /// Appends `record`, numbered and timed as it is written.
     fn append(&mut self, mut record: Value) -> Result<(), String> {
         record["seq"] = self.seq.into();
+        record["at_ns"] = nanos(self.clock.now()).into();
         let mut line = record.to_string();
         line.push('\n');
         self.file
             .write_all(line.as_bytes())
             .context(self.path.display())?;
-        // Counted once written, so that a record after one whose sync failed, such as the note
-        // of why the run failed, follows it in `seq` as it does in the file.
         self.seq += 1;
-        self.file.sync_data().context(self.path.display())
+        Ok(())
+    }
+
+    /// Makes every record written so far last.
+    pub(super) fn sync(&self) -> Result<(), String> {
+        (self.host)
+            .sync(&self.file, Durable::Data)
+            .context(self.path.display())
     }
 }
 
