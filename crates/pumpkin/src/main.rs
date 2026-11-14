@@ -1,7 +1,10 @@
 //! `pumpkin`, the operator's command line, which [`cli`] parses and describes, as
-//! `pumpkin --help` prints it. `run` starts a workflow's run with [`runtime`], on the Docker
-//! provider, in a driver process ([`driver`]), with the `sandboxd` that [`sandboxd`] finds, and
-//! [`config`] reads the machine's configuration.
+//! `pumpkin --help` prints it. `run` builds a task's images on the machine's engine and starts
+//! its workflow's run with [`runtime`], on the Docker provider, in a driver process
+//! ([`driver`]), with the `sandboxd` that [`sandboxd`] finds, and [`config`] reads the machine's
+//! configuration. `check` checks a task's source, which [`star`] reads, and lints it, and `build`
+//! builds its images and prints its IR. `fmt` formats `.star` files, and `check` lints them, with
+//! the formatter beside `pumpkin` ([`style`]).
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -18,7 +21,6 @@ use engine::{ContextName, Engine};
 use provider::Provider;
 use runtime::{Ending, Record, Run};
 use sandboxd::Sandboxd;
-use schema::ir;
 use schema::workflow::{ParseErrors, Workflow};
 use stdx::Context;
 
@@ -26,6 +28,8 @@ mod cli;
 mod config;
 mod driver;
 mod sandboxd;
+mod star;
+mod style;
 
 /// The most bytes of a final judge's standard error that a run's ending shows ([`end`]): one
 /// that holds more is named, and not shown.
@@ -34,7 +38,8 @@ mod sandboxd;
 const JUDGE_STDERR_SHOWN_BYTES: u64 = 1 << 20;
 
 fn main() -> ExitCode {
-    // A run's judge calls, and each session's reader, run on threads of their own.
+    // A run's judge calls, each session's reader, and the evaluation of `check` and `build` run
+    // on threads of their own.
     stdx::abort_on_panic();
     let mut args = env::args_os();
     let argv0 = args.next();
@@ -44,6 +49,9 @@ fn main() -> ExitCode {
     let done = match cli::parse(args) {
         Ok(cli::Command::Run(flags)) => run(flags),
         Ok(cli::Command::Wait(flags)) => wait(flags),
+        Ok(cli::Command::Check(flags)) => check(flags),
+        Ok(cli::Command::Fmt(flags)) => style::fmt(flags),
+        Ok(cli::Command::Build(flags)) => build(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
@@ -77,7 +85,8 @@ fn finish(done: Result<ExitCode, String>) -> ExitCode {
 /// follows it and prints its outcome; returns the exit status that `run`'s help gives.
 fn run(flags: cli::Run) -> Result<ExitCode, String> {
     let cli::Run {
-        ir,
+        entry,
+        args: cli::TaskArgs(task_args),
         runs,
         config,
         sandboxd,
@@ -96,7 +105,7 @@ fn run(flags: cli::Run) -> Result<ExitCode, String> {
         )
     })?;
     // The driver parses these as `run`'s own, and finds everything else wrong with them. The
-    // IR comes last, after `--`, so that a path that starts with `-` is not taken for a flag.
+    // entry comes last, after `--`, so that a path that starts with `-` is not taken for a flag.
     let mut args: Vec<OsString> = vec!["run".into()];
     args.extend(["--runs".into(), runs.clone().into()]);
     for (flag, value) in [("--sandboxd", sandboxd), ("--config", config)] {
@@ -104,7 +113,8 @@ fn run(flags: cli::Run) -> Result<ExitCode, String> {
             args.extend([flag.into(), value.into()]);
         }
     }
-    args.extend(["--".into(), ir.into()]);
+    args.extend(arg_flags(&task_args).map(OsString::from));
+    args.extend(["--".into(), entry.path().into()]);
     match Driver::spawn(&args)?.started(&runs)? {
         Handoff::Started(record) => {
             let id = record.id();
@@ -150,11 +160,9 @@ fn unstarted(status: ExitStatus, record: Option<&Record>) -> Result<ExitCode, St
 
 /// The driver: runs the run that `args`, `run`'s process ID and then its own arguments, ask for.
 /// Asks to end with `run` until the start ([`driver::die_with_run`]), names its process
-/// [`ARGV0`], reads the configuration and key, reaches the engine, places the roles, makes the
-/// record and tells `run` its id, starts the run and tells `run` so, then drives it to its end.
-///
-/// # Errors
-///
+/// [`ARGV0`], checks the task, reaches the engine and the provider and builds the task's images
+/// ([`prepared`]), places the roles, makes the record and tells `run` its id, starts the run and
+/// tells `run` so, then drives it to its end.
 /// Fails if `run` has ended, the process can't be named, or the run is refused, can't be
 /// recorded, fails to start, or fails.
 fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
@@ -172,7 +180,8 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     // path that `run` executes.
     rustix::thread::set_name(ARGV0).context("naming the driver failed")?;
     let Ok(cli::Command::Run(cli::Run {
-        ir,
+        entry,
+        args: cli::TaskArgs(args),
         runs: Some(runs),
         config,
         sandboxd,
@@ -181,29 +190,30 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     else {
         return Err(refused());
     };
-    // The IR, `sandboxd`, the configuration and its upstream's key are checked before the
+    // The task, `sandboxd`, the configuration and its upstream's key are checked before the
     // engine is reached, so a mistake in one needs no engine and makes no record. The roles are
-    // placed in the engine's classes before the record is begun. What only the provider refuses,
-    // such as a `sandboxd` it can't mount, is refused once the record exists.
-    let workflow = read_workflow(&ir)?;
+    // placed in the provider's classes before the record is begun. What only the provider
+    // refuses, such as a `sandboxd` it can't mount, is refused once the record exists.
     let sandboxd = Sandboxd::find(sandboxd)?;
     let config = match config {
         Some(config) => config,
         None => default_config()?,
     };
-    let config::Config {
-        docker: config::Docker { context },
-        upstreams,
-    } = config::read(&config)?;
-    let serving = match &workflow.sandbox(workflow.agent().role).model_route {
-        Some(route) => Some(upstreams.serving(&route.models).context(config.display())?),
-        None => None,
-    };
-    let engine = engine(context)?;
-    let docker = Docker::connect(&engine)?;
+    // Held here once reached, as the provider connected to it outlives the thread that checks
+    // and builds the task.
+    let mut engine = None;
+    let prepared = star::checked(&entry, &args, |task| prepared(task, &config, &mut engine));
+    let prepared =
+        prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
+    let Prepared {
+        workflow,
+        docker,
+        serving,
+    } = prepared?;
     let placed = workflow.place(&docker.ready().classes);
     let placing = "placing the workflow's roles in the engine's classes";
-    let placed = placed.map_err(|errors| said(&ir, &errors, placing))?;
+    let path = Path::new(entry.path());
+    let placed = placed.map_err(|errors| said(path, &errors, placing))?;
     let run = Run::prepare(placed, &runs, SystemTime::now(), serving)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     // Said before `run` hears of it, so that whatever ends both later, the record is named.
@@ -214,6 +224,102 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let executed = run.execute(&docker, sandboxd.path(), || driver::announce(&dir));
     executed.map_err(|reason| closing(&id, &format!("failed: {reason}"), &dir))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// What a run starts from: its task's workflow, built, and the provider, connected.
+struct Prepared<'e> {
+    workflow: Workflow,
+    docker: Docker<'e>,
+    /// How the agent's model route is served, if it has one.
+    serving: Option<route::Serving>,
+}
+
+/// What a run of `task`, checked, starts from, on the machine that the configuration at `config`
+/// names, each step refused before the next begins: the configuration read, and an upstream found
+/// to serve the agent's model route; the engine reached, and kept in `engine`; the provider
+/// connected to it, so that an engine that can't run sandboxes is refused before any image is
+/// built; then the task's images built on it ([`star::Task::build`]).
+///
+/// # Errors
+///
+/// As each step fails; gives each build that failed, at its place.
+fn prepared<'e>(
+    task: star::Task<'_>,
+    config: &Path,
+    engine: &'e mut Option<Engine>,
+) -> Result<Result<Prepared<'e>, lang::Problems>, String> {
+    let config::Config {
+        docker: config::Docker { context },
+        upstreams,
+    } = config::read(config)?;
+    let workflow = task.workflow();
+    let serving = match &workflow.sandbox(workflow.agent().role).model_route {
+        Some(route) => Some(upstreams.serving(&route.models).context(config.display())?),
+        None => None,
+    };
+    let engine = &*engine.insert(crate::engine(context)?);
+    let docker = Docker::connect(engine)?;
+    Ok(task.build(engine).map(|workflow| Prepared {
+        workflow,
+        docker,
+        serving,
+    }))
+}
+
+/// Checks the task that `flags` name, as `pumpkin check --help` says, saying each of its
+/// problems, if it has any; returns 0 if it has none.
+fn check(flags: cli::Check) -> Result<ExitCode, String> {
+    let cli::Check {
+        entry,
+        args: cli::TaskArgs(args),
+    } = flags;
+    let formatter = style::Formatter::beside()?;
+    match star::check(&entry, &args, &formatter) {
+        Ok(Ok(())) => Ok(ExitCode::SUCCESS),
+        Ok(Err(problems)) => Err(task_problems(&entry, &problems)),
+        Err(error) => Err(format!("{entry}: {error}")),
+    }
+}
+
+/// Builds the task that `flags` name, as `pumpkin build --help` says, on the engine that the
+/// configuration names, saying each of its problems if it has any, and else printing its IR;
+/// returns 0 once the IR is printed.
+fn build(flags: cli::Build) -> Result<ExitCode, String> {
+    let cli::Build {
+        entry,
+        args: cli::TaskArgs(args),
+        config,
+    } = flags;
+    let built = star::checked(&entry, &args, |task| {
+        let config = match config {
+            Some(config) => config,
+            None => default_config()?,
+        };
+        let engine = configured_engine(&config)?;
+        Ok(task.build(&engine))
+    })?;
+    let workflow = built.map_err(|problems| task_problems(&entry, &problems))?;
+    // As the run's record keeps it in `ir.json`.
+    let ir = format!("{:#}\n", serde_json::json!(workflow.ir()));
+    print(ir.as_bytes()).context("printing the IR failed")?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The words of the flags that give `args`, as `--arg <name>=<value>` each.
+fn arg_flags(args: &lang::Args) -> impl Iterator<Item = String> {
+    let flags = args
+        .iter()
+        .map(|(name, value)| ["--arg".to_owned(), format!("{name}={value}")]);
+    flags.flatten()
+}
+
+/// Says `problems`, those of the task whose entry is `entry`, and returns the line that closes
+/// them.
+fn task_problems(entry: &star::Entry, problems: &lang::Problems) -> String {
+    // Each problem reads as its first line names its place and those after show it, so only the
+    // line that closes them is said as `pumpkin`'s.
+    to_stderr(format!("{problems}\n").as_bytes());
+    closing_problems(format_args!("{entry}: the task has"), problems.count())
 }
 
 /// Waits until the run that `flags` name, in their runs directory or [`default_runs`], has
@@ -346,19 +452,6 @@ fn home(instead: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("HOME is unset or empty: set it, or {instead}"))
 }
 
-/// The workflow whose IR is in the file at `path`.
-fn read_workflow(path: &Path) -> Result<Workflow, String> {
-    let json = fs::read(path).map_err(|error| {
-        format!(
-            "the workflow's IR {} can't be read ({error}): name the file that holds it",
-            path.display()
-        )
-    })?;
-    let ir: ir::Workflow = serde_json::from_slice(&json)
-        .context(format_args!("the workflow's IR {}", path.display()))?;
-    Workflow::parse(&ir).map_err(|errors| said(path, &errors, "the workflow"))
-}
-
 /// Says each of `errors`, of the IR in the file at `path`, on a line of its own, so that the
 /// error the caller says last is still one line: the one returned, which says that `what` has
 /// them, and how many.
@@ -373,6 +466,40 @@ fn said(path: &Path, errors: &ParseErrors, what: &str) -> String {
         "{}: {what} has {count} problem{s}: fix {them} and run again",
         path.display()
     )
+}
+
+/// The line that closes a list of `count` problems, which says that `has` them, and how many.
+fn closing_problems(has: fmt::Arguments<'_>, count: usize) -> String {
+    let problems = counted(count, "problem");
+    format!("{has} {problems}")
+}
+
+/// `count` and `noun`, plural unless `count` is 1, as "1 problem", "2 problems", "2 entries" or
+/// "2 sandboxes": every count of a thing that Pumpkin says is said so.
+fn counted<C: Copy + fmt::Display + PartialEq + From<u8>>(count: C, noun: &str) -> String {
+    if count == C::from(1) {
+        return format!("{count} {noun}");
+    }
+    // English's plural of each noun that Pumpkin counts.
+    let consonant_y = noun
+        .strip_suffix('y')
+        .filter(|stem| !stem.ends_with(['a', 'e', 'o', 'u']));
+    match consonant_y {
+        Some(stem) => format!("{count} {stem}ies"),
+        None if noun.ends_with(['s', 'x']) || noun.ends_with("sh") || noun.ends_with("ch") => {
+            format!("{count} {noun}es")
+        }
+        None => format!("{count} {noun}s"),
+    }
+}
+
+/// The Docker engine of the context that the configuration at `path` names.
+fn configured_engine(path: &Path) -> Result<Engine, String> {
+    let config::Config {
+        docker: config::Docker { context },
+        upstreams: _,
+    } = config::read(path)?;
+    engine(context)
 }
 
 /// The Docker engine that `context` reaches, reported. A rootful engine is announced, since its

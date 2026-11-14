@@ -1,7 +1,11 @@
 //! A harness's pin, and the recipe that adds the harness to an image, as [`Pin::recipe`] says.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use alloc::borrow::ToOwned;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use schema::ir::{AbsolutePath, Sha256Digest};
 use schema::sandbox::{RelativePath, harness_dir};
@@ -11,6 +15,10 @@ use schema::sandbox::{RelativePath, harness_dir};
 /// each platform.
 const BUSYBOX: &str =
     "busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e";
+
+/// The name by which a harness's recipe ([`Pin::recipe`]) names the image it adds the harness
+/// to, as its last `FROM`: a name that its build gives that image, as a named context.
+pub const BASE: &str = "base";
 
 /// Where the stage that unpacks a harness puts its tarball.
 const TARBALL: &str = "/harness.tgz";
@@ -70,38 +78,37 @@ impl Mode {
 }
 
 impl Pin {
-    /// A Dockerfile that builds on `base`, an image the engine has, named as `FROM` takes it in
-    /// ASCII letters, digits and `-._/:@`, with the harness added at [`harness_dir()`]`/<name>`
-    /// in a layer of its own, independent of `base`: each file with its [`Mode`], in directories
-    /// of mode 0555, all owned by root. Its `ADD --checksum` needs Docker 25.0 or later.
+    /// A Dockerfile that builds the image its build names [`BASE`] with the harness added at its
+    /// root, [`harness_dir()`]`/<name>`, in a layer of its own, independent of that image: each
+    /// file kept, at its path there, with its [`Mode`], in directories of mode 0555, all owned
+    /// by root. The engine fetches the tarball, which `ADD --checksum` checks, and so needs
+    /// Docker 25.0 or later.
     ///
     /// # Panics
     ///
-    /// If the pin fails a check its fields' docs ask for, or `base` isn't written as above.
-    pub fn recipe(&self, base: &str) -> String {
-        match self.check(base) {
-            Ok(()) => {}
+    /// If the pin fails a check its fields' docs ask for.
+    pub fn recipe(&self) -> String {
+        let Checked { root, files } = match self.check() {
+            Ok(checked) => checked,
             // Checking pins as the crate builds would take a `const fn` copy of each check.
             Err(error) => unreachable!(
-                "pin {}, written in code and its recipe made by the tests, with a base named as \
-                 the engine accepted it, fails a check: {error}",
+                "pin {}, written in code and its recipe made by the tests, fails a check: {error}",
                 self.name
             ),
-        }
+        };
         let Self {
             name,
             url,
             sha256,
             dir,
-            files,
+            files: _,
         } = self;
-        let root = harness_dir().join(&valid(name));
         let mut recipe = format!(
             "FROM {BUSYBOX} AS {name}\nADD --checksum={sha256} {url} {TARBALL}\nRUN tar -x -z -f \
              {TARBALL} -C /"
         );
-        for file in *files {
-            let _ = write!(recipe, " {dir}/{}", file.path);
+        for (path, _) in &files {
+            let _ = write!(recipe, " {dir}/{path}");
         }
         // A `COPY` gives each file and directory it copies the permission bits it has where it
         // is copied from, unless `--chmod` gives them all one, but the directories it makes for
@@ -109,7 +116,7 @@ impl Pin {
         // the files in the tree the image gets, and gives each file and directory its mode, and
         // one `COPY` copies that tree to `/`, which every image has, with `--link`, so that an
         // engine that can reuses the layer on any base rather than copying it again.
-        let chmods: Vec<String> = (modes(&root, files).into_iter())
+        let chmods: Vec<String> = (modes(&root, &files).into_iter())
             .map(|(bits, paths)| {
                 let paths: Vec<String> = paths.iter().map(|path| format!("{OUT}{path}")).collect();
                 format!("chmod {bits:04o} {}", paths.join(" "))
@@ -118,15 +125,15 @@ impl Pin {
         let _ = write!(
             recipe,
             "\nFROM {BUSYBOX} AS {name}-tree\nCOPY --from={name} /{dir}/ {OUT}{root}/\nRUN {}\nFROM \
-             {base}\nCOPY --link --from={name}-tree --chown=0:0 {OUT}/ /\n",
+             {BASE}\nCOPY --link --from={name}-tree --chown=0:0 {OUT}/ /\n",
             chmods.join(" && ")
         );
         recipe
     }
 
-    /// Fails, saying what is wrong, unless each field is as its doc asks, and `base` as
-    /// [`Pin::recipe`]'s doc does.
-    fn check(&self, base: &str) -> Result<(), String> {
+    /// The pin's root and files, as [`Checked`] holds them; fails, saying what is wrong, unless
+    /// each field is as its doc asks.
+    fn check(&self) -> Result<Checked, String> {
         let named = self
             .name
             .starts_with(|char: char| char.is_ascii_lowercase())
@@ -152,9 +159,9 @@ impl Pin {
         recipe::check_source(self.url)?;
         Sha256Digest::try_from(self.sha256.to_owned())?;
         path(self.dir)?;
-        for file in self.files {
-            path(file.path)?;
-        }
+        let files = (self.files.iter())
+            .map(|file| Ok((path(file.path)?, file.mode)))
+            .collect::<Result<Vec<_>, String>>()?;
         if self.files.is_empty() {
             return Err("the pin keeps no file: list the files it keeps".to_owned());
         }
@@ -164,40 +171,42 @@ impl Pin {
                 pair[1].path, pair[0].path
             ));
         }
-        if base.is_empty() || !plain(base, b"-._/:@") {
-            return Err(format!(
-                "the base `{}` is not an image reference a recipe can hold: use ASCII letters and \
-                 digits and `-._/:@`",
-                base.escape_debug()
-            ));
-        }
-        Ok(())
+        // A name, which starts with a letter and holds no `/`, is a relative path.
+        let root = harness_dir().join(&RelativePath::try_from(self.name.to_owned())?);
+        Ok(Checked { root, files })
     }
+}
+
+/// What [`Pin::check`] accepts of a pin: the harness's root, [`harness_dir()`]`/<name>`, and each
+/// file kept, by its path below the pin's [`dir`](Pin::dir), with its [`Mode`].
+struct Checked {
+    root: AbsolutePath,
+    files: Vec<(RelativePath, Mode)>,
 }
 
 /// The path of each file of `files` at `root`, and of each directory that holds one, down from
 /// the one below `/`, by the permission bits the recipe gives it: [`DIRECTORY`]'s, or the file's
 /// mode's.
-fn modes(root: &AbsolutePath, files: &[PinnedFile]) -> BTreeMap<u32, BTreeSet<String>> {
+fn modes(root: &AbsolutePath, files: &[(RelativePath, Mode)]) -> BTreeMap<u32, BTreeSet<String>> {
     let mut modes: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-    for file in files {
-        let path = root.join(&valid(file.path)).to_string();
+    for (path, mode) in files {
+        let path = root.join(path).to_string();
         // Every `/` but the first, which is `/` itself, ends a directory's path.
         for (end, _) in path.match_indices('/').skip(1) {
             let dirs = modes.entry(DIRECTORY).or_default();
             dirs.insert(path[..end].to_owned());
         }
-        modes.entry(file.mode.bits()).or_default().insert(path);
+        modes.entry(mode.bits()).or_default().insert(path);
     }
     modes
 }
 
-/// Fails unless `path` is a relative path of ASCII letters and digits and `-._/`, which a
-/// recipe holds as it is.
-fn path(path: &str) -> Result<(), String> {
-    RelativePath::try_from(path.to_owned())?;
+/// `path`, as the type it is; fails unless it is a relative path of ASCII letters and digits and
+/// `-._/`, which a recipe holds as it is.
+fn path(path: &str) -> Result<RelativePath, String> {
+    let relative = RelativePath::try_from(path.to_owned())?;
     if plain(path, b"-._/") {
-        Ok(())
+        Ok(relative)
     } else {
         Err(format!(
             "the path `{}` is not one a pin can hold: use ASCII letters and digits and `-._/`",
@@ -210,15 +219,4 @@ fn path(path: &str) -> Result<(), String> {
 /// recipe quotes, escapes, expands or splits at.
 fn plain(text: &str, others: &[u8]) -> bool {
     (text.bytes()).all(|byte| byte.is_ascii_alphanumeric() || others.contains(&byte))
-}
-
-/// `path`, a relative path [`Pin::check`] has accepted, as the type it is.
-fn valid(path: &str) -> RelativePath {
-    match RelativePath::try_from(path.to_owned()) {
-        Ok(path) => path,
-        Err(error) => unreachable!(
-            "`Pin::check` accepted the pin's name, which starts with a letter and holds no `/`, \
-             and each file's path, which is a `RelativePath`; yet {error}"
-        ),
-    }
 }

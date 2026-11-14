@@ -3,24 +3,23 @@
 //! An image's tag names what it is built from only where its recipe pins all that its build
 //! fetches, so [`check`] refuses a recipe that may have Docker fetch:
 //!
-//! - an image not pinned by digest, as `<image>@sha256:<64 hexadecimal digits>`, where a `FROM`
-//!   or a `COPY --from` names neither `scratch`, an earlier stage nor the tag of one of the
-//!   build's bases, or where a `RUN --mount` could name one;
-//! - a frontend, which a parser directive such as `# syntax=` can name: any comment before the
-//!   first instruction that reads as a directive, `# <name>=…`;
-//! - a URL, which `ADD` fetches for a source such as `<scheme>://…` or `<user>@<host>:…`: any
-//!   `ADD` source with a `:`, but the one `https://` source of an `ADD` whose
-//!   `--checksum=sha256:<64 hexadecimal digits>` pins it;
-//! - a Git repository, which some versions of Docker clone with no checksum checked: any `ADD`
-//!   source that [`check_source`] refuses.
+//! - an image no digest pins, `<image>@sha256:<64 hexadecimal digits>`, where a `FROM`, a
+//!   `COPY --from` or a `RUN --mount`'s `from` names no `scratch`, earlier stage or named context
+//!   the build is [`Given`]; a `FROM` may name a build argument, `$<name>` or `${<name>}`, that an
+//!   `ARG` before the first `FROM` declares and the build is given, read as its value;
+//! - what the host keeps, which a `RUN --mount` but a `tmpfs` or a bind mount may mount;
+//! - a frontend, which a parser directive (`# <name>=…` before the first instruction) or a
+//!   `BUILDKIT_` build argument can name;
+//! - a URL, any `ADD` source with a `:`, but the one `https://` source that `--checksum` pins;
+//! - a Git repository: any `ADD` source that [`check_source`] refuses.
 //!
-//! It reads a recipe as Docker frames it, with `\` as the escape character: comments, continued
-//! lines, each instruction's keyword, flags and words. What it can't read as Docker would, it
-//! refuses rather than guess: a heredoc, which `<<` in a `RUN`, `COPY` or `ADD` may begin;
-//! `ONBUILD`; a keyword that is no instruction; a `FROM` other than `FROM <image>` or
-//! `FROM <image> AS <name>`; and, in a flag or a name, a character other than printable ASCII,
-//! a quote or `\`, or, in a name, `$`. What a `RUN` step's own command fetches, and the
-//! `ONBUILD` triggers a base may hold, are outside it.
+//! It refuses a target that names no stage, a build argument or named context misnamed, and a
+//! stage named as a named context. It reads a recipe as Docker frames it, with `\` as the escape
+//! character, and refuses what it can't read as Docker would: a heredoc; `ONBUILD`; a keyword
+//! that is no instruction; a `FROM` other than `FROM <image>` or `FROM <image> AS <name>`; and, in
+//! a flag or a name, a character other than printable ASCII, a quote or `\`, or, in a name, `$`,
+//! but for a `FROM`'s build argument. What a `RUN` step's own command fetches, and a base's `ONBUILD`
+//! triggers are outside it.
 
 // Without `std`, the check can name no file, process or clock: it reads only the text it is given.
 #![no_std]
@@ -28,17 +27,18 @@
 extern crate alloc;
 
 use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 
 /// The characters that separate an instruction's keyword and words: ASCII whitespace, as
 /// Docker splits them, but the line feed, which no instruction holds once its lines are joined.
 const BLANKS: [char; 5] = [' ', '\t', '\u{b}', '\u{c}', '\r'];
 
 /// The instructions that fetch nothing, of which the check reads only the keyword.
-const INERT: [&str; 13] = [
-    "ARG",
+const INERT: [&str; 12] = [
     "CMD",
     "ENTRYPOINT",
     "ENV",
@@ -53,21 +53,40 @@ const INERT: [&str; 13] = [
     "WORKDIR",
 ];
 
-/// Checks `text`, the recipe named `name`, of a build on images tagged `bases`, as the
-/// [crate] doc says.
+/// Checks `text`, the recipe named `name`, of a build given `given`, as the [crate] doc says.
 ///
 /// # Errors
 ///
 /// Fails, naming `name`, if `text` isn't UTF-8, or on the first thing the check refuses, with
-/// the line its instruction starts on.
-pub fn check(name: &str, text: &[u8], bases: &[&str]) -> Result<(), String> {
-    let text = str::from_utf8(text)
-        .map_err(|error| format!("{name}: {error}: write the recipe in UTF-8"))?;
+/// the line its instruction starts on if it is in `text`.
+pub fn check<B>(name: &str, text: &[u8], given: &Given<B>) -> Result<(), String> {
+    let at = |error: String| format!("{name}: {error}");
+    let text =
+        str::from_utf8(text).map_err(|error| at(format!("{error}: write the recipe in UTF-8")))?;
+    let Given {
+        target,
+        args,
+        contexts,
+    } = given;
+    (args.keys().try_for_each(|name| arg(name))).map_err(at)?;
+    (contexts.keys().try_for_each(|name| context(name))).map_err(at)?;
     let mut named = Named {
         stages: Vec::new(),
-        bases,
+        declared: Vec::new(),
+        args,
+        contexts: contexts.keys().map(String::as_str).collect(),
     };
-    read(text, &mut named).map_err(|(line, error)| format!("{name}:{line}: {error}"))
+    read(text, &mut named).map_err(|(index, error)| at_line(name, index, &error))?;
+    let Some(target) = target else {
+        return Ok(());
+    };
+    if named.stage(target.as_str()) {
+        return Ok(());
+    }
+    Err(at(format!(
+        "the build's target, `{target}`, names no stage of the recipe: name one that a \
+         `FROM <image> AS <name>` begins"
+    )))
 }
 
 /// Fails unless `source`, an `ADD` source, is plain: it holds no `%`, `?` or `#`, and doesn't end
@@ -96,12 +115,144 @@ pub fn check_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What a build gives its recipe beside its context, all of it in the build's inputs.
+///
+/// `B` is a named context's image, such as what a provider built; [`check`] reads only the names.
+#[derive(Debug)]
+pub struct Given<B> {
+    /// The stage to build, as `docker build --target` names it; the recipe's last without one.
+    pub target: Option<Stage>,
+    /// Each build argument's value, as `docker build --build-arg` gives it, by its name: ASCII
+    /// letters, digits and `_`, not starting with a digit.
+    pub args: BTreeMap<String, String>,
+    /// Each named context's image, as `docker build --build-context` gives it, by the name the
+    /// recipe gives it in a `FROM`, a `COPY --from` or a `RUN --mount`'s `from`: words of
+    /// lowercase ASCII letters and digits, joined each by one `-`, `_` or `.`, starting with a
+    /// letter, but `scratch`.
+    pub contexts: BTreeMap<String, B>,
+}
+
+impl<B> Default for Given<B> {
+    /// No target, build argument or named context.
+    fn default() -> Self {
+        Self {
+            target: None,
+            args: BTreeMap::new(),
+            contexts: BTreeMap::new(),
+        }
+    }
+}
+
+/// The name of a stage of a recipe, as a build's target names it.
+///
+/// It is a-z, 0-9, `-`, `_` and `.`, starting with a letter, as Docker's Dockerfile frontend
+/// takes a stage's name once it has lowercased it, and it matches a target in any case
+/// ([`Stage::in_any_case`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Stage(String);
+
+impl Stage {
+    /// The stage that `name` names in any case, lowercased.
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`Stage`]'s check does, unless `name`, lowercased, is a stage's name.
+    pub fn in_any_case(name: &str) -> Result<Self, String> {
+        Self::try_from(name.to_ascii_lowercase())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Stage {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        let mut chars = name.chars();
+        let valid = chars.next().is_some_and(|first| first.is_ascii_lowercase())
+            && chars.all(|char| {
+                char.is_ascii_lowercase()
+                    || char.is_ascii_digit()
+                    || matches!(char, '-' | '_' | '.')
+            });
+        if valid {
+            Ok(Self(name))
+        } else {
+            Err(format!(
+                "`{}` is no stage's name: use a-z, 0-9, `-`, `_` and `.`, starting with a letter",
+                name.escape_debug()
+            ))
+        }
+    }
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Refuses `name`, a build argument's, unless it is as [`Given::args`] says, and starts with no
+/// `BUILDKIT_`.
+fn arg(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let first = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !first || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "`{}` is no build argument's name: name it with ASCII letters, digits and `_`, not \
+             starting with a digit",
+            name.escape_debug()
+        ));
+    }
+    // BuildKit reads these for itself, before any recipe (`frontend/dockerfile/docs/
+    // reference.md`, "BuildKit built-in build args").
+    if name.starts_with("BUILDKIT_") {
+        return Err(format!(
+            "`{name}` starts with `BUILDKIT_`, a prefix BuildKit reads for itself, as \
+             `BUILDKIT_SYNTAX` names a frontend to fetch: give no build argument with it"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses `name`, a named context's, unless it is as [`Given::contexts`] says.
+fn context(name: &str) -> Result<(), String> {
+    let word = |word: &str| {
+        !word.is_empty()
+            && (word.bytes()).all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    };
+    let named =
+        name.starts_with(|c: char| c.is_ascii_lowercase()) && name.split(['-', '_', '.']).all(word);
+    if !named {
+        return Err(format!(
+            "`{}` is no named context's name: name it with words of lowercase ASCII letters and \
+             digits, joined each by one `-`, `_` or `.`, starting with a letter",
+            name.escape_debug()
+        ));
+    }
+    if name == "scratch" {
+        return Err(
+            "`scratch` is the empty image's name, which no named context may take: name it \
+             otherwise"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// What an instruction may name for an image that no digest pins: the names of the stages
-/// before it, lowercased, or `None` for one with no name, to which a `FROM` adds its stage; and
-/// the build's bases, by their tags.
-struct Named<'b> {
+/// before it, lowercased, or `None` for one with no name, to which a `FROM` adds its stage; the
+/// build arguments that an `ARG` before the first `FROM` declares, which a `FROM` may expand,
+/// and their values, which the build is given; and the names of the build's named contexts.
+struct Named<'a> {
     stages: Vec<Option<String>>,
-    bases: &'b [&'b str],
+    declared: Vec<String>,
+    args: &'a BTreeMap<String, String>,
+    contexts: Vec<&'a str>,
 }
 
 impl Named<'_> {
@@ -111,28 +262,60 @@ impl Named<'_> {
     }
 }
 
-/// Checks `text`, a recipe, an instruction at a time, with its continued lines joined as
-/// Docker joins them; fails with the number of the line an instruction starts on, and why the
-/// check refuses it.
+/// Checks `text`, a recipe, an instruction at a time, as [`lines`] reads them; fails with the
+/// index of the line an instruction starts on, and why the check refuses it.
 fn read(text: &str, named: &mut Named<'_>) -> Result<(), (usize, String)> {
-    let mut started = false;
-    // The instruction being continued: its first line's number, and its text so far.
-    let mut open: Option<(usize, String)> = None;
-    for (number, line) in (1..).zip(text.split('\n')) {
-        let line = line.trim_end_matches('\r');
-        let trimmed = line.trim_start();
-        // Docker drops a comment or a blank line even in a continued instruction, which goes on.
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            if !started && directive(trimmed) {
+    for line in lines(text) {
+        match line {
+            Line::Leading(index, comment) if directive(comment) => {
                 return Err((
-                    number,
+                    index,
                     format!(
                         "`{}` reads as a parser directive, which can name a frontend for the \
                          build to fetch, or change how Docker reads the lines after it: drop it, \
                          or reword the comment",
-                        shown(trimmed)
+                        shown(comment)
                     ),
                 ));
+            }
+            Line::Leading(..) => {}
+            Line::Instruction(first, joined) => {
+                instruction(&joined, named).map_err(|error| (first, error))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `error`, at the line at `index` of the recipe named `name`, by the line's number, which counts
+/// from 1.
+pub(crate) fn at_line(name: &str, index: usize, error: &str) -> String {
+    format!("{name}:{}: {error}", index + 1)
+}
+
+/// What [`lines`] reads of a recipe.
+pub(crate) enum Line<'t> {
+    /// A comment or a blank line before the first instruction, trimmed, by its line's index.
+    Leading(usize, &'t str),
+    /// An instruction, by the index of the line it starts on, its continued lines joined.
+    Instruction(usize, String),
+}
+
+/// The lines of `text`, a recipe, as Docker reads them: each comment or blank line before the
+/// first instruction, and then each instruction, with its continued lines joined as Docker
+/// joins them, but for the comments and blank lines among and after them, which Docker drops.
+pub(crate) fn lines(text: &str) -> Vec<Line<'_>> {
+    let mut read = Vec::new();
+    let mut started = false;
+    // The instruction being continued: its first line's index, and its text so far.
+    let mut open: Option<(usize, String)> = None;
+    for (index, line) in text.split('\n').enumerate() {
+        let line = line.trim_end_matches('\r');
+        let trimmed = line.trim_start();
+        // Docker drops a comment or a blank line even in a continued instruction, which goes on.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            if !started {
+                read.push(Line::Leading(index, trimmed));
             }
             continue;
         }
@@ -141,20 +324,18 @@ fn read(text: &str, named: &mut Named<'_>) -> Result<(), (usize, String)> {
         // written, with no separator.
         let (first, part, mut joined) = match open.take() {
             Some((first, joined)) => (first, line, joined),
-            None => (number, trimmed, String::new()),
+            None => (index, trimmed, String::new()),
         };
         let body = continued(part);
         joined.push_str(body.unwrap_or(part));
         if body.is_some() {
             open = Some((first, joined));
         } else {
-            instruction(&joined, named).map_err(|error| (first, error))?;
+            read.push(Line::Instruction(first, joined));
         }
     }
-    if let Some((first, joined)) = open {
-        instruction(&joined, named).map_err(|error| (first, error))?;
-    }
-    Ok(())
+    read.extend(open.map(|(first, joined)| Line::Instruction(first, joined)));
+    read
 }
 
 /// Whether `comment`, a line from its `#` on, reads as a parser directive, `# <name>=…`.
@@ -183,6 +364,16 @@ fn instruction(text: &str, named: &mut Named<'_>) -> Result<(), String> {
             let stage = from(words, named)?;
             named.stages.push(stage);
         }
+        // Docker expands a `FROM`'s build arguments with those of the `ARG`s before the first
+        // `FROM` alone. A word that isn't `<name>` or `<name>=…` declares no name a `FROM` can
+        // expand here.
+        "ARG" => {
+            if named.stages.is_empty() {
+                let words = split(rest).into_iter();
+                let declared = words.map(|word| word.split_once('=').map_or(word, |(arg, _)| arg));
+                named.declared.extend(declared.map(str::to_owned));
+            }
+        }
         "RUN" | "COPY" | "ADD" if text.contains("<<") => {
             return Err(format!(
                 "this `{keyword}` holds `<<`, which may begin a heredoc, and the check reads \
@@ -191,15 +382,12 @@ fn instruction(text: &str, named: &mut Named<'_>) -> Result<(), String> {
         }
         "RUN" => {
             let (flags, _) = flags(rest)?;
-            // Docker names a flag by its text up to its first `=`.
-            let mount =
-                |flag: &str| flag.split_once('=').map_or(flag, |(name, _)| name) == "--mount";
-            if flags.into_iter().any(mount) {
-                return Err(
-                    "`RUN --mount` can mount an image no digest pins, or what the \
-                     host keeps: copy what the step needs with `COPY` instead"
-                        .to_owned(),
-                );
+            for flag in flags {
+                // Docker names a flag by its text up to its first `=`.
+                let (name, value) = flag.split_once('=').unwrap_or((flag, ""));
+                if name == "--mount" {
+                    mount(value, named)?;
+                }
             }
         }
         "COPY" => {
@@ -235,6 +423,70 @@ fn instruction(text: &str, named: &mut Named<'_>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Refuses `value`, a `RUN --mount`'s text after its `=`, unless it is a `tmpfs`, which mounts
+/// empty memory, or a bind mount, Docker's default type, of the build's context, which it mounts
+/// without `from`, or of what a `from` names that [`pinned`] passes, but for a number, which
+/// Docker takes here for an image's name rather than a stage's index.
+fn mount(value: &str, named: &Named<'_>) -> Result<(), String> {
+    name(value)?;
+    let (kind, from) = fields(value);
+    match kind.as_str() {
+        "bind" => {}
+        "tmpfs" => return Ok(()),
+        "cache" | "secret" | "ssh" => {
+            return Err(format!(
+                "`RUN --mount=type={kind}` mounts what the host keeps, which the build's inputs \
+                 don't name: mount the build's context, an earlier stage, a named context or an \
+                 image pinned by digest with `type=bind`, or copy what the step needs with `COPY`"
+            ));
+        }
+        "" => {
+            return Err(
+                "a `RUN --mount`'s `type` is empty: give it `bind` or `tmpfs`, the types of \
+                 mount that the check passes"
+                    .to_owned(),
+            );
+        }
+        _ => {
+            return Err(format!(
+                "`{}` is no type of mount that the check passes: mount with `type=bind` or \
+                 `type=tmpfs`",
+                shown(&kind)
+            ));
+        }
+    }
+    if from.is_empty() {
+        return Ok(());
+    }
+    if from.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "a `RUN --mount`'s `from={from}` names the image `docker.io/library/{from}`, as \
+             Docker reads a number there, not a stage's index: name the stage by its `AS` name"
+        ));
+    }
+    // Docker takes a name there for a stage's in any case.
+    pinned(from, named.stage(&from.to_ascii_lowercase()), named)
+}
+
+/// The type of a `RUN --mount` whose text after its `=` is `value`, lowercased, and its `from`,
+/// empty if it has none.
+fn fields(value: &str) -> (String, &str) {
+    // Docker reads the value as fields split by commas, each `<key>=<value>` or a bare key, its
+    // key in any case, and a later field of a key sets it again, each value expanded, which
+    // `name` keeps from happening (`parseMount`, in
+    // `frontend/dockerfile/instructions/commands_runmount.go` in `moby/buildkit` at `1d510a30`).
+    let (mut kind, mut from) = ("bind".to_owned(), "");
+    for field in value.split(',') {
+        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+        match key.to_ascii_lowercase().as_str() {
+            "type" => kind = value.to_ascii_lowercase(),
+            "from" => from = value,
+            _ => {}
+        }
+    }
+    (kind, from)
 }
 
 /// The flags at the start of `rest`, an instruction's text after its keyword, and its text
@@ -276,9 +528,58 @@ fn from(words: &str, named: &Named<'_>) -> Result<Option<String>, String> {
             ));
         }
     };
-    // Docker takes a stage's name exactly as the stage gives it, lowercased.
-    pinned(image, named.stage(image), named)?;
+    // Docker would build the named context in the stage's place, with what follows the `FROM`
+    // on it.
+    if let Some(stage) = &stage
+        && named.contexts.contains(&stage.as_str())
+    {
+        return Err(format!(
+            "the stage `{stage}` is named as a named context the build is given, which Docker \
+             would build in its place: name the stage otherwise"
+        ));
+    }
+    let Some(value) = expanded(image, named)? else {
+        // Docker takes a stage's name exactly as the stage gives it, lowercased.
+        pinned(image, named.stage(image), named)?;
+        return Ok(stage);
+    };
+    (pinned(value, named.stage(value), named))
+        .map_err(|error| format!("`{image}` expands to the build argument's value: {error}"))?;
     Ok(stage)
+}
+
+/// The value of the build argument that `image`, a `FROM`'s, names, if it names one, as
+/// `$<name>` or `${<name>}`, the whole word, which Docker expands to its value.
+///
+/// # Errors
+///
+/// Fails if no `ARG` before the first `FROM` declares it, so that Docker would expand it to
+/// another value, or if the build isn't given it.
+fn expanded<'n>(image: &str, named: &'n Named<'_>) -> Result<Option<&'n str>, String> {
+    let braced = image
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'));
+    let Some(variable) = braced.or_else(|| image.strip_prefix('$')) else {
+        return Ok(None);
+    };
+    // Another shape is refused as a name that Docker may expand.
+    if arg(variable).is_err() {
+        return Ok(None);
+    }
+    if !named.declared.iter().any(|declared| declared == variable) {
+        return Err(format!(
+            "`{image}` names `{variable}`, which no `ARG` before the first `FROM` declares, so \
+             Docker would expand it to nothing or to a value of its own: declare it there with \
+             `ARG {variable}`, and give the build its value"
+        ));
+    }
+    match named.args.get(variable) {
+        Some(value) => Ok(Some(value)),
+        None => Err(format!(
+            "`{image}` names the build argument `{variable}`, which the build isn't given: give \
+             it an image pinned by digest"
+        )),
+    }
 }
 
 /// Refuses each source in `words`, an `ADD`'s text after `flags`, that [`check_source`]
@@ -287,13 +588,13 @@ fn from(words: &str, named: &Named<'_>) -> Result<Option<String>, String> {
 fn add(flags: &[&str], words: &str) -> Result<(), String> {
     let words = split(words);
     let sources = words.split_last().map_or(&[][..], |(_, sources)| sources);
+    let checksums: Vec<&str> = (flags.iter())
+        .filter_map(|flag| flag.strip_prefix("--checksum="))
+        .collect();
     for source in sources {
         name(source)?;
         check_source(source)?;
     }
-    let checksums: Vec<&str> = (flags.iter())
-        .filter_map(|flag| flag.strip_prefix("--checksum="))
-        .collect();
     for checksum in &checksums {
         if !digest(checksum) {
             return Err(format!(
@@ -322,18 +623,19 @@ fn split(text: &str) -> Vec<&str> {
     text.split(BLANKS).filter(|word| !word.is_empty()).collect()
 }
 
-/// Refuses `image`, which a `FROM` or a `COPY --from` names, unless it is a [`name`], and a
-/// `stage` before it, `scratch`, the tag of one of `named`'s bases, or pinned by digest.
+/// Refuses `image`, which an instruction names where [`Given::contexts`] says a named context
+/// may be, unless it is a [`name`], and a `stage` before it, `scratch`, one of `named`'s named
+/// contexts, or pinned by digest.
 fn pinned(image: &str, stage: bool, named: &Named<'_>) -> Result<(), String> {
     name(image)?;
     let by_digest =
         (image.rsplit_once('@')).is_some_and(|(name, hex)| !name.is_empty() && digest(hex));
-    if stage || image == "scratch" || named.bases.contains(&image) || by_digest {
+    if stage || image == "scratch" || named.contexts.contains(&image) || by_digest {
         return Ok(());
     }
     Err(format!(
         "`{image}` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, \
-         `scratch`, an earlier stage or a base the build is given"
+         `scratch`, an earlier stage or a named context the build is given"
     ))
 }
 
@@ -347,7 +649,7 @@ fn digest(text: &str) -> bool {
 
 /// Refuses `word`, an image or a source, unless Docker takes it as written: [`plain`], with no
 /// `$`, which Docker may expand.
-fn name(word: &str) -> Result<(), String> {
+pub(crate) fn name(word: &str) -> Result<(), String> {
     plain(word)?;
     if word.contains('$') {
         return Err(format!(

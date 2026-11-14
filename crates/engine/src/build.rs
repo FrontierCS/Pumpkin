@@ -2,39 +2,44 @@
 //! as [`Engine::build`] says.
 //!
 //! A build that finds no image by its tag reads its context from a stage, a copy of it that is
-//! the build's alone, and tags its image by the stage's digest. The digest is the SHA-256 of a
-//! text that names the inputs: a line that names the text's form, [`FORM`], and the options
-//! every build gives `docker build`, [`OPTIONS`]; a line for the recipe, `file` and its path in
-//! the context, or `text` and the SHA-256 of a [`Recipe::Text`]; then a line for each directory
-//! and regular file of the context, or of its stage, the root first, as `./`, and then the rest,
-//! sorted by their paths' bytes, a directory's without its `/`, so `bin/` comes before `bin-x`:
+//! the build's alone, and tags its image by the stage's digest: the SHA-256 of a text of a line
+//! for the text's form, [`FORM`], and [`OPTIONS`]; one for the recipe, `file` and its path or
+//! `text` and its SHA-256; one for each of what the build is [`Given`], a named context by its
+//! image's tag ([`Built::tag`]); and one for each directory and regular file of the context or
+//! its stage, the root first, as `./`, then the rest by their paths' bytes, a directory's
+//! without its `/`, so `bin/` comes before `bin-x`:
 //!
 //! ```text
 //! pumpkin-build/2 <option>...
 //! file <recipe>
+//! target <stage>
+//! arg <name> <sha256>
+//! context <name> <tag>
 //! ./ <mode>
 //! <path>/ <mode>
 //! <path> <mode> <sha256>
 //! ```
 //!
-//! A path is relative to the context, a directory's ends in `/`, a mode is the permission bits
-//! that the stage gives the entry ([`BuildContext`]), in four octal digits, and a SHA-256 is in
-//! lowercase hexadecimal. No name holds whitespace or a control character, which would make its
-//! line ambiguous.
+//! A mode is the bits the stage gives the entry ([`BuildContext`]), in four octal digits, and a
+//! SHA-256 is in lowercase hexadecimal. No name holds whitespace or a control character.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::{fmt, io, iter};
+use std::process::{Child, Stdio};
+use std::{fmt, io};
 
+use recipe::Given;
 use schema::ir::{Image, Sha256Digest};
 use schema::sandbox::RelativePath;
 use sha2::{Digest, Sha256};
 use stdx::Context;
+use tempfile::TempDir;
 
-use crate::{ContextName, Engine, Stderr, docker, docker_to, fix_reported, image_id};
+use crate::{ContextName, Engine, docker, docker_command, fix_reported, image_id};
 
 /// The permission bits of each directory of a stage.
 // Git's two modes for a regular file, as a checkout under a 022 umask gives them, so that one
@@ -51,8 +56,11 @@ const FILE_MODE: u32 = 0o644;
 const OWNER_EXECUTE: u32 = 0o100;
 
 /// The name and number of the inputs' text's form, the first word of its first line.
-// The number changes with what the text holds or how it is written, so that the texts of two
-// forms never coincide, and no tag of one names an image of another.
+// The number changes with what the text holds, how it is written, or how a build reads what it
+// names, such as its stage's times, so that the texts of two forms never coincide, and no tag of
+// one names an image of another. The lines of what a build is given share it with a build given
+// nothing: each starts with a word, `target`, `arg` or `context`, where a text without them has
+// `./ `, so no text with them is one without.
 const FORM: &str = "pumpkin-build/2";
 
 /// The options every build gives `docker build`, beside those that name its recipe, its context
@@ -66,12 +74,12 @@ const FORM: &str = "pumpkin-build/2";
 // installed; without it, `docker build` falls back to the classic builder, which has no such
 // option. And the recipe that adds a harness to an agent's image (`Pin::recipe`) fetches with
 // `ADD --checksum`, which BuildKit's Dockerfile frontend takes outside its labs channel only
-// from BuildKit 0.12, which Docker 25.0 is the first to ship. So the provider needs Docker 25.0
-// or later with its Buildx plugin.
+// from BuildKit 0.12, which Docker 25.0 is the first to ship. So builds need Docker 25.0 or later
+// with its Buildx plugin.
 const OPTIONS: [&str; 1] = ["--provenance=false"];
 
-/// An image that [`Engine::build`] built or found, and only it makes: a build given one as a
-/// base may name it by its tag.
+/// An image that [`Engine::build`] built or found, which only it makes, so that a build may be
+/// [`Given`] it as a named context.
 #[derive(Debug)]
 pub struct Built {
     image: Image,
@@ -79,15 +87,25 @@ pub struct Built {
 }
 
 impl Built {
-    /// The image's ID.
+    /// The image's ID, the digest of its manifest, by which a workflow names the image.
     pub fn image(&self) -> &Image {
         &self.image
     }
 
-    /// The tag `build` found the image by or gave it, `<repository>:<hex>`, by which a recipe's
-    /// `FROM` can name it, until another build of the same inputs moves it to its own image.
+    /// The tag `build` found the image by or gave it, `<repository>:<hex>`, by which, with its
+    /// ID, a build on it names it to the engine, until another build of the same inputs moves it
+    /// to its own image.
+    /// Its digest names the build's inputs, not the image: a key that finds what they built
+    /// before, as two builds of the same inputs may make different images.
     pub fn tag(&self) -> &str {
         &self.tag
+    }
+}
+
+impl AsRef<Image> for Built {
+    /// [`Built::image`].
+    fn as_ref(&self) -> &Image {
+        &self.image
     }
 }
 
@@ -98,11 +116,29 @@ impl Built {
 /// path, which must name nothing that `dir` or an earlier mount holds, in a directory that one
 /// of them holds. It holds only directories and regular files, named in UTF-8 without
 /// whitespace or a control character. Its stage gives each directory mode 0755, and each file
-/// 0755 if its owner may execute it, else 0644.
+/// 0755 if its owner may execute it, else 0644, and each of them one time, the build's, as the
+/// time it was last modified.
 #[derive(Debug, Default)]
 pub struct BuildContext {
     pub dir: Option<PathBuf>,
     pub mounts: BTreeMap<RelativePath, PathBuf>,
+}
+
+/// The mount of `mounts`, a [`BuildContext`]'s, that holds what is at `path` in the context.
+///
+/// It is the deepest of the mounts whose paths `path` is below, given with the rest of `path`
+/// below it; or `None` if there is none, as the context's own directory then holds it. This is
+/// how [`Engine::build`] lays the context out (`read_context`): its own directory, each mount
+/// laid over it, and a mount below another laid over what that one holds.
+pub fn mounted<'m, 'p, D>(
+    mounts: &'m BTreeMap<RelativePath, D>,
+    path: &'p str,
+) -> Option<(&'m D, &'p str)> {
+    let below = mounts.iter().filter_map(|(at, dir)| {
+        let within = path.strip_prefix(at.as_str())?.strip_prefix('/')?;
+        Some((dir, within))
+    });
+    below.min_by_key(|(_, within)| within.len())
 }
 
 /// A build's recipe, a Dockerfile.
@@ -115,132 +151,350 @@ pub enum Recipe {
 }
 
 impl Engine {
-    /// The image that `recipe`, once [`recipe::check`] passes it, builds with `context` on
-    /// `bases`, which it may name by their tags: the engine's under the tag `<repository>:<hex>`,
-    /// the digest of the build's inputs, or else one built now from a stage of the context.
+    /// The image that `recipe` builds with `context`, given `given`, tagged `<repository>:<hex>`,
+    /// as [`Engine::start`] starts its build, once that build has ended ([`finish`]).
     ///
     /// # Errors
     ///
-    /// Fails as [`recipe::check`] does, if `context` isn't as [`BuildContext`] says, if a
-    /// [`Recipe::File`] is no regular file of it, if `docker` fails, or if the stage can't be
-    /// made or removed.
+    /// As [`Engine::start`] and [`finish`] fail.
     pub fn build(
         &self,
         context: &BuildContext,
         recipe: &Recipe,
-        bases: &[&Built],
+        given: &Given<&Built>,
         repository: &str,
     ) -> Result<Built, String> {
-        let bases: Vec<&str> = bases.iter().map(|base| base.tag()).collect();
-        // An image found by the tag was built from a stage whose inputs are those the context's
-        // own files give now, so only a build needs a stage.
-        let inputs = Inputs::checked(read_context(context)?, None, recipe, &bases)?;
-        let tag = format!("{repository}:{}", inputs.digest());
-        let found = image_id(&self.report.context, &tag).map_err(|error| {
-            fix_reported(format!(
-                "the image tagged `{tag}` can't be looked up: {error}"
-            ))
-        })?;
-        if let Some(id) = found {
-            let image = Image::try_from(id)?;
-            return Ok(Built { image, tag });
-        }
-        let scratch = tempfile::Builder::new()
-            .prefix("pumpkin-build-")
-            .permissions(Permissions::from_mode(0o700))
-            .tempdir()
-            .map_err(|error| {
-                format!(
-                    "a directory for a build can't be made: {error}: let this user make one in \
-                     the system's temporary directory"
-                )
-            })?;
-        let path = scratch.path().to_owned();
-        let built = self.build_in(&path, &inputs, recipe, &bases, repository);
-        let left = |removing: io::Error| {
-            format!(
-                "{} can't be removed after the build: {removing}: remove it",
-                path.display()
-            )
-        };
-        match (built, scratch.close()) {
-            (built, Ok(())) => built,
-            (Ok(_), Err(removing)) => Err(left(removing)),
-            (Err(error), Err(removing)) => Err(format!("{error}; and {}", left(removing))),
+        match self.start(context, recipe, given, repository)? {
+            Started::Found(built) => Ok(built),
+            Started::Building(building) => finish(&mut Vec::from([((), building)])).1,
         }
     }
 
-    /// The image of [`Engine::build`] that `recipe` builds from a stage of `inputs`, in
-    /// `scratch`, an empty directory of the build's own, which also holds a text recipe and the
-    /// file the build writes the image's ID to.
-    fn build_in(
+    /// Starts the build of the image that `recipe`, once [`recipe::check`] passes it, builds with
+    /// `context` and `given`, tagged `<repository>:<hex>`, the digest of the build's inputs: the
+    /// engine's image under that tag, or a `docker build` of a stage of the context, to be tagged
+    /// once it has ended ([`finish`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`recipe::check`] does, if `context` isn't as [`BuildContext`] says, if a
+    /// [`Recipe::File`] is no regular file of it, or if `docker` or the stage fails.
+    pub fn start(
+        &self,
+        context: &BuildContext,
+        recipe: &Recipe,
+        given: &Given<&Built>,
+        repository: &str,
+    ) -> Result<Started, String> {
+        // An image found by the tag was built from a stage whose inputs are those the context's
+        // own files give now, so only a build needs a stage.
+        let inputs = Inputs::checked(read_context(context)?, None, recipe, given)?;
+        let tag = format!("{repository}:{}", inputs.digest());
+        if let Some(built) = self.tagged(&tag)? {
+            return Ok(Started::Found(built));
+        }
+        let scratch = make_scratch("build")?;
+        match self.start_in(scratch.path(), &inputs, recipe, given, repository) {
+            Ok((child, recipe, tag)) => Ok(Started::Building(Building {
+                child,
+                scratch,
+                recipe,
+                tag,
+                context: self.report.context.clone(),
+            })),
+            Err(error) => removed(scratch, "build", Err(error)),
+        }
+    }
+
+    /// The image that the engine has under `tag`, if any.
+    fn tagged(&self, tag: &str) -> Result<Option<Built>, String> {
+        let found = image_id(&self.report.context, tag).map_err(|error| {
+            let error = fix_reported(&error);
+            format!("the image tagged `{tag}` can't be looked up: {error}")
+        })?;
+        let Some(id) = found else {
+            return Ok(None);
+        };
+        let image = Image::try_from(id)?;
+        Ok(Some(Built {
+            image,
+            tag: tag.to_owned(),
+        }))
+    }
+
+    /// Starts the `docker build` of [`Engine::start`] that `recipe` builds from a stage of
+    /// `inputs`, in `scratch`, an empty directory of the build's own, which also holds a text
+    /// recipe, the file the build writes the image's ID to, and the build's `output`; and gives
+    /// it with the recipe, as a failure names it, and the tag of the stage's inputs.
+    fn start_in(
         &self,
         scratch: &Path,
         inputs: &Inputs,
         recipe: &Recipe,
-        bases: &[&str],
+        given: &Given<&Built>,
         repository: &str,
-    ) -> Result<Built, String> {
+    ) -> Result<(Child, String, String), String> {
         let stage = scratch.join("context");
         // The stage is this build's alone, so the bytes the check reads there are those the
         // digest covers and the build reads, which may differ from those `inputs` read.
-        let staged = Inputs::checked(inputs.stage(&stage)?, Some(&stage), recipe, bases)?;
-        let file = match recipe {
-            Recipe::File(path) => stage.join(path.as_str()),
+        let staged = Inputs::checked(inputs.stage(&stage)?, Some(&stage), recipe, given)?;
+        let digest = staged.digest();
+        let (file, shown) = match recipe {
+            Recipe::File(path) => (stage.join(path.as_str()), format!("`{path}`")),
             Recipe::Text(text) => {
                 let file = scratch.join("Dockerfile");
                 fs::write(&file, text).context(file.display())?;
-                file
+                (file, "its recipe's text".to_owned())
             }
         };
-        let tag = format!("{repository}:{}", staged.digest());
-        let context = &self.report.context;
-        let image = build_untagged(context, &stage, &file, &scratch.join("id"))?;
+        let child = start_untagged(self, &stage, &file, given, scratch)?;
+        Ok((child, shown, format!("{repository}:{digest}")))
+    }
+}
+
+/// What [`Engine::start`] gives: the image found by its tag, or its build, started.
+#[derive(Debug)]
+pub enum Started {
+    /// The image the engine has under the tag of the build's inputs.
+    Found(Built),
+    /// Its `docker build`, running.
+    Building(Building),
+}
+
+/// A `docker build` that [`Engine::start`] has started, and [`finish`] waits for.
+#[derive(Debug)]
+pub struct Building {
+    child: Child,
+    /// The build's directory of its own, removed once it has ended, which holds its `output`,
+    /// its standard output and error.
+    scratch: TempDir,
+    /// The recipe, as a failure names it.
+    recipe: String,
+    tag: String,
+    context: ContextName,
+}
+
+/// Waits until one of `building` has ended, takes it out, and gives its key with its image.
+///
+/// The image is tagged as [`Engine::start`] says, once its directory is removed. A failed
+/// `docker build` has all it wrote put on standard error at once, as `make --output-sync` does.
+///
+/// # Errors
+///
+/// Gives, with that key, why: `docker build`, or its waiting, output, image's ID, tag or
+/// directory's removal failed. Panics if `building` is empty, as none of it would ever end.
+pub fn finish<K>(building: &mut Vec<(K, Building)>) -> (K, Result<Built, String>) {
+    let mut children: Vec<&mut Child> = (building.iter_mut()).map(|(_, b)| &mut b.child).collect();
+    let (index, status) = stdx::process::wait_any(&mut children);
+    let (key, mut ended) = building.remove(index);
+    let built = match status {
+        // A build that succeeds says nothing that its image doesn't: only a failure's output
+        // tells the operator something to act on.
+        Ok(status) if status.success() => ended.built(),
+        Ok(status) => ended.shown().and_then(|()| {
+            Err(format!(
+                "`docker build` of {} failed with {status}: its output above says why: fix what \
+                 Docker reports",
+                ended.recipe
+            ))
+        }),
+        Err(error) => {
+            // Killed, and reaped, so that it stops using its directory before it is removed.
+            let _ = ended.child.kill().and_then(|()| ended.child.wait());
+            Err(format!(
+                "`docker build` of {} can't be waited for, so it is killed: {error}",
+                ended.recipe
+            ))
+        }
+    };
+    (key, removed(ended.scratch, "build", built))
+}
+
+impl Building {
+    /// Writes all of the build's output to this process's standard error, whole.
+    fn shown(&self) -> Result<(), String> {
+        let output = self.scratch.path().join("output");
+        let mut output = File::open(&output).context(output.display())?;
+        let mut stderr = io::stderr().lock();
+        // A standard error that can't be written leaves the output unshown, as `pumpkin` leaves
+        // whatever else it says, and the build's outcome still stands.
+        let _ = io::copy(&mut output, &mut stderr).and_then(|_| stderr.flush());
+        Ok(())
+    }
+
+    /// The image of this build, which has succeeded, tagged.
+    fn built(&self) -> Result<Built, String> {
+        let id_file = self.scratch.path().join("id");
+        let id = fs::read_to_string(&id_file).map_err(|error| {
+            format!(
+                "the ID of the image `docker build` built can't be read from {}: {error}: the \
+                 build should have written it there",
+                id_file.display()
+            )
+        })?;
+        // In the containerd image store, which `Engine::connect` requires, the ID of an image
+        // built for the engine's platform alone, with no attestation (`OPTIONS`), is its
+        // manifest's digest.
+        let image = Image::try_from(id.trim().to_owned())?;
+        let tag = &self.tag;
         // The tag moves only if an image of the same inputs has it: one that another build
         // tagged since the lookup, or one of what the context's files changed to since they were
         // read. And it is `docker tag`'s, not the build's: in the containerd image store,
         // a tag that a build moves to its image drops the image the tag named, which a run may
         // still be using, whereas one that `docker tag` moves leaves that image, untagged.
-        let tagged = docker(context, ["tag", "--", image.as_str(), &tag]);
-        tagged
-            .map_err(|error| fix_reported(format!("{image} can't be tagged `{tag}`: {error}")))?;
-        Ok(Built { image, tag })
+        let tagged = docker(&self.context, ["tag", "--", image.as_str(), tag]);
+        tagged.map_err(|error| {
+            format!("{image} can't be tagged `{tag}`: {}", fix_reported(&error))
+        })?;
+        Ok(Built {
+            image,
+            tag: tag.clone(),
+        })
     }
 }
 
-/// Builds `recipe`, a file, with `stage` as its context, on the engine of `context`, names the
-/// image it builds with no tag, and returns its ID, which the build writes to `id_file`.
-fn build_untagged(
-    context: &ContextName,
+/// A directory of its own in the system's temporary directory for one `task`, made with bits
+/// 0700: named by `task`, this process and a random word, so that each that a process that has
+/// ended made is removed then ([`sweep`]).
+// A process killed during its task leaves this directory, with what the task put there, such as
+// a build's stage, a copy of the whole context, behind, until another process makes one.
+fn make_scratch(task: &str) -> Result<TempDir, String> {
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("pumpkin-{task}-{}-", std::process::id()))
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir()
+        .map_err(|error| {
+            format!(
+                "a directory for the {task} can't be made in the system's temporary directory: \
+                 {error}: let this user make one there"
+            )
+        })?;
+    sweep(scratch.path());
+    Ok(scratch)
+}
+
+/// Removes each directory beside `ours`, one that [`make_scratch`] has just made, that it made
+/// for a process that has ended, as this process's user: one that a process killed during its
+/// task left behind.
+fn sweep(ours: &Path) {
+    let (Some(dir), Ok(made)) = (ours.parent(), fs::symlink_metadata(ours)) else {
+        return;
+    };
+    // What can't be read or removed is left as it was before the sweep: it is no task's of this
+    // process, which has no use for it.
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(scratch_pid) else {
+            continue;
+        };
+        // A process that has ended has no directory in `/proc`, of the PID namespace this
+        // process is in, which every `pumpkin` that shares this directory is in too.
+        let ended = !Path::new("/proc").join(pid.to_string()).exists();
+        let path = entry.path();
+        let theirs = fs::symlink_metadata(&path)
+            .is_ok_and(|found| found.is_dir() && found.uid() == made.uid());
+        if ended && theirs {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// The ID of the process that [`make_scratch`] made the directory named `name` for, if it made
+/// it: `pumpkin-<task>-<pid>-<word>`.
+fn scratch_pid(name: &str) -> Option<u32> {
+    let mut words = name.rsplitn(3, '-');
+    let (word, pid, task) = (words.next()?, words.next()?, words.next()?);
+    let task = task.strip_prefix("pumpkin-")?;
+    let named = !task.is_empty() && task.bytes().all(|b| b.is_ascii_lowercase());
+    let digits = !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit());
+    (named && digits && !word.is_empty()).then(|| pid.parse().ok())?
+}
+
+/// `done`, what `task` gave in `scratch`, once `scratch` is removed.
+fn removed<T>(scratch: TempDir, task: &str, done: Result<T, String>) -> Result<T, String> {
+    let path = scratch.path().to_owned();
+    let left = |removing: io::Error| {
+        format!(
+            "{} can't be removed after the {task}: {removing}: remove it",
+            path.display()
+        )
+    };
+    match (done, scratch.close()) {
+        (done, Ok(())) => done,
+        (Ok(_), Err(removing)) => Err(left(removing)),
+        (Err(error), Err(removing)) => Err(format!("{error}; and {}", left(removing))),
+    }
+}
+
+/// Starts `docker build` of `recipe`, a file, with `stage` as its context, given `given`, on
+/// `engine`, to name the image it builds with no tag, and to write its ID to `id` in `scratch`,
+/// and what it outputs to `output` there.
+fn start_untagged(
+    engine: &Engine,
     stage: &Path,
     recipe: &Path,
-    id_file: &Path,
-) -> Result<Image, String> {
+    given: &Given<&Built>,
+    scratch: &Path,
+) -> Result<Child, String> {
+    let Given {
+        target,
+        args,
+        contexts,
+    } = given;
+    let mut flags: Vec<String> = Vec::new();
+    if let Some(target) = target {
+        flags.extend(["--target".to_owned(), target.to_string()]);
+    }
+    for (name, value) in args {
+        flags.extend(["--build-arg".to_owned(), format!("{name}={value}")]);
+    }
+    // Each an image's named context, which BuildKit resolves on the engine as it does a `FROM`.
+    // By its digest as well as its tag, so that the engine finds that image even if the tag has
+    // moved, and anything else it fetches, as from Docker Hub, is the same image.
+    for (name, built) in contexts {
+        let named = format!(
+            "{name}=docker-image://{}@{}",
+            built.tag(),
+            built.image().as_str()
+        );
+        flags.extend(["--build-context".to_owned(), named]);
+    }
     // `docker build` has no `--pull=never`: it pulls a base the engine lacks, by the reference
     // its recipe names, which pins it by digest.
-    let build = (iter::once("build").chain(OPTIONS).map(OsStr::new)).chain([
-        OsStr::new("--file"),
-        recipe.as_os_str(),
-        OsStr::new("--iidfile"),
-        id_file.as_os_str(),
-        OsStr::new("--"),
-        stage.as_os_str(),
-    ]);
-    docker_to(context, build, Stderr::Shown).map_err(fix_reported)?;
-    let id = fs::read_to_string(id_file).map_err(|error| {
-        format!(
-            "the ID of the image `docker build` built can't be read from {}: {error}: the build \
-             should have written it there",
-            id_file.display()
-        )
-    })?;
-    Image::try_from(id.trim().to_owned())
+    let id_file = scratch.join("id");
+    // BuildKit's plain progress, as it writes it to a file, and not to a terminal, either way;
+    // it shapes the output alone, not the image, so it is not among the inputs' `OPTIONS`.
+    let build = (["build", "--progress=plain"].into_iter().map(OsStr::new))
+        .chain(OPTIONS.map(OsStr::new))
+        .chain(flags.iter().map(OsStr::new))
+        .chain([
+            OsStr::new("--file"),
+            recipe.as_os_str(),
+            OsStr::new("--iidfile"),
+            id_file.as_os_str(),
+            OsStr::new("--"),
+            stage.as_os_str(),
+        ]);
+    let output = scratch.join("output");
+    let file = File::create(&output).context(output.display())?;
+    let errors = file.try_clone().context(output.display())?;
+    let mut command = docker_command(&engine.report.context, build);
+    // In this process's group, so that the terminal's interrupt reaches it too: a session that
+    // BuildKit cancels once its client is gone.
+    let started = (command.stdin(Stdio::null()).stdout(file).stderr(errors)).spawn();
+    started.map_err(|error| {
+        format!("`docker build` didn't start: {error}: install Docker's command line on `PATH`")
+    })
 }
 
 /// A build's inputs, as the [module](self)'s doc lists them.
 struct Inputs {
     /// The recipe's line.
     recipe: String,
+    /// The lines of what the build is given.
+    given: Vec<String>,
     /// Each directory and regular file below the context's root, by its path.
     entries: BTreeMap<String, Entry>,
 }
@@ -296,14 +550,14 @@ impl Inputs {
         Ok(entries)
     }
 
-    /// The inputs with `entries`, once [`recipe::check`] has passed `recipe`'s bytes, as a
-    /// recipe that may name `bases` by their tags: a [`Recipe::File`]'s as read from `stage`,
-    /// if given, or else from the path it was found at, and then named by its entry.
+    /// The inputs with `entries`, given `given`, once [`recipe::check`] has passed them and
+    /// `recipe`'s bytes: a [`Recipe::File`]'s as read from `stage`, if given, or else from the
+    /// path it was found at, and then named by its entry.
     fn checked(
         mut entries: BTreeMap<String, Entry>,
         stage: Option<&Path>,
         recipe: &Recipe,
-        bases: &[&str],
+        given: &Given<&Built>,
     ) -> Result<Self, String> {
         let recipe = match recipe {
             Recipe::File(path) => {
@@ -316,7 +570,7 @@ impl Inputs {
                 };
                 let file = stage.map_or_else(|| from.clone(), |stage| stage.join(path.as_str()));
                 let text = fs::read(&file).context(file.display())?;
-                recipe::check(&from.display().to_string(), &text, bases)?;
+                recipe::check(&from.display().to_string(), &text, given)?;
                 // The digest covers the bytes the check passed, even if the file has changed
                 // since it was hashed.
                 *sha256 = hex(Sha256::digest(&text).into());
@@ -324,11 +578,29 @@ impl Inputs {
             }
             Recipe::Text(text) => {
                 // Named as Docker names a recipe by default.
-                recipe::check("Dockerfile", text.as_bytes(), bases)?;
+                recipe::check("Dockerfile", text.as_bytes(), given)?;
                 format!("text {}", hex(Sha256::digest(text).into()))
             }
         };
-        Ok(Self { recipe, entries })
+        let Given {
+            target,
+            args,
+            contexts,
+        } = given;
+        // No line holds a line feed: the check passes only a target that names a stage, and
+        // build arguments and named contexts with names of the characters it says; and a tag
+        // holds none.
+        let target = target.iter().map(|target| format!("target {target}"));
+        let args = (args.iter())
+            .map(|(name, value)| format!("arg {name} {}", hex(Sha256::digest(value).into())));
+        let contexts =
+            (contexts.iter()).map(|(name, built)| format!("context {name} {}", built.tag()));
+        let lines = target.chain(args).chain(contexts).collect();
+        Ok(Self {
+            recipe,
+            given: lines,
+            entries,
+        })
     }
 
     /// The hexadecimal digits of the inputs' digest.
@@ -342,6 +614,9 @@ impl fmt::Display for Inputs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{FORM} {}", OPTIONS.join(" "))?;
         writeln!(f, "{}", self.recipe)?;
+        for line in &self.given {
+            writeln!(f, "{line}")?;
+        }
         writeln!(f, "./ {DIR_MODE:04o}")?;
         for (path, entry) in &self.entries {
             match entry {

@@ -33,9 +33,10 @@ impl Drop for Tagged {
     }
 }
 
-/// Builds `dockerfile` into an image tagged `tag`.
-fn build(dockerfile: &str, tag: &str) -> Tagged {
-    test_support::build(dockerfile, tag);
+/// Builds `dockerfile` into an image tagged `tag`, given `base`, an image reference, as the
+/// named context [`harness::BASE`].
+fn build(dockerfile: &str, base: &str, tag: &str) -> Tagged {
+    test_support::build(dockerfile, &[(harness::BASE, base)], tag);
     Tagged(tag.to_owned())
 }
 
@@ -59,18 +60,15 @@ fn last_layer(image: &Tagged) -> String {
 /// another base.
 fn check(script: &str, expect: &Expect) {
     let tag = |name: &str| format!("pumpkin-tests/harness-{}:{name}", std::process::id());
-    let image = build(&CODEX_0_167_0.recipe(BUSYBOX), &tag("codex"));
+    let image = build(&CODEX_0_167_0.recipe(), BUSYBOX, &tag("codex"));
     // With no network, which Codex's files need none of.
     let run = ["run", "--rm", "--network=none", "--label", LABEL];
     let mut docker = docker();
     let output = docker.args(run).arg(&image.0).args(["sh", "-c", script]);
     let output = output.output().unwrap();
     assert!(output.status.success(), "{output:?}");
-    let other = build(
-        &format!("FROM {BUSYBOX}\nRUN mkdir /other\n"),
-        &tag("other"),
-    );
-    let on_other = build(&CODEX_0_167_0.recipe(&other.0), &tag("codex-on-other"));
+    let other = build("FROM base\nRUN mkdir /other\n", BUSYBOX, &tag("other"));
+    let on_other = build(&CODEX_0_167_0.recipe(), &other.0, &tag("codex-on-other"));
     // The same with or without `COPY --link`, which the `pin` tests' snapshot keeps.
     let same = if last_layer(&image) == last_layer(&on_other) {
         "the same"

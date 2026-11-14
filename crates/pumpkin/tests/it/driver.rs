@@ -16,8 +16,8 @@ use schema::provider::RunTag;
 use test_support::{docker_context, sandboxd};
 
 use super::{
-    Scratch, StandIn, Step, check, docker_table, image, invocation, poll, ran, record, report,
-    signal, workflow,
+    Scratch, StandIn, Step, build_first, check, docker_table, invocation, poll, ran, record,
+    report, signal, workflow,
 };
 
 /// How `child` ended, waited for a minute at most, and what it printed: its standard output,
@@ -63,7 +63,7 @@ fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
     stand_in.hold(at);
-    let mut run = stand_in.run("stand-in.json", &[]);
+    let mut run = stand_in.run("stand-in/task.star", &[]);
     run.stdout(Stdio::piped()).stderr(Stdio::piped());
     let invoked = invocation(&run);
     let mut child = run.spawn().unwrap();
@@ -96,7 +96,7 @@ fn unlogged(name: &str) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("image");
-    let mut run = stand_in.run("stand-in.json", &[]);
+    let mut run = stand_in.run("stand-in/task.star", &[]);
     run.stdout(Stdio::piped()).stderr(Stdio::piped());
     let invoked = invocation(&run);
     let child = run.spawn().unwrap();
@@ -110,6 +110,18 @@ fn unlogged(name: &str) -> String {
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
+/// What becomes of a `pumpkin run` in a scratch directory of its own, `name`, of a task whose
+/// image the stand-in engine lacks and fails to build: the failure at the image's place, and no
+/// record and no id.
+fn unbuilt(name: &str) -> String {
+    let scratch = Scratch::new(name);
+    let stand_in = StandIn::new(&scratch);
+    let text = ran(stand_in.run("unbuilt/task.star", &[]), &scratch.0, false);
+    let made = scratch.0.join("runs").exists();
+    let text = format!("{text}\na record was made: {made}");
+    text.replace(&scratch.0.display().to_string(), "<scratch>")
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -118,8 +130,9 @@ fn unlogged(name: &str) -> String {
 fn does_not_start() {
     let scratch = Scratch::new("does-not-start");
     let stand_in = StandIn::new(&scratch);
-    let mut steps = vec![Step::from(stand_in.run("absent.json", &[]))];
+    let mut steps = vec![Step::from(stand_in.run("lacking/task.star", &[]))];
     steps.push(Step::Ran(unlogged("unlogged")));
+    steps.push(Step::Ran(unbuilt("unbuilt")));
     // The driver is held before it makes the record, at `context`, or after, at `image`.
     for (at, whom, signal) in [
         ("context", Whom::Driver, "KILL"),
@@ -139,34 +152,44 @@ fn does_not_start() {
         false,
         &[],
         &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run absent.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: publishing what the run's sandboxes run failed: the engine of context `default` has no image absent@sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
+            pumpkin: run <id> failed: publishing what the run's sandboxes run failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing what the run's sandboxes run failed: the engine of context `default` has no image absent@sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing what the run's sandboxes run failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
             printed outcome.json: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
             record: driver.pid, ir.json, outcome.json, provider.json, record.json
             outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}
             printed outcome.json: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: building an image in pumpkin/unbuilt
+            the stand-in creates nothing
+            pumpkin: the build of an image in pumpkin/unbuilt failed
+            unbuilt/task.star:1:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                1 | IMAGE = image("Dockerfile")
+                  |         ^^^^^^^^^^^^^^^^^^^
+            pumpkin: unbuilt/task.star: the task has 1 problem
+            a record was made: false
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
             the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 9
             the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 15
             the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 2
             the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
@@ -176,7 +199,7 @@ fn does_not_start() {
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
             pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 15
             pumpkin: run <id> records into <scratch>/runs/<id>
             outcome.json: none
@@ -184,7 +207,7 @@ fn does_not_start() {
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
             pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended: remove what it left, which is its containers, labelled `pumpkin.run=<id>`, and its socket directory, `pumpkin-<id>` in the temporary directory; its record is <scratch>/runs/<id>
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 2
             pumpkin: run <id> records into <scratch>/runs/<id>
             outcome.json: none
@@ -221,7 +244,7 @@ fn returns() -> String {
     let scratch = Scratch::new("detaches-returns");
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
-    let mut run = stand_in.run("stand-in.json", &[]);
+    let mut run = stand_in.run("stand-in/task.star", &[]);
     let invoked = invocation(&run);
     let output = run.output().unwrap();
     detached(&stand_in, invoked, &output, stand_in.held("create"))
@@ -233,7 +256,7 @@ fn interrupted() -> String {
     let scratch = Scratch::new("detaches-interrupted");
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
-    let mut run = stand_in.run("stand-in.json", &["--wait"]);
+    let mut run = stand_in.run("stand-in/task.star", &["--wait"]);
     run.stdout(Stdio::piped()).stderr(Stdio::piped());
     let invoked = invocation(&run);
     let mut child = run.spawn().unwrap();
@@ -255,7 +278,7 @@ fn stopped() -> String {
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("image");
     stand_in.hold("create");
-    let mut run = stand_in.run("stand-in.json", &[]);
+    let mut run = stand_in.run("stand-in/task.star", &[]);
     run.stdout(Stdio::piped()).stderr(Stdio::piped());
     let invoked = invocation(&run);
     let mut child = run.spawn().unwrap();
@@ -280,7 +303,7 @@ fn detaches() {
         false,
         &[],
         &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started: `pumpkin wait <id>` follows it
@@ -293,7 +316,7 @@ fn detaches() {
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
             ended by signal: 2
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
@@ -307,7 +330,7 @@ fn detaches() {
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in.json --sandboxd sandboxd --runs runs --config pumpkin.toml
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 15
             pumpkin: run <id> records into <scratch>/runs/<id>
             outcome.json: none
@@ -389,15 +412,15 @@ fn lost_on_docker() {
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
     let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
-    let image = image(&engine);
-    scratch.write("sleeps.json", &workflow(&image, &["sleep", "300"]));
+    scratch.write_task("sleeps", &workflow("", &["sleep", "300"]));
     scratch.write("pumpkin.toml", &docker_table(&context));
+    build_first(&scratch, "sleeps", "pumpkin.toml");
     let docker = Docker::connect(&engine).unwrap();
     let _cleanup = Cleanup {
         provider: &docker,
         runs: scratch.0.join("runs"),
     };
-    let mut run = scratch.pumpkin(&["run", "sleeps.json", "--sandboxd", &sandboxd]);
+    let mut run = scratch.pumpkin(&["run", "sleeps/task.star", "--sandboxd", &sandboxd]);
     run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
     let invoked = invocation(&run);
     let output = run.output().unwrap();
@@ -420,7 +443,7 @@ fn lost_on_docker() {
         false,
         &shown,
         &expect![[r#"
-            $ pumpkin run sleeps.json --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+            $ pumpkin run sleeps/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started: `pumpkin wait <id>` follows it

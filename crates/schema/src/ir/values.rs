@@ -107,13 +107,13 @@ checked_string!(
 
 impl JsonPointer {
     /// The pointer to the whole document.
-    pub(crate) fn root() -> Self {
+    pub fn root() -> Self {
         Self(String::new())
     }
 
     /// This pointer with one more reference token, `token`, escaped.
     #[must_use]
-    pub(crate) fn token(&self, token: impl fmt::Display) -> Self {
+    pub fn token(&self, token: impl fmt::Display) -> Self {
         // `~` first, so that the `~` of a `~1` is not escaped again.
         let token = token.to_string().replace('~', "~0").replace('/', "~1");
         Self(format!("{}/{token}", self.0))
@@ -126,10 +126,12 @@ impl JsonPointer {
         document.pointer(self.as_str())
     }
 
-    /// The last reference token, unescaped: `None` for the whole document.
-    fn last_token(&self) -> Option<String> {
-        let (_, token) = self.0.rsplit_once('/')?;
-        Some(token.replace("~1", "/").replace("~0", "~"))
+    /// The reference tokens, unescaped, from the document's top down: none for the whole
+    /// document.
+    pub fn tokens(&self) -> impl Iterator<Item = String> {
+        // `~1` first, so that the `~` a `~0` gives does not make an escape with what follows it.
+        let tokens = self.0.split('/').skip(1);
+        tokens.map(|token| token.replace("~1", "/").replace("~0", "~"))
     }
 }
 
@@ -329,6 +331,16 @@ fn check_model_name(name: &str) -> Result<(), String> {
 pub struct Mode(u16);
 
 impl Mode {
+    /// The mode of `bits`, such as `Mode::new(0o644)`.
+    ///
+    /// # Panics
+    ///
+    /// If `bits` is over `0o777`.
+    pub const fn new(bits: u16) -> Self {
+        assert!(bits <= 0o777, "not a mode");
+        Self(bits)
+    }
+
     pub fn bits(self) -> u32 {
         u32::from(self.0)
     }
@@ -577,7 +589,7 @@ impl TryFrom<Vec<JsonPointer>> for Returns {
     fn try_from(pointers: Vec<JsonPointer>) -> Result<Self, Self::Error> {
         let mut fields: Vec<(String, JsonPointer)> = Vec::with_capacity(pointers.len());
         for pointer in pointers {
-            let Some(key) = pointer.last_token() else {
+            let Some(key) = pointer.tokens().last() else {
                 let message = "the empty pointer names the whole result, with no key: point to \
                                a field";
                 return Err(message.to_owned());

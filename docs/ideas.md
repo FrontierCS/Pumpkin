@@ -2,13 +2,6 @@
 
 Ideas that aren't built. An idea goes away when a change builds it.
 
-## A workflow language
-
-A workflow is written in a language of Pumpkin's own, not as a Rust factory.
-
-- A front end that evaluates to the IR, as Bazel's Starlark and Terraform's HCL, so the runtime and
-  the decision core never see it.
-
 ## Providers outside the binary
 
 A user should be able to add a provider without a change to this repository.

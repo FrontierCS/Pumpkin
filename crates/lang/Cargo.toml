@@ -1,0 +1,23 @@
+[package]
+name = "lang"
+version.workspace = true
+description = "Pumpkin's workflow language: a subset of Starlark, evaluated to the workflow IR"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+harness = { path = "../harness" }
+recipe = { path = "../recipe" }
+schema = { path = "../schema" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

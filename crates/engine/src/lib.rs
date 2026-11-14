@@ -4,8 +4,9 @@
 //! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
 //! operator names ([`ContextName`]), which nothing in the environment overrides, and reports it
 //! ([`Report`]). It builds images ([`Engine::build`]); [`confinement`] confines a role's
-//! container wherever a provider's sandbox is one. It needs Docker 25.0 or later, rootful or
-//! rootless ([`Security::rootless`]).
+//! container wherever a provider's sandbox is one. Outside the engine, it writes only in the
+//! system's temporary directory. It needs Docker 25.0 or later, rootful or rootless
+//! ([`Security::rootless`]).
 
 use std::ffi::OsStr;
 use std::process::{ExitStatus, Output, Stdio};
@@ -18,7 +19,7 @@ use stdx::process::Environment;
 
 mod build;
 
-pub use build::{BuildContext, Built, Recipe};
+pub use build::{BuildContext, Building, Built, Recipe, Started, finish, mounted};
 
 /// The most the container's log may hold, in bytes, in one file. The log is kept on the
 /// host's disk, outside the container's other limits, so it is capped whatever writes there,
@@ -68,7 +69,7 @@ pub struct Engine {
 }
 
 /// The engine, as `docker` describes it before anything starts.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Report {
     /// The context `docker` reaches the engine through.
     pub context: ContextName,
@@ -87,7 +88,7 @@ pub struct Report {
 }
 
 /// What the engine's security options say.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Security {
     /// Whether the engine runs as an ordinary user rather than as root.
     // Rootless Docker is the setup to choose: its engine, and so every container, runs as an
@@ -124,12 +125,11 @@ struct ClientInfoJson {
 }
 
 impl Engine {
-    /// Reaches the engine through `context`, and reports it. Nothing is started.
+    /// Reaches the engine through `context`, and reports it.
     ///
     /// # Errors
     ///
-    /// Fails if the context can't be read, or the engine can't be reached through it, saying
-    /// what to do; or if `docker` describes the engine in JSON of another form.
+    /// Fails, saying what to do, if the engine can't be reached or read.
     pub fn connect(context: ContextName) -> Result<Self, String> {
         let Reach { endpoint, info } = reach(&context)?;
         let InfoJson {
@@ -286,7 +286,7 @@ pub fn confinement(user: User, resources: Resources) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// Fails as [`docker`] does.
+/// Fails if `docker` does, but for an image it doesn't have.
 pub fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Failure> {
     let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", reference];
     match docker(context, inspect) {
@@ -304,68 +304,59 @@ pub fn fix_reported(error: impl fmt::Display) -> String {
     format!("{error}: fix what Docker reports")
 }
 
-/// Runs `docker` against `context` alone with `args`, as `docker_to` does, with `docker`'s
-/// standard error captured.
-///
-/// # Errors
-///
-/// Fails as `docker_to` does.
-pub fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    docker_to(context, args, Stderr::Captured)
-}
-
-/// Runs `docker` against `context` alone with `args`, with its standard error where `stderr`
-/// says, and returns its output. Of the environment, `docker` gets only `HOME`, `PATH` and
-/// `DOCKER_CONFIG`, so that the context named alone steers it.
+/// Runs `docker` against `context` alone with `args`, and returns its output. Of the
+/// environment, `docker` gets only `HOME`, `PATH` and `DOCKER_CONFIG`, so that the context named
+/// alone steers it.
 ///
 /// # Errors
 ///
 /// Fails if the command fails, saying which it was and what Docker reported, for the caller to
 /// add what that means and what to do; or if `docker` doesn't run, asking for it on `PATH`.
-fn docker_to<I, S>(context: &ContextName, args: I, stderr: Stderr) -> Result<Output, Failure>
+pub fn docker<I, S>(context: &ContextName, args: I) -> Result<Output, Failure>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let args: Vec<S> = args.into_iter().collect();
-    // A context reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
-    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
-    let output = stdx::process::command("docker", kept)
-        // One argument, so that a name that begins with `-` can't be taken for an option.
-        .arg(format!("--context={}", context.as_str()))
-        .args(&args)
+    let output = docker_command(context, &args)
         .stdin(Stdio::null())
-        .stderr(match stderr {
-            Stderr::Captured => Stdio::piped(),
-            Stderr::Shown => Stdio::inherit(),
-        })
+        .stderr(Stdio::piped())
         .output()
         .map_err(Failure::Unrun)?;
     if output.status.success() {
-        Ok(output)
-    } else {
-        // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`,
-        // but none of its options, which can be long.
-        let mut command = "docker".to_owned();
-        let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
-        for word in words.take(2).take_while(|word| !word.starts_with('-')) {
-            command.push(' ');
-            command.push_str(&word);
-        }
-        let stderr = match stderr {
-            Stderr::Captured => String::from_utf8_lossy(&output.stderr).into_owned(),
-            Stderr::Shown => "its output above says why".to_owned(),
-        };
-        Err(Failure::Exited {
-            command,
-            status: output.status,
-            stderr,
-        })
+        return Ok(output);
     }
+    // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`, but
+    // none of its options, which can be long.
+    let mut shown = "docker".to_owned();
+    let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
+    for word in words.take(2).take_while(|word| !word.starts_with('-')) {
+        shown.push(' ');
+        shown.push_str(&word);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Err(Failure::Exited {
+        command: shown,
+        status: output.status,
+        stderr,
+    })
+}
+
+/// The command that runs `docker` with `args` against the engine of `context`, with the
+/// environment that [`docker`] gives it.
+fn docker_command<I, S>(context: &ContextName, args: I) -> std::process::Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    // A context reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
+    let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
+    let mut command = stdx::process::command("docker", kept);
+    // One argument, so that a name that begins with `-` can't be taken for an option.
+    command
+        .arg(format!("--context={}", context.as_str()))
+        .args(args);
+    command
 }
 
 /// Why a [`docker`] command failed, displayed as [`docker`] describes its error.
@@ -373,8 +364,7 @@ pub enum Failure {
     /// `docker` didn't run.
     Unrun(io::Error),
     /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what
-    /// Docker reported, or, where its report went to this process's standard error, that it
-    /// says why.
+    /// Docker reported.
     Exited {
         command: String,
         status: ExitStatus,
@@ -396,14 +386,4 @@ impl fmt::Display for Failure {
             } => write!(f, "`{command}` failed with {status}: {}", stderr.trim()),
         }
     }
-}
-
-/// Where [`docker_to`] sends `docker`'s standard error.
-#[derive(Clone, Copy)]
-enum Stderr {
-    /// Into the output it returns, and the error it fails with.
-    Captured,
-    /// To this process's own standard error, as `docker` writes it, for progress that the
-    /// operator follows.
-    Shown,
 }

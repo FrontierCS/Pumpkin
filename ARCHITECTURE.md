@@ -31,8 +31,9 @@ operator's Docker engine, on which the images that sandboxes run are built.
 ## Front ends
 
 The workflow IR (`schema`'s `ir`) is the only input the runtime reads, and it holds no
-defaults. Programs that write it are front ends: today, Rust factories, such as a task
-repository's.
+defaults. Programs that write it are front ends. Pumpkin's own front end is its workflow
+language, a subset of Starlark that `lang` evaluates to the IR; any other program may still write
+the IR, as a task repository's Rust factories do.
 
 ## Code map
 
@@ -178,30 +179,60 @@ refuses the route's key.
   whatever its provider still lists of the run, so a run ends with none of its sandboxes left, or
   fails.
 
-**`crates/pumpkin`.** `pumpkin`, the operator's command line: `run` starts a workflow's run on
-the engine of a named Docker context in a driver process (`driver`), which it executes as
-itself, and returns once the run has started; the driver reaches a run's provider and hands it
-to `Run` as a `Provider`, with the static `sandboxd` it has found (`Sandboxd`). `wait` follows a
-run's record (`Record`) to its end. The driver places the workflow's roles in the engine's
-classes before the record is begun. It reads the machine's configuration (`config`, TOML): the
-Docker context, and the model upstreams that a workflow's model route may reach, of which it
-hands `Run` the one that serves the route (`Serving`).
-
 **`crates/harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
-directory the in-sandbox contract reserves for it, and each with an adapter, such as `Codex`,
-that writes the agent's runtime that runs it.
+directory the in-sandbox contract reserves for it, and each with an adapter, such as
+`codex::runtime`, that writes the agent's runtime that runs it.
 - **Architecture Invariant:** it knows no task and no provider: of Pumpkin's crates, outside its
   tests it depends only on `schema` and `recipe`, and its Docker test also uses `test-support`. A
   harness therefore reaches an agent alike whichever factory builds its image, and any factory,
   in this repository or outside it, may use it.
+- **Architecture Invariant:** what an adapter writes depends on its arguments alone: the crate is
+  `#![no_std]`, and the workspace forbids `unsafe`, so it can name no file, network, process,
+  environment, thread or clock, though `schema`'s I/O items stay reachable through it.
+
+**`crates/lang`.** Pumpkin's workflow language, a subset of Starlark: `evaluate` runs an entry
+file, and the files it loads, given a run's `Args`, to a `Plan` of the images it declares and of
+the workflow that names them, which its caller checks and builds, or to its `Problems`, each at
+its file, line and column, as a linter's findings in the files it read are too (`Plan::lint`).
+- **Architecture Invariant:** evaluation is hermetic, so the same sources and args always give
+  the same plan: it reads source only through its `Loader`, by `Label`s, which stay below the
+  root, it only declares the images its caller builds, and the crate is `#![no_std]`, so its own
+  code can name no file, clock, environment, process or randomly seeded hash. Of Pumpkin's
+  crates it depends on `schema`, whose I/O items stay reachable through it, as they do through
+  the decision core, on `recipe`, and on `harness`, whose adapter writes the runtime its
+  `codex()` gives from its arguments alone, as `harness`'s invariant says.
+- **Architecture Invariant:** no crate but `pumpkin` depends on it, so the runtime, the decision
+  core and the providers never see the language.
+
+**`crates/pumpkin`.** `pumpkin`, the operator's command line, which `cli` parses. `check`
+evaluates a task's source with `lang`, from the files below the root of its repository (`star`'s
+`Root`), and checks its images' recipes and its workflow, reaching no engine and reading no
+configuration, then lints the files it read (`Plan::lint`) with the formatter beside `pumpkin`
+(`style`), with which `fmt` formats `.star` files. `build` takes the same path, then builds the
+images on the engine of the configuration's Docker context (`Engine::start`) and prints the IR
+that names them. `run` starts the run of a task on that engine in a driver process (`driver`),
+which it executes as itself, and returns once the run has started: the driver builds the task's
+images as `build` does, places the workflow's roles in the engine's classes before the record is
+begun, and hands `Run` the provider as a `Provider`, with the static `sandboxd` it has found
+(`Sandboxd`). `wait` follows a run's record (`Record`) to its end. It reads the machine's
+configuration (`config`, TOML): the Docker context, and the model upstreams that a workflow's
+model route may reach, of which it hands `Run` the one that serves the route (`Serving`).
+- **Architecture Invariant:** only `style` runs the formatter, buildifier, and Pumpkin's interface
+  holds none of its flags or forms: each file's text goes to it, and `style` reads what it gives
+  back, so another formatter can take its place.
+- **Architecture Invariant:** what a task's source names stays below its root on disk, as its
+  labels keep it there in name: `Root`, the one `Loader`, reaches each file and directory that
+  an evaluation or its images name from the root, and refuses a symbolic link on the way.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
-and with `--docker` the tests that need Docker), `cargo xtask sandboxd`, `cargo xtask install`,
-which installs `pumpkin` beside a static `sandboxd`, `cargo xtask mutants`, which runs
-cargo-mutants on the working tree's changes (`diff`), `cargo xtask refill`, which rewrites a
-package's snapshots, and `cargo xtask install-tools`, which installs the contributor tools that
-`tools` pins. A check is a step of `ci`.
+the check that the repository's `.star` files are formatted in `star`, and with `--docker` the tests
+that need Docker), `cargo xtask sandboxd`, `cargo xtask install`, which installs `pumpkin` beside a
+static `sandboxd` and the formatter, `cargo xtask mutants`, which runs cargo-mutants on the working
+tree's changes (`diff`), `cargo xtask refill`, which rewrites a package's snapshots, and `cargo
+xtask install-tools`, which installs the contributor tools that `tools` pins. The formatter is
+buildifier, pinned by its release's SHA-256, which `star` fetches once into the target directory. A
+check is a step of `ci`.
 
 ## Cross-cutting concerns
 

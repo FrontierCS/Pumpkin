@@ -21,16 +21,9 @@ const ITEM_CAP: usize = 9;
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, passes
 /// the checks.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
-    // Every file, filtered here: a pathspec's meaning changes with Git's variables, such as
-    // `GIT_LITERAL_PATHSPECS`, and `-z` keeps unusual names as they are rather than quoted.
-    let files = cmd!(sh, "git ls-files -z --cached --others --exclude-standard").read()?;
     let mut problems = Vec::new();
-    // Rust files, but not a tracked one deleted from the working tree: it has nothing left to
-    // check.
-    let rust =
-        |path: &&str| Path::new(path).extension() == Some("rs".as_ref()) && sh.path_exists(path);
-    for path in files.split('\0').filter(rust) {
-        let tokens: TokenStream = match sh.read_file(path)?.parse() {
+    for path in files(sh, "rs")? {
+        let tokens: TokenStream = match sh.read_file(&path)?.parse() {
             Ok(tokens) => tokens,
             Err(error) => {
                 let LineColumn { line, column } = error.span().start();
@@ -73,6 +66,18 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
     } else {
         Err(problems.join("\n").into())
     }
+}
+
+/// The repository's files that end in `.<extension>`, tracked or not yet, but not ignored, and
+/// not a tracked one deleted from the working tree, which has nothing left to check.
+pub(crate) fn files(sh: &Shell, extension: &str) -> Result<Vec<String>> {
+    // Every file, filtered here: a pathspec's meaning changes with Git's variables, such as
+    // `GIT_LITERAL_PATHSPECS`, and `-z` keeps unusual names as they are rather than quoted.
+    let files = cmd!(sh, "git ls-files -z --cached --others --exclude-standard").read()?;
+    let kept = |path: &&str| {
+        Path::new(path).extension() == Some(extension.as_ref()) && sh.path_exists(path)
+    };
+    Ok(files.split('\0').filter(kept).map(str::to_owned).collect())
 }
 
 /// A doc over its cap: its first line's number, what it documents, the lines it spans and its

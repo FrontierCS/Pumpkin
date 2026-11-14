@@ -152,6 +152,7 @@ fn refusals() {
         codex("/pumpkin/home", "gpt-6.1-terra", Tools::Native, "").map(|_| ()),
         codex("/workspace", "gpt-6.1-sol", Tools::Functions, "").map(|_| ()),
         ReasoningEffort::try_from("extreme").map(|_| ()),
+        Tools::try_from("both").map(|_| ()),
     ];
     let errors: Vec<String> = errors.into_iter().map(|error| error.unwrap_err()).collect();
     check(
@@ -159,7 +160,8 @@ fn refusals() {
         &expect![[r#"
             `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
             Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
-            `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra"#]],
+            `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
+            `both` is not a way to send Codex's tools: use one of native, functions"#]],
     );
 }
 
