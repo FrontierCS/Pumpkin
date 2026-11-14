@@ -253,7 +253,7 @@ impl Run<'_> {
 
 /// A payload by the number of the op that sent it, which its test digest holds.
 fn payload_name(payload: &PayloadRef) -> String {
-    let digest = payload.digest.as_str().trim_start_matches("sha256:");
+    let digest = payload.digest.hex();
     let op = u64::from_str_radix(digest, 16).unwrap();
     format!("op {op}'s payload of {} bytes", payload.size)
 }

@@ -755,8 +755,5 @@ impl io::Write for Hasher {
 
 /// The hexadecimal digits of the [`Sha256Digest`] of SHA-256's 32 bytes, `sha256`.
 fn hex(sha256: [u8; 32]) -> String {
-    Sha256Digest::from(sha256)
-        .as_str()
-        .trim_start_matches("sha256:")
-        .to_owned()
+    Sha256Digest::from(sha256).hex().to_owned()
 }
