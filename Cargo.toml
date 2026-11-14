@@ -13,7 +13,7 @@ expect-test = "1"
 libc = "0.2.191"
 rustix = "1.1.6"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.140"
+serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
 sha2 = { version = "0.11.0", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }

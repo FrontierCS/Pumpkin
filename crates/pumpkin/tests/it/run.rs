@@ -114,11 +114,12 @@ fn usage() {
               Usage: pumpkin <command>
 
               Commands:
-                check   Check a task's source, building and running nothing
+                check   Check tasks' sources, building and running nothing
                 fmt     Format the workflow language's `.star` files
                 run     Build a task's images, and start a run of it
                 wait    Wait until a run has ended, and print its outcome
                 cancel  Stop a run, and remove what it left
+                lock    Write a recipe's fetch stage, which pins what a step fetches
                 help    Print the help of a command or a topic
 
               Options:
@@ -436,11 +437,12 @@ fn usage() {
             Usage: pumpkin <command>
 
             Commands:
-              check   Check a task's source, building and running nothing
+              check   Check tasks' sources, building and running nothing
               fmt     Format the workflow language's `.star` files
               run     Build a task's images, and start a run of it
               wait    Wait until a run has ended, and print its outcome
               cancel  Stop a run, and remove what it left
+              lock    Write a recipe's fetch stage, which pins what a step fetches
               help    Print the help of a command or a topic
 
             Options:
@@ -546,7 +548,7 @@ fn usage() {
             pumpkin: to read how to use it: pumpkin help run
             $ pumpkin help bogus
             exit status: Some(2)
-            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `cancel`, `help`, `build`, `reap`) or a topic (`config`)
+            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `cancel`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help"#]],

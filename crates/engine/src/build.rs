@@ -10,7 +10,7 @@
 //! without its `/`, so `bin/` comes before `bin-x`:
 //!
 //! ```text
-//! pumpkin-build/2 <option>...
+//! pumpkin-build/4 <option>...
 //! file <recipe>
 //! target <stage>
 //! arg <name> <sha256>
@@ -30,6 +30,7 @@ use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::time::{Duration, UNIX_EPOCH};
 use std::{fmt, io};
 
 use recipe::Given;
@@ -55,16 +56,34 @@ const FILE_MODE: u32 = 0o644;
 
 const OWNER_EXECUTE: u32 = 0o100;
 
+/// The time of every build, since the Unix epoch, 1980-01-01T00:00:00Z: when each file and
+/// directory of its stage was last modified, and, as `SOURCE_DATE_EPOCH`, when its image and each
+/// step its recipe adds to the image's history were created.
+// One time for every build, so that a layer that holds only staged files and directories, as a
+// `COPY` of them into `/` does, is the same bytes from any engine that compresses it alike, and
+// after the build cache is lost, and so is an image whose every layer is: a registry, and a
+// provider that imports images by their digests, then has it already. BuildKit gives the build's
+// own time to what a `RUN` writes, and to each directory above what a copy copies, made or changed,
+// such as a directory of the base it copies into, so such a layer differs still. Not the epoch
+// itself: the ZIP format, which Python's wheels and Java's archives use, holds no time before 1980,
+// and Python's `zipfile` refuses to write one, so a recipe that zips staged files would fail. The
+// layers' own times are left as BuildKit gives them, not clamped to this one (its
+// `rewrite-timestamp`): that would change what a `RUN` installs, such as a Python module whose
+// compiled form records the module's time, so that it would be compiled again at each import.
+// The days from 1970 to 1980, two of whose years are leap years.
+const BUILD_TIME: Duration = Duration::from_hours(3_652 * 24);
+
 /// The name and number of the inputs' text's form, the first word of its first line.
 // The number changes with what the text holds, how it is written, or how a build reads what it
 // names, such as its stage's times, so that the texts of two forms never coincide, and no tag of
 // one names an image of another. The lines of what a build is given share it with a build given
 // nothing: each starts with a word, `target`, `arg` or `context`, where a text without them has
 // `./ `, so no text with them is one without.
-const FORM: &str = "pumpkin-build/2";
+const FORM: &str = "pumpkin-build/4";
 
 /// The options every build gives `docker build`, beside those that name its recipe, its context
-/// and the file it writes the image's ID to.
+/// and the file it writes the image's ID to: these, and [`BUILD_TIME`] as `SOURCE_DATE_EPOCH`
+/// ([`options`]).
 // They are in the inputs' text, so that a change to them is a change of every tag, rather than
 // one that a found image hides until a task's files change.
 //
@@ -75,8 +94,27 @@ const FORM: &str = "pumpkin-build/2";
 // option. And the recipe that adds a harness to an agent's image (`Pin::recipe`) fetches with
 // `ADD --checksum`, which BuildKit's Dockerfile frontend takes outside its labs channel only
 // from BuildKit 0.12, which Docker 25.0 is the first to ship. So builds need Docker 25.0 or later
-// with its Buildx plugin.
-const OPTIONS: [&str; 1] = ["--provenance=false"];
+// with its Buildx plugin, which the engine's own floor, Docker 28.0, as the crate's doc says,
+// meets.
+//
+// The image's layers are zstd's, in an OCI manifest, which a zstd layer needs: BuildKit compresses
+// with zstd several times faster than with gzip, its default, and engines unpack it faster too.
+// `force-compression` gives the base's layers zstd too, so that every layer of an image unpacks as
+// fast, wherever it runs: Docker pulls one from its 23.0, which a provider that pulls images onto a
+// Docker of its own requires. So a base's layers are no longer its registry's: the engine
+// compresses them again, once per base until its build cache is pruned, and their digests follow
+// the version of its zstd encoder. The image exporter, given no name, keeps the image in the engine
+// untagged, as `docker build` does without `--output`.
+const OPTIONS: [&str; 2] = [
+    "--provenance=false",
+    "--output=type=image,compression=zstd,oci-mediatypes=true,force-compression=true",
+];
+
+/// The options every build gives `docker build`, as [`OPTIONS`] says.
+fn options() -> impl Iterator<Item = String> {
+    let time = format!("--build-arg=SOURCE_DATE_EPOCH={}", BUILD_TIME.as_secs());
+    (OPTIONS.into_iter().map(str::to_owned)).chain([time])
+}
 
 /// An image that [`Engine::build`] built or found, which only it makes, so that a build may be
 /// [`Given`] it as a named context.
@@ -234,11 +272,25 @@ impl Engine {
         given: &Given<&Built>,
         repository: &str,
     ) -> Result<(Child, String, String), String> {
-        let stage = scratch.join("context");
+        let staging = scratch.join("context");
         // The stage is this build's alone, so the bytes the check reads there are those the
         // digest covers and the build reads, which may differ from those `inputs` read.
-        let staged = Inputs::checked(inputs.stage(&stage)?, Some(&stage), recipe, given)?;
+        let staged = Inputs::checked(inputs.stage(&staging)?, Some(&staging), recipe, given)?;
         let digest = staged.digest();
+        // Named by its digest: Buildx keys what it sends of a build's directories, its context's
+        // and its recipe's, by the name of the context's directory alone, and the machine, and
+        // BuildKit skips each file it sent under that key before whose size, mode and time are as
+        // they were.
+        // Every staged file has the same time, so no two stages of other files may share that
+        // name, as `reproducible`, a test of a file changed to another of the same size, checks.
+        let stage = scratch.join(&digest);
+        fs::rename(&staging, &stage).context(format!(
+            "{} to {}",
+            staging.display(),
+            stage.display()
+        ))?;
+        // Once renamed, which may change its time.
+        set_build_time(&stage)?;
         let (file, shown) = match recipe {
             Recipe::File(path) => (stage.join(path.as_str()), format!("`{path}`")),
             Recipe::Text(text) => {
@@ -466,8 +518,9 @@ fn start_untagged(
     let id_file = scratch.join("id");
     // BuildKit's plain progress, as it writes it to a file, and not to a terminal, either way;
     // it shapes the output alone, not the image, so it is not among the inputs' `OPTIONS`.
+    let options: Vec<String> = options().collect();
     let build = (["build", "--progress=plain"].into_iter().map(OsStr::new))
-        .chain(OPTIONS.map(OsStr::new))
+        .chain(options.iter().map(OsStr::new))
         .chain(flags.iter().map(OsStr::new))
         .chain([
             OsStr::new("--file"),
@@ -513,7 +566,8 @@ enum Entry {
 
 impl Inputs {
     /// Copies these inputs' entries to `stage`, which names nothing yet, each file from the path
-    /// it was read from, with its mode; and returns the entries that the stage holds.
+    /// it was read from, with its mode, and each entry below `stage` last modified at
+    /// [`BUILD_TIME`]; and returns the entries that the stage holds.
     fn stage(&self, stage: &Path) -> Result<BTreeMap<String, Entry>, String> {
         make_dir(stage)?;
         let mut entries = BTreeMap::new();
@@ -546,6 +600,10 @@ impl Inputs {
                 }
             };
             entries.insert(path.clone(), staged);
+        }
+        // Once all is made, as making an entry changes the time of the directory it is in.
+        for path in entries.keys() {
+            set_build_time(&stage.join(path))?;
         }
         Ok(entries)
     }
@@ -612,7 +670,7 @@ impl Inputs {
 impl fmt::Display for Inputs {
     /// The text whose lines the module doc gives, each ending in a line feed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{FORM} {}", OPTIONS.join(" "))?;
+        writeln!(f, "{FORM} {}", options().collect::<Vec<_>>().join(" "))?;
         writeln!(f, "{}", self.recipe)?;
         for line in &self.given {
             writeln!(f, "{line}")?;
@@ -675,6 +733,13 @@ fn make_dir(dir: &Path) -> Result<(), String> {
     (fs::create_dir(dir))
         .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(DIR_MODE)))
         .context(dir.display())
+}
+
+/// Sets the time the file or directory at `path` was last modified to [`BUILD_TIME`].
+fn set_build_time(path: &Path) -> Result<(), String> {
+    (File::open(path))
+        .and_then(|file| file.set_modified(UNIX_EPOCH + BUILD_TIME))
+        .context(path.display())
 }
 
 /// Adds each directory and regular file below `dir` to `entries`, by its path in the context:

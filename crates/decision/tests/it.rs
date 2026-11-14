@@ -1208,6 +1208,52 @@ fn reports_for_the_log() {
 }
 
 #[test]
+fn exact_scores() {
+    check(
+        |_| {},
+        r#"
+        0 agent_started
+        1000 judge train 10
+        1500 judge_started 0
+        2000 judge_exited 0
+        2100 collected 0 {"raw_score": 22.833062975103598}
+        2200 status 0
+        3000 submit submit 10 final
+        3100 agent_exited 0
+        3500 judge_started 1
+        4000 judge_exited 1
+        4100 collected 1 {"raw_score": 22.830584316865718}
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1000 judge train 10
+              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1500 judge_started 0
+            2000 judge_exited 0
+            2100 collected 0 {"raw_score": 22.833062975103598}
+            2200 status 0
+              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"scored":true,"remaining":{"calls":99,"seconds":11999}}
+            3000 submit submit 10 final
+              reply to op 3: {"kind":"submit","state":"accepted","remaining_seconds":60}
+              (tick due at 63000)
+            3100 agent_exited 0
+              tear down the agent
+              start job 1 of score on op 3's payload of 10 bytes, with a timeout of 120s
+              (tick due at 18210000)
+            3500 judge_started 1
+            4000 judge_exited 1
+            4100 collected 1 {"raw_score": 22.830584316865718}
+              finish: score 22.830584316865718; work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, judged, returning {"raw_score":22.830584316865718}
+        "#]],
+    );
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshot"

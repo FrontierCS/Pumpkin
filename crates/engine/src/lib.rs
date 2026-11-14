@@ -3,10 +3,10 @@
 //!
 //! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
 //! operator names ([`ContextName`]), which nothing in the environment overrides, and reports it
-//! ([`Report`]). It builds images ([`Engine::build`]); [`confinement`] confines a role's
-//! container wherever a provider's sandbox is one. Outside the engine, it writes only in the
-//! system's temporary directory. It needs Docker 25.0 or later, rootful or rootless
-//! ([`Security::rootless`]).
+//! ([`Report`]). It builds images ([`Engine::build`]) and writes a recipe's fetch stage
+//! ([`Engine::lock`]); [`confinement`] confines a role's container wherever a provider's sandbox
+//! is one. Outside the engine, it writes only in the system's temporary directory. It needs Docker
+//! 28.0 or later, rootful or rootless ([`Security::rootless`]).
 
 use std::ffi::OsStr;
 use std::io::ErrorKind;
@@ -21,6 +21,7 @@ use stdx::Deadline;
 use stdx::process::Environment;
 
 mod build;
+mod lock;
 
 pub use build::{BuildContext, Building, Built, Recipe, Started, finish, mounted};
 

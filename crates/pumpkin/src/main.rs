@@ -5,8 +5,8 @@
 //! driver process ([`driver`]), with the `sandboxd` that [`sandboxd`] finds. `check` checks a
 //! task's source, which [`star`] reads, and lints it, and `build` builds its images and prints its
 //! IR. `fmt` formats `.star` files, and `check` lints them, with the formatter beside `pumpkin`
-//! ([`style`]). What a command says of an ending or a refusal ends with the commands to run
-//! next, as [`next`] makes them.
+//! ([`style`]), and [`lock`] writes a recipe's fetch stage. What a command says of an ending or a
+//! refusal ends with the commands to run next, as [`next`] makes them.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -33,6 +33,7 @@ use stdx::Context;
 mod cli;
 mod config;
 mod driver;
+mod lock;
 mod next;
 mod sandboxd;
 mod star;
@@ -69,6 +70,7 @@ fn main() -> ExitCode {
         Ok(cli::Command::Check(flags)) => check(flags),
         Ok(cli::Command::Fmt(flags)) => style::fmt(flags),
         Ok(cli::Command::Build(flags)) => build(flags),
+        Ok(cli::Command::Lock(flags)) => lock::lock(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
@@ -667,22 +669,30 @@ fn reap_rest(
     Ok(left)
 }
 
-/// Checks the task that `flags` name, as `pumpkin check --help` says, saying each of its
-/// problems, if it has any; returns 0 if it has none.
+/// Checks each task that `flags` name, as `pumpkin check --help` says, saying each of their
+/// problems, if they have any; returns 0 if they have none.
 fn check(flags: cli::Check) -> Result<ExitCode, String> {
     let cli::Check {
-        entry,
+        entries,
         args: cli::TaskArgs(args),
     } = flags;
     let formatter = style::Formatter::beside()?;
-    let again = source_again("check", &[&entry], &args, None)?;
-    let checked = match star::check(&entry, &args, &formatter) {
-        Ok(Ok(())) => return Ok(ExitCode::SUCCESS),
-        Ok(Err(problems)) => task_problems(&entry, &problems),
-        Err(error) => format!("{entry}: {error}"),
-    };
-    say(checked);
-    Err(format!("to check it again: {again}"))
+    let mut failed = Vec::new();
+    for entry in &entries {
+        let checked = match star::check(entry, &args, &formatter) {
+            Ok(Ok(())) => continue,
+            Ok(Err(problems)) => task_problems(entry, &problems),
+            Err(error) => format!("{entry}: {error}"),
+        };
+        say(checked);
+        failed.push(entry);
+    }
+    if failed.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let again = source_again("check", &failed, &args, None)?;
+    let them = if failed.len() == 1 { "it" } else { "them" };
+    Err(format!("to check {them} again: {again}"))
 }
 
 /// Builds the task that `flags` name, as `pumpkin build --help` says, on the engine that the

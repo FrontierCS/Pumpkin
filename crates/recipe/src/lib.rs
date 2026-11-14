@@ -11,15 +11,17 @@
 //! - a frontend, which a parser directive (`# <name>=…` before the first instruction) or a
 //!   `BUILDKIT_` build argument can name;
 //! - a URL, any `ADD` source with a `:`, but the one `https://` source that `--checksum` pins;
-//! - a Git repository: any `ADD` source that [`check_source`] refuses.
+//! - a Git repository: any `ADD` source that [`check_source`] refuses, but the one source
+//!   `https://<host>/<path>.git#<commit>`, whose full commit pins it;
+//! - the host's network, a device or a privilege, which a `RUN` flag but `--mount` may give.
 //!
 //! It refuses a target that names no stage, a build argument or named context misnamed, and a
 //! stage named as a named context. It reads a recipe as Docker frames it, with `\` as the escape
 //! character, and refuses what it can't read as Docker would: a heredoc; `ONBUILD`; a keyword
 //! that is no instruction; a `FROM` other than `FROM <image>` or `FROM <image> AS <name>`; and, in
 //! a flag or a name, a character other than printable ASCII, a quote or `\`, or, in a name, `$`,
-//! but for a `FROM`'s build argument. What a `RUN` step's own command fetches, and a base's `ONBUILD`
-//! triggers are outside it.
+//! but for a `FROM`'s build argument. What a `RUN` step's own command fetches, which a fetch stage
+//! may pin instead ([`fetch`]), and a base's `ONBUILD` triggers are outside it.
 
 // Without `std`, the check can name no file, process or clock: it reads only the text it is given.
 #![no_std]
@@ -32,6 +34,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
+
+pub mod fetch;
 
 /// The characters that separate an instruction's keyword and words: ASCII whitespace, as
 /// Docker splits them, but the line feed, which no instruction holds once its lines are joined.
@@ -96,8 +100,7 @@ pub fn check<B>(name: &str, text: &[u8], given: &Given<B>) -> Result<(), String>
 ///
 /// Fails, saying why, if `source` isn't plain.
 pub fn check_source(source: &str) -> Result<(), String> {
-    let git = (source.rsplit_once('.')).is_some_and(|(_, end)| end.eq_ignore_ascii_case("git"));
-    if git {
+    if git_like(source) {
         return Err(format!(
             "Docker may take `{}` for a Git repository's URL, which some of its versions clone \
              without checking a checksum: name no `ADD` source that ends in `.git`, in any case",
@@ -115,6 +118,12 @@ pub fn check_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `source` ends in `.git`, in any case, which Docker may take for a Git repository's
+/// URL.
+fn git_like(source: &str) -> bool {
+    (source.rsplit_once('.')).is_some_and(|(_, end)| end.eq_ignore_ascii_case("git"))
+}
+
 /// What a build gives its recipe beside its context, all of it in the build's inputs.
 ///
 /// `B` is a named context's image, such as what a provider built; [`check`] reads only the names.
@@ -123,7 +132,8 @@ pub struct Given<B> {
     /// The stage to build, as `docker build --target` names it; the recipe's last without one.
     pub target: Option<Stage>,
     /// Each build argument's value, as `docker build --build-arg` gives it, by its name: ASCII
-    /// letters, digits and `_`, not starting with a digit.
+    /// letters, digits and `_`, not starting with a digit, and not `SOURCE_DATE_EPOCH`, the
+    /// time that every build gives its image.
     pub args: BTreeMap<String, String>,
     /// Each named context's image, as `docker build --build-context` gives it, by the name the
     /// recipe gives it in a `FROM`, a `COPY --from` or a `RUN --mount`'s `from`: words of
@@ -215,6 +225,13 @@ fn arg(name: &str) -> Result<(), String> {
             "`{name}` starts with `BUILDKIT_`, a prefix BuildKit reads for itself, as \
              `BUILDKIT_SYNTAX` names a frontend to fetch: give no build argument with it"
         ));
+    }
+    if name == "SOURCE_DATE_EPOCH" {
+        return Err(
+            "`SOURCE_DATE_EPOCH` is the time BuildKit gives an image, which every build fixes: \
+             give no build argument by this name"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -385,9 +402,8 @@ fn instruction(text: &str, named: &mut Named<'_>) -> Result<(), String> {
             for flag in flags {
                 // Docker names a flag by its text up to its first `=`.
                 let (name, value) = flag.split_once('=').unwrap_or((flag, ""));
-                if name == "--mount" {
-                    mount(value, named)?;
-                }
+                run_flag(name)?;
+                mount(value, named)?;
             }
         }
         "COPY" => {
@@ -423,6 +439,33 @@ fn instruction(text: &str, named: &mut Named<'_>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Refuses a `RUN` flag but `--mount`: the build gives no step the host's network, a device or a
+/// privilege of the host's, which these flags may.
+fn run_flag(name: &str) -> Result<(), String> {
+    match name {
+        "--mount" => Ok(()),
+        "--network" => Err(
+            "`RUN --network` sets its step's network, which every build leaves as the engine \
+             gives it, and which `--network=host` makes the host's: drop the flag"
+                .to_owned(),
+        ),
+        "--device" => Err(
+            "`RUN --device` gives its step a device of the host's, which no step of a build has: \
+             drop the flag"
+                .to_owned(),
+        ),
+        "--security" => Err(
+            "`RUN --security` sets its step's privileges, which no step of a build has beyond a \
+             container's: drop the flag"
+                .to_owned(),
+        ),
+        _ => Err(format!(
+            "`RUN {}` is no flag the check passes: give a `RUN` no flag but `--mount`",
+            shown(name)
+        )),
+    }
 }
 
 /// Refuses `value`, a `RUN --mount`'s text after its `=`, unless it is a `tmpfs`, which mounts
@@ -487,6 +530,25 @@ fn fields(value: &str) -> (String, &str) {
         }
     }
     (kind, from)
+}
+
+/// The `from` of each bind mount of `text`, an instruction with its lines joined, if it is a
+/// `RUN` whose flags Docker takes as written; none for any other.
+pub(crate) fn bound_from(text: &str) -> Vec<&str> {
+    let (keyword, rest) = text.split_once(BLANKS).unwrap_or((text, ""));
+    let Ok((flags, _)) = flags(rest) else {
+        return Vec::new();
+    };
+    if !keyword.eq_ignore_ascii_case("RUN") {
+        return Vec::new();
+    }
+    let mounts = flags
+        .into_iter()
+        .filter_map(|flag| flag.strip_prefix("--mount="));
+    let bound = mounts
+        .map(fields)
+        .filter(|(kind, from)| kind == "bind" && !from.is_empty());
+    bound.map(|(_, from)| from).collect()
 }
 
 /// The flags at the start of `rest`, an instruction's text after its keyword, and its text
@@ -584,10 +646,26 @@ fn expanded<'n>(image: &str, named: &'n Named<'_>) -> Result<Option<&'n str>, St
 
 /// Refuses each source in `words`, an `ADD`'s text after `flags`, that [`check_source`]
 /// refuses, or that Docker may fetch as a URL, one with a `:`, unless `flags` pin it, as the
-/// [crate] doc says, and each checksum in `flags` that isn't a SHA-256 digest.
+/// [crate] doc says, and each checksum in `flags` that isn't a SHA-256 digest; and a Git
+/// repository's URL with no commit, or, the one source with a fragment, as [`git`] does.
 fn add(flags: &[&str], words: &str) -> Result<(), String> {
     let words = split(words);
     let sources = words.split_last().map_or(&[][..], |(_, sources)| sources);
+    if let [source] = sources
+        && let Some((url, fragment)) = source.split_once('#')
+        && url.contains("://")
+        && git_like(url)
+    {
+        return git(flags, url, fragment);
+    }
+    if let Some(source) = (sources.iter()).find(|source| source.contains("://") && git_like(source))
+    {
+        return Err(format!(
+            "`{source}` names a Git repository but no commit, so Docker would clone whatever \
+             its default branch holds: pin a commit, as `https://<host>/<path>.git#<commit>`, \
+             the one source of its `ADD`"
+        ));
+    }
     let checksums: Vec<&str> = (flags.iter())
         .filter_map(|flag| flag.strip_prefix("--checksum="))
         .collect();
@@ -614,6 +692,64 @@ fn add(flags: &[&str], words: &str) -> Result<(), String> {
              from the build's context with `COPY`, or fetch one `https://` URL with \
              `ADD --checksum=sha256:<64 hexadecimal digits>`"
         ));
+    }
+    Ok(())
+}
+
+/// Refuses `<url>#<fragment>`, the one source of an `ADD` with `flags`, a URL whose path ends in
+/// `.git`, in any case, that Docker may clone, unless it is `https://<host>/<path>.git#<commit>`:
+/// a commit in full, 40 lowercase hexadecimal digits, which pins the tree by SHA-1, where a
+/// prefix, a branch or a tag may move; in a URL with no `%` or `?`, which can hide what it names;
+/// with no `--checksum`, which adds nothing to the commit, and no `--keep-git-dir`, whose `.git`
+/// each clone writes afresh.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "Docker clones a URL whose path ends in `.git` in lowercase alone"
+)]
+fn git(flags: &[&str], url: &str, fragment: &str) -> Result<(), String> {
+    name(url)?;
+    let Some(rest) = url.strip_prefix("https://") else {
+        return Err(format!(
+            "`{url}` isn't an `https://` URL: name the Git repository by its `https://` URL"
+        ));
+    };
+    if let Some(c) = url.chars().find(|c| matches!(c, '%' | '?')) {
+        return Err(format!(
+            "`{url}` holds `{c}`, which can hide what the URL names: name the Git repository by \
+             a plain `https://` URL, with no escape or query"
+        ));
+    }
+    // Docker takes a URL for a Git repository's where its path ends in `.git`, in lowercase.
+    let path = rest.split_once('/').map_or("", |(_, path)| path);
+    if !path.ends_with(".git") {
+        return Err(format!(
+            "`{url}` has no path that ends in `.git`, in lowercase, which Docker clones: name the \
+             Git repository as `https://<host>/<path>.git`"
+        ));
+    }
+    let hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+    if fragment.len() != 40 || !fragment.bytes().all(|byte| hex(byte.to_ascii_lowercase())) {
+        return Err(format!(
+            "`#{fragment}` may name a branch, a tag or a prefix of a commit, any of which can \
+             move: name the commit in full, 40 hexadecimal digits"
+        ));
+    }
+    // BuildKit takes only lowercase digits for a commit (`IsCommitSHA`, in
+    // `util/gitutil/git_commit.go` in `moby/buildkit` at `1d510a30`), and others for a ref's name.
+    if !fragment.bytes().all(hex) {
+        return Err(format!(
+            "`#{fragment}` is in uppercase, which Docker takes for a branch or a tag's name: \
+             write the commit in lowercase"
+        ));
+    }
+    for flag in flags {
+        let (name, _) = flag.split_once('=').unwrap_or((flag, ""));
+        let why = match name {
+            "--checksum" => "adds nothing to the commit, which pins the tree",
+            "--keep-git-dir" => "keeps the clone's `.git`, which each build writes afresh",
+            _ => continue,
+        };
+        return Err(format!("`{name}` {why}: drop it"));
     }
     Ok(())
 }

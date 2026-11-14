@@ -286,6 +286,19 @@ impl Plan {
         }
     }
 
+    /// The recipe of each image that a recipe builds, in the order declared, with its named
+    /// contexts, each by the index among the plan's images of the image it names, which no other
+    /// index names, as no two images of a plan are equal.
+    pub fn recipes(&self) -> impl Iterator<Item = (&Recipe, BTreeMap<&str, usize>)> {
+        (self.images.iter()).filter_map(|Declaration { image, .. }| match image {
+            Image::Recipe { recipe, contexts } => {
+                let contexts = contexts.iter().map(|(name, base)| (name.as_str(), base.0));
+                Some((recipe, contexts.collect()))
+            }
+            Image::Layer { .. } => None,
+        })
+    }
+
     /// Checks each image a recipe builds with `recipes`, which gives the problems it finds (such
     /// as a recipe that is no file) given the recipe and the image's named contexts, sorted; and
     /// gives the workflow, its images standing as IDs of their own.
@@ -347,6 +360,42 @@ impl Plan {
             .collect();
         let workflow = self.workflow(&images);
         workflow.map_err(|problems| Problems::new(self.sources, problems))
+    }
+
+    /// What `then` gives, called once with every image whose recipe `wanted` picks, in order,
+    /// once those they are built on are built as [`Plan::build`] builds them with `step`, and no
+    /// other; the picked images themselves aren't built. It panics as [`Plan::build`] does.
+    ///
+    /// # Errors
+    ///
+    /// Each image whose build failed, with why, at the call that declares it.
+    pub fn build_for<B, T>(
+        &self,
+        jobs: NonZeroUsize,
+        mut wanted: impl FnMut(&Recipe) -> bool,
+        step: impl FnMut(Vec<(usize, Declared<'_, B>)>) -> Vec<(usize, Result<B, String>)>,
+        then: impl FnOnce(Vec<Declared<'_, B>>) -> T,
+    ) -> Result<T, Problems> {
+        let picked: Vec<bool> = (self.images.iter())
+            .map(|Declaration { image, .. }| match image {
+                Image::Recipe { recipe, .. } => wanted(recipe),
+                Image::Layer { .. } => false,
+            })
+            .collect();
+        // Each image is declared after those it is built on, so a walk from the last marks all
+        // that a picked image needs.
+        let mut needed = Vec::from_iter((0..self.images.len()).map(|_| false));
+        for (index, Declaration { image, .. }) in self.images.iter().enumerate().rev() {
+            if picked[index] || needed[index] {
+                image.bases().for_each(|base| needed[base.0] = true);
+            }
+        }
+        let done = self.built(jobs, &needed, step)?;
+        let declared = (self.images.iter().zip(&picked))
+            .filter(|(_, picked)| **picked)
+            .map(|(Declaration { image, .. }, _)| declared(image, &done))
+            .collect();
+        Ok(then(declared))
     }
 
     /// Each image that `needed` marks, by its index, built as [`Plan::build`] says by `step`,

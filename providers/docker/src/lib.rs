@@ -394,7 +394,7 @@ fn mountable(host: &Path, container: &str) -> Result<String, String> {
 fn remove(context: &ContextName, id: &str, bound: Bound) -> Result<(), Failure> {
     match docker_to(context, ["rm", "--force", "--volumes", id], bound) {
         Ok(_) => Ok(()),
-        // Docker 29 exits 0 here; older engines, down to the engine's floor, Docker 25.0, fail.
+        // Docker 29 exits 0 here; older engines, down to the engine's floor, Docker 28.0, fail.
         Err(Failure::Exited { stderr, .. }) if stderr.contains("No such container") => Ok(()),
         Err(error) => Err(error),
     }

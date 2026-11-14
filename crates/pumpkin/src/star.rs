@@ -16,7 +16,8 @@ use std::{fmt, fs, io, iter, panic, thread};
 
 use engine::{BuildContext, Building, Built, Engine, Started};
 use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe};
-use recipe::Given;
+use recipe::fetch::FetchStage;
+use recipe::{Given, Stage};
 use schema::workflow::Workflow;
 
 use crate::say;
@@ -324,6 +325,37 @@ impl Root {
         };
         (dir, below)
     }
+
+    /// The path below the root of the file at `path`, relative to the working directory, as an
+    /// entry's is: its directory's canonical path below the root, then its name.
+    ///
+    /// # Errors
+    ///
+    /// Fails if its directory can't be found, or isn't below the root, or the path isn't UTF-8.
+    fn below_root(&self, path: &str) -> Result<String, String> {
+        let given = Path::new(path);
+        let (dir, Some(name)) = (given.parent(), given.file_name()) else {
+            return Err(format!("`{path}` names no file: name the recipe's file"));
+        };
+        let dir = dir.filter(|dir| !dir.as_os_str().is_empty());
+        let dir = dir.unwrap_or(Path::new("."));
+        let dir = fs::canonicalize(dir).map_err(|error| {
+            format!("the recipe's directory {} can't be found ({error}): name the recipe by a path that exists", dir.display())
+        })?;
+        let below = dir.join(name);
+        let below = below.strip_prefix(&self.0).map_err(|_| {
+            format!(
+                "`{path}` isn't below the task's root, {}: name a recipe of the task",
+                self.0.display()
+            )
+        })?;
+        match below.to_str() {
+            Some(below) => Ok(below.to_owned()),
+            None => Err(format!(
+                "`{path}` isn't UTF-8 below the root: name one that is"
+            )),
+        }
+    }
 }
 
 /// `contexts`, a declared image's named contexts, as a build is given them.
@@ -409,9 +441,103 @@ impl Task<'_> {
     }
 }
 
-/// The builds that [`Task::build`] runs: each running build, by its image's index and how it is
-/// said; and each repository said to be built in, once, though several stages of one recipe are
-/// built there.
+/// Writes the fetch stage `stage` of the recipe `recipe` of the task `entry`, given `args`, as
+/// `pumpkin lock --help` says: once the task is [`checked`] and the stage read, calls `reach`
+/// for the engine, builds the named contexts that its images give the recipe, as [`Task::build`] does,
+/// locks the stage (`Engine::lock`) with the images' inputs, then writes the recipe.
+///
+/// # Errors
+///
+/// As [`checked`], `reach`, the read and the lock fail; if no image, or two that differ in their
+/// inputs, build `recipe`; if it can't be written. Gives the task's problems, or failed builds.
+pub(crate) fn lock(
+    entry: &Entry,
+    args: &Args,
+    recipe: &str,
+    stage: &Stage,
+    reach: impl FnOnce() -> Result<Engine, String> + Send,
+) -> Result<Result<(), Problems>, String> {
+    checked(entry, args, |Task { root, plan, .. }| {
+        let below = root.below_root(recipe)?;
+        let picked = |declared: &Recipe| Root::located(declared).1 == below;
+        same_inputs(
+            entry,
+            &below,
+            plan.recipes().filter(|(declared, _)| picked(declared)),
+        )?;
+        let path = root.reach(&below, Kind::File)?;
+        let text = root.bytes(&below)?;
+        let fetch = FetchStage::read(&below, &text, stage)?;
+        let engine = reach()?;
+        let mut builds = Builds::new();
+        let step = |ready: Vec<(usize, Declared<'_, Built>)>| builds.step(root, &engine, ready);
+        let written = plan.build_for(
+            jobs(),
+            picked,
+            step,
+            |declared: Vec<Declared<'_, Built>>| {
+                let Some(Declared::Recipe { recipe, contexts }) = declared.first() else {
+                    unreachable!(
+                        "an image of the recipe was found, and only recipes' images are picked"
+                    )
+                };
+                let (context, given) = root.inputs(recipe, contexts);
+                engine.lock(&fetch, &context, given)
+            },
+        );
+        let written = match written {
+            Ok(written) => written?,
+            Err(problems) => return Ok(Err(problems)),
+        };
+        fs::write(&path, written)
+            .map_err(|error| format!("`{below}` can't be written: {error}"))?;
+        Ok(Ok(()))
+    })
+}
+
+/// Nothing if each of `picked`, the task's images of the recipe at `below` below the root, with
+/// their named contexts, gives it the same inputs, but for their targets: its context, mounts,
+/// args and named contexts.
+///
+/// # Errors
+///
+/// Fails if `picked` is empty, or two of them give the recipe different inputs.
+fn same_inputs<'p>(
+    entry: &Entry,
+    below: &str,
+    mut picked: impl Iterator<Item = (&'p Recipe, BTreeMap<&'p str, usize>)>,
+) -> Result<(), String> {
+    let inputs = |(recipe, contexts): (&'p Recipe, BTreeMap<&'p str, usize>)| {
+        let Recipe {
+            context,
+            recipe: _,
+            mounts,
+            target: _,
+            args,
+            repository: _,
+        } = recipe;
+        (context, mounts, args, contexts)
+    };
+    let Some(first) = picked.next().map(inputs) else {
+        return Err(format!(
+            "{entry}: the task declares no image of the recipe `//{below}`: name a recipe that \
+             an image() call of the task builds"
+        ));
+    };
+    // The step's image may read any of them, so they all must agree, rather than those it reads.
+    if picked.map(inputs).any(|other| other != first) {
+        return Err(format!(
+            "{entry}: the task's images give the recipe `//{below}` different inputs, as its \
+             context, mounts, args or named contexts, for which its stage may resolve \
+             differently: give each image a recipe of its own, or the same inputs"
+        ));
+    }
+    Ok(())
+}
+
+/// The builds that [`Task::build`] and [`lock`] run: each running build, by its image's index and how
+/// it is said; and each repository said to be built in, once, though several stages of one
+/// recipe are built there.
 struct Builds {
     building: Vec<((usize, String), Building)>,
     said: BTreeSet<String>,

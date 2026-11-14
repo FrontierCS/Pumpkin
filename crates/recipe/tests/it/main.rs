@@ -1,11 +1,18 @@
 //! The recipe check: the recipes it reads as Docker does and passes, and those it refuses, for
 //! what they may have Docker fetch or for what it can't read as Docker would, with what their
-//! builds are given.
+//! builds are given. Also a recipe's fetch stages (`fetch`).
+
+#![expect(
+    clippy::unwrap_used,
+    reason = "a test helper fails the test that calls it"
+)]
 
 use std::collections::BTreeMap;
 
 use expect_test::{Expect, expect};
 use recipe::{Given, Stage};
+
+mod fetch;
 
 /// Checks each of `recipes`, a name and a text in which `<sha256>` stands for a digest, as the
 /// recipe of that name of a build given `given`, in whose args `<sha256>` stands for it too, and
@@ -249,20 +256,85 @@ fn sources() {
             add-second:2: `https://example.com/notes` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
             checksum: passes
             checksum-two:2: `https://example.com/a` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
-            checksum-git:2: Docker may take `https://example.com/notes.git` for a Git repository's URL, which some of its versions clone without checking a checksum: name no `ADD` source that ends in `.git`, in any case
+            checksum-git:2: `https://example.com/notes.git` names a Git repository but no commit, so Docker would clone whatever its default branch holds: pin a commit, as `https://<host>/<path>.git#<commit>`, the one source of its `ADD`
             add-repository:2: Docker may take `example.com/notes.GIT` for a Git repository's URL, which some of its versions clone without checking a checksum: name no `ADD` source that ends in `.git`, in any case
             checksum-escaped:2: `https://example.com/notes%2Egit` holds `%`, which can hide a `.git` ending: name a plain `ADD` source, with no escape, query or fragment, so no `%`, `?` or `#`
             checksum-query:2: `https://example.com/notes.git?x` holds `?`, which can hide a `.git` ending: name a plain `ADD` source, with no escape, query or fragment, so no `%`, `?` or `#`
-            checksum-fragment:2: `https://example.com/notes.git#main` holds `#`, which can hide a `.git` ending: name a plain `ADD` source, with no escape, query or fragment, so no `%`, `?` or `#`
+            checksum-fragment:2: `#main` may name a branch, a tag or a prefix of a commit, any of which can move: name the commit in full, 40 hexadecimal digits
             checksum-http:2: `http://example.com/notes` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
             checksum-short:2: `sha256:0123` isn't a SHA-256 digest: write `--checksum=sha256:<64 hexadecimal digits>`"#]],
     );
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn steps() {
     check(
         &[
+            // A Git repository's tree, which its commit names in full, and, refused, the other shapes:
+            // a prefix and a branch, which may move; a commit in uppercase, which Docker takes for a
+            // ref's name; a path that ends in `.git` in uppercase, or no path, which Docker doesn't
+            // clone; a query, which can hide what the URL names; plain `http://`; and the flags that add
+            // nothing to the commit or a `.git` of each build's own.
+            (
+                "git-commit",
+                "FROM scratch\nADD --link https://example.com/notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            (
+                "git-prefix",
+                "FROM scratch\nADD https://example.com/notes.git#0123456 /notes\n",
+            ),
+            (
+                "git-branch",
+                "FROM scratch\nADD https://example.com/notes.git#main /notes\n",
+            ),
+            (
+                "git-uppercase",
+                "FROM scratch\nADD https://example.com/notes.git#0123456789ABCDEF0123456789ABCDEF01234567 /notes\n",
+            ),
+            (
+                "git-suffix",
+                "FROM scratch\nADD https://example.com/notes.GIT#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            (
+                "git-no-path",
+                "FROM scratch\nADD https://notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            (
+                "git-query",
+                "FROM scratch\nADD https://example.com/notes.git?ref=x.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            (
+                "git-http",
+                "FROM scratch\nADD http://example.com/notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            (
+                "git-checksum",
+                "FROM scratch\nADD --checksum=0123456789abcdef0123456789abcdef01234567 https://example.com/notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            (
+                "git-keep",
+                "FROM scratch\nADD --keep-git-dir=true https://example.com/notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
+            ),
+            // The build gives no step the host's network, a device or a privilege, which these flags
+            // may; `--network` is refused whatever it names, as the check doesn't read its value.
+            (
+                "run-network",
+                "FROM scratch\nRUN --mount=target=/src --network=host true\n",
+            ),
+            (
+                "run-network-none",
+                "FROM scratch\nRUN --network=none true\n",
+            ),
+            ("run-device", "FROM scratch\nRUN --device=/dev/kvm true\n"),
+            (
+                "run-security",
+                "FROM scratch\nRUN --security=insecure true\n",
+            ),
+            ("run-flag", "FROM scratch\nRUN --frontend-flag=1 true\n"),
             (
                 "mount",
                 "FROM scratch\nRUN --mount=from=ubuntu:24.04,target=/ubuntu true\n",
@@ -314,6 +386,21 @@ fn steps() {
         ],
         &Given::default(),
         &expect![[r#"
+            git-commit: passes
+            git-prefix:2: `#0123456` may name a branch, a tag or a prefix of a commit, any of which can move: name the commit in full, 40 hexadecimal digits
+            git-branch:2: `#main` may name a branch, a tag or a prefix of a commit, any of which can move: name the commit in full, 40 hexadecimal digits
+            git-uppercase:2: `#0123456789ABCDEF0123456789ABCDEF01234567` is in uppercase, which Docker takes for a branch or a tag's name: write the commit in lowercase
+            git-suffix:2: `https://example.com/notes.GIT` has no path that ends in `.git`, in lowercase, which Docker clones: name the Git repository as `https://<host>/<path>.git`
+            git-no-path:2: `https://notes.git` has no path that ends in `.git`, in lowercase, which Docker clones: name the Git repository as `https://<host>/<path>.git`
+            git-query:2: `https://example.com/notes.git?ref=x.git` holds `?`, which can hide what the URL names: name the Git repository by a plain `https://` URL, with no escape or query
+            git-http:2: `http://example.com/notes.git` isn't an `https://` URL: name the Git repository by its `https://` URL
+            git-checksum:2: `--checksum` adds nothing to the commit, which pins the tree: drop it
+            git-keep:2: `--keep-git-dir` keeps the clone's `.git`, which each build writes afresh: drop it
+            run-network:2: `RUN --network` sets its step's network, which every build leaves as the engine gives it, and which `--network=host` makes the host's: drop the flag
+            run-network-none:2: `RUN --network` sets its step's network, which every build leaves as the engine gives it, and which `--network=host` makes the host's: drop the flag
+            run-device:2: `RUN --device` gives its step a device of the host's, which no step of a build has: drop the flag
+            run-security:2: `RUN --security` sets its step's privileges, which no step of a build has beyond a container's: drop the flag
+            run-flag:2: `RUN --frontend-flag` is no flag the check passes: give a `RUN` no flag but `--mount`
             mount:2: `ubuntu:24.04` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
             mount-bind: passes
             mount-index:3: a `RUN --mount`'s `from=0` names the image `docker.io/library/0`, as Docker reads a number there, not a stage's index: name the stage by its `AS` name
@@ -419,6 +506,13 @@ fn given() {
         &given("train", &[("BUILDKIT_SYNTAX", "docker/dockerfile:1")]),
         &expect![
             "buildkit: `BUILDKIT_SYNTAX` starts with `BUILDKIT_`, a prefix BuildKit reads for itself, as `BUILDKIT_SYNTAX` names a frontend to fetch: give no build argument with it"
+        ],
+    );
+    check(
+        &refused,
+        &given("train", &[("SOURCE_DATE_EPOCH", "0")]),
+        &expect![
+            "buildkit: `SOURCE_DATE_EPOCH` is the time BuildKit gives an image, which every build fixes: give no build argument by this name"
         ],
     );
     check(
