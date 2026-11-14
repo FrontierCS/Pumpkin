@@ -1,7 +1,8 @@
 //! `pumpkin`'s command line, parsed once into what it asks for ([`Command`]) by clap: each
 //! command is a struct whose fields are its operands and flags, which clap's parser, usage lines,
 //! help and errors all read. `-h` or `--help` before `--` asks for the help of the command the
-//! line names, which `pumpkin help` also prints, as it does the topics, such as [`CONFIG`].
+//! line names, which `pumpkin help` also prints, as it does the topics, such as [`CONFIG`]; `-V`
+//! or `--version` before the command, for the build ([`runtime::BUILD`]).
 
 use std::ffi::OsString;
 use std::iter;
@@ -29,6 +30,7 @@ Topics:
 does, and `pumpkin help <topic>` a topic.",
     disable_help_flag = true,
     disable_help_subcommand = true,
+    disable_version_flag = true,
     subcommand_value_name = "command",
     subcommand_help_heading = "Commands"
 )]
@@ -463,14 +465,20 @@ pub(crate) struct Refusal {
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut cli = command();
-    // clap's error doesn't name the command it was found in; the first word does, as only `-h`
-    // and `--help` may come before it.
-    let first = args.iter().find(|arg| !arg.as_bytes().starts_with(b"-"));
-    let named = first.and_then(|word| cli.find_subcommand(word));
+    // clap's error doesn't name the command it was found in; the first word does, as only `-h`,
+    // `--help`, `-V` and `--version` may come before it.
+    let first = args
+        .iter()
+        .position(|arg| !arg.as_bytes().starts_with(b"-"));
+    let named = first.and_then(|at| cli.find_subcommand(&args[at]));
     let named = named.map(|command| command.get_name().to_owned());
     let mut options = args.iter().take_while(|arg| *arg != "--");
     if options.any(|arg| arg == "-h" || arg == "--help") {
         return Ok(Command::Print(help(&mut cli, named.as_deref())));
+    }
+    let before = &args[..first.unwrap_or(args.len())];
+    if before.iter().any(|arg| arg == "-V" || arg == "--version") {
+        return Ok(Command::Print(format!("pumpkin {}\n", runtime::BUILD)));
     }
     let refusal = |error| Refusal {
         error,
@@ -528,10 +536,17 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
 /// `pumpkin`, with `-h` and `--help` listed last in each command's help.
 fn command() -> clap::Command {
     // No command has a help flag of clap's, so a usage error ends without clap's pointer to
-    // it, and `pumpkin help <command>` is said instead; `parse` answers `-h` and `--help`.
+    // it, and `pumpkin help <command>` is said instead; `parse` answers `-h` and `--help`, and
+    // `-V` and `--version`.
     let help = Arg::new("help").short('h').long("help").global(true);
     let help = help.action(ArgAction::SetTrue).help("Print this help.");
-    Parsed::command().arg(help.display_order(usize::MAX))
+    let version = Arg::new("version").short('V').long("version");
+    let version = version
+        .action(ArgAction::SetTrue)
+        .help("Print the version.");
+    Parsed::command()
+        .arg(version)
+        .arg(help.display_order(usize::MAX))
 }
 
 /// The help of the command of `cli` that `name` names, or of `pumpkin` if it names none.

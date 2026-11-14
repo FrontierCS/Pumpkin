@@ -50,14 +50,17 @@ fn usage() {
         pumpkin(&["wait", "-h"]),
         pumpkin(&["help", "--help"]),
         pumpkin(&["help", "config"]),
+        pumpkin(&["--version"]),
         same(&["help", "run"], &["run", "--help"]),
         same(&["help"], &["--help"]),
         same(&["-h"], &["--help"]),
+        same(&["-V"], &["--version"]),
         same(&["bogus", "--help"], &["--help"]),
         same(&["run", "--bogus", "-h", "extra"], &["run", "--help"]),
         pumpkin(&[]),
         pumpkin(&["bogus"]),
-        pumpkin(&["--version"]),
+        pumpkin(&["--bogus", "run"]),
+        pumpkin(&["--version=x", "run", "a.star"]),
         pumpkin(&["run", "--docker-context", "nowhere"]),
         pumpkin(&["run"]),
         pumpkin(&["run", "--runs=a", "--runs", "b", "a.star"]),
@@ -68,11 +71,15 @@ fn usage() {
         pumpkin(&["help", "bogus"]),
         pumpkin(&["wait", "--runs=nowhere", "6a"]),
     ];
+    // What `--version` prints: this build, which names its commit if it was made in a git
+    // checkout of Pumpkin's repository.
+    let this = format!("pumpkin {}\n", runtime::BUILD);
+    // Filled in by `UPDATE_EXPECT=1` once the crate builds.
     check(
         &scratch,
         steps,
         false,
-        &[],
+        &[(&this, "pumpkin <this>\n")],
         &expect![[r#"
             $ pumpkin --help
             exit status: Some(0)
@@ -91,6 +98,9 @@ fn usage() {
                 build  Build a task's images, and print its workflow's IR
 
               Options:
+                -V, --version
+                        Print the version.
+
                 -h, --help
                         Print this help.
 
@@ -253,12 +263,18 @@ fn usage() {
 
               A workflow's model route reaches the one upstream that serves every model it
               allows.
+            $ pumpkin --version
+            exit status: Some(0)
+            printed:
+              pumpkin <this>
             $ pumpkin help run
             does what `pumpkin run --help` does: true
             $ pumpkin help
             does what `pumpkin --help` does: true
             $ pumpkin -h
             does what `pumpkin --help` does: true
+            $ pumpkin -V
+            does what `pumpkin --version` does: true
             $ pumpkin bogus --help
             does what `pumpkin --help` does: true
             $ pumpkin run --bogus -h extra
@@ -279,7 +295,8 @@ fn usage() {
               build  Build a task's images, and print its workflow's IR
 
             Options:
-              -h, --help  Print this help.
+              -V, --version  Print the version.
+              -h, --help     Print this help.
 
             Topics:
               config  The machine's configuration, pumpkin.toml
@@ -293,12 +310,18 @@ fn usage() {
 
             Usage: pumpkin <command>
             pumpkin: to read how to use it: pumpkin help
-            $ pumpkin --version
+            $ pumpkin --bogus run
             exit status: Some(2)
-            error: unexpected argument '--version' found
+            error: unexpected argument '--bogus' found
 
             Usage: pumpkin <command>
-            pumpkin: to read how to use it: pumpkin help
+            pumpkin: to read how to use it: pumpkin help run
+            $ pumpkin --version=x run a.star
+            exit status: Some(2)
+            error: unexpected value 'x' for '--version' found; no more were expected
+
+            Usage: pumpkin --version <command>
+            pumpkin: to read how to use it: pumpkin help run
             $ pumpkin run --docker-context nowhere
             exit status: Some(2)
             error: unexpected argument '--docker-context' found
