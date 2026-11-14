@@ -63,13 +63,21 @@ pub(crate) struct LateTake {
     pub(crate) then: usize,
 }
 
-/// The first sync of the run log that makes `record` last, by its `seq`, with the records before
-/// it, lasts until `queued` inputs are queued in the loop's inbox, and ends at `at`, as the
-/// machine's disk may hold a sync while other threads hand the loop what they observed.
+/// The first sync that makes `record` last, of the run log or another file of the record, lasts
+/// until `queued` inputs are queued in the loop's inbox, and ends at `at`, as the machine's disk
+/// may hold a sync while other threads hand the loop what they observed.
 pub(crate) struct SlowSync {
-    pub(crate) record: u64,
+    pub(crate) record: Synced,
     pub(crate) queued: usize,
     pub(crate) at: Duration,
+}
+
+/// What a sync makes last: the run log's record of a `seq`, with the records before it; or a file
+/// whose path ends with the first, as it holds the second, such as a sandbox's `sandbox.json` once
+/// it records the delete, which the run log may not sync before the next act.
+pub(crate) enum Synced {
+    Seq(u64),
+    Holding(&'static str, &'static str),
 }
 
 impl SimHost {
@@ -141,7 +149,11 @@ impl Host for SimHost {
         let through = last.map_or_else(String::new, |last| format!(", through record {last}"));
         let lasts = |record: u64| last.is_some_and(|last| last >= record);
         let mut state = stdx::unpoisoned(self.state.lock());
-        let slow = state.slow.take_if(|slow| lasts(slow.record));
+        let holds = |text: &str| fs::read_to_string(&path).is_ok_and(|held| held.contains(text));
+        let slow = state.slow.take_if(|slow| match slow.record {
+            Synced::Seq(record) => lasts(record),
+            Synced::Holding(file, text) => path.ends_with(file) && holds(text),
+        });
         let named = |name: &str| path.file_name() == Some(name.as_ref());
         let file = match &mut state.failed_file {
             Some((name, 0)) => named(name),

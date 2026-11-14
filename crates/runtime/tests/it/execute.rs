@@ -38,11 +38,11 @@ use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
 use test_support::{WORKFLOW, files, sandboxes, standard_outputs};
 
-use crate::host::{LateTake, SimHost, SlowSync};
+use crate::host::{LateTake, SimHost, SlowSync, Synced};
 use crate::run::{PROVIDER, Runs, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
-    self, BRIEF, DAWDLING, HUNG, Journal, LAST, LATER, LINGERING, LOST, MUTE, REFUSED_ONCE, SLOW,
-    Sim, UNDELETABLE, UNLISTABLE, UNPUBLISHED, UNSHOWN, VANISHING,
+    self, BRIEF, DAWDLING, HUNG, Journal, LAST, LATER, LOST, MUTE, REFUSED_ONCE, SLOW, Sim,
+    UNDELETABLE, UNLISTABLE, UNPUBLISHED, UNSHOWN, VANISHING,
 };
 
 /// A `sandboxd` that dials.
@@ -53,6 +53,15 @@ const SANDBOXD: &str = "/sim/sandboxd";
 // Short, so that the wait takes seconds, but far longer than a simulated sandbox takes to start,
 // so that a busy machine makes a start that succeeds wait longer, never fail.
 const SHORT_STARTUP: u64 = 1;
+
+/// The file that a sync of the agent's `sandbox.json` writes, and what it holds once it records
+/// the sandbox's delete.
+const AGENT_SANDBOX: &str = "agent/.sandbox.json.partial";
+const DELETED: &str = r#""state": "deleted""#;
+
+/// A time past the hard end, 6 s, of the runs of [`short_workflow`] with a deadline of 2 s on a
+/// provider whose startup is [`SHORT_STARTUP`].
+const PAST_THE_HARD_END: Duration = Duration::from_millis(6_500);
 
 /// The seconds that what an interrupted run waits on lasts, a start's startup or a work phase's
 /// deadline.
@@ -2007,10 +2016,10 @@ fn watches_each_provider() {
     grant["judge"]["role"] = json!("near_judge");
     grants.as_array_mut().unwrap().push(grant);
     // A simulated sandbox that never dials waits on nothing but its start's deadline, so the near
-    // judge's start is kept waiting by its class's startup, 5 s: past the end of the train
+    // judge's start is kept waiting by its class's startup, 4 s: past the end of the train
     // judge's start, a second later, at its class's 2 s. A watcher that listed `here` alone
     // while its start waits would leave the train judge's start to run out at its startup.
-    let here = Sim::with_startup(5).named("here");
+    let here = Sim::with_startup(4).named("here");
     let there = there(Sim::new());
     let providers = [("here", &here), ("there", &there)];
     check(
@@ -2026,7 +2035,7 @@ fn watches_each_provider() {
             payloads hold: ["xxxxxx"]
             provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"provider":"here"},"final_judge":{"class":"sim","image":{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"near_judge":{"class":"sim","image":{"digest":"sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"},"provider":"here"},"train_judge":{"class":"brief","image":{"digest":"sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000"},"provider":"there"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"250000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
             {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"near","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"near","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
             {"actions":[{"kind":"reply","op":1,"reply":{"job":1,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
@@ -2058,11 +2067,11 @@ fn judge_stalls() {
         "finalize submit 6",
     ];
     // A deadline seconds after the agent's ops, so that the teardown's end, which follows it,
-    // comes soon; and a call timeout seconds longer than the agent takes to finalize, so that
-    // the stop ends the call, and seconds shorter than the time left when the call is made, so
+    // comes soon; and a call timeout a second longer than the agent takes to finalize, so that
+    // the stop ends the call, and a second shorter than the time left when the call is made, so
     // that it is the call's timeout.
-    let mut ir = short_workflow(&argv, 4);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(2);
+    let mut ir = short_workflow(&argv, 2);
+    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
     ir["roles"][2]["image"] = json!(sim::image(UNDELETABLE).as_str());
     check(
         &System,
@@ -2075,9 +2084,9 @@ fn judge_stalls() {
             job 1's sandbox, jobs/1/sandbox.json: {"delete":{"reason":"sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-3","provider":"simulated","report":null}
             payloads hold: ["stall", "xxxxxx"]
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"8000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5},"timeout_ns":"2000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97","size":5}}},"observed_ns":"<ns>","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
             {"actions":[{"kind":"reply","op":1,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
@@ -2092,14 +2101,20 @@ fn judge_stalls() {
     );
 }
 
+// The run's clock passes the hard end as the agent's delete is recorded, while the stopped call's
+// delete waits for the agent's, so the hard end's tick comes before the call's end.
 #[test]
 fn abandoned() {
     let argv = ["ops", "judge train slow", "await 0 running", "exit"];
-    // A deadline later than the agent's ops, so that the agent's exit ends the work phase.
     let mut ir = short_workflow(&argv, 2);
-    ir["roles"][1]["image"] = json!(sim::image(LINGERING).as_str());
+    ir["roles"][1]["image"] = json!(sim::image(LAST).as_str());
+    let slow = SlowSync {
+        record: Synced::Holding(AGENT_SANDBOX, DELETED),
+        queued: 0,
+        at: PAST_THE_HARD_END,
+    };
     check(
-        &System,
+        &SimHost::new().slow_sync(slow),
         "abandoned",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
@@ -2108,19 +2123,18 @@ fn abandoned() {
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
             payloads hold: ["slow"]
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
-            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"observed_ns":"<ns>","seq":9}
-            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":10}
-            its last record came once the hard end had passed
-            its log's last record was written once the hard end had passed"#]],
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"0","seq":2}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"judge_started"},"observed_ns":"0","seq":3}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"0","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":4}
+            {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
+            {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":7}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"observed_ns":"6500000000","seq":9}
+            {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":10}
+            its last record came once the hard end had passed"#]],
     );
 }
 
@@ -2164,10 +2178,16 @@ fn reported_before_the_hard_end() {
     // bounds the judge's start.
     let argv = ["ops", "judge train 6", "exit", "judge train 6"];
     let mut ir = short_workflow(&argv, 2);
-    ir["roles"][0]["image"] = json!(sim::image(LINGERING).as_str());
     ir["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
+    // Held until the run's other threads have queued each input they send, the judge's failure,
+    // stamped after its delete, last; then the clock passes the hard end, past no input's stamp.
+    let slow = SlowSync {
+        record: Synced::Holding(AGENT_SANDBOX, DELETED),
+        queued: 4,
+        at: PAST_THE_HARD_END,
+    };
     check(
-        &System,
+        &SimHost::new().slow_sync(slow),
         "reported-before-the-hard-end",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
@@ -2177,18 +2197,17 @@ fn reported_before_the_hard_end() {
             job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
-            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"refused","message":"the work phase has ended: make no more ops"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
-            {"at_ns":"<ns>","note":"op 1's reply wasn't sent: the agent's sandbox is gone","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":9}
-            its last record came once the hard end had passed
-            its log's last record was written once the hard end had passed"#]],
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":2}
+            {"actions":[{"job":0,"kind":"stop_judge"},{"kind":"tear_down_agent"}],"at_ns":"0","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
+            {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
+            {"actions":[{"kind":"reply","op":1,"reply":{"kind":"refused","message":"the work phase has ended: make no more ops"}}],"at_ns":"6500000000","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":6}
+            {"at_ns":"6500000000","note":"op 1's reply wasn't sent: the agent's sandbox is gone","seq":7}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"6500000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"0","seq":9}
+            its last record came once the hard end had passed"#]],
     );
 }
 
@@ -2258,38 +2277,43 @@ fn reported_past_the_hard_end() {
 // sandbox created, and the hard end's tick, which comes first, abandons the run.
 #[test]
 fn torn_down_past_the_hard_end() {
+    // The record of the agent's delete holds the loop past the hard end.
+    let slow = SlowSync {
+        record: Synced::Holding(AGENT_SANDBOX, DELETED),
+        queued: 0,
+        at: PAST_THE_HARD_END,
+    };
     check(
-        &System,
+        &SimHost::new().slow_sync(slow),
         "torn-down-past-the-hard-end",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &short_workflow(&["ops", "finalize submit 6"], 2),
-        LINGERING,
+        SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
             payloads hold: ["xxxxxx"]
             log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}},{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
-            {"actions":[{"kind":"abandon"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"<ns>","seq":6}
-            {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":7}
-            its last record came once the hard end had passed
-            its log's last record was written once the hard end had passed"#]],
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":0,"state":"accepted"}},{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":2}
+            {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
+            {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":5}
+            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"6500000000","seq":6}
+            {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":7}
+            its last record came once the hard end had passed"#]],
     );
 }
 
-// The agent checks that the `ops` after its 2 s sleep leaves at least 2 s less than the one before,
+// The agent checks that the `ops` after its 1 s sleep leaves at least 1 s less than the one before,
 // however long it took to start.
 #[test]
 fn late_ops() {
     let argv = [
         "ops",
         "ops",
-        "sleep 2",
-        "ops at least 2 less",
+        "sleep 1",
+        "ops at least 1 less",
         "exit",
         "judge train 6",
     ];
@@ -2353,7 +2377,7 @@ fn taken_past_the_deadline() {
 #[test]
 fn held_by_a_slow_sync() {
     let slow = SlowSync {
-        record: 2,
+        record: Synced::Seq(2),
         queued: 1,
         at: Duration::from_millis(30_500),
     };
@@ -2385,7 +2409,7 @@ fn held_by_a_slow_sync() {
 #[test]
 fn started_late() {
     let slow = SlowSync {
-        record: 0,
+        record: Synced::Seq(0),
         queued: 0,
         at: Duration::from_secs(25),
     };
@@ -2413,7 +2437,7 @@ fn started_late() {
             its last record came before the agent's teardown was to end"#]],
     );
     let slow = SlowSync {
-        record: 0,
+        record: Synced::Seq(0),
         queued: 0,
         at: Duration::from_secs(35),
     };
@@ -2456,7 +2480,7 @@ fn sync_fails() {
 #[test]
 fn refusal_held_by_a_slow_sync() {
     let slow = SlowSync {
-        record: 3,
+        record: Synced::Seq(3),
         queued: 0,
         at: Duration::from_millis(30_500),
     };
@@ -2835,7 +2859,7 @@ fn model_stream_cut() {
         &System,
         "model-stream-cut",
         &[(PROVIDER, &Sim::new())],
-        &routed(short_workflow(&argv, 2)),
+        &routed(short_workflow(&argv, 1)),
         SANDBOXD,
         &[Also::Exchanges],
     );
@@ -2843,7 +2867,7 @@ fn model_stream_cut() {
         finished, with score None
         payloads hold: ["slow"]
         log.jsonl:
-        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"92000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
