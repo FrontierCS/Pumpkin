@@ -1,7 +1,7 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
 //! workflow, [`WORKFLOW`].
-//! Also placing the workflow's roles in classes of sandbox, the JSON of ops' replies, which
-//! `sandboxctl` prints, the sandbox protocol's hellos, and the in-sandbox contract.
+//! Also placing the workflow's roles on providers, in classes of sandbox, the JSON of ops'
+//! replies, which `sandboxctl` prints, the sandbox protocol's hellos, and the in-sandbox contract.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of all
 //! of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
@@ -11,8 +11,8 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::collections::BTreeMap;
-use std::num::NonZeroU64;
+use std::collections::{BTreeMap, BTreeSet};
+use std::num::{NonZeroU32, NonZeroU64};
 
 use expect_test::{Expect, expect};
 use schema::ir;
@@ -22,7 +22,7 @@ use schema::sandbox::{
     command_stdin, command_stdout, evidence_dir, frame, pumpkin_dir, pumpkin_subdirs, result_file,
     slot_dir, slot_payload,
 };
-use schema::workflow::{Class, Workflow};
+use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
@@ -72,47 +72,143 @@ impl Case for Value {
     }
 }
 
-/// An IR placed by [`classes`]: each role, with its class's startup, or why the IR fails to
-/// parse or be placed.
+/// An IR placed on [`offered`]: each role, where it is placed, with its class's startup, or why
+/// the IR fails to parse or be placed.
 struct Placing(Value);
 
 impl Case for Placing {
     fn outcome(self) -> String {
         let ir = serde_json::from_value::<ir::Workflow>(self.0).unwrap();
+        let offered = offered();
         let placed = Workflow::parse(&ir)
-            .and_then(|workflow| workflow.place(&classes()))
+            .and_then(|workflow| workflow.place(&offered, |classes| classes))
             .map_err(|errors| errors.to_string());
-        let placed = match placed {
+        let (placed, providers) = match placed {
             Ok(placed) => placed,
             Err(error) => return error,
         };
-        let workflow = placed.workflow();
-        let roles = workflow.roles().map(|(role, sandbox)| {
+        let roles = placed.workflow().roles().map(|(role, sandbox)| {
             let name = &sandbox.name;
-            format!("{name}'s starts take at most {:?}", placed.startup(role))
+            let Placement {
+                provider,
+                class,
+                declared: _,
+            } = placed.placement(role);
+            let startup = placed.startup(role);
+            format!("{name}, on `{provider}` in `{class}`, whose starts take at most {startup:?}")
         });
-        roles.collect::<Vec<String>>().join(", ")
+        let providers = providers
+            .iter()
+            .map(|(provider, _)| format!("`{provider}`"));
+        let roles = roles.collect::<Vec<String>>().join("; ");
+        format!(
+            "{roles}; providers {}",
+            providers.collect::<Vec<_>>().join(", ")
+        )
     }
 }
 
-/// Two classes: `large`, whose starts take 30 s, which every role of [`WORKFLOW`] fits, and
-/// `small`, whose starts take 60 s, which gives a role exactly what each of its judges asks for.
-fn classes() -> BTreeMap<ir::Name, Class> {
-    let class = |name: &str, cpu_millis, memory_bytes, startup_seconds| {
-        let class = Class {
-            resources: ir::Resources {
-                cpu_millis: NonZeroU64::new(cpu_millis).unwrap(),
-                memory_bytes: NonZeroU64::new(memory_bytes).unwrap(),
-            },
-            startup_seconds: NonZeroU64::new(startup_seconds).unwrap(),
+/// The train judge, needing what the case gives, placed on [`offered`] beside roles that fit
+/// its smallest class: where it is placed, or why it can't be.
+struct Needing(Value);
+
+impl Case for Needing {
+    fn outcome(self) -> String {
+        let mut ir = fixture();
+        ir["roles"][1]["needs"] = self.0.clone();
+        let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
+        let offered = offered();
+        let placed = Workflow::parse(&ir)
+            .unwrap()
+            .place(&offered, |classes| classes);
+        let at = match placed {
+            Ok((placed, _)) => {
+                let (judge, _) = placed.workflow().roles().nth(1).unwrap();
+                let placement = placed.placement(judge);
+                format!("`{}` `{}`", placement.provider, placement.class)
+            }
+            Err(errors) => errors.to_string(),
         };
-        (ir::Name::try_from(name.to_owned()).unwrap(), class)
-    };
-    BTreeMap::from([
-        class("large", 16_000, 64 << 30, 30),
-        class("small", 8_000, 2 << 30, 60),
-    ])
+        format!("{}: {at}", self.0)
+    }
 }
+
+/// The classes that two providers offer, as an EC2 envelope and a Modal workspace might: on
+/// `aws`, `judge`, `agent` and `judge_memory`, the last two alike, `judge_60`, and `ice_lake`,
+/// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs.
+fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    let name = |name: &str| ir::Name::try_from(name.to_owned()).unwrap();
+    let flags = |flags: &[&str]| flags.iter().map(|flag| valid(flag)).collect();
+    let h100 = |count| {
+        let model = valid("NVIDIA H100 80GB HBM3");
+        let count = NonZeroU32::new(count).unwrap();
+        Some(ir::Gpu { count, model })
+    };
+    let offers = |cpus: u64, memory_gib: u64| Offers {
+        cpu_millis: NonZeroU64::new(cpus * 1000).unwrap(),
+        memory_bytes: NonZeroU64::new(memory_gib << 30).unwrap(),
+        gpu: None,
+        cpu_features: flags(&["avx2", "sse4_2"]),
+        cpu_model: None,
+    };
+    let class = |provider: &str, class: &str, offers, startup_seconds| {
+        let declared = Class {
+            offers,
+            startup_seconds: NonZeroU64::new(startup_seconds).unwrap(),
+            usd_per_hour: None,
+        };
+        (name(provider), name(class), declared)
+    };
+    let avx512 = flags(&["avx2", "avx512f", "sse4_2"]);
+    let ice_lake = Offers {
+        cpu_features: avx512.clone(),
+        cpu_model: Some(valid(XEON)),
+        ..offers(4, 16)
+    };
+    let classes = [
+        class("aws", "judge", offers(8, 16), 60),
+        class("aws", "agent", offers(8, 64), 30),
+        class("aws", "judge_memory", offers(8, 64), 60),
+        class(
+            "aws",
+            "judge_60",
+            Offers {
+                cpu_features: avx512,
+                ..offers(64, 128)
+            },
+            60,
+        ),
+        class("aws", "ice_lake", ice_lake, 60),
+        class(
+            "gpus",
+            "h100",
+            Offers {
+                gpu: h100(1),
+                cpu_features: BTreeSet::new(),
+                ..offers(8, 64)
+            },
+            600,
+        ),
+        class(
+            "gpus",
+            "h100_4",
+            Offers {
+                gpu: h100(4),
+                cpu_features: BTreeSet::new(),
+                ..offers(32, 256)
+            },
+            600,
+        ),
+    ];
+    let mut offered: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+    for (provider, class, declared) in classes {
+        offered.entry(provider).or_default().insert(class, declared);
+    }
+    offered
+}
+
+/// The CPU model that [`offered`]'s `ice_lake` states.
+const XEON: &str = "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz";
 
 /// An op's reply as JSON, which reads as the reply shown and writes back as itself, or fails to
 /// read.
@@ -168,6 +264,11 @@ impl Case for Frame {
     }
 }
 
+/// `value`, one of the IR's checked values.
+fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
+    T::try_from(value.to_owned()).unwrap()
+}
+
 /// A relative path below an absolute one, as a role's commands find a path of the in-sandbox
 /// contract below `pumpkin_dir()`.
 struct Joined(ir::AbsolutePath, RelativePath);
@@ -191,19 +292,106 @@ impl Case for CommandEnv {
 
 #[test]
 fn placement() {
-    let mut larger = fixture();
-    larger["roles"][1]["needs"]["cpu_millis"] = json!(8001);
-    larger["roles"][2]["needs"]["memory_bytes"] = json!((2u64 << 30) + 1);
-    let mut unplaced = fixture();
-    unplaced["roles"][0]["needs"]["cpu_millis"] = json!(16_001);
-    unplaced["roles"][2]["needs"]["memory_bytes"] = json!((64u64 << 30) + 1);
+    let gib = |gib: u64| gib << 30;
+    let h100 = |count: u32| json!({ "count": count, "model": "NVIDIA H100 80GB HBM3" });
+    let small = |more: Value| {
+        let mut needs = json!({ "cpu_millis": 2000, "memory_bytes": gib(2) });
+        needs
+            .as_object_mut()
+            .unwrap()
+            .extend(more.as_object().unwrap().clone());
+        Needing(needs)
+    };
     check(
-        [Placing(fixture()), Placing(larger), Placing(unplaced)],
+        [
+            small(json!({})),
+            small(json!({ "cpu_millis": 8000, "memory_bytes": gib(16) })),
+            small(json!({ "cpu_millis": 8001 })),
+            small(json!({ "cpu_millis": 60_000, "memory_bytes": gib(100) })),
+            small(json!({ "memory_bytes": gib(32) })),
+            small(json!({ "cpu_features": ["avx512f"] })),
+            small(json!({ "cpu_model": XEON })),
+            small(json!({ "gpu": h100(1) })),
+            small(json!({ "gpu": h100(4), "cpu_millis": 16_000, "memory_bytes": gib(128) })),
+        ],
         &expect![[r#"
-            agent's starts take at most 30s, train_judge's starts take at most 60s, final_judge's starts take at most 60s
-            agent's starts take at most 30s, train_judge's starts take at most 30s, final_judge's starts take at most 30s
-            /roles/0/needs: `agent` fits no class of sandbox, as `large` offers 16000 thousandths of a CPU, fewer than its 16001; `small` offers 8000 thousandths of a CPU, fewer than its 16001: ask for no more than a class offers
-            /roles/2/needs: `final_judge` fits no class of sandbox, as `large` offers 68719476736 bytes of memory, fewer than its 68719476737; `small` offers 2147483648 bytes of memory, fewer than its 68719476737: ask for no more than a class offers"#]],
+            {"cpu_millis":2000,"memory_bytes":2147483648}: `aws` `judge`
+            {"cpu_millis":8000,"memory_bytes":17179869184}: `aws` `judge`
+            {"cpu_millis":8001,"memory_bytes":2147483648}: `aws` `judge_60`
+            {"cpu_millis":60000,"memory_bytes":107374182400}: `aws` `judge_60`
+            {"cpu_millis":2000,"memory_bytes":34359738368}: `aws` `agent`
+            {"cpu_features":["avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: `aws` `judge_60`
+            {"cpu_millis":2000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: `aws` `ice_lake`
+            {"cpu_millis":2000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: `gpus` `h100`
+            {"cpu_millis":16000,"gpu":{"count":4,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":137438953472}: `gpus` `h100_4`"#]],
+    );
+    check(
+        [
+            small(json!({ "cpu_millis": 128_000 })),
+            small(json!({ "memory_bytes": gib(512) })),
+            small(json!({ "cpu_features": ["amx_tile", "avx512f"] })),
+            small(json!({ "cpu_model": XEON, "cpu_millis": 8000 })),
+            small(json!({ "cpu_model": "AMD EPYC 7R13 Processor" })),
+            small(json!({ "gpu": h100(2) })),
+        ],
+        &expect![[r#"
+            {"cpu_millis":128000,"memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: offer a class that meets its needs, or change its needs
+            {"cpu_millis":2000,"memory_bytes":549755813888}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` offers 68719476736 bytes of memory, fewer than its 549755813888; `aws`'s `ice_lake` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge_60` offers 137438953472 bytes of memory, fewer than its 549755813888; `aws`'s `judge_memory` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100_4` offers 274877906944 bytes of memory, fewer than its 549755813888: offer a class that meets its needs, or change its needs
+            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `ice_lake` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `judge_60` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge_memory` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
+            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_60` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_memory` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
+            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
+            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs"#]],
+    );
+    let mut unplaced = fixture();
+    unplaced["roles"][0]["needs"]["gpu"] = h100(8);
+    unplaced["roles"][2]["needs"]["cpu_millis"] = json!(64_001);
+    check(
+        [Placing(fixture()), Placing(unplaced)],
+        &expect![[r#"
+            agent, on `aws` in `agent`, whose starts take at most 30s; train_judge, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
+            /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs
+            /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 64001: offer a class that meets its needs, or change its needs"#]],
+    );
+}
+
+/// A class's price as JSON, and how it writes back, or why it is refused.
+struct Price(Value);
+
+impl Case for Price {
+    fn outcome(self) -> String {
+        match serde_json::from_value::<UsdPerHour>(self.0.clone()) {
+            Ok(price) => format!("{} writes as {}", self.0, json!(price)),
+            Err(error) => error.to_string(),
+        }
+    }
+}
+
+#[test]
+fn prices() {
+    check(
+        [
+            Price(json!(0)),
+            Price(json!(2)),
+            Price(json!(0.3672)),
+            Price(json!(0.000_001)),
+            Price(json!(1_000_000)),
+            Price(json!(0.000_000_4)),
+            Price(json!(0.123_456_7)),
+            Price(json!(-0.000_001)),
+            Price(json!(1_000_000.000_001)),
+            Price(json!("0.3672")),
+        ],
+        &expect![[r#"
+            0 writes as 0.0
+            2 writes as 2.0
+            0.3672 writes as 0.3672
+            1e-6 writes as 1e-6
+            1000000 writes as 1000000.0
+            4e-7 writes as 0.0
+            0.1234567 writes as 0.123457
+            -0.000001 is not a price in dollars an hour: give one from 0 to 1000000, such as 0.3672
+            1000000.000001 is not a price in dollars an hour: give one from 0 to 1000000, such as 0.3672
+            invalid type: string "0.3672", expected f64"#]],
     );
 }
 
@@ -268,14 +456,18 @@ fn hellos() {
             HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddee"}"#),
             HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff00"}"#),
             HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeefg"}"#),
+            HelloJson(r#"{"version":0,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":0,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
-            Hello { grant: None }
-            Hello { grant: Some(RegistrationGrant(..)) }
+            Hello { grant: None, gpus: None }
+            Hello { grant: Some(RegistrationGrant(..)), gpus: None }
             the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox"#]],
+            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            Hello { grant: None, gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
+            the hello isn't of sandbox protocol 0's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -428,6 +620,49 @@ fn checked_values() {
             `/metrics/` would return the empty key: point to a field with a name
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
+    );
+}
+
+#[test]
+fn needs_values() {
+    let needs = "/roles/0/needs";
+    let mut labelled = fixture();
+    let role = labelled["roles"][0].as_object_mut().unwrap();
+    let resources = role.remove("needs").unwrap();
+    role.insert("resources".to_owned(), resources);
+    role.insert("placement".to_owned(), json!("agent"));
+    let gpu = |count: u32, model: &str| json!({ "count": count, "model": model });
+    let every = json!({
+        "cpu_millis": 4000,
+        "memory_bytes": 17_179_869_184_u64,
+        "gpu": gpu(1, "NVIDIA H100 80GB HBM3"),
+        "cpu_features": ["avx512bw", "avx512dq", "avx512f"],
+        "cpu_model": XEON,
+    });
+    check(
+        [
+            fixture_with("/ir_version", json!("pumpkin.ir/v1")),
+            labelled,
+            fixture_with(needs, every),
+            fixture_with(&format!("{needs}/gpu"), gpu(0, "NVIDIA H100 80GB HBM3")),
+            fixture_with(&format!("{needs}/gpu"), gpu(1, "")),
+            fixture_with(&format!("{needs}/cpu_features"), json!(["AVX512F"])),
+            fixture_with(&format!("{needs}/cpu_features"), json!([""])),
+            fixture_with(&format!("{needs}/cpu_model"), json!("")),
+            fixture_with(&format!("{needs}/cpu_model"), json!("Xeon\n")),
+            fixture_with(&format!("{needs}/disk_bytes"), json!(1u64 << 37)),
+        ],
+        &expect![[r#"
+            unknown variant `pumpkin.ir/v1`, expected `pumpkin.ir/v0`
+            unknown field `placement`, expected one of `name`, `image`, `user`, `needs`, `runtime`, `egress`, `grants`
+            parsed
+            invalid value: integer `0`, expected a nonzero u32
+            `` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`
+            `AVX512F` is not a CPU's flag: use one as `/proc/cpuinfo` names it, such as `avx512f`
+            `` is not a CPU's flag: use one as `/proc/cpuinfo` names it, such as `avx512f`
+            `` is not a CPU's model: use one as `/proc/cpuinfo` names it, such as `AMD EPYC 7R13 Processor`
+            `Xeon\n` is not a CPU's model: use one as `/proc/cpuinfo` names it, such as `AMD EPYC 7R13 Processor`
+            unknown field `disk_bytes`, expected one of `cpu_millis`, `memory_bytes`, `gpu`, `cpu_features`, `cpu_model`"#]],
     );
 }
 

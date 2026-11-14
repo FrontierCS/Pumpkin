@@ -155,7 +155,7 @@ bench_task(
     train_seconds = 12000,
     final_timeout = 120,
     submission_bytes = 4 * MiB,
-    judge = {{"cpu_millis": 8000, "memory_bytes": 2 * GiB}},
+    judge = {{"cpu_millis": 8000, "memory_bytes": 2 * GiB, "cpu_features": ["avx2"]}},
     metrics = ["instances", "solved", "submitted", "invalid", "duplicate"],
 )
 "#

@@ -8,10 +8,16 @@ use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::{fmt, thread};
 
-use schema::sandbox::{FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, ToSandbox, frame};
-use stdx::{Context, unpoisoned};
+use schema::ir::GpuModel;
+use schema::sandbox::{
+    FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant, ToSandbox,
+    frame,
+};
+use stdx::process::Environment;
+use stdx::{Context, Deadline, unpoisoned};
 
 use crate::commands::Commands;
 use crate::files::{self, Puts};
@@ -38,12 +44,18 @@ type Reader = Box<dyn Read>;
 /// The writing end of a session's connection.
 type Writer = Box<dyn Write + Send>;
 
-/// Connects to `gateway`, opens the session, and serves it until the gateway ends it. With
-/// `serve_ops`, it also serves ops, and with `serve_model`, the model endpoint, both from before
-/// the first request. Fails, with the gateway's reason, if the gateway refuses the session,
-/// having started nothing.
+/// How long `sandboxd` gives `nvidia-smi` to name the sandbox's GPUs as it starts.
+// A first query wakes the GPUs' driver, which takes seconds where nothing keeps it awake; past
+// that, the start goes on without a fact that it can do without.
+const GPUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connects to `gateway`, opens the session with a hello that names the sandbox's GPUs, as
+/// `nvidia-smi` names them, if it does within [`GPUS_TIMEOUT`], and serves the session until the
+/// gateway ends it. With `serve_ops`, it also serves ops, and with `serve_model`, the model
+/// endpoint, both from before the first request. Fails, with the gateway's reason, if the gateway
+/// refuses the session, having started nothing.
 pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Result<(), String> {
-    let (reader, writer) = meet(gateway)?;
+    let (reader, writer) = meet(gateway, gpus())?;
     let sender = Sender(Arc::new(Mutex::new(writer)));
     let ops = Ops::default();
     if serve_ops {
@@ -69,15 +81,44 @@ pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Re
     served.context("the session with the gateway failed")
 }
 
+/// The sandbox's GPUs, each by its model, as `nvidia-smi` names them within [`GPUS_TIMEOUT`],
+/// which it runs as it would a command; none where it isn't on `PATH`, fails, or names none.
+fn gpus() -> Option<Vec<GpuModel>> {
+    let mut nvidia_smi = stdx::process::command("nvidia-smi", Environment::Inherited);
+    nvidia_smi.args(["--query-gpu=name", "--format=csv,noheader"]);
+    let output = stdx::process::output(&mut nvidia_smi, Deadline::after(GPUS_TIMEOUT));
+    let output = output.ok()?.filter(|output| output.status.success())?;
+    let names = String::from_utf8(output.stdout).ok()?;
+    let gpus = names
+        .lines()
+        .map(|name| GpuModel::try_from(name.trim().to_owned()).ok());
+    gpus.collect::<Option<Vec<_>>>()
+        .filter(|gpus| !gpus.is_empty())
+}
+
+/// The hello that presents `grant` and names `gpus`, unless their names would make it longer
+/// than [`MAX_HELLO_BYTES`], which the gateway would refuse.
+fn hello(grant: Option<RegistrationGrant>, gpus: Option<Vec<GpuModel>>) -> Hello {
+    let named = Hello { grant, gpus };
+    let fits = serde_json::to_vec(&named).is_ok_and(|json| json.len() <= MAX_HELLO_BYTES);
+    if fits {
+        return named;
+    }
+    Hello {
+        gpus: None,
+        ..named
+    }
+}
+
 /// Meets `gateway`, once it connects, or connecting to it, once, and returns the connection's two
-/// ends, the session open.
-fn meet(gateway: &Gateway) -> Result<(Reader, Writer), String> {
+/// ends, the session open with a hello that names `gpus`.
+fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Writer), String> {
     let connecting = format_args!("connecting to the gateway at {gateway} failed");
     let opening = format_args!("opening the session with the gateway at {gateway} failed");
     match gateway {
         Gateway::Socket(socket) => {
             let stream = UnixStream::connect(socket).context(connecting)?;
-            open(&mut &stream, &Hello { grant: None }).context(opening)?;
+            open(&mut &stream, &hello(None, gpus)).context(opening)?;
             halves(stream, UnixStream::try_clone)
         }
     }

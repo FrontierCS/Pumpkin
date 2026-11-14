@@ -21,12 +21,13 @@ harming the host or the run.
 
 ## Entry points
 
-The binaries are `pumpkin` (`crates/pumpkin/src/main.rs`), which runs a workflow,
-`sandboxd`, also `sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask`
-(`xtask/src/main.rs`). The key types: `ir::Workflow`, a workflow as written; `workflow::Workflow`,
-parsed; `Placed`, its roles placed in classes of sandbox; `Core`, a run's decisions; `Session`,
-the host's end of a sandbox; `Provider`, a provider a run has connected to; `Engine`, the
-operator's Docker engine, on which the images that sandboxes run are built.
+The binaries are `pumpkin` (`crates/pumpkin/src/main.rs`), which runs a workflow, `sandboxd`, also
+`sandboxctl` (`crates/sandboxd/src/main.rs`), and `cargo xtask` (`xtask/src/main.rs`). The key
+types: `ir::Workflow`, a workflow as written; `workflow::Workflow`, parsed; `Placed`, its roles
+placed on providers, each in the smallest class of sandbox whose offers meet its needs
+(`Workflow::place`); `Core`, a run's decisions; `Session`, the host's end of a sandbox; `Provider`,
+a provider a run has connected to; `Engine`, the operator's Docker engine, on which the images that
+sandboxes run are built.
 
 ## Front ends
 
@@ -54,9 +55,9 @@ need Docker reach it with; a helper that one crate's tests use stays in that cra
 
 **`crates/schema`.** The formats Pumpkin's programs share, never copied into a consumer: `ir`, the
 workflow IR; `workflow`, a workflow parsed, and placed in the classes of sandbox that providers
-declare (`Class`); `sandbox`, the sandbox protocol, its `frame`s, `tree`s, ops (`sandbox::op`),
-how a sandbox meets the gateway (`SocketDial`) and the in-sandbox contract: the paths, limits and
-environment a role's commands and its session's owner share.
+offer (`Class`, `Offers`); `sandbox`, the sandbox protocol, its `frame`s, `tree`s, ops
+(`sandbox::op`), how a sandbox meets the gateway (`SocketDial`) and the in-sandbox contract: the
+paths, limits and environment a role's commands and its session's owner share.
 Another program's format, such as `docker info`'s, stays with the code that reads it.
 **API Boundary:** the IR, the in-sandbox contract, `sandboxctl`'s JSON.
 - **Architecture Invariant:** outside its tests, it depends on `serde` and `serde_json` alone,
@@ -114,12 +115,13 @@ the model endpoint, `ctl` is `sandboxctl`, and `sys` holds the system calls `std
   sandbox: where the role runs the agent's code, that code can shape what `sandboxd` reports.
 
 **`crates/provider`.** `Provider`, a run's one handle on a provider for every side effect on it: it
-publishes what the run's sandboxes run, creates, lists and deletes them, and reads their consoles;
-`Sweep`, the part of it that lists and deletes, which a reap needs alone; and the values they take
-and give, such as `Create`. How a provider's sandboxes meet the gateway is its `Meeting`, each way of which holds the create, a `Creator`, that takes what that way gives a
-sandbox: a socket's dial. A provider is `providers/<name>`, crate `<name>`, which holds its
-platform's calls, but those that a crate of its own holds for every provider that makes them, as
-`engine` does the operator's Docker engine's.
+reserves what the run's roles need (`Reservation`), publishes what the run's sandboxes run, creates,
+lists and deletes them, and reads their consoles; `Sweep`, the part of it that lists and deletes,
+which a reap needs alone; and the values they take and give, such as `Create`. How a provider's
+sandboxes meet the gateway is its `Meeting`, each way of which holds the create, a `Creator`, that
+takes what that way gives a sandbox: a socket's dial. A provider is `providers/<name>`, crate
+`<name>`, which holds its platform's calls, but those that a crate of its own holds for every
+provider that makes them, as `engine` does the operator's Docker engine's.
 - **Architecture Invariant:** it knows no provider: of Pumpkin's crates it depends only on
   `schema`.
 - **Architecture Invariant:** every call on sandboxes names its run and keeps to that run's, by
@@ -139,12 +141,17 @@ platform's calls, but those that a crate of its own holds for every provider tha
   with the start that issued it.
 
 **`providers/docker`.** `docker`, a sandbox as a container that needs no root to start, on the
-operator's engine: `Docker`, made from an `Engine`, is the `Provider` that makes each sandbox a
-container under the engine's `confinement`, once it has checked that the engine enforces each of
-a container's limits (`Docker::connect`). For a reap, it reaches the engine without checking that
-it is fit to run on (`Docker::reach`), as `Reached`, which is only a `Sweep`.
+operator's engine: `Docker`, made from an `Engine` and the CPUs it may give, is the `Provider`
+that makes each sandbox a container under the engine's `confinement`, on CPUs of its run's own
+(`cpus`), once it has checked that the engine enforces each of a container's limits
+(`Docker::connect`). For a reap, it reaches the engine without checking that it is fit to run on
+(`Docker::reach`), as `Reached`, which is only a `Sweep`.
 - **Architecture Invariant:** a container's only way out is its session's socket: it has no
   network but loopback, and the role's files move over the session, never through the daemon.
+- **Architecture Invariant:** a run's containers run on CPUs that no other run's are given, from
+  its reservation to its end: the machine's ledger (`cpus`) holds each run's, locked by the
+  process that holds the reservation, so no process keeps it, and a reserve reads every run's
+  and writes only its own.
 
 **`crates/decision`.** The driver's decision core: `Core` takes each `Event` a runtime
 observes and returns the `Action`s the runtime is to perform, until one ends the run, with its
@@ -175,34 +182,38 @@ so the model provider's TLS client (`ureq`, with `rustls` and `ring`) is in this
   reverse; what the run does with an answer, its health and fault rule, is the runtime's.
 
 **`crates/runtime`.** The host side: the driver's runtime, whose `Run` prepares each run, then
-drives the decision core on the run's `Provider`, whose sandboxes meet the gateway where its
-`Meeting` says, timed by its `Host`, whose clock makes the inboxes the run's threads wait on
-(`System`, the machine's), keeping the run's record, whose files `record` lays out, and its run
-log, whose records `log` does, each synced through the host. `model` serves the agent's model
+drives the decision core on the run's `Provider`s, each of whose sandboxes meets the gateway where
+its provider's `Meeting` says, timed by its `Host`, whose clock makes the inboxes the run's threads
+wait on (`System`, the machine's), keeping the run's record, whose files `record` lays out, and
+its run log, whose records `log` does, each synced through the host. `model` serves the agent's model
 requests through `route`'s `Route` and `Upstream`, and judges the model provider's answers, until
 the work phase ends (`model_requests_allowed`), or the provider refuses the route's key.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox and its jobs
   are gone, so nothing the agent started runs while its submission is judged.
 - **Architecture Invariant:** a judge's evidence (`evidence_dir`) goes to the run's record and
   nowhere else: no op reply carries a collected file, so only the operator sees it.
+- **Architecture Invariant:** a run's record is made only once each provider that it places a
+  role on holds what its roles need at once (`Provider::reserve`), so a run that doesn't fit is
+  refused with no record; the run holds it until its end has deleted its sandboxes.
 - **Architecture Invariant:** a record appears in the runs directory only once its `driver.pid`
   is locked (`Lock`), and the lock is held until the run's last write, so a record is ended, live
   or lost, by `outcome.json` and then the lock, and a record without `driver.pid` is not one.
   Only the lock's holder writes the record, and once it has let go only `Record::reap` does,
   which records a lost run as failed, and appends each sandbox it removed, or found gone, to
   `reaps.jsonl`, so that a reap is auditable from the record.
-- **Architecture Invariant:** a run takes its workflow placed (`Placed`), so each role fits the
-  class of sandbox it is placed in, and each sandbox is given as long to start as its role's class
-  takes.
+- **Architecture Invariant:** a run takes its workflow placed (`Placed`), and makes from it the
+  providers it runs on (`ByProvider`), one for each provider that it places a role on, so each
+  role's sandboxes are created on its provider, in the class of sandbox it is placed in, which it
+  fits, and each is given as long to start as that class takes.
 - **Architecture Invariant:** the runtime is written once, against `Provider`: it depends on no
   provider's crate, not even in its tests, which run on the simulated provider (`Sim`), so a new
   provider changes no runtime code.
 - **Architecture Invariant:** every sandbox starts on the runtime's one start path, `sandbox`, as
-  the runtime calls a run's provider, but for what it declared (`Provider::ready`), only there:
-  through `Sandboxes` for a run, and for a reap through `Record::reap`, which only lists and
-  deletes (`Sweep`); and a run's end deletes whatever its provider still lists of the run, so a
-  run ends with none of its sandboxes left, or fails, but for one that a create that gave up makes
-  only after that list (`Creator::create`), which `Record::reap` deletes.
+  the runtime calls a run's providers, but for what each declared (`Provider::ready`), only
+  there: through `Sandboxes` for a run, and for a reap through `Record::reap`, which only lists
+  and deletes (`Sweep`); and a run's end deletes whatever each of its providers still lists of the
+  run, so a run ends with none of its sandboxes left, or fails, but for one that a create that
+  gave up makes only after that list (`Creator::create`), which `Record::reap` deletes.
 
 **`crates/harness`.** The harnesses agents run, such as Codex (`codex`), each pinned by a
 `Pin`, whose recipe adds the harness to a task's agent image in a layer of its own, below the
@@ -236,16 +247,18 @@ evaluates a task's source with `lang`, from the files below the root of its repo
 configuration, then lints the files it read (`Plan::lint`) with the formatter beside `pumpkin`
 (`style`), with which `fmt` formats `.star` files. `build` takes the same path, then builds the
 images on the engine of the configuration's Docker context (`Engine::start`) and prints the IR
-that names them. `run` starts the run of a task on that engine in a driver process (`driver`),
-which it executes as itself, and returns once the run has started: the driver builds the task's
-images as `build` does, places the workflow's roles in the engine's classes before the record is
-begun, and hands `Run` the provider as a `Provider`, with the static `sandboxd` it has found
-(`Sandboxd`). `wait` follows a run's record (`Record`) to its end, `cancel` stops a run, and
-`cancel` and `reap` remove what a run that has ended left (`Record::reap`), on each provider that
-its record names (`Reaching`); what a command says of an ending or a refusal ends with the
-commands to run next (`next`). It reads the machine's configuration (`config`, TOML): the Docker
-context, and the model upstreams that a workflow's model route may reach, of which it hands `Run`
-the one that serves the route (`Serving`).
+that names them.
+`run` starts the run of a task in a driver process (`driver`), which it executes as itself, and
+returns once the run has started: the driver connects each provider that the configuration
+names, as its kind says (`Connected`), then builds the task's images as `build` does, places the
+workflow's roles in the classes that they offer before the record is begun, and hands `Run` each
+provider that a role is placed on, with the static `sandboxd` it has found (`Sandboxd`). `wait`
+follows a run's record (`Record`) to its end, `cancel` stops a run, and `cancel` and `reap`
+remove what a run that has ended left (`Record::reap`), on each provider that its record names
+(`Reaching`); what a command says of an ending or a refusal ends with the commands to run next
+(`next`). It reads the machine's configuration (`config`, TOML): the Docker context; the
+providers, each by name and kind, `docker`; and the model upstreams that a workflow's model
+route may reach, of which it hands `Run` the one that serves the route (`Serving`).
 - **Architecture Invariant:** only `style` runs the formatter, buildifier, and Pumpkin's interface
   holds none of its flags or forms: each file's text goes to it, and `style` reads what it gives
   back, so another formatter can take its place.

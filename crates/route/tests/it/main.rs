@@ -126,7 +126,15 @@ fn meeting(dir: &Path) -> (Sockets, Registration, PathBuf) {
 /// body as it hears it.
 fn fake_sandbox(socket: &Path, requests: Vec<Request>, parts: Option<&Sender<()>>) -> Vec<String> {
     let mut connection = UnixStream::connect(socket).unwrap();
-    frame::write(&mut connection, &Hello { grant: None }, &[]).unwrap();
+    frame::write(
+        &mut connection,
+        &Hello {
+            grant: None,
+            gpus: None,
+        },
+        &[],
+    )
+    .unwrap();
     let (reply, _) = frame::read::<HelloReply>(&mut connection).unwrap().unwrap();
     assert_eq!(reply, HelloReply::Accepted, "the answer to the hello");
     let mut heard = Vec::new();

@@ -252,7 +252,7 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 3814 prefixes evaluate
+            == tasks/literal/task.star: 2 of 3938 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
@@ -285,7 +285,15 @@ fn tasks() {
                   "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
                   "name": "agent",
                   "needs": {
+                    "cpu_features": [
+                      "avx2",
+                      "avx512f"
+                    ],
                     "cpu_millis": 4000,
+                    "gpu": {
+                      "count": 1,
+                      "model": "NVIDIA H100 80GB HBM3"
+                    },
                     "memory_bytes": 17179869184
                   },
                   "runtime": {

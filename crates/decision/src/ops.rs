@@ -253,7 +253,11 @@ impl Core<'_> {
         });
         OpsReply {
             remaining_seconds: self.seconds_left(deadline),
-            resources: self.workflow.sandbox(self.workflow.agent().role).needs,
+            resources: self
+                .workflow
+                .sandbox(self.workflow.agent().role)
+                .needs
+                .resources(),
             grants: judges.chain([submit]).collect(),
         }
     }

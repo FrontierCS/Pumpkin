@@ -7,7 +7,8 @@
 //!
 //! Where a contract lets providers differ, as [`Sweep::list`](provider::Sweep::list)'s lets one
 //! leave out an ended sandbox that it has freed itself, the suite shows what the contract fixes,
-//! by what the subject's platform holds ([`Subject::held`]), so the outcomes stay the same.
+//! by what the subject's platform holds ([`Subject::held`]), or whether its provider holds
+//! anything for runs ([`Subject::reserves`]), so the outcomes stay the same.
 
 #![expect(
     clippy::print_stderr,
@@ -15,6 +16,7 @@
 )]
 
 use std::fmt::Write as _;
+use std::num::NonZeroU32;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -24,8 +26,8 @@ use std::{fs, thread};
 use expect_test::expect;
 use gateway::{Arrival, Put, Registration, Session, Sockets};
 use provider::{
-    Console, Create, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
-    UnixTime,
+    Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
+    SandboxdRef, UnixTime,
 };
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
@@ -55,6 +57,10 @@ pub trait Subject {
     /// through the provider: those in which anything still runs, or whose resources are still
     /// to free.
     fn held(&self, run: &RunTag) -> Vec<SandboxId>;
+
+    /// Whether the provider shares a host between runs, and so refuses a create for a role its
+    /// run holds nothing for ([`Provider::reserve`]).
+    fn reserves(&self) -> bool;
 }
 
 /// What the suite publishes, which only a subject's platform can name.
@@ -78,6 +84,14 @@ pub struct Locals {
 fn soon() -> Deadline {
     Deadline::after(Duration::from_secs(1))
 }
+
+/// The roles of the suite's run, each of which it starts sandboxes of only once those of the one
+/// before are gone; the other run's is the first alone.
+const ROLES: [&str; 6] = ["lifecycle", "killed", "mute", "stalled", "broken", "late"];
+
+/// How long the suite waits for room to reserve on its provider, which other tests may hold
+/// for as long as they run.
+const ROOM: Duration = Duration::from_mins(10);
 
 /// Runs the suite against each of `subjects` and checks that their outcomes are the same.
 ///
@@ -103,6 +117,7 @@ pub fn check(subjects: &[(&str, &dyn Subject)]) {
     expect![[r#"
         publishing an image it can't reach: refused
         publishing a `sandboxd` it can't reach: refused
+        a create for a role the run holds nothing for, where the provider holds anything: refused
         lifecycle: accepted and set up by its startup
         listed: ["lifecycle"]
         listed as another run's: []
@@ -162,6 +177,13 @@ fn run(name: &str, subject: &dyn Subject) -> String {
     let (image, sandboxd) = ours;
     let mute = suite.connect().publish_sandboxd(&mute).unwrap();
     let broken = suite.connect().publish_sandboxd(&broken).unwrap();
+    // A provider that holds nothing for runs makes such a create as any other, so it isn't made.
+    let refused = !subject.reserves()
+        || (suite.create("unheld", &image, &sandboxd, from_now(suite.startup()))).is_err();
+    lines.push(format!(
+        "a create for a role the run holds nothing for, where the provider holds anything: {}",
+        if refused { "refused" } else { "made" }
+    ));
     lines.extend(lifecycle(&mut suite, &image, &sandboxd, &theirs));
     lines.extend(kills(&mut suite, &image, &sandboxd));
     lines.extend(exits(&mut suite, &image, &mute));
@@ -392,8 +414,12 @@ struct Suite<'a> {
     /// The other run's sandboxes created, each by its id and the role whose name it shares, by
     /// which the outcomes name it, as that role's namesake.
     namesakes: Vec<(SandboxId, &'static str)>,
-    /// The startup of the provider's slowest class, which bounds each create.
-    startup: Duration,
+    /// The provider's slowest class, by its name, which each sandbox is created in, and its
+    /// startup, which bounds each create.
+    slowest: (Name, Duration),
+    /// What the provider holds for the run and the other run, each of whose roles' sandboxes
+    /// it creates.
+    _held: [Reservation; 2],
     /// Last, so that it is removed once the sockets in it are.
     dir: TempDir,
 }
@@ -408,16 +434,27 @@ impl<'a> Suite<'a> {
             .tempdir()
             .unwrap();
         let provider = subject.connect().unwrap();
-        let classes = provider.ready().classes.values();
-        let startup = classes.map(|class| class.startup_seconds).max().unwrap();
+        let classes = provider.ready().classes.iter();
+        let (class, declared) = classes
+            .max_by_key(|(_, class)| class.startup_seconds)
+            .unwrap();
+        let slowest = (
+            class.clone(),
+            Duration::from_secs(declared.startup_seconds.get()),
+        );
+        let run = RunTag::try_from(tag.clone()).unwrap();
+        let other = RunTag::try_from(format!("{tag}-other")).unwrap();
+        let held = [(&run, &ROLES[..]), (&other, &ROLES[..1])]
+            .map(|(run, roles)| reserved(&*provider, run, roles));
         Self {
             subject,
             sockets: Sockets::create(dir.path().join("sockets")).unwrap(),
-            run: RunTag::try_from(tag.clone()).unwrap(),
-            other: RunTag::try_from(format!("{tag}-other")).unwrap(),
+            run,
+            other,
             made: Vec::new(),
             namesakes: Vec::new(),
-            startup: Duration::from_secs(startup.get()),
+            slowest,
+            _held: held,
             dir,
         }
     }
@@ -465,7 +502,7 @@ impl<'a> Suite<'a> {
         (id, registration)
     }
 
-    /// Creates a sandbox of `run` for `role`, named for it, which
+    /// Creates a sandbox of `run` for `role`, named for it, in the provider's slowest class, which
     /// runs `image` and `sandboxd`, meets the gateway where the provider's meeting says, at the
     /// socket the suite's sockets issue as `socket`, and gives up by
     /// `by`; returns its id and the registration of where it meets the gateway, or how its create
@@ -478,7 +515,7 @@ impl<'a> Suite<'a> {
         published: (&ImageRef, &SandboxdRef),
         by: UnixTime,
     ) -> Result<(SandboxId, Registration), String> {
-        let create = asked(run, role, published, by);
+        let create = asked(run, role, self.slowest.0.clone(), published, by);
         let provider = self.connect();
         match provider.meeting() {
             Meeting::Local(creator) => {
@@ -491,7 +528,7 @@ impl<'a> Suite<'a> {
 
     /// The startup of the provider's slowest class.
     fn startup(&self) -> Duration {
-        self.startup
+        self.slowest.1
     }
 
     /// Whether the run's list finds all that the platform holds of the run, which, once the
@@ -641,11 +678,12 @@ impl<'a> Suite<'a> {
     }
 }
 
-/// The create of a sandbox of `run` for `role`, named for it, which runs
+/// The create of a sandbox of `run` for `role`, named for it, of class `class`, which runs
 /// `image` and `sandboxd` as [`suite_role`] says, and gives up by `by`.
 fn asked(
     run: &RunTag,
     role: &str,
+    class: Name,
     (image, sandboxd): (&ImageRef, &SandboxdRef),
     by: UnixTime,
 ) -> Create {
@@ -653,6 +691,8 @@ fn asked(
         run: run.clone(),
         name: Name::try_from(role.to_owned()).unwrap(),
         role: suite_role(role),
+        instance: 0,
+        class,
         image: image.clone(),
         sandboxd: sandboxd.clone(),
         ops: false,
@@ -663,7 +703,36 @@ fn asked(
     }
 }
 
-/// Role `role`, as the suite's sandboxes have it: run as 4242:4243, with half a CPU and 256 MiB.
+/// What `provider` holds for `run`, whose `roles` run one after another, as
+/// [`suite_role`] says each is ([`reserve_with_room`]).
+fn reserved(provider: &dyn Provider, run: &RunTag, roles: &[&str]) -> Reservation {
+    let phases: Vec<Vec<Role>> = (roles.iter()).map(|&role| vec![suite_role(role)]).collect();
+    reserve_with_room(provider, run, &phases)
+}
+
+/// What `provider` holds for `run`, of `phases`, once it has room beside what other tests hold,
+/// which it waits for for up to 10 minutes.
+///
+/// # Panics
+///
+/// Panics if it still has no room then.
+pub fn reserve_with_room(
+    provider: &dyn Provider,
+    run: &RunTag,
+    phases: &[Vec<Role>],
+) -> Reservation {
+    let room = Deadline::after(ROOM);
+    loop {
+        match provider.reserve(run, phases) {
+            Ok(held) => return held,
+            Err(error) if room.remaining().is_none() => panic!("{error}"),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+/// Role `role`, as the suite's sandboxes have it: run as 4242:4243, with half a CPU and 256 MiB,
+/// one at a time.
 fn suite_role(role: &str) -> Role {
     Role {
         name: Name::try_from(role.to_owned()).unwrap(),
@@ -672,6 +741,7 @@ fn suite_role(role: &str) -> Role {
             r#"{"cpu_millis": 500, "memory_bytes": 268435456}"#,
         )
         .unwrap(),
+        instances: NonZeroU32::MIN,
     }
 }
 

@@ -1,8 +1,7 @@
 //! The driver's decision core, fed event scripts on [`WORKFLOW`], or on variants of it. Each
 //! test shows what the core did after each event, and when it next wants a tick whenever that
-//! changes. Each role is placed in a class whose sandboxes may take [`STARTUP`] to start, or, if
-//! it asks for more memory than that class gives, [`SLOW_STARTUP`], which sets the run's hard
-//! end.
+//! changes. Each role is placed in a class whose sandboxes may take [`STARTUP`] to start, or
+//! [`SLOW_STARTUP`] for a role that needs the CPU model `slow`, which sets the run's hard end.
 //!
 //! A script has one event per line: the time in milliseconds since the run started, then one
 //! of these:
@@ -21,7 +20,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -31,21 +30,18 @@ use decision::{
     Verdict, WorkEnd,
 };
 use expect_test::{Expect, expect};
-use schema::ir::{self, Name, Resources, Sha256Digest};
+use schema::ir::{self, CpuModel, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
-use schema::workflow::{Class, JudgeCall, Workflow};
+use schema::workflow::{Class, JudgeCall, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
-/// How long a sandbox may take to start in the class that every role of [`WORKFLOW`] fits.
+/// How long a sandbox may take to start in class `fast`.
 const STARTUP: Duration = Duration::from_secs(10);
 
-/// How long a sandbox may take to start in the class that gives a role more memory.
+/// How long a sandbox may take to start in class `slow`.
 const SLOW_STARTUP: Duration = Duration::from_secs(30);
-
-/// The memory that the slow class gives a role.
-const SLOW_MEMORY_BYTES: u64 = 2 << 40;
 
 /// Runs `script` on [`WORKFLOW`] with `edit` applied, and compares what the core did
 /// with `expect`.
@@ -53,7 +49,11 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     edit(&mut ir);
     let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
-    let placed = Workflow::parse(&ir).unwrap().place(&classes()).unwrap();
+    let offered = offered();
+    let (placed, _) = Workflow::parse(&ir)
+        .unwrap()
+        .place(&offered, |classes| classes)
+        .unwrap();
     let mut run = Run {
         workflow: placed.workflow(),
         ops: 0,
@@ -86,23 +86,32 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     expect.assert_eq(&run.transcript);
 }
 
-/// Two classes: one whose starts take [`STARTUP`], which every role of [`WORKFLOW`] fits, and one
-/// whose starts take [`SLOW_STARTUP`], which gives a role [`SLOW_MEMORY_BYTES`].
-fn classes() -> BTreeMap<Name, Class> {
-    let class = |name: &str, memory_bytes, startup: Duration| {
-        let class = Class {
-            resources: Resources {
-                cpu_millis: NonZeroU64::new(64_000).unwrap(),
-                memory_bytes: NonZeroU64::new(memory_bytes).unwrap(),
-            },
-            startup_seconds: NonZeroU64::new(startup.as_secs()).unwrap(),
+/// The classes of one provider, each of which offers what every role of the fixture needs:
+/// `fast`, and `slow`, which states the CPU model `slow`, so that only a role that needs that
+/// model is placed in it.
+fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
+    let name = |name: &str| Name::try_from(name.to_owned()).unwrap();
+    let class = |class: &str, startup: Duration, cpu_model: Option<CpuModel>| {
+        let offers = Offers {
+            cpu_millis: NonZeroU64::new(64_000).unwrap(),
+            memory_bytes: NonZeroU64::new(1 << 40).unwrap(),
+            gpu: None,
+            cpu_features: BTreeSet::new(),
+            cpu_model,
         };
-        (Name::try_from(name.to_owned()).unwrap(), class)
+        let declared = Class {
+            offers,
+            startup_seconds: NonZeroU64::new(startup.as_secs()).unwrap(),
+            usd_per_hour: None,
+        };
+        (name(class), declared)
     };
-    BTreeMap::from([
-        class("fast", 1 << 40, STARTUP),
-        class("slow", SLOW_MEMORY_BYTES, SLOW_STARTUP),
-    ])
+    let slow = CpuModel::try_from("slow".to_owned()).unwrap();
+    let classes = [
+        class("fast", STARTUP, None),
+        class("slow", SLOW_STARTUP, Some(slow)),
+    ];
+    BTreeMap::from([(name("provider"), BTreeMap::from(classes))])
 }
 
 /// What a script needs to know as it runs.
@@ -913,7 +922,7 @@ fn hard_end_startups() {
     check(
         |ir| {
             ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(5);
-            ir["roles"][0]["needs"]["memory_bytes"] = json!(SLOW_MEMORY_BYTES);
+            ir["roles"][0]["needs"]["cpu_model"] = json!("slow");
         },
         r"
         0 agent_started
@@ -943,7 +952,7 @@ fn hard_end_startups() {
     check(
         |ir| {
             ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
-            ir["roles"][2]["needs"]["memory_bytes"] = json!(SLOW_MEMORY_BYTES);
+            ir["roles"][2]["needs"]["cpu_model"] = json!("slow");
         },
         r"
         0 agent_started

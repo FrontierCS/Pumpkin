@@ -14,7 +14,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use std::{fmt, thread};
 
-use schema::ir::Name;
+use schema::ir::{GpuModel, Name};
 use schema::sandbox::{Hello, HelloReply, OpPayloadLimit, SOCKET_NAME, SocketDial, frame};
 use stdx::Deadline;
 
@@ -94,6 +94,13 @@ impl Drop for Sockets {
     }
 }
 
+/// A sandbox's connection, once its hello has been read, and the GPUs that the hello names.
+#[derive(Debug)]
+struct Met {
+    connection: Connection,
+    gpus: Option<Vec<GpuModel>>,
+}
+
 /// Where one sandbox meets the gateway, and the accept of the session it opens there.
 ///
 /// [`Sockets::issue`] issues it. The sandbox meets the gateway as it connects to its socket.
@@ -128,7 +135,7 @@ impl Registration {
         wrap: impl Fn(Arrival) -> T + Send + 'static,
         stopped: impl Fn() -> bool,
     ) -> io::Result<Session> {
-        let connection = match self.meeting {
+        let Met { connection, gpus } = match self.meeting {
             Meeting::Socket(listener) => listener.connected(by, &stopped)?,
         };
         welcome(&connection, by)?;
@@ -141,7 +148,7 @@ impl Registration {
         let send = move |arrival| {
             let _ = arrivals.send(wrap(arrival));
         };
-        Session::new(connection, ops, models, Box::new(send))
+        Session::new(connection, gpus, ops, models, Box::new(send))
     }
 }
 
@@ -198,7 +205,7 @@ impl Listener {
     /// Waits until `by`, or until `stopped` returns true, for the sandbox to connect, then removes
     /// the socket, and reads the sandbox's hello, until then too: one that presents no grant, as
     /// a socket of the sandbox's own identifies it.
-    fn connected(self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Connection> {
+    fn connected(self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         let path = self.path.display();
         self.listener
             .set_nonblocking(true)
@@ -232,13 +239,13 @@ impl Listener {
         let connection = Connection::Unix(stream);
         let hello = read_hello(&connection, by, stopped);
         let hello = hello.map_err(|error| refuse(&connection, by, error))?;
-        if let Hello { grant: Some(_) } = hello {
+        let Hello { grant: None, gpus } = hello else {
             let message = "the hello presents a registration grant on a socket of the sandbox's \
                            own, which identifies it: expected none there";
             let error = io::Error::new(io::ErrorKind::InvalidData, message);
             return Err(refuse(&connection, by, error));
-        }
-        Ok(connection)
+        };
+        Ok(Met { connection, gpus })
     }
 }
 

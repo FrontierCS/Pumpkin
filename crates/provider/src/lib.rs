@@ -1,8 +1,10 @@
 //! The interface every provider implements, [`Provider`], the part of it that finds and
 //! deletes a run's sandboxes, [`Sweep`], and the create of its sandboxes, by how they meet the
 //! gateway ([`Meeting`]). The values they take and return are this crate's, such as
-//! [`Create`], the IR's [`Image`], and the sandbox protocol's dial ([`SocketDial`]).
+//! [`Create`], the IR's [`Image`], the sandbox protocol's dial ([`SocketDial`]), and what a run
+//! holds of a provider's ([`Reservation`]).
 
+use std::fmt;
 use std::path::Path;
 
 use schema::ir::Image;
@@ -54,6 +56,17 @@ pub trait Provider: Sweep + Send + Sync {
     /// What the provider declared when the run connected to it.
     fn ready(&self) -> &Ready;
 
+    /// Holds for `run` what its roles on this provider need, beside what other runs hold, until the
+    /// [`Reservation`] is dropped or its process ends: `phases` are the run's roles, those of a
+    /// phase running at once, [`instances`](Role::instances) of each. A shared host gives each
+    /// create its [instance](Create::instance)'s share; a host of its own holds nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails, holding nothing, if the run's needs don't fit beside other runs', saying what does,
+    /// or if what they hold can't be read; panics if a role is in more than one phase.
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String>;
+
     /// Publishes `image`, a role's, so that this provider's sandboxes can run it.
     ///
     /// # Errors
@@ -101,4 +114,27 @@ pub trait Creator<D, C = Created>: Sync {
     /// Fails if it can't be created or started by `create.by`, deleting what it made or saying
     /// what is left; [`list`](Sweep::list) finds what it can't name once the platform holds it.
     fn create(&self, create: &Create, dial: D) -> Result<C, String>;
+}
+
+/// What a provider holds for a run ([`Provider::reserve`]), until it is dropped.
+pub struct Reservation(
+    // Whatever the provider holds it by, such as a locked file; its drop releases it.
+    #[expect(
+        dead_code,
+        reason = "the reservation is held by owning it, and released by dropping it"
+    )]
+    Box<dyn Send + Sync>,
+);
+
+impl Reservation {
+    /// A reservation that holds `held`, which releases what it holds when dropped.
+    pub fn new(held: impl Send + Sync + 'static) -> Self {
+        Self(Box::new(held))
+    }
+}
+
+impl fmt::Debug for Reservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reservation").finish_non_exhaustive()
+    }
 }

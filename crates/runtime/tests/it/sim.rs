@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -26,16 +26,16 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, RunTag,
-    SandboxId, SandboxdRef, Sweep,
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep,
 };
-use schema::ir::{AbsolutePath, Image, Name, Resources, Sha256Digest};
+use schema::ir::{AbsolutePath, CpuModel, Image, Name, Sha256Digest};
 use schema::sandbox::op::{JobState, OpCall, OpReply, StatusReply};
 use schema::sandbox::{
     Entry, ExitStatus, FromSandbox, HelloReply, PROTOCOL_VERSION, RESULT_MAX_BYTES, RelativePath,
     SOCKET_NAME, SocketDial, ToSandbox, frame, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::Class;
+use schema::workflow::{Class, Offers};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::suite::{Locals, Subject};
@@ -80,12 +80,10 @@ pub(crate) const SLOW: &str = "/sim/slow";
 /// the providers whose tests use it.
 const SLOW_CREATE: Duration = Duration::from_secs(2);
 
-/// What the simulated provider's class `brief` gives a role: a CPU and a GiB of memory. Its
-/// sandboxes take at most [`BRIEF_STARTUP`] seconds to start.
-pub(crate) const BRIEF: Resources = Resources {
-    cpu_millis: NonZeroU64::new(1000).unwrap(),
-    memory_bytes: NonZeroU64::new(1 << 30).unwrap(),
-};
+/// The name of the simulated provider's second class, whose sandboxes take at most
+/// `BRIEF_STARTUP` seconds to start, and the CPU model it states, so that it is offered only to
+/// roles that need that model.
+pub(crate) const BRIEF: &str = "brief";
 
 /// How long a start in class `brief` takes at most: seconds, but still far longer than a
 /// simulated sandbox takes to start, so that a busy machine makes a start that succeeds wait
@@ -198,9 +196,24 @@ struct State {
     modes: Vec<u32>,
     /// Whether each create asked for the model endpoint, in the order of the creates.
     models: Vec<bool>,
+    /// The class of each create, in the order of the creates.
+    classes: Vec<Name>,
     /// What each publish that succeeded published, `sandboxd` or an image, in the order of the
     /// publishes.
     published: Vec<String>,
+    /// The CPUs it shares out between runs' reservations.
+    cpus: u64,
+    /// Each reservation made, live until its holder drops it.
+    reserved: Vec<Reserved>,
+}
+
+/// A run's reservation of CPUs, which counts while its holder keeps it.
+struct Reserved {
+    run: RunTag,
+    /// The roles it holds CPUs for, each with how many of its sandboxes run at once.
+    roles: Vec<(Name, NonZeroU32)>,
+    cpus: u64,
+    live: Weak<()>,
 }
 
 struct Sandbox {
@@ -279,8 +292,8 @@ impl Sim {
         Self::with_startup(30)
     }
 
-    /// A simulated provider, of platform `sim`, that declares two classes: `sim`, whose startup
-    /// is `seconds`, which every role fits, and `brief`, which gives a role [`BRIEF`].
+    /// A simulated provider, of platform `sim`, that declares two classes, which offer far more
+    /// CPU and memory than any role needs: `sim`, whose startup is `seconds`, and [`BRIEF`].
     ///
     /// # Panics
     ///
@@ -296,7 +309,10 @@ impl Sim {
                 deleting: 0,
                 modes: Vec::new(),
                 models: Vec::new(),
+                classes: Vec::new(),
                 published: Vec::new(),
+                cpus: 1 << 10,
+                reserved: Vec::new(),
             })),
             journal: None,
         }
@@ -317,10 +333,61 @@ impl Sim {
         self.journal.as_ref()
     }
 
+    /// Fails unless `create`'s run holds CPUs for its role's instance.
+    fn holds(&self, create: &Create) -> Result<(), String> {
+        let reserved = (self.state().reserved.iter()).any(|reserved| {
+            reserved.live.strong_count() > 0
+                && reserved.run.as_str() == create.run.as_str()
+                && (reserved.roles.iter()).any(|(role, instances)| {
+                    *role == create.role.name && create.instance < instances.get()
+                })
+        });
+        if reserved {
+            return Ok(());
+        }
+        Err(format!(
+            "run {} holds no simulated CPUs for instance {} of role `{}`: reserve them before its \
+             creates",
+            create.run.as_str(),
+            create.instance,
+            create.role.name
+        ))
+    }
+
     fn tell(&self, entry: impl FnOnce() -> String) {
         if let Some(journal) = &self.journal {
             journal.tell(entry());
         }
+    }
+
+    /// This provider, of the platform named `platform` in place of `sim`: each reference it
+    /// publishes names its platform, and its create refuses one that names another, as a
+    /// platform's references mean nothing to another's.
+    #[must_use]
+    pub(crate) fn named(self, platform: &'static str) -> Self {
+        Self { platform, ..self }
+    }
+
+    /// This provider, which shares out `cpus` CPUs between the reservations of runs, each
+    /// instance of a role counting its CPU limit rounded up to whole CPUs, and refuses a
+    /// reservation that doesn't fit beside the others held.
+    #[must_use]
+    pub(crate) fn with_cpus(self, cpus: u64) -> Self {
+        self.state().cpus = cpus;
+        self
+    }
+
+    /// This provider, whose classes offer `memory_bytes` of memory each.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `memory_bytes` is 0.
+    #[must_use]
+    pub(crate) fn offering_memory(mut self, memory_bytes: u64) -> Self {
+        for class in self.ready.classes.values_mut() {
+            class.offers.memory_bytes = NonZeroU64::new(memory_bytes).unwrap();
+        }
+        self
     }
 
     /// The permission bits of the directory that held each create's socket directory, in the
@@ -332,6 +399,11 @@ impl Sim {
     /// Whether each create asked for the model endpoint, in the order of the creates.
     pub(crate) fn models(&self) -> Vec<bool> {
         self.state().models.clone()
+    }
+
+    /// The class of each create, in the order of the creates.
+    pub(crate) fn classes(&self) -> Vec<Name> {
+        self.state().classes.clone()
     }
 
     /// What each publish that succeeded published, in the order of the publishes: `sandboxd`, as
@@ -358,26 +430,31 @@ impl Sim {
     }
 }
 
-/// What a simulated provider declares whose class `sim` has a startup of `startup_seconds`, which
-/// every role fits: that class and `brief`, which gives a role [`BRIEF`].
+/// What a simulated provider declares whose class `sim` has a startup of `startup_seconds`:
+/// that class and [`BRIEF`], which states its model.
 fn ready(startup_seconds: NonZeroU64) -> Ready {
-    let class = |name: &str, resources, startup_seconds| {
+    let class = |name: &str, startup_seconds, cpu_model| {
+        let offers = Offers {
+            cpu_millis: NonZeroU64::new(1 << 20).unwrap(),
+            memory_bytes: NonZeroU64::new(1 << 50).unwrap(),
+            gpu: None,
+            cpu_features: BTreeSet::new(),
+            cpu_model,
+        };
         let class = Class {
-            resources,
+            offers,
             startup_seconds,
+            usd_per_hour: None,
         };
         (Name::try_from(name.to_owned()).unwrap(), class)
     };
-    let all = Resources {
-        cpu_millis: NonZeroU64::new(1 << 20).unwrap(),
-        memory_bytes: NonZeroU64::new(1 << 50).unwrap(),
-    };
+    let model = Some(CpuModel::try_from(BRIEF.to_owned()).unwrap());
     let brief = NonZeroU64::new(BRIEF_STARTUP).unwrap();
     Ready {
         report: json!({ "provider": "sim" }),
         classes: BTreeMap::from([
-            class("sim", all, startup_seconds),
-            class("brief", BRIEF, brief),
+            class("sim", startup_seconds, None),
+            class(BRIEF, brief, model),
         ]),
     }
 }
@@ -477,6 +554,47 @@ impl Provider for Sim {
         &self.ready
     }
 
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+        let needs = |phase: &Vec<Role>| -> u64 {
+            (phase.iter())
+                .map(|role| {
+                    let cpus = role.resources.cpu_millis.get().div_ceil(1000);
+                    cpus * u64::from(role.instances.get())
+                })
+                .sum()
+        };
+        let needed = phases.iter().map(needs).max().unwrap_or(0);
+        let mut roles: Vec<(Name, NonZeroU32)> = phases
+            .iter()
+            .flatten()
+            .map(|role| (role.name.clone(), role.instances))
+            .collect();
+        roles.sort();
+        let count = roles.len();
+        roles.dedup_by(|(a, _), (b, _)| a == b);
+        assert!(roles.len() == count, "a role is in more than one phase");
+        let mut state = self.state();
+        state
+            .reserved
+            .retain(|reserved| reserved.live.strong_count() > 0);
+        let held: u64 = state.reserved.iter().map(|reserved| reserved.cpus).sum();
+        if held.saturating_add(needed) > state.cpus {
+            return Err(format!(
+                "the run needs {needed} simulated CPUs, and {held} of the {} are held: run it \
+                 once others end",
+                state.cpus
+            ));
+        }
+        let live = Arc::new(());
+        state.reserved.push(Reserved {
+            run: run.clone(),
+            roles,
+            cpus: needed,
+            live: Arc::downgrade(&live),
+        });
+        Ok(Reservation::new(live))
+    }
+
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
         if *image == self::image(UNPUBLISHED) {
             return Err(format!(
@@ -525,6 +643,7 @@ impl Sim {
                 "the simulated create's deadline had passed: expected time left to make it";
             return Err(passed.to_owned());
         }
+        self.holds(create)?;
         let path = self.own("the `sandboxd`", create.sandboxd.as_str())?;
         let digest = self.own("the image", create.image.as_str())?;
         let Faults {
@@ -561,6 +680,7 @@ impl Sim {
         state.next += 1;
         state.modes.extend(mode);
         state.models.push(model);
+        state.classes.push(create.class.clone());
         let sandbox = Sandbox {
             run: create.run.clone(),
             refusals,
@@ -736,6 +856,11 @@ impl Subject for Sim {
         held.chain(ending)
             .map(|id| SandboxId::from(id.clone()))
             .collect()
+    }
+
+    // Its creates refuse a role its run holds no simulated CPUs for.
+    fn reserves(&self) -> bool {
+        true
     }
 }
 

@@ -37,4 +37,8 @@ impl Subject for Freeing {
     fn held(&self, run: &RunTag) -> Vec<SandboxId> {
         self.0.held(run)
     }
+
+    fn reserves(&self) -> bool {
+        self.0.reserves()
+    }
 }

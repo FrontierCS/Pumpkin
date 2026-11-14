@@ -6,15 +6,16 @@
 //!   only way out, and files move only over the session;
 //! - the role's [`confinement`]: its user from its first process, no capabilities,
 //!   `no-new-privileges`, CPU, memory, swap and process limits, no core file, `/pumpkin` and a
-//!   read-only `/tmp`;
+//!   read-only `/tmp`; and CPUs of its run's own (`cpus`);
 //! - `sandboxd`, read-only, as its first process, dialing its [`SocketDial`], its log's only
 //!   writer;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), read-only;
 //! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
 //!
 //! On the engine, it creates only containers, labelled with their run's [`RunTag`] for
-//! [`Sweep::list`], and their anonymous volumes, and pulls no image. It needs an engine that
-//! enforces every limit that a container has.
+//! [`Sweep::list`], and their anonymous volumes, and pulls no image; outside it, it writes only
+//! its runs' entries in the ledger of CPUs. It needs an engine that enforces every limit that a
+//! container has, as a rootless one does only with `cpuset` ([`engine::Security::rootless`]).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -26,18 +27,24 @@ use engine::{
     fix_reported,
 };
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Role, RunTag,
-    SandboxId, SandboxdRef, Sweep,
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep,
 };
-use schema::ir::{Image, MILLIS_PER_CPU, Name, Resources};
+use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
-use schema::workflow::Class;
+use schema::workflow::{Class, Offers};
 use serde::Deserialize;
 use serde_json::json;
 use stdx::{Context, Deadline};
 
+use crate::cpus::Cpus;
+
+mod cpus;
+
+pub use cpus::CpuList;
+
 /// The name of the provider's one class of sandbox, a container on the engine's host, which
-/// gives a role as many CPUs and as much memory as the host has.
+/// gives a role as many CPUs as the provider gives sandboxes, and as much memory as the host has.
 const CLASS: Name = Name::from_static("container");
 
 /// The most seconds a sandbox's start takes, as [`Class::startup_seconds`] declares it.
@@ -60,6 +67,8 @@ pub struct Docker<'e> {
     engine: &'e Engine,
     /// What [`Provider::ready`] gives: the engine's report as JSON, and the one class.
     ready: Ready,
+    /// The CPUs it shares out between runs.
+    cpus: Cpus,
 }
 
 /// What `docker info` prints of the engine's host and the limits it enforces, as JSON.
@@ -76,23 +85,27 @@ struct HostJson {
     swap_limit: bool,
     /// Whether the engine supports CPU limits, which a container's confinement sets.
     cpu_cfs_quota: bool,
+    /// Whether the engine supports confining a container to a set of CPUs, as each is.
+    #[serde(rename = "CPUSet")]
+    cpu_set: bool,
     /// Whether the engine supports process limits, which a container's confinement sets.
     pids_limit: bool,
-    /// The CPUs of the engine's host, which a container's CPU limit can't pass.
-    #[serde(rename = "NCPU")]
-    ncpu: NonZeroU64,
     /// The memory of the engine's host, in bytes.
     mem_total: NonZeroU64,
+    /// The engine's ID, which it keeps from one start to the next.
+    #[serde(rename = "ID")]
+    id: String,
 }
 
 impl<'e> Docker<'e> {
-    /// The provider on `engine`.
+    /// The provider on `engine`, whose sandboxes are given the CPUs of `cpus`, or else all that
+    /// are online.
     ///
     /// # Errors
     ///
     /// Fails, saying what to do, if the engine can't be read or can't enforce every container's
-    /// limits.
-    pub fn connect(engine: &'e Engine) -> Result<Self, String> {
+    /// limits, or if `cpus` isn't online.
+    pub fn connect(engine: &'e Engine, cpus: Option<&CpuList>) -> Result<Self, String> {
         let report = engine.report();
         let info = docker(&report.context, ["info", "--format", "{{json .}}"])
             .map_err(|error| fix_reported(&error))?;
@@ -100,9 +113,10 @@ impl<'e> Docker<'e> {
             memory_limit,
             swap_limit,
             cpu_cfs_quota,
+            cpu_set,
             pids_limit,
-            ncpu,
             mem_total,
+            id,
         } = serde_json::from_slice(&info.stdout).map_err(|error| {
             format!(
                 "the JSON `docker info` printed isn't of the form expected: {error}: use \
@@ -115,19 +129,26 @@ impl<'e> Docker<'e> {
                 ("MemoryLimit", memory_limit),
                 ("SwapLimit", swap_limit),
                 ("CpuCfsQuota", cpu_cfs_quota),
+                ("CPUSet", cpu_set),
                 ("PidsLimit", pids_limit),
             ],
         )?;
-        let Some(cpu_millis) = NonZeroU64::new(ncpu.get().saturating_mul(MILLIS_PER_CPU)) else {
-            unreachable!("a product of CPUs and `MILLIS_PER_CPU`, neither of them 0, is 0")
-        };
-        let host = Resources {
-            cpu_millis,
+        // The engine runs on this machine's kernel, as its containers mount this machine's paths,
+        // so its CPUs are those the kernel here lists.
+        let cpus = Cpus::of_machine(&id, cpus)?;
+        let offers = Offers {
+            cpu_millis: cpus.cpu_millis(),
             memory_bytes: mem_total,
+            gpu: None,
+            cpu_features: cpus::flags()?,
+            // A class that states its CPU's model is offered only to roles that need that model,
+            // and the engine has this one class, which every role is to fit.
+            cpu_model: None,
         };
         Ok(Self {
             engine,
-            ready: ready(report, host),
+            ready: ready(report, offers),
+            cpus,
         })
     }
 
@@ -179,6 +200,10 @@ impl Sweep for Docker<'_> {
 impl Provider for Docker<'_> {
     fn ready(&self) -> &Ready {
         &self.ready
+    }
+
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+        cpus::reserve(&self.cpus, run, phases)
     }
 
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
@@ -236,7 +261,7 @@ impl Creator<SocketDial> for Docker<'_> {
         let by = Bound::Until(Deadline::at_unix(create.by.since_epoch()));
         // Creating and starting apart gives the container's ID before anything can fail with
         // a container left behind, so a failure removes this container by its ID.
-        let args = create_args(create, &dial);
+        let args = create_args(create, &dial, &self.cpus);
         let args = args.context("creating the container failed")?;
         let created = docker_to(context, &args, by).map_err(|error| fix_reported(&error))?;
         let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
@@ -256,11 +281,13 @@ impl Creator<SocketDial> for Docker<'_> {
     }
 }
 
-/// What [`Provider::ready`] gives of an engine that `report` describes, whose host has `host`.
-fn ready(report: &engine::Report, host: Resources) -> Ready {
+/// What [`Provider::ready`] gives of an engine that `report` describes, whose one class `offers`
+/// what its host has.
+fn ready(report: &engine::Report, offers: Offers) -> Ready {
     let class = Class {
-        resources: host,
+        offers,
         startup_seconds: STARTUP_SECONDS,
+        usd_per_hour: None,
     };
     Ready {
         report: json!(report),
@@ -268,32 +295,16 @@ fn ready(report: &engine::Report, host: Resources) -> Ready {
     }
 }
 
-/// Fails unless the engine of `context` supports each of `limits`, a name in `docker info`
-/// and whether it reports the limit supported. Those are the limits a container's confinement
-/// sets (`engine::confinement`), and the engine discards one it doesn't support with only a warning from `docker create`, so a
-/// container would start without it.
-fn check_limits(context: &ContextName, limits: [(&str, bool); 4]) -> Result<(), String> {
-    let unsupported: Vec<&str> = (limits.iter())
-        .filter_map(|&(name, supported)| (!supported).then_some(name))
-        .collect();
-    if unsupported.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "the Docker engine of context `{}` can't enforce every limit a sandbox has: \
-         `docker info` reports {} false: use an engine that reports MemoryLimit, SwapLimit, \
-         CpuCfsQuota and PidsLimit true",
-        context.as_str(),
-        unsupported.join(", ")
-    ))
-}
-
-/// The arguments of `docker create` for the container, which dials the socket `dial` names.
-fn create_args(create: &Create, dial: &SocketDial) -> Result<Vec<String>, String> {
+/// The arguments of `docker create` for the container, which dials the socket `dial` names, on
+/// its run's share of `cpus`.
+fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<String>, String> {
     let Create {
         run,
         name: sandbox_name,
         role,
+        instance,
+        // The provider has one class (`CLASS`), so every container is of it.
+        class: _,
         image,
         sandboxd,
         ops,
@@ -311,6 +322,8 @@ fn create_args(create: &Create, dial: &SocketDial) -> Result<Vec<String>, String
         name,
         user,
         resources,
+        // The ledger holds a share for each instance, and `instance` names the one to take.
+        instances: _,
     } = role;
     let sandboxd = Path::new(sandboxd.as_str());
     let mut args = vec![
@@ -324,6 +337,8 @@ fn create_args(create: &Create, dial: &SocketDial) -> Result<Vec<String>, String
         "--network=none".to_owned(),
     ];
     args.extend(confinement(*user, *resources));
+    let share = cpus::share(cpus, run, name, *instance)?;
+    args.push(format!("--cpuset-cpus={share}"));
     args.extend([
         bind_mount(sandboxd, SANDBOXD_PATH)?,
         bind_mount(dir, GATEWAY_DIR)?,
@@ -509,4 +524,32 @@ fn log_tail(context: &ContextName, id: &str) -> Result<String, Failure> {
         stderr,
     } = docker(context, logs)?;
     Ok(String::from_utf8_lossy(&[stdout, stderr].concat()).into_owned())
+}
+
+/// Fails unless the engine of `context` supports each of `limits`, a name in `docker info`
+/// and whether it reports the limit supported. Those are the limits a container's confinement
+/// sets (`engine::confinement`), and the CPUs it is confined to, and the engine discards one it
+/// doesn't support with only a warning from `docker create`, so a container would start without
+/// it.
+fn check_limits(context: &ContextName, limits: [(&str, bool); 5]) -> Result<(), String> {
+    let unsupported: Vec<&str> = (limits.iter())
+        .filter_map(|&(name, supported)| (!supported).then_some(name))
+        .collect();
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the Docker engine of context `{}` can't enforce every limit a sandbox has: \
+         `docker info` reports {} false: use an engine that reports each true{}",
+        context.as_str(),
+        unsupported.join(", "),
+        // systemd delegates no `cpuset` to a user's manager by default, so rootless Docker
+        // there lacks it.
+        if unsupported.contains(&"CPUSet") {
+            ", as rootless Docker does once systemd delegates `cpuset` to the user's manager: a \
+             `user@.service.d` drop-in with `Delegate=cpu cpuset io memory pids`"
+        } else {
+            ""
+        }
+    ))
 }

@@ -15,6 +15,7 @@
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -66,9 +67,10 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// Starts `sandboxd`, meeting the gateway as `meeting` says, and puts the directories a role
+    /// Starts `sandboxd`, meeting the gateway as `meeting` says, with the shell script
+    /// `nvidia_smi`, if given, as the `nvidia-smi` on its `PATH`, and puts the directories a role
     /// expects.
-    fn start(meeting: Meeting) -> Self {
+    fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
         // Kept if the test fails.
         let root = tempfile::Builder::new()
             .prefix("sandboxd-")
@@ -79,6 +81,9 @@ impl Sandbox {
         // `processes` finds the sandbox's processes by.
         let root = fs::canonicalize(root).unwrap();
         let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+        if let Some(script) = nvidia_smi {
+            sandboxd.env("PATH", stand_in(&root, script));
+        }
         let (gateway, registration) = match meeting {
             Meeting::Socket => {
                 let sockets = Sockets::create(root.join("sockets")).unwrap();
@@ -198,6 +203,15 @@ impl Sandbox {
     }
 }
 
+/// A `PATH` on which the `nvidia-smi` that runs is the shell script `script`, in `bin` in `root`.
+fn stand_in(root: &Path, script: &str) -> String {
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("nvidia-smi"), format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(bin.join("nvidia-smi"), fs::Permissions::from_mode(0o755)).unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from(path.to_str().unwrap().to_owned()).unwrap()
 }
@@ -250,7 +264,7 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 /// how `sandboxd` exited, and how many processes were left running in the sandbox, against
 /// `expect`. Those left get 2 s to exit, and are then killed.
 fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
-    let mut sandbox = Sandbox::start(meeting);
+    let mut sandbox = Sandbox::start(meeting, None);
     let mut lines = scenario(&mut sandbox);
     lines.extend(sandbox.end());
     expect.assert_eq(&lines.join("\n"));
@@ -293,6 +307,46 @@ impl Sandbox {
         fs::remove_dir_all(root).unwrap();
         lines
     }
+}
+
+#[test]
+fn gpus() {
+    // A stand-in that names two GPUs, as `nvidia-smi` does, if asked as `sandboxd` asks.
+    let named = r#"[ "$*" = "--query-gpu=name --format=csv,noheader" ] || exit 1
+printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
+    let long = format!(
+        "for i in $(seq 12); do echo 'NVIDIA {}'; done",
+        "X".repeat(100)
+    );
+    let cases = [
+        ("named, at a socket", Meeting::Socket, Some(named)),
+        ("none on PATH", Meeting::Socket, None),
+        (
+            "failing",
+            Meeting::Socket,
+            Some("echo 'No devices were found'; exit 6"),
+        ),
+        ("naming none", Meeting::Socket, Some("true")),
+        (
+            "naming more than a hello holds",
+            Meeting::Socket,
+            Some(&long),
+        ),
+    ];
+    let lines = cases.map(|(case, meeting, nvidia_smi)| {
+        let sandbox = Sandbox::start(meeting, nvidia_smi);
+        let gpus = format!("{case}: {:?}", sandbox.session.gpus());
+        let ended = sandbox.end();
+        assert_eq!(ended.last().map(String::as_str), Some("left running: 0"));
+        gpus
+    });
+    let expected = expect![[r#"
+        named, at a socket: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
+        none on PATH: None
+        failing: None
+        naming none: None
+        naming more than a hello holds: None"#]];
+    expected.assert_eq(&lines.join("\n"));
 }
 
 #[test]
