@@ -26,9 +26,12 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   does: a bird's-eye view, the entry points, a code map giving each crate's purpose, key types
   and boundary invariants, and the cross-cutting concerns. Name code there (a crate, a module,
   a type, a source file), never link it, as a link to code goes stale; link another document
-- `cargo xtask ci` checks the rest: doc lengths, no doc on a test, doc form (first paragraph,
+- `cargo xtask ci` checks the rest: doc lengths, no doc on a test and no `//` of over 2 lines
+  on one, no doc whose first sentence only restates its item's name, doc form (first paragraph,
   punctuation, backticks, links), `# Panics` on a public function that can panic, no `TODO`,
-  `FIXME`, `XXX` or code commented out
+  `FIXME`, `XXX` or code commented out, no line of a doc or comment past 100 columns but a table
+  row or a single word, and no link in `ARCHITECTURE.md` to code or to a document the
+  repository lacks
 - WRITE commit subjects in lowercase imperative, with bodies that explain what and why to a
   reader without other context
 - LIST schema changes in the pull request description
