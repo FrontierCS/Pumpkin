@@ -33,7 +33,6 @@ use provider::{
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
 use schema::workflow::{Class, Offers};
-use serde::Deserialize;
 use serde_json::json;
 use stdx::{Context, Deadline};
 
@@ -71,58 +70,25 @@ pub struct Docker<'e> {
     cpus: Cpus,
 }
 
-/// What `docker info` prints of the engine's host and the limits it enforces, as JSON.
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "`docker info` reports whether the engine supports each limit as a boolean"
-)]
-struct HostJson {
-    /// Whether the engine supports memory limits, which a container's confinement sets.
-    memory_limit: bool,
-    /// Whether the engine supports swap limits, which a container's confinement sets.
-    swap_limit: bool,
-    /// Whether the engine supports CPU limits, which a container's confinement sets.
-    cpu_cfs_quota: bool,
-    /// Whether the engine supports confining a container to a set of CPUs, as each is.
-    #[serde(rename = "CPUSet")]
-    cpu_set: bool,
-    /// Whether the engine supports process limits, which a container's confinement sets.
-    pids_limit: bool,
-    /// The memory of the engine's host, in bytes.
-    mem_total: NonZeroU64,
-    /// The engine's ID, which it keeps from one start to the next.
-    #[serde(rename = "ID")]
-    id: String,
-}
-
 impl<'e> Docker<'e> {
     /// The provider on `engine`, whose sandboxes are given the CPUs of `cpus`, or else all that
     /// are online.
     ///
     /// # Errors
     ///
-    /// Fails, saying what to do, if the engine can't be read or can't enforce every container's
-    /// limits, or if `cpus` isn't online.
+    /// Fails, saying what to do, if what the engine said of itself can't be read, if it can't
+    /// enforce every container's limits, or if `cpus` isn't online.
     pub fn connect(engine: &'e Engine, cpus: Option<&CpuList>) -> Result<Self, String> {
         let report = engine.report();
-        let info = docker(&report.context, ["info", "--format", "{{json .}}"])
-            .map_err(|error| fix_reported(&error))?;
-        let HostJson {
+        let &engine::Host {
             memory_limit,
             swap_limit,
             cpu_cfs_quota,
             cpu_set,
             pids_limit,
-            mem_total,
-            id,
-        } = serde_json::from_slice(&info.stdout).map_err(|error| {
-            format!(
-                "the JSON `docker info` printed isn't of the form expected: {error}: use \
-                 Docker's own command line, which prints it"
-            )
-        })?;
+            memory_bytes,
+            ref id,
+        } = engine.host()?;
         check_limits(
             &report.context,
             [
@@ -135,10 +101,10 @@ impl<'e> Docker<'e> {
         )?;
         // The engine runs on this machine's kernel, as its containers mount this machine's paths,
         // so its CPUs are those the kernel here lists.
-        let cpus = Cpus::of_machine(&id, cpus)?;
+        let cpus = Cpus::of_machine(id, cpus)?;
         let offers = Offers {
             cpu_millis: cpus.cpu_millis(),
-            memory_bytes: mem_total,
+            memory_bytes,
             gpu: None,
             cpu_features: cpus::flags()?,
             // A class that states its CPU's model is offered only to roles that need that model,
