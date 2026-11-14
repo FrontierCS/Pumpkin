@@ -57,6 +57,16 @@ the run's id once it has started.")]
     #[command(long_about = "Wait until a run has ended, then print its outcome.json.")]
     #[command(after_help = WAIT_NOTES)]
     Wait(Wait),
+    #[command(about = "List the runs and their states")]
+    #[command(long_about = "\
+List the runs in --runs, oldest first, a line for each, then a line of totals:
+without a prefix, those that are live or ended within the last day, and the
+line of totals says how many others there are, and how to list them. A live
+run's line gives its phase, how long it has been in it, the bound at which
+Pumpkin ends the phase, its task, and what it does; an ended run's, its state,
+how long it ran, its score if it has one, and its task.")]
+    #[command(after_help = LS_NOTES)]
+    Ls(Ls),
     #[command(about = "Stop a run, and remove what it left")]
     #[command(long_about = "\
 Stop a run, wait until it has ended, remove what it left, and print its
@@ -101,6 +111,7 @@ const RARE: [&str; 2] = ["build", "reap"];
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
+    Ls(Ls),
     Cancel(Cancel),
     Reap(Reap),
     Check(Check),
@@ -254,7 +265,7 @@ The directory that <run> is looked up in.
 Default: runs/ in the .pumpkin directory that this pumpkin is in";
 
 /// What `pumpkin wait` is asked for, as `pumpkin wait --help` says. Its paths are UTF-8, as
-/// those of `cancel` and `reap` are, so that a command that names them names the same
+/// those of `ls`, `cancel` and `reap` are, so that a command that names them names the same
 /// files.
 #[derive(Args)]
 pub(crate) struct Wait {
@@ -262,6 +273,22 @@ pub(crate) struct Wait {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
+}
+
+/// What `pumpkin ls` is asked for, as `pumpkin ls --help` says.
+#[derive(Args)]
+pub(crate) struct Ls {
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
+The directory of the runs to list.
+Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+    pub(crate) runs: Option<String>,
+    /// The prefixes of the ids of the runs to list, or none for every run.
+    #[arg(value_name = "prefix", value_parser = utf8(", as every id is: name a prefix of an id"))]
+    #[arg(help = "\
+A prefix of the ids of the runs to list, such as a day's or an hour's,
+as ids start with the UTC time of their `pumpkin run`.
+Default: every run")]
+    pub(crate) prefixes: Vec<String>,
 }
 
 /// What `pumpkin cancel` is asked for, as `pumpkin cancel --help` says.
@@ -501,14 +528,44 @@ Exit status:
   1  The run failed, was interrupted, or was lost as its driver ended without
      an outcome.json, which `pumpkin cancel` then records; or another error.
   2  A usage error.
-Once the run has ended, `wait` says on the standard error how it ended, and
-where its record is, then the command that runs it again, as `pumpkin run
---help` says, and of a lost run, the commands that remove what it left; any
-other exit but 0 ends with a `pumpkin:` line that says why.
+While the run goes on, `wait` says on the standard error each of its milestones
+as its record logs it: the agent's start, each judge call's start and end, each
+lease's start, its runner's readiness and its end, and the end of the work
+phase. Once the run has ended, it says its summary: when it started, how long it
+ran, the agent's start and end, each judge call with how long it took and how it
+ended, each lease with how long its runner lived and was charged for, and how
+much of that a command or transfer ran, its commands and how it ended, the
+model requests of an agent with a model route and the tokens reported, and the
+sandboxes, by provider and class, with how long they lasted and how many were
+deleted; then how it ended, and where its record
+is, then the command that runs it again, as `pumpkin run --help` says, and of a
+lost run, the commands that remove what it left; any other exit but 0 ends with
+a `pumpkin:` line that says why.
 If the final judge returned no result, its standard error is shown first, or,
 if it is long, named.
 
 Ending `pumpkin wait` doesn't stop the run: `pumpkin cancel` does.";
+
+const LS_NOTES: &str = "\
+Examples:
+  pumpkin ls
+  pumpkin ls 20261110-1
+  pumpkin ls --runs runs
+
+Exit status:
+  0  The runs are listed.
+  1  A run can't be listed, which `ls` says, or another error; it lists the
+     others all the same.
+  2  A usage error.
+
+A live run's phase is `publishing` what its sandboxes run, `starting` its agent,
+`agent` at work, `ending` the work phase, or `final judge`; under it, a line for
+each judge call the agent made, by its grant, and each lease, by its grant and
+state, that hasn't ended; a phase past its bound is a bug, which `ls` says. An
+ended run's state is `finished`, `failed`, `interrupted` (by a signal), or
+`lost`, if its driver ended without an outcome.json. Its task is its workflow's
+name, or `-` if its record has no ir.json yet. A directory of --runs that is not
+there yet is no runs, if it is the default one.";
 
 const CANCEL_NOTES: &str = "\
 Examples:
@@ -708,7 +765,8 @@ settings:
                   names them: without `cpu_features`, the class states no
                   flag, and without `cpu_model`, no model, and a class that
                   states a model is offered only to roles that need it; and
-                  `usd_per_hour`, what an instance costs an hour, if given.
+                  `usd_per_hour`, what an instance costs an hour, if given,
+                  by which `ls` and a run's summary price its sandboxes.
     repositories  The envelope's ECR repositories: `roles`, of the roles'
                   images, and `sandboxd`, of the images that hold sandboxd.
     timer         The sandboxes' timer, which terminates each instance at its
@@ -736,8 +794,9 @@ settings:
                   one, such as \"H100!\", or \"A100-80GB:2\" for two, with
                   `gpu_model`, its model as nvidia-smi names it, such as
                   \"NVIDIA H100 80GB HBM3\". A class with a GPU is offered
-                  only to roles that need its GPUs. Its `usd_per_hour`, if
-                  given, is what a sandbox costs an hour.
+                  only to roles that need its GPUs. With `usd_per_hour`, what
+                  a sandbox costs an hour, `ls` and a run's summary price its
+                  sandboxes.
 
 [gateway], where the gateway meets the sandboxes that dial it over a network:
   private       The address, ip:port, that the sandboxes of an ec2 provider
@@ -811,6 +870,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     Ok(match parsed {
         Parsed::Run(run) => Command::Run(run),
         Parsed::Wait(wait) => Command::Wait(wait),
+        Parsed::Ls(ls) => Command::Ls(ls),
         Parsed::Cancel(cancel) => Command::Cancel(cancel),
         Parsed::Reap(reap) => Command::Reap(reap),
         Parsed::Check(check) => Command::Check(check),

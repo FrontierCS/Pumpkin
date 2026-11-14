@@ -69,6 +69,7 @@ fn check(
 ) {
     let runs = Runs::new("prepare");
     let args = ["--config".to_owned(), "/pumpkin.toml".to_owned()];
+    let no_tags = BTreeMap::new();
     let mut lines = Vec::new();
     for (index, (seconds, value, served)) in cases.into_iter().enumerate() {
         let ir: ir::Workflow = serde_json::from_value(value).unwrap();
@@ -85,7 +86,10 @@ fn check(
             let placed = placed(&ir, sim.ready())?;
             let servings = agent_servings(placed.workflow(), &runs.dir, url, served);
             let on = providers_of(&placed, |_| &sim);
-            let recorded = Recorded { args: &args };
+            let recorded = Recorded {
+                args: &args,
+                tags: &no_tags,
+            };
             Run::prepare(&System, placed, on, &dir, id, &servings, recorded)
         });
         let record = fs::read_dir(&dir)
@@ -327,4 +331,213 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
         }
     }
     outcome.to_string()
+}
+
+// The model use that a record's reader takes from its log, of answers that come in turn: a good
+// one, then a 429, one cut short, a 200 whose stream states a failure, a refusal of the route's
+// own and a bar, none of which is good, so the first's time stays the last good one's.
+#[test]
+fn reads_model_answers() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let answers = [
+        r#"{"answer":{"kind":"forwarded"},"upstream_status":200}"#,
+        r#"{"answer":{"kind":"forwarded"},"upstream_status":429}"#,
+        r#"{"answer":{"kind":"cut"},"upstream_status":200}"#,
+        r#"{"answer":{"kind":"forwarded"},"upstream_status":200,"failed":{"code":"rate_limit_exceeded"}}"#,
+        r#"{"answer":{"kind":"refused","status":502,"message":"m"},"upstream_status":null}"#,
+        r#"{"answer":{"kind":"barred","status":400,"message":"m"},"upstream_status":null}"#,
+    ];
+    let mut log = String::from(
+        r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#,
+    );
+    for (seq, answer) in (1_u64..).zip(answers) {
+        let mut event: Value = serde_json::from_str(answer).unwrap();
+        event["kind"] = "model_answered".into();
+        event["caller"] = "agent".into();
+        event["request"] = (seq - 1).into();
+        let at = (seq * 1_000_000_000).to_string();
+        let answered =
+            serde_json::json!({ "seq": seq, "at_ns": at, "actions": [], "event": event });
+        log.push('\n');
+        log.push_str(&answered.to_string());
+    }
+    log.push('\n');
+    fs::write(record.join("log.jsonl"), log).unwrap();
+    let progress = Record::open(&record).unwrap().progress().unwrap().unwrap();
+    expect![[r#"
+        ModelUse {
+            requests: 6,
+            answers: {
+                "200": 2,
+                "200 cut": 1,
+                "429": 1,
+                "barred": 1,
+                "refused": 1,
+            },
+            failed: {
+                Some(
+                    "rate_limit_exceeded",
+                ): 1,
+            },
+            not_2xx: 4,
+            last_good: Some(
+                1s,
+            ),
+            tokens: Tokens {
+                reported: 0,
+                input: 0,
+                output: 0,
+                cached: None,
+                reasoning: None,
+            },
+        }"#]]
+    .assert_eq(&format!("{:#?}", progress.model));
+}
+
+// The leased time that a record's reader takes from its log, of two leases each running a command
+// that never ends: one whose runner the run deletes as a signal stops it, and one that expires.
+// Each command is busy until its lease's charge ends, so that busy is never more than charged.
+#[test]
+fn reads_unended_commands() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let ir = serde_json::json!({ "roles": [{
+        "name": "solver",
+        "runtime": { "agent": {} },
+        "grants": [
+            { "lease": { "name": "stopped", "role": "stopped" } },
+            { "lease": { "name": "expired", "role": "expired" } },
+        ],
+    }] });
+    fs::write(record.join("ir.json"), ir.to_string()).unwrap();
+    let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
+    let provided = serde_json::json!({ "roles": {
+        "solver": place("agent"), "stopped": place("stopped"), "expired": place("expired"),
+    } });
+    fs::write(record.join("provider.json"), provided.to_string()).unwrap();
+    let run_started =
+        serde_json::json!({ "kind": "run_started", "unix_ns": "0", "hard_end_ns": "600000000000" });
+    let tick = serde_json::json!({ "kind": "tick" });
+    let event = |kind: &str, lease: u64| serde_json::json!({ "kind": kind, "lease": lease });
+    let deleted =
+        |sandbox: &str| serde_json::json!({ "kind": "sandbox_deleted", "sandbox": sandbox });
+    let start = |grant: &str, lease: u64| {
+        serde_json::json!({
+            "kind": "start_lease", "grant": grant, "holder": "agent", "lease": lease,
+        })
+    };
+    let run = |lease: u64| serde_json::json!({ "kind": "run_command", "lease": lease, "command": 0, "argv": [] });
+    let close = serde_json::json!({ "kind": "close_lease", "lease": 1 });
+    let records = [
+        (0, run_started, vec![]),
+        (
+            1,
+            tick.clone(),
+            vec![start("stopped", 0), start("expired", 1)],
+        ),
+        (2, event("lease_ready", 0), vec![]),
+        (2, event("lease_ready", 1), vec![]),
+        (3, tick.clone(), vec![run(0), run(1)]),
+        (5, tick, vec![close]),
+        (6, deleted("lease-1"), vec![]),
+        (7, event("lease_ended", 1), vec![]),
+        (12, deleted("lease-0"), vec![]),
+        (20, deleted("agent"), vec![]),
+    ];
+    let mut log = String::new();
+    for (seq, (seconds, event, actions)) in (0_u64..).zip(records) {
+        let at = (seconds * 1_000_000_000_u64).to_string();
+        let record =
+            serde_json::json!({ "seq": seq, "at_ns": at, "actions": actions, "event": event });
+        log.push_str(&record.to_string());
+        log.push('\n');
+    }
+    fs::write(record.join("log.jsonl"), log).unwrap();
+    let progress = Record::open(&record).unwrap().progress().unwrap().unwrap();
+    let sandboxes = progress.sandboxes().into_iter();
+    let used = sandboxes.map(|(place, used)| format!("{}: {:?}", place.class, used.charged));
+    expect![[r#"
+        agent: None
+        expired: Some((3s, 2s))
+        stopped: Some((10s, 9s))"#]]
+    .assert_eq(&used.collect::<Vec<_>>().join("\n"));
+}
+
+// The spans that a record's reader takes from its log, of a judge call and two leases, each
+// event written seconds after the core took it: each span runs between the core's times, its
+// `observed_ns`, but where a record has none, as lease 1's delete, which ends its charge, at its
+// `at_ns`. A judge call's exit times nothing: its call runs until its result is collected.
+#[test]
+fn reads_core_times() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let ir = serde_json::json!({ "roles": [{
+        "name": "solver",
+        "runtime": { "agent": {} },
+        "grants": [
+            { "judge": { "name": "train", "role": "trainer" } },
+            { "lease": { "name": "runner", "role": "runner" } },
+        ],
+    }] });
+    fs::write(record.join("ir.json"), ir.to_string()).unwrap();
+    let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
+    let provided = serde_json::json!({ "roles": {
+        "solver": place("agent"), "trainer": place("trainer"), "runner": place("runner"),
+    } });
+    fs::write(record.join("provider.json"), provided.to_string()).unwrap();
+    let log = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}
+{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","request":{"kind":"judge","grant":"train"}},"actions":[{"kind":"start_judge","job":0,"grant":"train","timeout_ns":"60000000000"}]}
+{"seq":2,"at_ns":"3000000000","observed_ns":"1000000000","event":{"kind":"tick"},"actions":[{"kind":"start_lease","grant":"runner","holder":"agent","lease":0},{"kind":"start_lease","grant":"runner","holder":"agent","lease":1}]}
+{"seq":3,"at_ns":"5000000000","observed_ns":"2000000000","event":{"kind":"judge_started","job":0},"actions":[]}
+{"seq":4,"at_ns":"8000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":0},"actions":[]}
+{"seq":5,"at_ns":"9000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":1},"actions":[]}
+{"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"tick"},"actions":[{"kind":"run_command","lease":0,"command":0,"argv":[]},{"kind":"run_command","lease":1,"command":0,"argv":[]}]}
+{"seq":7,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0},"actions":[]}
+{"seq":8,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
+{"seq":9,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
+{"seq":10,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"judge_exited","job":0},"actions":[]}
+{"seq":11,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"judge_collected","job":0,"result":{"score":1,"returned":{}}},"actions":[]}
+{"seq":12,"at_ns":"25000000000","event":{"kind":"sandbox_deleted","sandbox":"lease-1"},"actions":[]}
+"#;
+    fs::write(record.join("log.jsonl"), log).unwrap();
+    let progress = Record::open(&record).unwrap().progress().unwrap().unwrap();
+    let sandboxes = progress.sandboxes().into_iter();
+    let charged = sandboxes.map(|(place, used)| format!("{}: {:?}", place.class, used.charged));
+    let calls = (progress.calls.iter()).map(|call| {
+        let runtime::Sandbox {
+            asked,
+            started,
+            gone,
+            ..
+        } = &call.sandbox;
+        format!(
+            "job {}: asked {asked:?}, started {started:?}, gone {gone:?}",
+            call.job
+        )
+    });
+    let leases = (progress.leases.iter()).map(|lease| {
+        let runtime::Sandbox { started, gone, .. } = &lease.sandbox;
+        format!("lease {}: ready {started:?}, gone {gone:?}", lease.lease)
+    });
+    let last = format!("last: {:?}", progress.last);
+    let read: Vec<String> = charged.chain(calls).chain(leases).chain([last]).collect();
+    expect![[r#"
+        agent: None
+        runner: Some((28s, 23s))
+        trainer: None
+        job 0: asked 1s, started Some(2s), gone Some(15s)
+        lease 0: ready Some(3s), gone Some(11s)
+        lease 1: ready Some(3s), gone Some(25s)
+        last: 25s"#]]
+    .assert_eq(&read.join("\n"));
 }

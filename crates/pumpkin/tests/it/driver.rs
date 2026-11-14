@@ -403,9 +403,12 @@ fn detaches() {
             the driver's name: pumpkin-driver
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
+            printed outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
             ended by signal: 2
@@ -418,9 +421,12 @@ fn detaches() {
             the driver's name: pumpkin-driver
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
+            printed outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: ""
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             ended by signal: 15
@@ -431,9 +437,12 @@ fn detaches() {
             the driver's name: pumpkin-driver
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
+            printed outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             driver.log: """#]],
     );
 }
@@ -527,30 +536,42 @@ fn signaled_after_the_start() {
             the driver catches HUP INT TERM; ignores none
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
             driver.log: "pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n"
             the driver catches HUP INT TERM; ignores none
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> was interrupted by SIGHUP; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"signal":"SIGHUP","state":"interrupted"}
+            printed outcome.json: {"signal":"SIGHUP","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
             driver.log: "pumpkin: run <id> was interrupted by SIGHUP; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n"
             the driver catches HUP INT TERM; ignores none
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> was interrupted by SIGINT; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"signal":"SIGINT","state":"interrupted"}
+            printed outcome.json: {"signal":"SIGINT","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
             driver.log: "pumpkin: run <id> was interrupted by SIGINT; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n"
             the driver catches INT TERM; ignores HUP
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container
+              sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
             driver.log: "pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>\npumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star\n""#]],
     );
 }
@@ -704,6 +725,9 @@ fn lost_on_docker() {
             its temporary directory holds: []
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container, started at <t>
+              sandboxes: 1 on local/container, <t> in all, 1 created, 0 deleted
             pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
             pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
@@ -713,6 +737,9 @@ fn lost_on_docker() {
             pumpkin: run <id> left 1 sandbox on provider `local`, now removed: <the agent's container>
             pumpkin: run <id> left its socket directory, now removed: <scratch>/runs/<id>/sockets
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container, started at <t>
+              sandboxes: 1 on local/container, <t> in all, 1 created, 0 deleted
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
             printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
@@ -787,9 +814,12 @@ fn signaled_on_docker() {
         &expect![[r#"
             $ pumpkin wait <id> --runs runs
             exit status: Some(1)
+            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+                 <t> agent on local/container, started at <t>
+              sandboxes: 1 on local/container, <t> in all, 1 created, all deleted
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
-            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+            printed outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
             the run log's last note: "the run was interrupted by SIGTERM"
             it came before the deadline: true
             containers left: 0

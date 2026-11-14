@@ -18,9 +18,9 @@
 //!   collected, but a result over [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
 //! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
 //! - `reaps.jsonl`: each sandbox that a reap removed, or found gone ([`REAPS`]);
-//! - `outcome.json`: how the run ended: `{"state": "finished"}` and the outcome's fields
-//!   (`log::outcome_json`), `{"state": "failed", "reason": r}`, as [`Record::reap`] records a lost
-//!   run too, or `{"state": "interrupted", "signal": s}`.
+//! - `outcome.json`: how the run ended, and what it used (`log::usage_of`): `{"state":
+//!   "finished"}` and the outcome's fields (`log::outcome_json`), `{"state": "failed", "reason":
+//!   r}`, as [`Record::reap`] records a lost run too, or `{"state": "interrupted", "signal": s}`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -32,15 +32,16 @@ use std::time::{Duration, SystemTime};
 
 use decision::PayloadRef;
 use provider::{Meeting, Provider, RunTag, SandboxId, Sweep, UnixTime};
-use schema::ir::{GpuModel, Name, Sha256Digest};
+use schema::ir::{GpuModel, Image, Name, Sha256Digest};
 use schema::sandbox::{command_stderr, log_dir, out_dir};
 use schema::workflow::{ByProvider, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
 
+use super::log::{self, Progress};
 use super::sandbox::sweep;
-use super::{Durable, Host, Signal, Stopped, System, log};
+use super::{Durable, Host, Signal, Stopped, System};
 
 /// Why [`Record::reap`] records a lost run as failed.
 const LOST: &str = "its driver ended without an outcome";
@@ -309,12 +310,12 @@ pub struct Record {
 }
 
 /// How a run ended, as its `outcome.json` says, each with a sentence that follows the run's id
-/// and says how in words.
+/// and says how in words, but a score, which the reader words as it shows any score.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// The run finished with a score, the JSON number `score`: `finished with a score of
-    /// <score>, after the work phase ended <how>`, which `how` is.
-    Scored { score: String, how: String },
+    /// The run finished with a score, the JSON number `score`, after its work phase ended as
+    /// `after` says: `after the work phase ended <how>`.
+    Scored { score: String, after: String },
     /// The run finished without a score, as the agent submitted nothing or the verdict has
     /// none: `finished without a score: <why>`.
     Unscored(String),
@@ -481,6 +482,37 @@ impl Record {
     /// entry, which a command that runs it again takes.
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+
+    /// The name of the run's workflow, from its `ir.json`; `None` if the record has none yet, as
+    /// one just begun.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `ir.json` can't be read, or isn't a workflow's IR.
+    pub fn task(&self) -> Result<Option<String>, String> {
+        let path = self.dir.join("ir.json");
+        let Some(bytes) = read_optional(&path)? else {
+            return Ok(None);
+        };
+        let ir: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
+        match ir["name"].as_str() {
+            Some(name) => Ok(Some(name.to_owned())),
+            None => Err(format!(
+                "{} holds no name: expected a workflow's IR",
+                path.display()
+            )),
+        }
+    }
+
+    /// What the run's log says of it so far ([`Progress`]); `None` if its log doesn't record
+    /// its start yet, as a run that has yet to start.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a file of the record can't be read.
+    pub fn progress(&self) -> Result<Option<Progress>, String> {
+        log::progress(&self.dir)
     }
 
     /// The build of Pumpkin that made the record, shown as a [`Build`] is, if it isn't [`BUILD`];
@@ -822,7 +854,7 @@ fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
     if !score.is_null() {
         return Ending::Scored {
             score: score.to_string(),
-            how: format!("finished with a score of {score}, after the work phase ended {ended}"),
+            after: format!("after the work phase ended {ended}"),
         };
     }
     let unscored = |why: String| format!("finished without a score: {why}");
@@ -1009,10 +1041,15 @@ fn utc_stamp(seconds: u64) -> String {
 }
 
 /// What `provider.json` holds of `placed`, whose roles are placed on `providers`:
-/// `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c}}}`, where `r` is what `p`
-/// declared ([`Ready`](provider::Ready)), with how its sandboxes meet the gateway, `"reach"`:
-/// `local`, `private` or `listen` ([`Meeting`]); and role `n` is placed on `p`, in class `c`.
-pub(super) fn provided(placed: &Placed, providers: &ByProvider<&dyn Provider>) -> Value {
+/// `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c, "image": {"digest": d,
+/// "build_tag": t}}}}`, where `r` is what `p` declared ([`Ready`](provider::Ready)), with how its
+/// sandboxes meet the gateway, `"reach"`: `local`, `private` or `listen` ([`Meeting`]); and role
+/// `n` is placed on `p`, in class `c`, and runs image `d`, built as tag `t`.
+pub(super) fn provided(
+    placed: &Placed,
+    providers: &ByProvider<&dyn Provider>,
+    tags: &BTreeMap<Image, String>,
+) -> Value {
     let declared = (providers.iter())
         .map(|(name, provider)| {
             let mut declared = json!(provider.ready());
@@ -1032,7 +1069,11 @@ pub(super) fn provided(placed: &Placed, providers: &ByProvider<&dyn Provider>) -
             class,
             declared: _,
         } = placed.placement(role);
-        let at = json!({ "provider": provider, "class": class });
+        let mut at = json!({ "provider": provider, "class": class });
+        at["image"] = json!({ "digest": sandbox.image });
+        if let Some(tag) = tags.get(&sandbox.image) {
+            at["image"]["build_tag"] = json!(tag);
+        }
         (sandbox.name.to_string(), at)
     });
     json!({ "providers": declared, "roles": roles.collect::<Map<_, _>>() })

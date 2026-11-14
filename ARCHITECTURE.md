@@ -276,6 +276,8 @@ serves the model requests of each sandbox whose role has a route through `route`
 work phase ends, a judge call's while its command runs (`model_requests_allowed`), or until the
 provider refuses an entry's key, which fails the run as the deployment's fault, but for one heard
 after the agent's final submission locked the selection, on a route that served before it.
+`Record` also reads a record, for `pumpkin`: a live run's phase and bounds (`Progress`), and the
+arguments that started it (`Record::args`).
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs, and
   every lease it or they held, are gone, so nothing the agent started runs while its submission
   is judged; and a run ends only once the final judge's leases are gone too.
@@ -333,26 +335,27 @@ its file, line and column, as a linter's findings in the files it read are too (
 - **Architecture Invariant:** no crate but `pumpkin` depends on it, so the runtime, the decision
   core and the providers never see the language.
 
-**`crates/pumpkin`.** `pumpkin`, the operator's command line, which `cli` parses. `check` evaluates
-a task's source with `lang`, from the files below the root of its repository (`star`'s `Root`), and
-checks its images' recipes and its workflow, reaching no engine and reading no configuration, then
-lints the files it read (`Plan::lint`) with the formatter beside `pumpkin` (`style`), with which
-`fmt` formats `.star` files. `build` takes the same path, then builds the images on the engine of
-the configuration's Docker context (`Engine::start`) and prints the IR that names them; `lock` takes
-it to a recipe's fetch stage, which it writes (`Engine::lock`). `run` starts the run of a task in a
-driver process (`driver`), which it executes as itself, and returns once the run has started: the
-driver connects each provider that the configuration names, as its kind says (`Connected`), then
-builds the task's images as `build` does, places the workflow's roles in the classes that they offer
-before the record is begun, and hands `Run` each provider that a role is placed on, with the static
-`sandboxd` it has found (`Sandboxd`), the `Dialer` for the sandboxes that listen, and, for a run
-that places a role on a private provider, the `GrantListener` it binds where that provider's
-sandboxes dial (`listen`). `wait` follows a run's record (`Record`) to its end, `cancel` stops a
-run, and `cancel` and `reap` remove what a run that has ended left (`Record::reap`), on each
-provider that its record names (`Reaching`); what a command says of an ending or a refusal ends with
-the commands to run next (`next`). It reads the machine's configuration (`config`, TOML): the Docker
-context; the providers, each by name and kind, `docker`, `ec2` or `modal`; the gateway's address for
-each reach over a network; and the model upstreams that a workflow's model route may reach, of which
-it hands `Run` the one that serves each entry of a route (`Serving`).
+**`crates/pumpkin`.** `pumpkin`, the operator's command line, which `cli` parses. `check`
+evaluates a task's source with `lang`, from the files below the root of its repository (`star`'s
+`Root`), and checks its images' recipes and its workflow, reaching no engine and reading no
+configuration, then lints the files it read (`Plan::lint`) with the formatter beside `pumpkin`
+(`style`), with which `fmt` formats `.star` files. `build` takes the same path, then builds the
+images on the engine of the configuration's Docker context (`Engine::start`) and prints the IR
+that names them; `lock` takes it to a recipe's fetch stage, which it writes (`Engine::lock`).
+`run` starts the run of a task in a driver process (`driver`), which it executes as itself, and
+returns once the run has started: the driver connects each provider that the configuration
+names, as its kind says (`Connected`), then builds the task's images as `build` does, places the
+workflow's roles in the classes that they offer before the record is begun, and hands `Run` each
+provider that a role is placed on, with the static `sandboxd` it has found (`Sandboxd`), the
+`Dialer` for the sandboxes that listen, and, for a run that places a role on a private provider,
+the `GrantListener` it binds where that provider's sandboxes dial (`listen`). `wait` follows a run's
+record (`Record`) to its end, `ls` lists the records (`progress`), `cancel` stops a run, and
+`cancel` and `reap` remove what a run that has ended left (`Record::reap`), on each provider that
+its record names (`Reaching`); what a command says of an ending or a refusal ends with the
+commands to run next (`next`). It reads the machine's configuration (`config`, TOML): the Docker
+context; the providers, each by name and kind, `docker`, `ec2` or `modal`; the gateway's address
+for each reach over a network; and the model upstreams that a workflow's model route may reach,
+of which it hands `Run` the one that serves each entry of a route (`Serving`).
 - **Architecture Invariant:** only `style` runs the formatter, buildifier, and Pumpkin's interface
   holds none of its flags or forms: each file's text goes to it, and `style` reads what it gives
   back, so another formatter can take its place.

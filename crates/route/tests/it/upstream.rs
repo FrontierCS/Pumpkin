@@ -34,17 +34,56 @@ const STREAM_HEAD: &str = "content-type: text/event-stream\r\nopenai-model: m-la
                            x-ratelimit-remaining-requests: 499\r\nset-cookie: s=1\r\n\
                            transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
 
+/// The two parts of a stream that the stand-in sends.
+type Parts = [&'static str; 2];
+
 /// The two parts of the stand-in's streamed body.
-const PARTS: [&str; 2] = [
+const PARTS: Parts = [
     "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":8},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":3}}}}\n\n",
 ];
 
 /// The two parts of the stand-in's streamed body for Chat Completions, the second with the usage
 /// that the request asked for.
-const CHAT_PARTS: [&str; 2] = [
+const CHAT_PARTS: Parts = [
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"7\"}}],\"usage\":null}\n\n",
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":16},\"completion_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\ndata: [DONE]\n\n",
+];
+
+/// A stream that fails with a rate limit as a provider sent it with a 200, its message cut short.
+const LIMITED_PARTS: Parts = [
+    "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"},\"output\":[],\"usage\":null}}\n\n",
+    "event: error\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\",\"param\":null,\"sequence_number\":1}\n\n",
+];
+
+/// A stream that fails after some of the model's output, reporting its usage.
+const FAILED_LATE_PARTS: Parts = [
+    "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+    "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The model failed\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":1}}}\n\n",
+];
+
+/// A stream whose failure gives no code.
+const UNCODED_PARTS: Parts = [
+    PARTS[0],
+    "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n",
+];
+
+/// A stream whose failure gives a code that is no identifier.
+const MISCODED_PARTS: Parts = [
+    PARTS[0],
+    "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"Slow down: wait 3s\",\"message\":\"\"}}}\n\n",
+];
+
+/// A stream that ends with an `error` event alone.
+const ERROR_PARTS: Parts = [
+    PARTS[0],
+    "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"An error occurred\",\"param\":null}\n\n",
+];
+
+/// A stream of Chat Completions that fails after its first chunk.
+const CHAT_FAILED_PARTS: Parts = [
+    CHAT_PARTS[0],
+    "data: {\"error\":{\"message\":\"Rate limit reached\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":\"rate_limit_exceeded\"}}\n\n",
 ];
 
 /// A case: its name, its upstream's URL and the text of its key file (`None` for no file), how
@@ -65,9 +104,7 @@ struct Case {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Answer {
     /// With a stream in two parts, the second once the sandbox has heard the first.
-    Streams,
-    /// With a stream of Chat Completions in two parts, as [`Answer::Streams`] does.
-    ChatStreams,
+    Streams(Parts),
     /// With an error of its own, a 429.
     Refuses,
     /// With a refusal, of the key or the request: a 401 or a 403.
@@ -101,7 +138,7 @@ fn case(name: &'static str, answer: Answer) -> Case {
 fn unanswered(name: &'static str) -> Case {
     Case {
         answer: None,
-        ..case(name, Answer::Streams)
+        ..case(name, Answer::Streams(PARTS))
     }
 }
 
@@ -283,9 +320,9 @@ fn serve(
         // What the sandbox heard of earlier answers.
         while heard_part.try_recv().is_ok() {}
         match answer {
-            Answer::Streams | Answer::ChatStreams | Answer::BreaksOff => {
+            Answer::Streams(_) | Answer::BreaksOff => {
                 let parts = match answer {
-                    Answer::ChatStreams => CHAT_PARTS,
+                    Answer::Streams(parts) => parts,
                     _ => PARTS,
                 };
                 write!(connection, "HTTP/1.1 200 OK\r\n{STREAM_HEAD}").unwrap();
@@ -356,7 +393,7 @@ fn serve(
 fn forward() {
     check(
         &[
-            case("a stream", Answer::Streams),
+            case("a stream", Answer::Streams(PARTS)),
             case("the provider's refusal", Answer::Refuses),
             Case {
                 then: Some(true),
@@ -408,18 +445,34 @@ fn forward() {
             Case {
                 api: Api::Chat,
                 url: "http://{stand-in}/v1/chat/completions",
-                ..case("a stream of Chat Completions", Answer::ChatStreams)
+                ..case("a stream of Chat Completions", Answer::Streams(CHAT_PARTS))
+            },
+            case("a rate limit with a 200", Answer::Streams(LIMITED_PARTS)),
+            case("a failure after output", Answer::Streams(FAILED_LATE_PARTS)),
+            case("a failure without a code", Answer::Streams(UNCODED_PARTS)),
+            case(
+                "a code that is no identifier",
+                Answer::Streams(MISCODED_PARTS),
+            ),
+            case("an error event", Answer::Streams(ERROR_PARTS)),
+            Case {
+                api: Api::Chat,
+                url: "http://{stand-in}/v1/chat/completions",
+                ..case(
+                    "a failure of Chat Completions",
+                    Answer::Streams(CHAT_FAILED_PARTS),
+                )
             },
         ],
         &expect![[r#"
-            a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); key refused: false
-            the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); key refused: false
+            a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 5, cached_tokens: Some(8), reasoning_tokens: Some(3) }), failed: None }); key refused: false
+            the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None, usage: None, failed: None }); key refused: false
             the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); key refused: true
-            the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); key refused: false
+            the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None, usage: None, failed: None }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); key refused: false
             a request forbidden: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(403), request_id: None, status: 400, message: "the model provider refused the request, with a 403: send only requests that it allows" }); key refused: false
-            a redirect: the stand-in got the same head with the body as sent; the sandbox heard 307 [] ; told: Some(Forwarded { status: 307, request_id: None }); key refused: false
+            a redirect: the stand-in got the same head with the body as sent; the sandbox heard 307 [] ; told: Some(Forwarded { status: 307, request_id: None, usage: None, failed: None }); key refused: false
             a coded body: the stand-in got the same head with the body as sent; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: Some(200), request_id: None, status: 502, message: "the model provider coded its answer, though the request asked for it uncoded: try again" }); key refused: false
-            a stream broken off: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\n, cut short; told: Some(Cut { status: 200, request_id: Some("req_1") }); key refused: false
+            a stream broken off: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\n, cut short; told: Some(Cut { status: 200, request_id: Some("req_1"), usage: None, failed: None }); key refused: false
             a hang-up: the stand-in got the same head with the body as sent; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: None, request_id: None, status: 502, message: "the model provider gave no answer: try again" }); key refused: false
             plain http beyond the loopback: the upstream's URL is plain http to a host beyond the loopback: name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
             a user: the upstream's URL names a user: name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
@@ -429,7 +482,13 @@ fn forward() {
             no key file: the key file <dir>/key-14 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
             an empty key file: the key file <dir>/key-15 holds no API key: write the key alone, on one line
             a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line
-            a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); key refused: false"#]],
+            a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 1, cached_tokens: Some(16), reasoning_tokens: Some(0) }), failed: None }); key refused: false
+            a rate limit with a 200: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.failed\ndata: {"type":"response.failed","sequence_number":0,"response":{"id":"resp_1","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"output":[],"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null,"sequence_number":1}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); key refused: false
+            a failure after output: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"The model failed"},"usage":{"input_tokens":12,"output_tokens":1}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 1, cached_tokens: None, reasoning_tokens: None }), failed: Some(Failure { code: Some("server_error") }) }); key refused: false
+            a failure without a code: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":null}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: None }) }); key refused: false
+            a code that is no identifier: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"Slow down: wait 3s","message":""}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: None }) }); key refused: false
+            an error event: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: error\ndata: {"type":"error","code":"server_error","message":"An error occurred","param":null}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("server_error") }) }); key refused: false
+            a failure of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"error":{"message":"Rate limit reached","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); key refused: false"#]],
     );
 }
 

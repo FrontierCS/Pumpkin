@@ -43,6 +43,7 @@ mod config;
 mod driver;
 mod lock;
 mod next;
+mod progress;
 mod sandboxd;
 mod star;
 mod style;
@@ -78,6 +79,7 @@ fn main() -> ExitCode {
     let done = match cli::parse(args) {
         Ok(cli::Command::Run(flags)) => run(flags),
         Ok(cli::Command::Wait(flags)) => wait(flags),
+        Ok(cli::Command::Ls(flags)) => ls(flags),
         Ok(cli::Command::Cancel(flags)) => cancel(flags),
         Ok(cli::Command::Reap(flags)) => reap(flags),
         Ok(cli::Command::Check(flags)) => check(flags),
@@ -149,7 +151,7 @@ fn start(id: &RunTag, flags: cli::Run, follower: bool) -> Result<ExitCode, Strin
                 // Whether the run is still live by now depends on how fast it went, which tells
                 // the operator nothing: `run` follows the run it started however soon it ends.
                 following(&record, "run");
-                let ending = record.wait(|| {})?;
+                let ending = followed(&record)?;
                 return end(&record, &ending, named, record.args());
             }
             if !follower {
@@ -278,6 +280,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
     let Prepared {
         workflow,
+        tags,
         providers,
         gateway,
         servings,
@@ -300,7 +303,10 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
     let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
     let on = placed_on.map(Connected::provider);
-    let kept = Recorded { args: &words };
+    let kept = Recorded {
+        args: &words,
+        tags: &tags,
+    };
     let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     // Said before `run` hears of it, so that whatever ends both later, the record is named.
@@ -360,10 +366,11 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, cli::Run), String> {
     }
 }
 
-/// What a run starts from: its task's workflow, built, and what it reads of the machine's
-/// configuration, its providers connected.
+/// What a run starts from: its task's workflow, built, with the tag of each image, which the
+/// run's record keeps, and what it reads of the machine's configuration, its providers connected.
 struct Prepared<'e> {
     workflow: Workflow,
+    tags: star::Tags,
     providers: config::Providers<Connected<'e>>,
     gateway: config::Gateway,
     /// How each role's model route is served, an entry at a time.
@@ -399,8 +406,9 @@ fn prepared<'e>(
     let engine = &*engine.insert(crate::engine(context)?);
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
-    Ok(task.build(engine).map(|workflow| Prepared {
+    Ok(task.build(engine).map(|(workflow, tags)| Prepared {
         workflow,
+        tags,
         providers,
         gateway,
         servings,
@@ -413,6 +421,99 @@ fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
     let cli::Wait { run, runs } = flags;
     let (record, named) = found(run, runs)?;
     follow(&record, "wait", named.as_deref())
+}
+
+/// Lists the runs in the runs directory that `flags` name, or [`default_runs`], whose ids start
+/// with one of their prefixes, oldest first, a line for each, and their totals
+/// ([`progress::lines`]); returns the exit status that `ls`'s help gives. The default directory
+/// not being there yet is no runs.
+fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
+    let cli::Ls { runs, prefixes } = flags;
+    let (runs, named) = runs_dir(runs)?;
+    let now = unix_now();
+    let since = progress::listed_since(&prefixes, now);
+    let (listing, unlisted) = listed_in(Path::new(&runs), named.is_none(), &prefixes, since)?;
+    let lines = progress::lines(&listing, now, named.as_deref());
+    print(lines.as_bytes()).context("printing the runs failed")?;
+    if unlisted > 0 {
+        let runs = counted(unlisted, "run");
+        return Err(format!("{runs} can't be listed, as said above"));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The time now, since the Unix epoch, or the epoch itself on a clock that reads before it.
+fn unix_now() -> std::time::Duration {
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
+    now.unwrap_or_default()
+}
+
+/// Each run in `runs` whose id starts with one of `prefixes`, or every run without any, as `ls`
+/// lists it, but those that ended before `since`, if given, since the Unix epoch, which it leaves
+/// out; and how many can't be listed, each of which is said; none if `runs` is the `default`
+/// directory, and not there yet.
+fn listed_in(
+    runs: &Path,
+    default: bool,
+    prefixes: &[String],
+    since: Option<std::time::Duration>,
+) -> Result<(progress::Listing, usize), String> {
+    let mut listing = progress::Listing::default();
+    if default && !runs.try_exists().context(runs.display())? {
+        return Ok((listing, 0));
+    }
+    let mut unlisted = 0;
+    for record in Record::all(runs)? {
+        if let Ok(record) = &record
+            && !picked(prefixes, record.id())
+        {
+            continue;
+        }
+        let run = record.and_then(|record| {
+            let id = record.id().to_owned();
+            if let Some(since) = since
+                && ended(record.dir())?.is_some_and(|ended| ended < since)
+            {
+                return Ok((id, None));
+            }
+            Ok((id, Some(progress::Listed::run(&record, record.ending()?)?)))
+        });
+        match run {
+            Ok((id, Some(run))) => {
+                listing.runs.insert(id, run);
+            }
+            Ok((id, None)) => {
+                listing.older.insert(id);
+            }
+            Err(error) => {
+                say(error);
+                unlisted += 1;
+            }
+        }
+    }
+    Ok((listing, unlisted))
+}
+
+/// When the run recorded in `dir` ended, as it wrote its `outcome.json`, since the Unix epoch;
+/// `None` while it has none, as it is live, or lost.
+fn ended(dir: &Path) -> Result<Option<std::time::Duration>, String> {
+    let outcome = dir.join("outcome.json");
+    let modified = fs::metadata(&outcome).and_then(|metadata| metadata.modified());
+    match modified {
+        Ok(modified) => Ok(Some(
+            (modified.duration_since(SystemTime::UNIX_EPOCH)).unwrap_or_default(),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", outcome.display())),
+    }
+}
+
+/// Whether the run `id` is one that `prefixes` pick: one of them starts it, or there are none.
+fn picked(prefixes: &[String], id: &str) -> bool {
+    prefixes.is_empty()
+        || prefixes
+            .iter()
+            .any(|prefix| id.starts_with(prefix.as_str()))
 }
 
 /// The record of the run that `run` names, in `runs` ([`runs_dir`]), and the runs directory that
@@ -831,7 +932,7 @@ fn built(entry: &star::Entry, args: &lang::Args, config: Option<String>) -> Resu
         let engine = configured_engine(&config_path(config)?)?;
         Ok(task.build(&engine))
     })?;
-    let workflow = built.map_err(|problems| task_problems(entry, &problems))?;
+    let (workflow, _) = built.map_err(|problems| task_problems(entry, &problems))?;
     let ir = runtime::ir_json(&workflow);
     print(ir.as_bytes()).context("printing the IR failed")
 }
@@ -874,11 +975,43 @@ fn task_problems(entry: &star::Entry, problems: &lang::Problems) -> String {
 }
 
 /// Waits until the run of `record`, in `runs`, as commands name it ([`end`]), has ended, saying
-/// first, if it is live, that ending `pumpkin command` does not stop it ([`following`]), and
-/// prints its outcome; returns the exit status that `wait`'s help gives.
+/// first, if it is live, that ending `pumpkin command` does not stop it ([`following`]), then its
+/// milestones as they come ([`followed`]), and prints its outcome; returns the exit status that
+/// `wait`'s help gives.
 fn follow(record: &Record, command: &str, runs: Option<&str>) -> Result<ExitCode, String> {
-    let ending = record.wait(|| following(record, command))?;
+    let ending = if let Some(ending) = record.ending()? {
+        ending
+    } else {
+        following(record, command);
+        followed(record)?
+    };
     end(record, &ending, runs, record.args())
+}
+
+/// How often [`followed`] looks at a live run's record.
+// A milestone said within a second is timely, and a run's log, at most about 100 KB, costs
+// nothing to read again.
+const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
+/// says each of its milestones meanwhile, as its log records it ([`progress::milestones`]).
+fn followed(record: &Record) -> Result<Ending, String> {
+    let mut said = std::collections::BTreeSet::new();
+    loop {
+        // How it ended first, so that the log read after holds every milestone before the end.
+        let ending = record.ending()?;
+        if let Some(progress) = record.progress()? {
+            for milestone in progress::milestones(&progress) {
+                if said.insert(milestone.clone()) {
+                    say(milestone);
+                }
+            }
+        }
+        if let Some(ending) = ending {
+            return Ok(ending);
+        }
+        std::thread::sleep(FOLLOW_POLL);
+    }
 }
 
 /// Says that `pumpkin command` follows the run of `record`, and that ending it does not stop
@@ -891,9 +1024,10 @@ fn following(record: &Record, command: &str) {
     ));
 }
 
-/// Prints the outcome of `record`, a run that has `ended`, then says how it ended ([`closing`]),
-/// after the standard error of a final judge that returned no result ([`show_judge_stderr`]), or
-/// why it can't be found; or of a lost run, says that it is lost. Ends with the command that runs it again with `args`
+/// Prints the outcome of `record`, a run that has `ended`, then says its summary
+/// ([`summarize`]) and how it ended ([`closing`]), after the standard error of a final judge
+/// that returned no result ([`show_judge_stderr`]), or why it can't be found; or of a lost run,
+/// says its summary, and that it is lost. Ends with the command that runs it again with `args`
 /// ([`again`]), and of a lost run, those that remove what it left, which name its runs directory
 /// `runs`, absolute, or none if it is the default. Returns the exit status that `run`'s and
 /// `wait`'s help give.
@@ -905,14 +1039,21 @@ fn end(
 ) -> Result<ExitCode, String> {
     let id = record.id();
     let (exit, how, judge_stderr) = match ending {
-        Ending::Scored { score: _, how } => (ExitCode::SUCCESS, how, None),
-        Ending::Unscored(why) => (ExitCode::from(3), why, None),
-        Ending::NoResult { why, judge_stderr } => (ExitCode::from(3), why, Some(judge_stderr)),
-        Ending::Failed(how) | Ending::Interrupted(how) => (ExitCode::FAILURE, how, None),
+        Ending::Scored { score, after } => {
+            let score = progress::shown_score(score);
+            let how = format!("finished with a score of {score}, {after}");
+            (ExitCode::SUCCESS, how, None)
+        }
+        Ending::Unscored(why) => (ExitCode::from(3), why.clone(), None),
+        Ending::NoResult { why, judge_stderr } => {
+            (ExitCode::from(3), why.clone(), Some(judge_stderr))
+        }
+        Ending::Failed(how) | Ending::Interrupted(how) => (ExitCode::FAILURE, how.clone(), None),
         // It has no `outcome.json` to print.
         Ending::Lost => {
             let how = "is lost: its driver ended without writing outcome.json, so nothing says \
                        how it ended";
+            summarize(record);
             say(closing(id, how, record.dir()));
             again(record, args);
             advise("remove what it left", &next::of_run("cancel", runs, id));
@@ -924,6 +1065,7 @@ fn end(
         }
     };
     print_outcome(record.dir())?;
+    summarize(record);
     match judge_stderr {
         Some(Ok(path)) => show_judge_stderr(path),
         Some(Err(error)) => say(format_args!(
@@ -931,9 +1073,22 @@ fn end(
         )),
         None => {}
     }
-    say(closing(id, how, record.dir()));
+    say(closing(id, &how, record.dir()));
     again(record, args);
     Ok(exit)
+}
+
+/// Says the summary of the run of `record`, which has ended ([`progress::summary`]), if it has a
+/// log, or why it can't be read.
+fn summarize(record: &Record) {
+    match progress::summary(record) {
+        Ok(Some(summary)) => {
+            // Its first line is `pumpkin`'s, and the rest are indented beneath it.
+            to_stderr(format!("pumpkin: {summary}").as_bytes());
+        }
+        Ok(None) => {}
+        Err(error) => say(format_args!("the run's summary can't be read: {error}")),
+    }
 }
 
 /// Says the command that runs the run of `record` again, with `args`, those of a `pumpkin run`.
