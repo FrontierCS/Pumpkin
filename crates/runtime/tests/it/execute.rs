@@ -23,7 +23,7 @@ use std::{fs, iter};
 
 use decision::lasts;
 use expect_test::{Expect, expect};
-use gateway::{GatewayAddress, GrantListener};
+use gateway::{Dialer, GatewayAddress, GrantListener};
 use provider::{
     Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation, Role,
     RunTag, SandboxId, SandboxdRef, Sweep,
@@ -146,6 +146,7 @@ impl Provider for Interrupting<'_> {
         match self.sim.meeting() {
             Meeting::Local(_) => Meeting::Local(self),
             Meeting::Private(_) => Meeting::Private(self),
+            Meeting::Listen(_) => Meeting::Listen(self),
         }
     }
 
@@ -187,10 +188,11 @@ fn interrupting<'a>(
         .collect()
 }
 
-/// Executes `run` with `sandboxd`, and a grant listener on the loopback if one of `providers` is
-/// private, interrupted `at` a step, if given, by the [`Interrupting`] providers it was prepared
-/// on: what `execute` returns, and for an interrupted run, whether it started, whether it returned
-/// within [`WAITED`], and what it published.
+/// Executes `run` with `sandboxd`, a grant listener on the loopback if one of `providers` is
+/// private, and a dialer that trusts the stand-in TLS edge, interrupted `at` a step, if given, by
+/// the [`Interrupting`] providers it was prepared on: what `execute` returns, and for an
+/// interrupted run, whether it started, whether it returned within [`WAITED`], and what it
+/// published.
 fn interrupted_at(
     run: Run<'_, impl Host>,
     providers: &[(&'static str, &Sim)],
@@ -211,10 +213,15 @@ fn interrupted_at(
         if at == Some(At::AgentStarted) {
             scope.spawn(|| interrupt_once_started(&record));
         }
-        run.execute(Path::new(sandboxd), private.as_ref(), || {
-            ran = true;
-            Ok(())
-        })
+        run.execute(
+            Path::new(sandboxd),
+            private.as_ref(),
+            &Dialer::new(test_support::edge::client()),
+            || {
+                ran = true;
+                Ok(())
+            },
+        )
     });
     let mut lines = vec![match executed {
         Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
@@ -376,6 +383,7 @@ fn declared(record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
     let reach = |provider: &Sim| match provider.meeting() {
         Meeting::Local(_) => "local",
         Meeting::Private(_) => "private",
+        Meeting::Listen(_) => "listen",
     };
     let expected = (providers.iter()).map(|(name, provider)| {
         let mut ready = json!(provider.ready());
@@ -1783,10 +1791,11 @@ fn there(sim: Sim) -> Sim {
 // A run on two simulated providers, the agent on `here` and the judges on [`there`], the train
 // judge, which needs the CPU model [`BRIEF`], in that class, whose agent and judges share
 // an image, which each provider publishes itself, and each refuses a reference that the other
-// published; `there` is private, so its sandboxes dial the run's grant listener, and `here`'s dial
-// their sockets: the agent makes a judge call and a final submission, which the final judge
-// scores, each sandbox is created in its role's class, and each provider is left with none of the
-// run's sandboxes; the record says where each role is placed, and each provider's reach.
+// published; `there` is private, so its sandboxes dial the run's grant listener, or it listens, so
+// the run dials its sandboxes, and `here`'s dial their sockets, alike either way: the agent makes
+// a judge call and a final submission, which the final judge scores, each sandbox is created in
+// its role's class, and each provider is left with none of the run's sandboxes; the record says
+// where each role is placed, and each provider's reach.
 #[test]
 fn spans_providers() {
     let argv = [
@@ -1798,52 +1807,54 @@ fn spans_providers() {
     let mut ir = ops_workflow(&argv, 30);
     ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
     ir["roles"][0]["image"] = ir["roles"][1]["image"].clone();
-    let (here, there) = (Sim::new().named("here"), there(Sim::new().private()));
-    let providers = [("here", &here), ("there", &there)];
-    check(
-        &System,
-        "spans-providers",
-        &providers,
-        &ir,
-        SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"here","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"there","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"there","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what each provider declared: true
-            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"brief","provider":"there"}}
-            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":7}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":8}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":14}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            here: their directory's mode at each create: ["700"]
-            here: the class at each create: ["sim"]
-            here listed once it ended: []
-            there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            there: their directory's mode at each create: []
-            there: the class at each create: ["brief", "sim"]
-            there listed once it ended: []"#]],
-    );
+    for reach in [Sim::private, Sim::listening] {
+        let (here, there) = (Sim::new().named("here"), there(reach(Sim::new())));
+        let providers = [("here", &here), ("there", &there)];
+        check(
+            &System,
+            "spans-providers",
+            &providers,
+            &ir,
+            SANDBOXD,
+            &expect![[r#"
+                finished, with score Some(Number(6))
+                record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+                the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"here","report":null}
+                job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"there","report":null}
+                job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"there","report":null}
+                payloads hold: ["xxxxxx"]
+                provider.json is what each provider declared: true
+                provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"brief","provider":"there"}}
+                outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+                log.jsonl:
+                {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+                {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+                {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+                {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+                {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
+                {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":5}
+                {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":6}
+                {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":7}
+                {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":8}
+                {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
+                {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":10}
+                {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":11}
+                {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":12}
+                {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+                {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":14}
+                {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
+                its last record came before the agent's teardown was to end
+                socket directories left: false
+                here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+                here: their directory's mode at each create: ["700"]
+                here: the class at each create: ["sim"]
+                here listed once it ended: []
+                there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+                there: their directory's mode at each create: []
+                there: the class at each create: ["brief", "sim"]
+                there listed once it ended: []"#]],
+        );
+    }
 }
 
 // A run on two simulated providers, `here` and [`there`], whose agent's
@@ -3254,7 +3265,12 @@ fn holds_until_its_end() {
         Err(error) => format!("refused: {error}"),
     };
     let execute = |run: Run<'_, System>| {
-        let executed = run.execute(Path::new(SANDBOXD), None, || Ok(()));
+        let executed = run.execute(
+            Path::new(SANDBOXD),
+            None,
+            &Dialer::new(test_support::edge::client()),
+            || Ok(()),
+        );
         match executed {
             Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
             Err(stopped) => stopped.to_string(),

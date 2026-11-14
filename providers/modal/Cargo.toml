@@ -1,0 +1,29 @@
+[package]
+name = "modal"
+version.workspace = true
+description = "Pumpkin's Modal provider: a sandbox for a role as a sandbox in a Modal workspace"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+aws = { path = "../../crates/aws" }
+engine = { path = "../../crates/engine" }
+provider = { path = "../../crates/provider" }
+schema = { path = "../../crates/schema" }
+stdx = { path = "../../crates/stdx" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+gateway = { path = "../../crates/gateway" }
+test-support = { path = "../../crates/test-support" }
+expect-test.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

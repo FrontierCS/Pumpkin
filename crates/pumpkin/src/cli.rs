@@ -484,9 +484,10 @@ record's driver.pid, as SIGINT and SIGHUP do too: the run removes its
 sandboxes, and its outcome.json says which signal interrupted it. A signal
 ignored as `run` starts stays ignored. SIGKILL to the driver leaves the run
 lost, with its sandboxes, which `pumpkin cancel` removes: its containers,
-labelled pumpkin.run=<id>, and its EC2 instances, tagged pumpkin:run=<id>, which
-end at the run's hard end all the same; and its socket directories in the
-record's sockets/, which `cancel` removes too.";
+labelled pumpkin.run=<id>, its EC2 instances, tagged pumpkin:run=<id>, and its
+Modal sandboxes, tagged pumpkin-run=<id>, which end at the run's hard end all
+the same; and its socket directories in the record's sockets/, which `cancel`
+removes too.";
 
 const WAIT_NOTES: &str = "\
 Examples:
@@ -525,7 +526,7 @@ A live run's driver, whose pid is in the record's driver.pid, gets SIGTERM, and
 the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
 `pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
 signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
-provider that it ran on, Docker or EC2, as `pumpkin reap --help` says,
+provider that it ran on, Docker, EC2 or Modal, as `pumpkin reap --help` says,
 and prints its outcome.json, then says how the run ended, as `pumpkin wait`
 does.";
 
@@ -611,16 +612,17 @@ Of each run whose driver has ended, `reap` deletes the sandboxes of the run that
 remain on each provider that it ran on, such as one that a create given up at
 its deadline made: on the Docker engine of the context that the record's
 provider.json names, the containers labelled pumpkin.run=<id>; and on each
-provider of kind ec2, as the configuration that ran the run names it, the one
-its record.json's flags name or else the default, the EC2 instances tagged
-pumpkin:run=<id>. It removes the run's socket directories, in the record's
-sockets/, and a lost run's record it marks failed, as its driver ended without
-an outcome.json. It leaves a live run to its driver: `pumpkin cancel` stops one.
+provider of kind ec2 or modal, as the configuration that ran the run names it,
+the one its record.json's flags name or else the default, the EC2 instances
+tagged pumpkin:run=<id>, or the Modal sandboxes tagged pumpkin-run=<id>. It
+removes the run's socket directories, in the record's sockets/, and a lost run's
+record it marks failed, as its driver ended without an outcome.json. It leaves a
+live run to its driver: `pumpkin cancel` stops one.
 
 Each sandbox that `reap` removes it notes in the record's reaps.jsonl, with the
 time; and each that the record holds undeleted, but that its provider no longer
-lists, as when the configuration now points to another region, it says, and
-notes there as gone.";
+lists, as when the configuration now points to another region or profile, it
+says, and notes there as gone.";
 
 /// `pumpkin help config`, the machine's configuration.
 const CONFIG: &str = "\
@@ -630,7 +632,7 @@ $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below
 Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
 and any other key is refused.
 
-Example, of a machine whose runs go to EC2:
+Example, of a machine whose runs go to EC2 and Modal:
   [docker]
   context = \"default\"
 
@@ -648,6 +650,22 @@ Example, of a machine whose runs go to EC2:
   vcpus = 8
   memory_mib = 16384
   cpu_features = [\"avx2\"]
+
+  [providers.gpus.modal]
+  profile = \"pumpkin\"
+  dials_from = \"203.0.113.7\"
+
+  [providers.gpus.modal.images]
+  region = \"us-west-1\"
+  repository = \"pumpkin/roles\"
+  role_arn = \"arn:aws:iam::123456789012:role/pumpkin-modal-pull\"
+
+  [providers.gpus.modal.classes.a100]
+  gpu = \"A100-80GB\"
+  gpu_model = \"NVIDIA A100-SXM4-80GB\"
+  cpu_millis = 8000
+  memory_bytes = 68719476736
+  startup_seconds = 1800
 
   [gateway]
   private = \"172.31.0.10:7433\"
@@ -669,9 +687,10 @@ settings:
   docker        Sandboxes on the engine of [docker]; it takes no settings. A
                 provider of this kind is the configuration's one provider, as
                 a machine runs its roles either on its own engine or on others,
-                of kind ec2. Its one class, `container`, offers the CPUs that
-                sandboxes may be given, the machine's memory, the flags that
-                /proc/cpuinfo lists for every CPU, no CPU model and no GPU.
+                of kind ec2 and modal. Its one class, `container`, offers the
+                CPUs that sandboxes may be given, the machine's memory, the
+                flags that /proc/cpuinfo lists for every CPU, no CPU model and
+                no GPU.
   ec2           Sandboxes on EC2 instances of their own, in the envelope that
                 its settings name, which pull their images from it, pushed
                 there from the engine of [docker]; they dial [gateway]'s
@@ -696,6 +715,29 @@ settings:
                   run's hard end: `group`, its EventBridge Scheduler schedule
                   group, and `role_arn`, the ARN of the role that its schedules
                   terminate instances with.
+  modal         Sandboxes in a Modal workspace, which run images that Modal
+                imports from an ECR repository, pushed there from the engine of
+                [docker]; each listens behind Modal's TLS tunnel, which the run
+                dials. It runs Modal's helper, pumpkin-modal.py, beside
+                `pumpkin`, with `uv` from PATH, and `aws`, AWS CLI v2, as ec2
+                does. Its settings:
+    profile       The profile of Modal's configuration whose token reaches the
+                  workspace.
+    config        The file of Modal's configuration that holds the profile, by
+                  its absolute path; absent, ~/.modal.toml.
+    dials_from    This machine's public IPv4 address, from which alone the
+                  sandboxes' tunnels take connections.
+    images        Where Modal imports images from: `region`, `repository`,
+                  an ECR repository there, and `role_arn`, the ARN of the AWS
+                  role that Modal pulls with, which trusts Modal's identity.
+    classes       Each class of sandbox, by its name; one at least: its
+                  `cpu_millis`, `memory_bytes`, in whole MiB, and
+                  `startup_seconds`, and its `gpu`, if any, as Modal names
+                  one, such as \"H100!\", or \"A100-80GB:2\" for two, with
+                  `gpu_model`, its model as nvidia-smi names it, such as
+                  \"NVIDIA H100 80GB HBM3\". A class with a GPU is offered
+                  only to roles that need its GPUs. Its `usd_per_hour`, if
+                  given, is what a sandbox costs an hour.
 
 [gateway], where the gateway meets the sandboxes that dial it over a network:
   private       The address, ip:port, that the sandboxes of an ec2 provider

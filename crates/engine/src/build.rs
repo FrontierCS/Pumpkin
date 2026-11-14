@@ -100,11 +100,12 @@ const FORM: &str = "pumpkin-build/4";
 // The image's layers are zstd's, in an OCI manifest, which a zstd layer needs: BuildKit compresses
 // with zstd several times faster than with gzip, its default, and engines unpack it faster too.
 // `force-compression` gives the base's layers zstd too, so that every layer of an image unpacks as
-// fast, wherever it runs: Docker pulls one from its 23.0, which a provider that pulls images onto a
-// Docker of its own requires, as the EC2 provider's boot does. So a base's layers are no longer its
-// registry's: the engine compresses them again, once per base until its build cache is pruned, and
-// their digests follow the version of its zstd encoder. The image exporter, given no name, keeps
-// the image in the engine untagged, as `docker build` does without `--output`.
+// fast, wherever it runs: Modal imports such an image, and Docker pulls one from its 23.0, which a
+// provider that pulls images onto a Docker of its own requires, as the EC2 provider's boot does. So
+// a base's layers are no longer its registry's: the engine compresses them again, once per base
+// until its build cache is pruned, and their digests follow the version of its zstd encoder. The
+// image exporter, given no name, keeps the image in the engine untagged, as `docker build` does
+// without `--output`.
 const OPTIONS: [&str; 2] = [
     "--provenance=false",
     "--output=type=image,compression=zstd,oci-mediatypes=true,force-compression=true",

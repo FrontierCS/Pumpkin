@@ -1,7 +1,8 @@
 //! The system calls the standard library doesn't offer, and the flags it doesn't name: waiting
-//! for any child or finding whether there is one, killing every process, making the process
-//! non-dumpable, opening only a regular file, at a path the role's code can write, and finding
-//! whether a connection's other end has closed it, without reading from it.
+//! for any child or finding whether there is one, killing every process, finding whether the
+//! process is root and becoming the role's user, making the process non-dumpable, opening only a
+//! regular file, at a path the role's code can write, and finding whether a connection's other
+//! end has closed it, without reading from it.
 //!
 //! Every errno a call returns is the world's, and returned: the kernel's security policy, a
 //! security module's or a seccomp filter's, may fail any call with any errno.
@@ -14,7 +15,10 @@ use std::path::Path;
 
 use rustix::io::Errno;
 use rustix::net::RecvFlags;
-use rustix::process::{self, DumpableBehavior, Pid, Signal, WaitId, WaitIdOptions, WaitOptions};
+use rustix::process::{
+    self, DumpableBehavior, Gid, Pid, Signal, Uid, WaitId, WaitIdOptions, WaitOptions,
+};
+use rustix::thread;
 use stdx::Context;
 
 /// Waits until a child has exited, or a child that made this process its tracer has stopped,
@@ -82,6 +86,26 @@ pub(crate) fn kill_all_others() -> io::Result<()> {
 /// Whether this is the first process of its PID namespace, as `sandboxd` is in a sandbox.
 pub(crate) fn is_first_process() -> bool {
     std::process::id() == 1
+}
+
+/// Whether this process's effective user is root.
+pub(crate) fn is_root() -> bool {
+    process::geteuid().is_root()
+}
+
+/// Makes this process, started as root, `uid` and `gid` alone, for good: it sets
+/// `no_new_privs`, so that no program it or its commands execute gains a privilege, a set-user-ID
+/// one's included, then drops every supplementary group, then makes `gid` its real, effective
+/// and saved group, then `uid` its user likewise, which takes every capability it had. Call it
+/// before any thread starts: each call changes the calling thread alone. Fails with the errno of
+/// the first call that fails.
+pub(crate) fn become_user(uid: u32, gid: u32) -> io::Result<()> {
+    let (uid, gid) = (Uid::from_raw(uid), Gid::from_raw(gid));
+    thread::set_no_new_privs(true)?;
+    thread::set_thread_groups(&[])?;
+    thread::set_thread_res_gid(gid, gid, gid)?;
+    thread::set_thread_res_uid(uid, uid, uid)?;
+    Ok(())
 }
 
 /// Makes this process non-dumpable, so that the commands it starts, though they run as the

@@ -1011,7 +1011,7 @@ fn utc_stamp(seconds: u64) -> String {
 /// What `provider.json` holds of `placed`, whose roles are placed on `providers`:
 /// `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c}}}`, where `r` is what `p`
 /// declared ([`Ready`](provider::Ready)), with how its sandboxes meet the gateway, `"reach"`:
-/// `local` or `private` ([`Meeting`]); and role `n` is placed on `p`, in class `c`.
+/// `local`, `private` or `listen` ([`Meeting`]); and role `n` is placed on `p`, in class `c`.
 pub(super) fn provided(placed: &Placed, providers: &ByProvider<&dyn Provider>) -> Value {
     let declared = (providers.iter())
         .map(|(name, provider)| {
@@ -1019,6 +1019,7 @@ pub(super) fn provided(placed: &Placed, providers: &ByProvider<&dyn Provider>) -
             declared["reach"] = match provider.meeting() {
                 Meeting::Local(_) => "local",
                 Meeting::Private(_) => "private",
+                Meeting::Listen(_) => "listen",
             }
             .into();
             (name.to_string(), declared)

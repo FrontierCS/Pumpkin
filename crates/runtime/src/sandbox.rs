@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{io, iter};
 
 use decision::{Event, JobId, LeaseId};
-use gateway::{Arrival, GrantListener, Session, Sockets};
+use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag,
     SandboxId, SandboxdRef, Sweep, UnixTime,
@@ -27,8 +27,8 @@ use provider::{
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial, command_env,
-    command_stderr, command_stdout, pumpkin_dir,
+    Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial,
+    command_env, command_stderr, command_stdout, pumpkin_dir,
 };
 use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, RunnerId, Workflow};
 use serde_json::Value;
@@ -150,6 +150,8 @@ enum Meets<'p> {
     Sockets(&'p dyn Creator<SocketDial>),
     /// At the address of the run's grant listener.
     Grants(&'p dyn Creator<TcpDial>, &'p GrantListener),
+    /// At the endpoint each one's create gives, which the run's dialer dials.
+    Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
 }
 
 impl Meets<'_> {
@@ -170,6 +172,11 @@ impl Meets<'_> {
             Self::Grants(creator, listener) => {
                 let (dial, registration) = listener.issue().map_err(issued)?;
                 Ok((creator.create(create, dial)?, registration))
+            }
+            Self::Dials(creator, dialer) => {
+                let (dial, unreached) = dialer.issue().map_err(issued)?;
+                let (created, endpoint) = creator.create(create, dial)?;
+                Ok((created, unreached.at(endpoint)))
             }
         }
     }
@@ -264,13 +271,14 @@ impl<'p> Published<'p> {
     /// placed on: `sandboxd`, a static binary, then each image a role placed there names, once;
     /// then makes the directory of the run's sockets in `record`, the run's record
     /// ([`record::sockets`]), which must not exist yet. The sandboxes of a private provider meet
-    /// the gateway at `private` instead. Stops as interrupted before each publish once a signal
-    /// has come.
+    /// the gateway at `private` instead, and those of one whose sandboxes listen, through `dialer`.
+    /// Stops as interrupted before each publish once a signal has come.
     pub(super) fn create(
         providers: &ByProvider<&'p dyn Provider>,
         placed: &Placed,
         sandboxd: &Path,
         private: Option<&'p GrantListener>,
+        dialer: &'p Dialer,
         record: &Path,
     ) -> Result<Self, Stopped> {
         let workflow = placed.workflow();
@@ -282,6 +290,7 @@ impl<'p> Published<'p> {
             let meets = match (provider.meeting(), private) {
                 (Meeting::Local(creator), _) => Meets::Sockets(creator),
                 (Meeting::Private(creator), Some(listener)) => Meets::Grants(creator, listener),
+                (Meeting::Listen(creator), _) => Meets::Dials(creator, dialer),
                 (Meeting::Private(_), None) => unreachable!(
                     "provider `{name}` is private, and the run has no grant listener, though \
                      `Run::execute`'s caller binds one for every run that places a role on a \

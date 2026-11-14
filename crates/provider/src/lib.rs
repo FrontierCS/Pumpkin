@@ -1,14 +1,14 @@
 //! The interface every provider implements, [`Provider`], the part of it that finds and
 //! deletes a run's sandboxes, [`Sweep`], and the create of its sandboxes, by how they meet the
 //! gateway ([`Meeting`]). The values they take and return are this crate's, such as
-//! [`Create`], the IR's [`Image`], the sandbox protocol's dials ([`SocketDial`], [`TcpDial`]),
+//! [`Create`], the IR's [`Image`], the sandbox protocol's dials ([`SocketDial`], [`TcpDial`], [`Listening`]),
 //! and what a run holds of a provider's ([`Reservation`]).
 
 use std::fmt;
 use std::path::Path;
 
 use schema::ir::Image;
-use schema::sandbox::{SocketDial, TcpDial};
+use schema::sandbox::{Endpoint, Listening, SocketDial, TcpDial};
 pub use values::{
     Console, Create, Created, ImageRef, Listed, Ready, Role, RunTag, SandboxId, SandboxdRef,
     UnixTime,
@@ -102,6 +102,9 @@ pub enum Meeting<'p> {
     /// On a private network that the gateway's host is on, each dialing a TCP address the host
     /// has there.
     Private(&'p dyn Creator<TcpDial>),
+    /// Across the Internet, each listening, and the gateway dialing it at the endpoint its create
+    /// gives.
+    Listen(&'p dyn Creator<Listening, (Created, Endpoint)>),
 }
 
 /// The create of a provider's sandboxes that are given `D` to meet the gateway by, which returns

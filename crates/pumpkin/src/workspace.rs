@@ -65,4 +65,10 @@ impl Workspace {
     pub(crate) fn ec2(&self) -> PathBuf {
         self.0.join("ec2")
     }
+
+    /// The directory of what providers of kind `modal` write on this machine
+    /// ([`modal::Modal`]).
+    pub(crate) fn modal(&self) -> PathBuf {
+        self.0.join("modal")
+    }
 }

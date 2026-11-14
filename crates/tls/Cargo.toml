@@ -1,0 +1,23 @@
+[package]
+name = "tls"
+version.workspace = true
+description = "TLS 1.3 below a session whose connection crosses the Internet, carried to a Unix socket"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+stdx = { path = "../stdx" }
+rustix = { workspace = true, features = ["event"] }
+rustls.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
+expect-test.workspace = true
+
+[lints]
+workspace = true

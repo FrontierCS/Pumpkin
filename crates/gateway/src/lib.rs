@@ -1,7 +1,7 @@
 //! The gateway's end of the sessions that sandboxes open, by [the protocol](schema::sandbox).
 //!
-//! A sandbox meets the gateway where its [`Registration`] says ([`Sockets`], [`GrantListener`]),
-//! which accepts the [`Session`] the sandbox opens with its hello.
+//! A sandbox meets the gateway where its [`Registration`] says ([`Sockets`], [`GrantListener`],
+//! [`Dialer`]), which accepts the [`Session`] the sandbox opens with its hello.
 //!
 //! A sandbox, however buggy, can't harm the host through its session: a message that fails to
 //! parse or comes out of turn, more replies than a waiting request takes, or a malformed tree
@@ -36,7 +36,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
-pub use meeting::{GatewayAddress, GrantListener, Registration, Sockets};
+pub use meeting::{Dialer, GatewayAddress, GrantListener, Registration, Sockets, Unreached};
 use schema::ir::{AbsolutePath, Argv, GpuModel, Mode, Name};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::{self, Limits, Modes};
@@ -1208,11 +1208,13 @@ impl Write for Until<'_> {
     }
 }
 
-/// A session's connection: to a socket of the sandbox's own, or over TCP, each behaving alike.
+/// A session's connection: to a socket of the sandbox's own, over TCP, or over TLS, each behaving
+/// alike.
 #[derive(Debug)]
 enum Connection {
     Unix(UnixStream),
     Tcp(TcpStream),
+    Tls(tls::Stream),
 }
 
 impl Connection {
@@ -1221,6 +1223,7 @@ impl Connection {
         match self {
             Self::Unix(stream) => stream.shutdown(Shutdown::Both),
             Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            Self::Tls(stream) => stream.shutdown(),
         }
     }
 
@@ -1228,6 +1231,7 @@ impl Connection {
         match self {
             Self::Unix(stream) => stream.set_nonblocking(nonblocking),
             Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            Self::Tls(stream) => stream.set_nonblocking(nonblocking),
         }
     }
 
@@ -1235,6 +1239,7 @@ impl Connection {
         match self {
             Self::Unix(stream) => stream.set_write_timeout(timeout),
             Self::Tcp(stream) => stream.set_write_timeout(timeout),
+            Self::Tls(stream) => stream.set_write_timeout(timeout),
         }
     }
 }
@@ -1246,6 +1251,7 @@ impl Read for &Connection {
         match self {
             Connection::Unix(stream) => (&mut &*stream).read(buf),
             Connection::Tcp(stream) => (&mut &*stream).read(buf),
+            Connection::Tls(stream) => (&mut &*stream).read(buf),
         }
     }
 }
@@ -1255,6 +1261,7 @@ impl Write for &Connection {
         match self {
             Connection::Unix(stream) => (&mut &*stream).write(buf),
             Connection::Tcp(stream) => (&mut &*stream).write(buf),
+            Connection::Tls(stream) => (&mut &*stream).write(buf),
         }
     }
 
@@ -1262,6 +1269,7 @@ impl Write for &Connection {
         match self {
             Connection::Unix(stream) => (&mut &*stream).flush(),
             Connection::Tcp(stream) => (&mut &*stream).flush(),
+            Connection::Tls(stream) => (&mut &*stream).flush(),
         }
     }
 }

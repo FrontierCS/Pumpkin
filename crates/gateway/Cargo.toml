@@ -12,6 +12,7 @@ doctest = false
 [dependencies]
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+tls = { path = "../tls" }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }

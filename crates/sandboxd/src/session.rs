@@ -5,7 +5,7 @@
 //! session reads on meanwhile; any other request is served before the next frame is read.
 
 use std::io::{self, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,13 +31,33 @@ pub(crate) enum Gateway {
     Socket(PathBuf),
     /// At a TCP address, where the hello presents the grant that identifies the sandbox.
     Tcp(SocketAddr, RegistrationGrant),
+    /// At a TCP address of the sandbox's own, where it listens, and the gateway's answer to the
+    /// hello presents the grant that identifies the gateway; until the deadline, past which no
+    /// gateway will.
+    Listen(SocketAddr, RegistrationGrant, Deadline),
 }
+
+/// How long a `sandboxd` that listens waits between its looks for a peer: a twentieth of a second, which the gateway's dial, taking a round trip or more, hardly notices.
+const ACCEPT_POLL: Duration = Duration::from_millis(50);
+
+/// Why a `sandboxd` that listens ends once its deadline has passed.
+const UNCLAIMED: &str = "no gateway claimed the sandbox by its start's deadline, and the slack \
+                         after it: expected the gateway to dial while the start lasts, past which \
+                         nothing does, so the sandbox ends";
+
+/// How many of the peers it turns away a `sandboxd` that listens tells of on standard error, each
+/// in a line, before it tells of no more: any host behind the gateway's address may reach its
+/// endpoint, as often as it likes.
+// Enough to show why the gateway's own dials failed, which come first unless another peer races
+// them, and as many as the kernel's rate limit lets a burst of its messages print
+// (`printk_ratelimit_burst`).
+const TOLD_PEERS_COUNT: usize = 10;
 
 impl fmt::Display for Gateway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Socket(socket) => socket.display().fmt(f),
-            Self::Tcp(address, _) => address.fmt(f),
+            Self::Tcp(address, _) | Self::Listen(address, _, _) => address.fmt(f),
         }
     }
 }
@@ -117,15 +137,132 @@ fn hello(grant: Option<RegistrationGrant>, gpus: Option<Vec<GpuModel>>) -> Hello
     }
 }
 
+/// Listens at `address` until a peer's answer to `hello` presents `grant`, and returns that
+/// peer's connection's two ends, the session open; or fails once `by` has passed. Each other peer
+/// is told nothing more, and its connection closed, with why on standard error.
+fn listen(
+    address: &SocketAddr,
+    grant: &RegistrationGrant,
+    by: Deadline,
+    hello: &Hello,
+) -> Result<(Reader, Writer), String> {
+    let listener = TcpListener::bind(address).context(format_args!(
+        "listening for the gateway at {address} failed"
+    ))?;
+    (listener.set_nonblocking(true)).context("making the listener wait in turns failed")?;
+    let mut told = 0;
+    loop {
+        // A peer that the kernel resets before it is taken costs one turn, as any other refusal.
+        let (stream, peer) = match listener.accept() {
+            Ok(taken) => taken,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if by.remaining().is_none() {
+                    return Err(UNCLAIMED.to_owned());
+                }
+                thread::sleep(ACCEPT_POLL);
+                continue;
+            }
+            Err(error) => {
+                return Err(error).context(format_args!("taking a connection at {address} failed"));
+            }
+        };
+        stream
+            .set_nonblocking(false)
+            .context("making the connection block failed")?;
+        match greet(&stream, grant, by, hello) {
+            // The listener closes as it drops, so no other peer reaches the session's sandbox.
+            Ok(()) => return halves(stream, TcpStream::try_clone),
+            Err(error) => {
+                told += 1;
+                if told <= TOLD_PEERS_COUNT {
+                    let line = format_args!("sandboxd: turned away the peer at {peer}: {error}");
+                    crate::print_line(io::stderr(), line);
+                }
+                if told == TOLD_PEERS_COUNT {
+                    let line = format_args!(
+                        "sandboxd: telling of no more peers it turns away, having told of \
+                         {TOLD_PEERS_COUNT}"
+                    );
+                    crate::print_line(io::stderr(), line);
+                }
+            }
+        }
+    }
+}
+
+/// Opens the session on `stream` with `hello`, as [`open`] does, all within [`HELLO_TIMEOUT`]
+/// and by `by`, with a peer whose answer presents `grant`; then lifts that bound.
+fn greet(
+    stream: &TcpStream,
+    grant: &RegistrationGrant,
+    by: Deadline,
+    hello: &Hello,
+) -> Result<(), String> {
+    stdx::net::set_options(stream).context("setting the connection's options failed")?;
+    // No later than `by`, past which no gateway claims the sandbox.
+    let left = by.remaining().unwrap_or_default();
+    let mut peer = Until {
+        stream,
+        by: Deadline::after(left.min(HELLO_TIMEOUT)),
+    };
+    open(&mut peer, hello, Some(grant))?;
+    let lifted = stream
+        .set_read_timeout(None)
+        .and_then(|()| stream.set_write_timeout(None));
+    lifted.context("lifting the bound on the connection's reads and writes failed")
+}
+
+/// Reads and writes `stream` until `by`, after which each read and write fails as timed out.
+struct Until<'a> {
+    stream: &'a TcpStream,
+    by: Deadline,
+}
+
+impl Until<'_> {
+    /// The time left until `by`, as the socket's timeout bounds each call on its own; failing
+    /// once it has passed, which a socket's `None` would take for no timeout at all.
+    fn left(&self) -> io::Result<Duration> {
+        self.by.remaining().ok_or(io::ErrorKind::TimedOut.into())
+    }
+}
+
+/// `error`, from a socket whose timeout was set, as timed out if that timeout passed, which fails
+/// a call as it would fail a non-blocking one.
+fn timed_out(error: io::Error) -> io::Error {
+    match error.kind() {
+        io::ErrorKind::WouldBlock => io::ErrorKind::TimedOut.into(),
+        _ => error,
+    }
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.left()?))?;
+        self.stream.read(buf).map_err(timed_out)
+    }
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.left()?))?;
+        self.stream.write(buf).map_err(timed_out)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
 /// Meets `gateway`, once it connects, or connecting to it, once, and returns the connection's two
 /// ends, the session open with a hello that names `gpus`.
 fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Writer), String> {
     let connecting = format_args!("connecting to the gateway at {gateway} failed");
     let opening = format_args!("opening the session with the gateway at {gateway} failed");
     match gateway {
+        Gateway::Listen(address, grant, by) => listen(address, grant, *by, &hello(None, gpus)),
         Gateway::Socket(socket) => {
             let stream = UnixStream::connect(socket).context(connecting)?;
-            open(&mut &stream, &hello(None, gpus)).context(opening)?;
+            open(&mut &stream, &hello(None, gpus), None).context(opening)?;
             halves(stream, UnixStream::try_clone)
         }
         Gateway::Tcp(address, grant) => {
@@ -137,15 +274,19 @@ fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Write
             stdx::net::set_options(&stream)
                 .context("setting the options of the connection to the gateway failed")?;
             let hello = hello(Some(grant.clone()), gpus);
-            open(&mut &stream, &hello).context(opening)?;
+            open(&mut &stream, &hello, None).context(opening)?;
             halves(stream, TcpStream::try_clone)
         }
     }
 }
 
-/// Says `hello` to `peer`, and returns once its answer accepts the session; or why not, saying
-/// what `it`, the peer, did.
-fn open(peer: &mut (impl Read + Write), hello: &Hello) -> Result<(), String> {
+/// Says `hello` to `peer`, and returns once its answer accepts the session, presenting
+/// `expected`; or why not, saying what `it`, the peer, did.
+fn open(
+    peer: &mut (impl Read + Write),
+    hello: &Hello,
+    expected: Option<&RegistrationGrant>,
+) -> Result<(), String> {
     let late = |error: io::Error| match error.kind() {
         io::ErrorKind::TimedOut => format!(
             "it didn't take the hello and answer it within {} s, or by the sandbox's deadline if \
@@ -162,10 +303,23 @@ fn open(peer: &mut (impl Read + Write), hello: &Hello) -> Result<(), String> {
     let answer = frame::read_hello_reply(peer)
         .map_err(late)
         .context("reading its answer failed")?;
-    match answer {
-        Some(HelloReply::Accepted) => Ok(()),
-        Some(HelloReply::Refused { message }) => Err(format!("it refused the session: {message}")),
-        None => Err(
+    match (answer, expected) {
+        (Some(HelloReply::Accepted { grant }), expected) if grant.as_ref() == expected => Ok(()),
+        (Some(HelloReply::Accepted { grant: Some(_) }), Some(_)) => {
+            Err("it presented another registration grant: expected the sandbox's".to_owned())
+        }
+        (Some(HelloReply::Accepted { grant: Some(_) }), None) => Err(
+            "it presented a registration grant, which it never does where sandboxd dials it: \
+             expected none"
+                .to_owned(),
+        ),
+        (Some(HelloReply::Accepted { grant: None }), _) => {
+            Err("it presented no registration grant: expected the sandbox's".to_owned())
+        }
+        (Some(HelloReply::Refused { message }), _) => {
+            Err(format!("it refused the session: {message}"))
+        }
+        (None, _) => Err(
             "it closed the connection before it answered the hello: expected it to accept or \
              refuse the session"
                 .to_owned(),

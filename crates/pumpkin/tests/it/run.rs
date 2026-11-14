@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 use test_support::{BUSYBOX, WORKFLOW, docker_context, files, sandboxd, standard_outputs};
 
 use super::{
-    EC2, LOCAL, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first, check, containers, cpu_list,
-    docker_table, engine, invocation, ledger, machine, machine_cores, machine_cpus, ran, record,
-    report, siblings, through_shell, with_room, workflow,
+    EC2, HELD, LOCAL, MODAL, MODAL_HELPER, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first,
+    check, containers, cpu_list, docker_table, engine, install, invocation, ledger, machine,
+    machine_cores, machine_cpus, ran, record, report, siblings, through_shell, with_room, workflow,
 };
 
 #[test]
@@ -223,9 +223,10 @@ fn usage() {
               sandboxes, and its outcome.json says which signal interrupted it. A signal
               ignored as `run` starts stays ignored. SIGKILL to the driver leaves the run
               lost, with its sandboxes, which `pumpkin cancel` removes: its containers,
-              labelled pumpkin.run=<id>, and its EC2 instances, tagged pumpkin:run=<id>, which
-              end at the run's hard end all the same; and its socket directories in the
-              record's sockets/, which `cancel` removes too.
+              labelled pumpkin.run=<id>, its EC2 instances, tagged pumpkin:run=<id>, and its
+              Modal sandboxes, tagged pumpkin-run=<id>, which end at the run's hard end all
+              the same; and its socket directories in the record's sockets/, which `cancel`
+              removes too.
             $ pumpkin wait -h
             exit status: Some(0)
             printed:
@@ -309,7 +310,7 @@ fn usage() {
               the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
               `pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
               signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
-              provider that it ran on, Docker or EC2, as `pumpkin reap --help` says,
+              provider that it ran on, Docker, EC2 or Modal, as `pumpkin reap --help` says,
               and prints its outcome.json, then says how the run ended, as `pumpkin wait`
               does.
             $ pumpkin reap --help
@@ -345,16 +346,17 @@ fn usage() {
               remain on each provider that it ran on, such as one that a create given up at
               its deadline made: on the Docker engine of the context that the record's
               provider.json names, the containers labelled pumpkin.run=<id>; and on each
-              provider of kind ec2, as the configuration that ran the run names it, the one
-              its record.json's flags name or else the default, the EC2 instances tagged
-              pumpkin:run=<id>. It removes the run's socket directories, in the record's
-              sockets/, and a lost run's record it marks failed, as its driver ended without
-              an outcome.json. It leaves a live run to its driver: `pumpkin cancel` stops one.
+              provider of kind ec2 or modal, as the configuration that ran the run names it,
+              the one its record.json's flags name or else the default, the EC2 instances
+              tagged pumpkin:run=<id>, or the Modal sandboxes tagged pumpkin-run=<id>. It
+              removes the run's socket directories, in the record's sockets/, and a lost run's
+              record it marks failed, as its driver ended without an outcome.json. It leaves a
+              live run to its driver: `pumpkin cancel` stops one.
 
               Each sandbox that `reap` removes it notes in the record's reaps.jsonl, with the
               time; and each that the record holds undeleted, but that its provider no longer
-              lists, as when the configuration now points to another region, it says, and
-              notes there as gone.
+              lists, as when the configuration now points to another region or profile, it
+              says, and notes there as gone.
             $ pumpkin help --help
             exit status: Some(0)
             printed:
@@ -384,7 +386,7 @@ fn usage() {
               Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
               and any other key is refused.
 
-              Example, of a machine whose runs go to EC2:
+              Example, of a machine whose runs go to EC2 and Modal:
                 [docker]
                 context = "default"
 
@@ -402,6 +404,22 @@ fn usage() {
                 vcpus = 8
                 memory_mib = 16384
                 cpu_features = ["avx2"]
+
+                [providers.gpus.modal]
+                profile = "pumpkin"
+                dials_from = "203.0.113.7"
+
+                [providers.gpus.modal.images]
+                region = "us-west-1"
+                repository = "pumpkin/roles"
+                role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull"
+
+                [providers.gpus.modal.classes.a100]
+                gpu = "A100-80GB"
+                gpu_model = "NVIDIA A100-SXM4-80GB"
+                cpu_millis = 8000
+                memory_bytes = 68719476736
+                startup_seconds = 1800
 
                 [gateway]
                 private = "172.31.0.10:7433"
@@ -423,9 +441,10 @@ fn usage() {
                 docker        Sandboxes on the engine of [docker]; it takes no settings. A
                               provider of this kind is the configuration's one provider, as
                               a machine runs its roles either on its own engine or on others,
-                              of kind ec2. Its one class, `container`, offers the CPUs that
-                              sandboxes may be given, the machine's memory, the flags that
-                              /proc/cpuinfo lists for every CPU, no CPU model and no GPU.
+                              of kind ec2 and modal. Its one class, `container`, offers the
+                              CPUs that sandboxes may be given, the machine's memory, the
+                              flags that /proc/cpuinfo lists for every CPU, no CPU model and
+                              no GPU.
                 ec2           Sandboxes on EC2 instances of their own, in the envelope that
                               its settings name, which pull their images from it, pushed
                               there from the engine of [docker]; they dial [gateway]'s
@@ -450,6 +469,29 @@ fn usage() {
                                 run's hard end: `group`, its EventBridge Scheduler schedule
                                 group, and `role_arn`, the ARN of the role that its schedules
                                 terminate instances with.
+                modal         Sandboxes in a Modal workspace, which run images that Modal
+                              imports from an ECR repository, pushed there from the engine of
+                              [docker]; each listens behind Modal's TLS tunnel, which the run
+                              dials. It runs Modal's helper, pumpkin-modal.py, beside
+                              `pumpkin`, with `uv` from PATH, and `aws`, AWS CLI v2, as ec2
+                              does. Its settings:
+                  profile       The profile of Modal's configuration whose token reaches the
+                                workspace.
+                  config        The file of Modal's configuration that holds the profile, by
+                                its absolute path; absent, ~/.modal.toml.
+                  dials_from    This machine's public IPv4 address, from which alone the
+                                sandboxes' tunnels take connections.
+                  images        Where Modal imports images from: `region`, `repository`,
+                                an ECR repository there, and `role_arn`, the ARN of the AWS
+                                role that Modal pulls with, which trusts Modal's identity.
+                  classes       Each class of sandbox, by its name; one at least: its
+                                `cpu_millis`, `memory_bytes`, in whole MiB, and
+                                `startup_seconds`, and its `gpu`, if any, as Modal names
+                                one, such as "H100!", or "A100-80GB:2" for two, with
+                                `gpu_model`, its model as nvidia-smi names it, such as
+                                "NVIDIA H100 80GB HBM3". A class with a GPU is offered
+                                only to roles that need its GPUs. Its `usd_per_hour`, if
+                                given, is what a sandbox costs an hour.
 
               [gateway], where the gateway meets the sandboxes that dial it over a network:
                 private       The address, ip:port, that the sandboxes of an ec2 provider
@@ -1351,6 +1393,209 @@ fn ec2() {
     }
 }
 
+/// `calls`, the stand-in SDK's, with each sandbox's `"timeout": <t>`, where `t` is a time since
+/// the epoch, as `"timeout": <start> + <s>`, `s` the seconds from the start of the run of
+/// `record`, as its log's first record gives it, in whole seconds; and its start's deadline,
+/// which a clock read as the create begins gives, as `"--by", "<by>"`.
+fn from_the_start(calls: &str, record: &Path) -> String {
+    let log = fs::read_to_string(record.join("log.jsonl")).unwrap();
+    let started: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    let unix_ns: u64 = started["event"]["unix_ns"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let start = unix_ns / 1_000_000_000;
+    let key = "\"timeout\": ";
+    let mut pieces = calls.split(key);
+    let mut shown = vec![pieces.next().unwrap().to_owned()];
+    for piece in pieces {
+        let digits = piece
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(piece.len());
+        let timeout: u64 = piece[..digits].parse().unwrap();
+        shown.push(format!("<start> + {}{}", timeout - start, &piece[digits..]));
+    }
+    let key = "\"--by\", \"";
+    let mut pieces = shown
+        .join("\"timeout\": ")
+        .split(key)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for piece in pieces.iter_mut().skip(1) {
+        let digits = piece
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(piece.len());
+        piece.replace_range(..digits, "<by>");
+    }
+    pieces.join(key)
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn modal() {
+    let scratch = Scratch::new("modal");
+    let _stand_in = StandIn::new(&scratch);
+    let bin = scratch.0.join("bin");
+    for (command, stand_in) in [("aws", test_support::aws()), ("uv", test_support::uv())] {
+        symlink(stand_in, bin.join(command)).unwrap();
+    }
+    scratch.write("bin/ecr batch-get-image", HELD);
+    // The helper's clock at the epoch, so that the timeout it gives a sandbox is the run's hard
+    // end itself, which the run's start fixes, rather than the time left to it, which counts the
+    // seconds the run took to reach the create.
+    scratch.write("bin/clock", "0");
+    scratch.write(
+        "modal.toml",
+        &format!("{}\n{MODAL}", docker_table("default")),
+    );
+    // Roles that need `gpus`'s GPU, which its one class has.
+    let mut gpu = workflow("", &["true"]);
+    for role in gpu["roles"].as_array_mut().unwrap() {
+        role["needs"]["gpu"] = json!({ "count": 1, "model": "NVIDIA H100 80GB HBM3" });
+    }
+    scratch.write_task("gpu", &gpu);
+    // Links to `pumpkin`, in the workspace: beside the helper and its lock, as `cargo xtask
+    // install` installs them, beside the lock alone, and beside the helper alone.
+    let [script, lock] = MODAL_HELPER;
+    install(&scratch, ".pumpkin/installed", &MODAL_HELPER);
+    install(&scratch, ".pumpkin/unhelped", &[lock]);
+    install(&scratch, ".pumpkin/unlocked", &[script]);
+    let run = |dir: &str| {
+        let args = ["run", "gpu/task.star", "--sandboxd", "sandboxd", "--wait"];
+        let pumpkin = scratch.0.join(".pumpkin").join(dir).join("pumpkin");
+        let mut command = scratch.program(pumpkin, &args);
+        command.args(["--runs", &format!("{dir}-runs"), "--config", "modal.toml"]);
+        command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        command
+    };
+    let on_modal = run("installed");
+    let invoked = invocation(&on_modal);
+    let mut on_modal = on_modal;
+    let output = on_modal.output().unwrap();
+    let mut shown = vec![report(invoked, &output, &scratch.0, false)];
+    let record = fs::read_dir(scratch.0.join("installed-runs"))
+        .unwrap()
+        .next()
+        .unwrap();
+    let record = record.unwrap().path();
+    let id = record.file_name().unwrap().to_str().unwrap().to_owned();
+    let provided = fs::read_to_string(record.join("provider.json")).unwrap();
+    let mut provided: Value = serde_json::from_str(&provided).unwrap();
+    // The system's, which runs the helper here.
+    provided["providers"]["gpus"]["report"]["python"] = json!("<python>");
+    shown.push(format!(
+        "provider.json declares {:?}, of which gpus:\n{:#}\nand places the roles: {}",
+        provided["providers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        provided["providers"]["gpus"],
+        provided["roles"]
+    ));
+    let called = fs::read_to_string(bin.join("modal-calls")).unwrap();
+    let called = from_the_start(called.trim_end(), &record).replace(&id, "<id>");
+    shown.push(format!("the stand-in SDK was called with:\n{called}"));
+    let steps = iter::once(Step::Ran(shown.join("\n")));
+    let steps = steps.chain(["unhelped", "unlocked"].map(|dir| Step::Run(run(dir))));
+    check(
+        &scratch,
+        steps,
+        false,
+        &[],
+        &expect![[r#"
+            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin run gpu/task.star --sandboxd sandboxd --wait --runs installed-runs --config modal.toml
+            exit status: Some(3)
+            pumpkin: run <id> records into <scratch>/installed-runs/<id>
+            pumpkin: publishing run <id>'s images on provider `gpus`: it starts once they are there
+            pumpkin: run <id> started
+            pumpkin: following run <id>, recorded in <scratch>/installed-runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: Modal refused the helper's `create`: Modal made sandbox sb-1, then failed: Error: sandbox sb-1 opened no tunnel; it was terminated: fix what Modal reports; what Modal made by then, if anything, the run's list finds; its record is <scratch>/installed-runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/installed-runs --config <scratch>/modal.toml --sandboxd <scratch>/sandboxd <scratch>/gpu/task.star
+            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: Modal refused the helper's `create`: Modal made sandbox sb-1, then failed: Error: sandbox sb-1 opened no tunnel; it was terminated: fix what Modal reports; what Modal made by then, if anything, the run's list finds"}}
+            printed outcome.json: true
+            provider.json declares ["gpus"], of which gpus:
+            {
+              "classes": {
+                "h100": {
+                  "offers": {
+                    "cpu_features": [],
+                    "cpu_millis": 4000,
+                    "cpu_model": null,
+                    "gpu": {
+                      "count": 1,
+                      "model": "NVIDIA H100 80GB HBM3"
+                    },
+                    "memory_bytes": 17179869184
+                  },
+                  "startup_seconds": 1800
+                }
+              },
+              "reach": "listen",
+              "report": {
+                "aws": "aws-cli/2.38.1 Python/3.14.6 Linux/7.0.0 exe/x86_64.stand-in",
+                "dials_from": "203.0.113.7",
+                "docker": {
+                  "client_version": "29.0.0",
+                  "context": "default",
+                  "endpoint": "unix:///stand-in.sock",
+                  "engine_version": "29.0.0",
+                  "kernel": "6.0",
+                  "os": "stand-in",
+                  "platform": "linux/amd64",
+                  "security": {
+                    "apparmor": false,
+                    "rootless": true,
+                    "seccomp_profile": "builtin",
+                    "userns": false
+                  }
+                },
+                "images": {
+                  "region": "us-west-1",
+                  "repository": "pumpkin/roles",
+                  "role_arn": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"
+                },
+                "modal": "1.6.3",
+                "profile": "pumpkin",
+                "python": "<python>",
+                "repository": {
+                  "name": "pumpkin/roles",
+                  "uri": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles"
+                },
+                "workspace": "pumpkin-workspace"
+              }
+            }
+            and places the roles: {"agent":{"class":"h100","provider":"gpus"},"final_judge":{"class":"h100","provider":"gpus"},"train_judge":{"class":"h100","provider":"gpus"}}
+            the stand-in SDK was called with:
+            modal: Workspace.hydrate {"profile": "pumpkin"}
+            modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
+            modal: Image.build {"app": "pumpkin-images", "reference": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:0000000000000000000000000000000000000000000000000000000000000000", "secret": {"AWS_REGION": "us-west-1", "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/pumpkin-modal-pull"}}
+            modal: App.lookup {"create_if_missing": true, "name": "pumpkin-images"}
+            modal: Sandbox.create {"app": "pumpkin-images", "args": ["/.pumpkin/sandboxd", "0.0.0.0:7434", "--listen", "--by", "<by>", "--user", "10001:10001", "--ops"], "cpu": [0.5, 0.5], "encrypted_ports": [7434], "env": {"SANDBOXD_GRANT": "<grant>"}, "gpu": "H100!", "image": [{"from_id": "im-eedd61da80d57048dc8bb5"}, {"add_local_file": "<scratch>/sandboxd", "copy": false, "remote": "/.pumpkin/sandboxd"}, {"add_local_file": "<scratch>/sandboxd", "copy": false, "remote": "/.pumpkin/bin/sandboxctl"}], "inbound_cidr_allowlist": ["203.0.113.7/32"], "memory": [256, 256], "outbound_cidr_allowlist": [], "runtime": "gvisor", "tags": {"pumpkin-role": "agent", "pumpkin-run": "<id>"}, "timeout": <start> + 5880}
+            modal: Sandbox.tunnels {"id": "sb-1"}
+            modal: Sandbox.terminate {"id": "sb-1", "wait": false}
+            modal: App.lookup {"create_if_missing": false, "name": "pumpkin-images"}
+            modal: Sandbox.list {"app_id": "pumpkin-images", "tags": {"pumpkin-run": "<id>"}}
+            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/unhelped/pumpkin run gpu/task.star --sandboxd sandboxd --wait --runs unhelped-runs --config modal.toml
+            exit status: Some(1)
+            pumpkin: reaching provider `gpus` failed: <scratch>/.pumpkin/unhelped/pumpkin-modal.py doesn't exist: expected Modal's helper and its lock beside `pumpkin`, as `cargo xtask install` installs them
+            pumpkin: to run it again: pumpkin run --runs <scratch>/unhelped-runs --config <scratch>/modal.toml --sandboxd <scratch>/sandboxd <scratch>/gpu/task.star
+            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/unlocked/pumpkin run gpu/task.star --sandboxd sandboxd --wait --runs unlocked-runs --config modal.toml
+            exit status: Some(1)
+            pumpkin: reaching provider `gpus` failed: <scratch>/.pumpkin/unlocked/pumpkin-modal.py.lock doesn't exist: expected Modal's helper and its lock beside `pumpkin`, as `cargo xtask install` installs them
+            pumpkin: to run it again: pumpkin run --runs <scratch>/unlocked-runs --config <scratch>/modal.toml --sandboxd <scratch>/sandboxd <scratch>/gpu/task.star"#]],
+    );
+    for refused in ["unhelped", "unlocked"] {
+        let runs = scratch.0.join(format!("{refused}-runs"));
+        assert!(!runs.exists(), "{refused} made a record");
+    }
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1396,6 +1641,7 @@ fn configurations() {
         "mixed",
         "bundled",
         "regional",
+        "unimaged",
         "unspecified",
         "portless",
         "public",
@@ -1521,7 +1767,7 @@ fn configurations() {
               |
             9 | [providers.local.podman]
               |                  ^^^^^^
-            unknown variant `podman`, expected `docker` or `ec2`
+            unknown variant `podman`, expected one of `docker`, `ec2`, `modal`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/podman.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config context.toml
             exit status: Some(1)
@@ -1563,6 +1809,14 @@ fn configurations() {
               |          ^^^^^^^^^^^
             `us_west_1` is not an AWS region: use one such as `us-west-1`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/regional.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config unimaged.toml
+            exit status: Some(1)
+            pumpkin: unimaged.toml: TOML parse error at line 4, column 1
+              |
+            4 | [providers.gpus.modal]
+              | ^^^^^^^^^^^^^^^^^^^^^^
+            missing field `images`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/unimaged.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config unspecified.toml
             exit status: Some(1)
             pumpkin: unspecified.toml: TOML parse error at line 5, column 11
@@ -1611,8 +1865,8 @@ fn configurations() {
 /// context `nowhere` and two upstreams, its key in `conf/key`; `docked`, without upstreams; and,
 /// to be refused, one for each rule a configuration breaks, as its name says (a missing context,
 /// TOML errors, keys, upstreams, URLs, unserved models, `[placement]`, provider kinds and their
-/// settings, [`EC2`]'s tables, the gateway's address); and `conf/unkeyed`, whose key file is
-/// missing. Each but `undocked` ends with [`LOCAL`]'s tables, changed as its name says.
+/// settings, [`EC2`]'s and Modal's tables, the gateway's address); and `conf/unkeyed`, whose key
+/// file is missing. Each but `undocked` ends with [`LOCAL`]'s tables, changed as its name says.
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the configurations, a line or a few each"
@@ -1668,6 +1922,14 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
             ),
         ),
         ("regional", EC2.replace("\"us-west-1\"", "\"us_west_1\"")),
+        (
+            "unimaged",
+            "[providers.gpus.modal]\nprofile = \"pumpkin\"\ndials_from = \"203.0.113.7\"\n\n\
+             [providers.gpus.modal.classes.h100]\ngpu = \"H100!\"\n\
+             gpu_model = \"NVIDIA H100 80GB HBM3\"\ncpu_millis = 4000\n\
+             memory_bytes = 17179869184\nstartup_seconds = 1800\n"
+                .to_owned(),
+        ),
         (
             "unspecified",
             "[gateway]\nprivate = \"0.0.0.0:7433\"\n".to_owned(),

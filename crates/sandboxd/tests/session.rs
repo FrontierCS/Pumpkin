@@ -1,5 +1,6 @@
 //! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
-//! sandbox's own, or at a TCP address on the loopback ([`Meeting`]). `sandboxd` runs here as an
+//! sandbox's own, at a TCP address on the loopback, or where `sandboxd` listens on the loopback,
+//! behind the stand-in TLS edge ([`Meeting`]). `sandboxd` runs here as an
 //! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
 //! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
 //! `/pumpkin`, nor the model endpoint, at a port of the sandbox's own loopback: the Docker
@@ -15,7 +16,7 @@
 
 use std::cell::Cell;
 use std::ffi::OsStr;
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -28,14 +29,14 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, GatewayAddress, GrantListener, Process, Put, Session, Sockets};
+use gateway::{Arrival, Dialer, GatewayAddress, GrantListener, Process, Put, Session, Sockets};
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
 use schema::sandbox::frame::MAX_BODY_BYTES;
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, PROTOCOL_VERSION,
-    RelativePath, Root, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, TcpDial, ToSandbox, dir_mode,
-    file_mode, frame,
+    Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
+    PROTOCOL_VERSION, RegistrationGrant, RelativePath, Root, SANDBOXD_GRANT, SOCKET_NAME,
+    SocketDial, TcpDial, ToSandbox, dir_mode, file_mode, frame,
 };
 use serde_json::{Value, json};
 use stdx::process::Environment;
@@ -57,6 +58,10 @@ enum Meeting {
     /// At a grant listener's address on the loopback, as a provider starts `sandboxd` for the
     /// dial that the listener issued: with its address and its grant ([`TcpDial`]).
     Tcp,
+    /// Where `sandboxd` listens, at an address of the loopback's, as a provider starts it for the
+    /// dial that a dialer issued, with its grant ([`Listening`]), behind the stand-in TLS
+    /// edge, at whose endpoint the gateway dials it.
+    Listen,
 }
 
 /// What issued a sandbox's meeting, which lasts as long as the sandbox.
@@ -68,6 +73,8 @@ enum Gateway {
     Sockets(Sockets),
     /// The listener, and the address it listens at.
     Tcp(GrantListener, SocketAddr),
+    /// The address where `sandboxd` listens.
+    Listen(SocketAddr),
 }
 
 /// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
@@ -117,6 +124,23 @@ impl Sandbox {
                     .arg(gateway.to_string())
                     .env(SANDBOXD_GRANT, grant.digits());
                 (Gateway::Tcp(listener, gateway), registration)
+            }
+            Meeting::Listen => {
+                let dialer = Dialer::new(test_support::edge::client());
+                let (Listening { grant }, unreached) = dialer.issue().unwrap();
+                // For `sandboxd` to listen at; until it does, the gateway dials again.
+                let address = unlistened();
+                sandboxd
+                    .args([
+                        "--listen",
+                        &address.to_string(),
+                        "--by",
+                        &unix_seconds(3600),
+                    ])
+                    .env(SANDBOXD_GRANT, grant.digits());
+                let port = test_support::edge::front(address);
+                let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+                (Gateway::Listen(address), unreached.at(endpoint))
             }
         };
         let sandboxd = sandboxd.spawn().unwrap();
@@ -368,6 +392,7 @@ printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
     let cases = [
         ("named, at a socket", Meeting::Socket, Some(named)),
         ("named, over TCP", Meeting::Tcp, Some(named)),
+        ("named, listening", Meeting::Listen, Some(named)),
         ("none on PATH", Meeting::Socket, None),
         (
             "failing",
@@ -391,6 +416,7 @@ printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
     let expected = expect![[r#"
         named, at a socket: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
         named, over TCP: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
+        named, listening: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
         none on PATH: None
         failing: None
         naming none: None
@@ -417,6 +443,21 @@ fn judge() {
     );
     check(
         Meeting::Tcp,
+        judging,
+        &expect![[r#"
+            exited: Code(3)
+            out/empty/
+            out/evidence/payload: 2109497 bytes
+            out/result.json: {"bytes": 2109497}
+            payload collected intact: true
+            log/1.stderr: warning
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+    check(
+        Meeting::Listen,
         judging,
         &expect![[r#"
             exited: Code(3)
@@ -897,6 +938,223 @@ fn over_tcp() {
 }
 
 #[test]
+fn listening() {
+    check(
+        Meeting::Listen,
+        |sandbox| {
+            let Gateway::Listen(address) = sandbox.gateway else {
+                panic!("the sandbox was to listen");
+            };
+            let second = TcpStream::connect(address)
+                .map(drop)
+                .map_err(|error| error.kind());
+            let mut lines = vec![format!(
+                "a second peer, once the session is open: {second:?}"
+            )];
+            lines.extend(listening_apart());
+            lines.push(trickled());
+            let by = unix_seconds(3600);
+            let with_socket = ["/run/gateway.sock", "--listen", "--by", &by].map(OsStr::new);
+            let refused = ended(sandboxd(&with_socket, Some(OsStr::new(GRANT))));
+            lines.push(format!("--listen with a socket: {refused}"));
+            let unbounded = ["127.0.0.1:7434", "--listen"].map(OsStr::new);
+            let refused = ended(sandboxd(&unbounded, Some(OsStr::new(GRANT))));
+            lines.push(format!("--listen without --by: {refused}"));
+            lines
+        },
+        &expect![[r#"
+            a second peer, once the session is open: Err(ConnectionRefused)
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(0)}), then closed
+            Accepted { grant: None }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 0" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 1" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 2" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 3" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 4" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 5" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 6" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 7" }: its hello Some(Object {"version": Number(0)}), then closed
+            Refused { message: "why 8" }: its hello Some(Object {"version": Number(0)}), then closed
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(0)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
+            then, its session ended: exit status: 0: sandboxd: turned away the peer at $PEER0: it presented another registration grant: expected the sandbox's
+            sandboxd: turned away the peer at $PEER1: it presented no registration grant: expected the sandbox's
+            sandboxd: turned away the peer at $PEER2: it refused the session: why 0
+            sandboxd: turned away the peer at $PEER3: it refused the session: why 1
+            sandboxd: turned away the peer at $PEER4: it refused the session: why 2
+            sandboxd: turned away the peer at $PEER5: it refused the session: why 3
+            sandboxd: turned away the peer at $PEER6: it refused the session: why 4
+            sandboxd: turned away the peer at $PEER7: it refused the session: why 5
+            sandboxd: turned away the peer at $PEER8: it refused the session: why 6
+            sandboxd: turned away the peer at $PEER9: it refused the session: why 7
+            sandboxd: telling of no more peers it turns away, having told of 10
+            a peer that trickles its answer: turned away; then: exit status: 1: sandboxd: turned away the peer at $PEER: reading its answer failed: it didn't take the hello and answer it within 15 s, or by the sandbox's deadline if sooner: expected the gateway, which answers at once
+            sandboxd: no gateway claimed the sandbox by its start's deadline, and the slack after it: expected the gateway to dial while the start lasts, past which nothing does, so the sandbox ends
+            --listen with a socket: exit status: 1: sandboxd: --listen takes a TCP address of the sandbox's own: give one, such as `0.0.0.0:7434`, or no --listen with a socket
+            --listen without --by: exit status: 1: sandboxd: --listen waits until the start's deadline: give it as --by, in seconds since the Unix epoch
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// What a `sandboxd` that listens apart from the test's gateway does with peers that answer its
+/// hello, each in turn, as [`greeted`] says, the last with its grant; then how it exited once that
+/// peer closed, which ends the session, and what it said.
+fn listening_apart() -> Vec<String> {
+    let apart = unlistened();
+    let apart_text = apart.to_string();
+    let by = unix_seconds(3600);
+    let listen = ["--listen", &apart_text, "--by", &by].map(OsStr::new);
+    let listening = sandboxd(&listen, Some(OsStr::new(GRANT)));
+    let mut lines = Vec::new();
+    let mut peers = Vec::new();
+    let other = RegistrationGrant::from([0xab; 16]);
+    let ours = RegistrationGrant::from(std::array::from_fn(|n| u8::try_from(n * 0x11).unwrap()));
+    let refused = |n| HelloReply::Refused {
+        message: format!("why {n}"),
+    };
+    let answers = [
+        HelloReply::Accepted { grant: Some(other) },
+        HelloReply::Accepted { grant: None },
+    ]
+    .into_iter()
+    .chain((0..9).map(refused))
+    .chain([HelloReply::Accepted { grant: Some(ours) }]);
+    lines.extend(answers.map(|answer| greeted(apart, &answer, &mut peers)));
+    let mut said = ended(listening);
+    for (n, peer) in peers.iter().enumerate() {
+        said = said.replace(peer, &format!("$PEER{n}"));
+    }
+    lines.push(format!("then, its session ended: {said}"));
+    lines
+}
+
+/// How a peer that dials the `sandboxd` that listens at `address`, once it listens, and answers
+/// its hello with `answer`, fares, its address added to `peers`: then it sends a request, which
+/// only a served peer hears answered, and a peer turned away meets closed, reset or not, as the
+/// order of its write and sandboxd's close decides.
+fn greeted(address: SocketAddr, answer: &HelloReply, peers: &mut Vec<String>) -> String {
+    let mut peer = dialed(address);
+    peers.push(peer.local_addr().unwrap().to_string());
+    let hello = frame::read::<Value>(&mut peer)
+        .unwrap()
+        .map(|(hello, _)| hello);
+    frame::write(&mut peer, answer, &[]).unwrap();
+    let probe = ToSandbox::Collect {
+        stream: 1,
+        dir: absolute(Path::new("/nonexistent")),
+    };
+    let _ = frame::write(&mut peer, &probe, &[]);
+    let then = match frame::read::<Value>(&mut peer) {
+        Ok(None) => "closed".to_owned(),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => "closed".to_owned(),
+        Ok(Some((reply, _))) => format!("served: {reply}"),
+        Err(error) => error.to_string(),
+    };
+    format!("{answer:?}: its hello {hello:?}, then {then}")
+}
+
+/// What a `sandboxd` that listens, its deadline seconds away, does with a peer that trickles its
+/// answer: how the peer ended, then how `sandboxd` exited, and what it said.
+fn trickled() -> String {
+    let address = unlistened();
+    let address_text = address.to_string();
+    // Two to three seconds from now, with the minute that `sandboxd` waits past it.
+    let by = unix_seconds(-57);
+    let listen = ["--listen", &address_text, "--by", &by].map(OsStr::new);
+    let listening = sandboxd(&listen, Some(OsStr::new(GRANT)));
+    let (peer, trickled) = trickling(address);
+    let said = ended(listening).replace(&peer, "$PEER");
+    format!("a peer that trickles its answer: {trickled}; then: {said}")
+}
+
+/// `offset` seconds from now, in whole seconds since the Unix epoch, as `--by` takes it.
+fn unix_seconds(offset: i64) -> String {
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();
+    now.checked_add_signed(offset).unwrap().to_string()
+}
+
+/// How a peer that dials the `sandboxd` that listens at `address`, takes its hello, and then
+/// trickles its answer, a byte a second, of a frame that would take minutes, ends: its address,
+/// and whether it was turned away within a bound far below that.
+fn trickling(address: SocketAddr) -> (String, String) {
+    let mut peer = dialed(address);
+    let local = peer.local_addr().unwrap().to_string();
+    frame::read::<Value>(&mut peer).unwrap();
+    // Each read waits a second for sandboxd to close the connection, which paces the bytes.
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let started = Instant::now();
+    let mut message = 200_u32.to_be_bytes().to_vec();
+    message.extend([b' '; 200]);
+    for byte in message {
+        assert!(
+            started.elapsed() < Duration::from_secs(45),
+            "the peer was to be turned away within sandboxd's bound on its greeting"
+        );
+        if peer.write_all(&[byte]).is_err() {
+            return (local, "turned away".to_owned());
+        }
+        match peer.read(&mut [0]) {
+            Ok(0) => return (local, "turned away".to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {
+                return (local, "turned away".to_owned());
+            }
+            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock) => {}
+            read => panic!("sandboxd was to send nothing more, not {read:?}"),
+        }
+    }
+    (local, "sent it all, never turned away".to_owned())
+}
+
+/// A connection to `address`, once something listens there, whose reads and writes wait as long
+/// as a request does ([`hung`]).
+fn dialed(address: SocketAddr) -> TcpStream {
+    // A `sandboxd` that never listens fails the test rather than hang it.
+    let by = hung();
+    let stream = loop {
+        match TcpStream::connect(address) {
+            Ok(stream) => break stream,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                assert!(
+                    by.remaining().is_some(),
+                    "sandboxd never listened: it should listen as it starts"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    stream.set_read_timeout(hung().remaining()).unwrap();
+    stream.set_write_timeout(hung().remaining()).unwrap();
+    stream
+}
+
+#[test]
+fn unclaimed() {
+    check(
+        Meeting::Socket,
+        |_| {
+            let address = unlistened().to_string();
+            // A minute ago, so that with the slack the deadline has just passed.
+            let by = unix_seconds(-60);
+            let grant = Some(OsStr::new(GRANT));
+            let listening = [&address, "--listen", "--by", &by].map(OsStr::new);
+            let dialing = [&address, "--by", &by].map(OsStr::new);
+            vec![
+                format!("listening: {}", ended(sandboxd(&listening, grant))),
+                format!("dialing: {}", ended(sandboxd(&dialing, grant))),
+            ]
+        },
+        &expect![[r#"
+            listening: exit status: 1: sandboxd: no gateway claimed the sandbox by its start's deadline, and the slack after it: expected the gateway to dial while the start lasts, past which nothing does, so the sandbox ends
+            dialing: exit status: 1: sandboxd: --by bounds how long a sandboxd that listens waits: give it with --listen
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
 fn refused_before_the_session() {
     check(
         Meeting::Socket,
@@ -920,6 +1178,13 @@ fn refused_before_the_session() {
                     format!("{case}: {}", ended.replace(&closed, "$CLOSED"))
                 })
                 .collect();
+            // Each refused as it is parsed, before sandboxd becomes anyone.
+            // The tests run as a user that isn't root.
+            for user in ["0:1000", "1000", "a:b", "1234:1235"] {
+                let args = [&closed, "--user", user].map(OsStr::new);
+                let ended = ended(sandboxd(&args, Some(OsStr::new(GRANT))));
+                lines.push(format!("--user {user}: {ended}"));
+            }
             listener.set_nonblocking(true).unwrap();
             lines.push(format!("dialed: {}", listener.accept().is_ok()));
             lines
@@ -931,6 +1196,10 @@ fn refused_before_the_session() {
             a grant too short: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             a grant not UTF-8: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             nothing listening: exit status: 1: sandboxd: connecting to the gateway at $CLOSED failed: Connection refused (os error 111)
+            --user 0:1000: exit status: 1: sandboxd: can't parse `--user`, `0:1000` is not a user's `uid:gid`: give two numbers but 0, such as `1000:1000`: see `sandboxd --help`
+            --user 1000: exit status: 1: sandboxd: can't parse `--user`, `1000` is not a user's `uid:gid`: give two numbers but 0, such as `1000:1000`: see `sandboxd --help`
+            --user a:b: exit status: 1: sandboxd: can't parse `--user`, `a:b` is not a user's `uid:gid`: give two numbers but 0, such as `1000:1000`: see `sandboxd --help`
+            --user 1234:1235: exit status: 1: sandboxd: started as a user that isn't root: `--user` needs sandboxd to start as root to drop to 1234:1235
             dialed: false
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
@@ -1034,7 +1303,7 @@ fn hear_both(gateway: &mut UnixStream, tree: &[u8]) -> Vec<String> {
 /// [`fake_gateway`], which accepts the hello.
 fn accepting_gateway(socket: &Path) -> (UnixStream, Child) {
     let (mut connection, sandboxd, _) = fake_gateway(socket);
-    frame::write(&mut connection, &HelloReply::Accepted, &[]).unwrap();
+    frame::write(&mut connection, &HelloReply::Accepted { grant: None }, &[]).unwrap();
     (connection, sandboxd)
 }
 
@@ -1089,4 +1358,103 @@ fn ended(mut sandboxd: Child) -> String {
         "" => status.to_string(),
         why => format!("{status}: {why}"),
     }
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn as_root_with_user() {
+    // Kept if the test fails.
+    let root = tempfile::Builder::new()
+        .prefix("sandboxd-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    let sockets = Sockets::create(root.join("sockets")).unwrap();
+    let name = Name::try_from("as-root".to_owned()).unwrap();
+    let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+    let container = format!("sandboxd-{}-as-root", std::process::id());
+    start_as_root(&dir, &container, "1234:1235");
+    let (sender, arrivals) = mpsc::channel();
+    let accepted = registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
+    let lines = as_user(accepted.unwrap(), &arrivals, &root.join("collected"));
+    // Gone already, once the session ended, which is as good as removed.
+    let _ = (test_support::docker())
+        .args(["rm", "--force", &container])
+        .output();
+    expect![[r#"
+        exited: Code(0)
+        /pumpkin: 1234:1235 755
+        Uid: 1234 1234 1234 1234
+        Gid: 1235 1235 1235 1235
+        Groups:
+        CapInh: 0000000000000000
+        CapPrm: 0000000000000000
+        CapEff: 0000000000000000
+        CapBnd: 00000000a80425fb
+        CapAmb: 0000000000000000
+        NoNewPrivs: 1
+        nsenter: setuid: Operation not permitted
+        root refused"#]]
+    .assert_eq(&lines.join("\n"));
+    drop(sockets);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Starts a container, `container`, of [`test_support::BUSYBOX`], as root, whose first process is
+/// the static `sandboxd`, with `--user` and `user`, meeting the gateway at the socket in `dir`.
+fn start_as_root(dir: &Path, container: &str, user: &str) {
+    let mount =
+        |host: &Path, at: &str| format!("--mount=type=bind,source={},target={at}", host.display());
+    let mut docker = test_support::docker();
+    docker.args(["run", "--detach", "--rm", "--network=none", "--user=0:0"]);
+    docker.arg(format!("--name={container}"));
+    docker.arg(mount(dir, "/.pumpkin/gateway"));
+    docker.arg(mount(&test_support::sandboxd(), "/.pumpkin/sandboxd"));
+    docker.args([test_support::BUSYBOX, "/.pumpkin/sandboxd", "--user", user]);
+    docker.arg(format!("/.pumpkin/gateway/{SOCKET_NAME}"));
+    // Not the container's id, which `docker run --detach` prints.
+    let started = docker.stdout(Stdio::null()).status().unwrap().success();
+    assert!(started, "the container was to start");
+}
+
+/// What a command in `session`'s sandbox finds of its user, and of `/pumpkin`, as it runs: how it
+/// exited, then each line it printed, collected into `collected`; then the session's end.
+fn as_user(mut session: Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
+    let dirs = ["home", "log"].map(relative);
+    let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
+    session
+        .put(&absolute(Path::new("/pumpkin")), put, hung())
+        .unwrap();
+    let script = r#"
+        stat -c '/pumpkin: %u:%g %a' /pumpkin
+        grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
+        nsenter --setuid=0 id 2>&1 || echo "root refused""#;
+    let out = absolute(Path::new("/pumpkin/log/out"));
+    let launch = Launch {
+        argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
+        env: Env::try_from(Vec::new()).unwrap(),
+        cwd: absolute(Path::new("/pumpkin/home")),
+        stdin: None,
+        stdout: out.clone(),
+        stderr: out,
+    };
+    let process = session.start(launch, hung()).unwrap();
+    let exited = match arrivals.recv_timeout(Duration::from_secs(30)) {
+        Ok(Arrival::Exited {
+            process: exited,
+            status,
+        }) if exited == process => status,
+        arrived => panic!("the command's exit was to arrive, not {arrived:?}"),
+    };
+    let limits = Limits {
+        bytes: 1 << 20,
+        entries: 10,
+    };
+    let log = absolute(Path::new("/pumpkin/log"));
+    session.collect(&log, collected, limits, hung()).unwrap();
+    let printed = fs::read_to_string(collected.join("out")).unwrap();
+    let mut lines = vec![format!("exited: {exited:?}")];
+    let printed = printed.lines().map(|line| line.replace('\t', " "));
+    lines.extend(printed.map(|line| line.trim_end().to_owned()));
+    lines
 }

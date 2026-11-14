@@ -66,6 +66,10 @@ pub(crate) enum Kind {
     /// pushed there from the machine's Docker engine, and dial the gateway at
     /// [`private`](Gateway::private).
     Ec2(ec2::Settings),
+    /// A Modal workspace, which its settings' profile reaches, whose sandboxes run images that
+    /// Modal imports from an ECR repository, pushed there from the machine's Docker engine, and
+    /// listen behind Modal's tunnels, which the gateway dials.
+    Modal(modal::Settings),
 }
 
 /// The table of a kind that takes no settings, which holds no key.
@@ -135,7 +139,7 @@ impl Providers<Kind> {
         for (name, kind) in &providers {
             match kind {
                 Kind::Docker(Empty {}) => docker.push(format!("`{name}`")),
-                Kind::Ec2(_) => remote.push(format!("`{name}`")),
+                Kind::Ec2(_) | Kind::Modal(_) => remote.push(format!("`{name}`")),
             }
         }
         // Each would be the machine's one engine, under another name, and would list the others'

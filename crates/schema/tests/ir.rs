@@ -1,7 +1,8 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
 //! workflow, [`WORKFLOW`].
 //! Also placing the workflow's roles on providers, in classes of sandbox, the JSON of ops'
-//! replies, which `sandboxctl` prints, the sandbox protocol's hellos, and the in-sandbox contract.
+//! replies, which `sandboxctl` prints, the sandbox protocol's hellos and endpoints, and the
+//! in-sandbox contract.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of
 //! all of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
@@ -21,9 +22,9 @@ use schema::sandbox::op::{
     TransferEnd, TransferStatus,
 };
 use schema::sandbox::{
-    ExitStatus, Hello, MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath,
-    ToSandbox, command_env, command_stderr, command_stdin, command_stdout, evidence_dir, frame,
-    pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
+    Endpoint, ExitStatus, Hello, MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant,
+    RelativePath, ToSandbox, command_env, command_stderr, command_stdin, command_stdout,
+    evidence_dir, frame, pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
 };
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use serde_json::{Value, json};
@@ -354,6 +355,49 @@ fn placement() {
             agent, on `aws` in `agent`, whose starts take at most 30s; train_judge, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
             /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs
             /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 64001: offer a class that meets its needs, or change its needs"#]],
+    );
+}
+
+/// Where the gateway dials a sandbox that listens: a DNS name and a port, which parse, or are
+/// refused.
+struct At<'a>(&'a str, u16);
+
+impl Case for At<'_> {
+    fn outcome(self) -> String {
+        match Endpoint::new(self.0.to_owned(), self.1) {
+            Ok(endpoint) => format!("`{endpoint}` parsed"),
+            Err(error) => error,
+        }
+    }
+}
+
+#[test]
+fn endpoints() {
+    let long = format!("{}.example", "a".repeat(64));
+    check(
+        [
+            At("ta-01k9-7434-xyz.w.modal.host", 443),
+            At("localhost", 7434),
+            At("", 443),
+            At("127.0.0.1:443", 443),
+            At("127.0.0.1", 443),
+            At("1.example", 443),
+            At("-edge.example", 443),
+            At(&long, 443),
+            At("edge..example", 443),
+            At("edge.example", 0),
+        ],
+        &expect![[r#"
+            `ta-01k9-7434-xyz.w.modal.host:443` parsed
+            `localhost:7434` parsed
+            `` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`
+            `127.0.0.1:443` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`
+            `127.0.0.1` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`
+            `1.example:443` parsed
+            `-edge.example` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`
+            `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`
+            `edge..example` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`
+            port 0 of `edge.example` is no endpoint's: give the port it serves"#]],
     );
 }
 

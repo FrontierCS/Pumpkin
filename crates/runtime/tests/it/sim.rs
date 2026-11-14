@@ -2,10 +2,12 @@
 //! provider passes ([`suite`](test_support::suite)).
 //!
 //! Each sandbox is a thread of this process, running a fake `sandboxd` that dials its create's
-//! dial at once, a socket's, or a TCP address's for a provider made [private](Sim::private);
-//! says hello and answers the session's requests, running each command by its program, which may
-//! make ops or judge a payload ([`Sim`]). What it does that a run acts on may go to a
-//! [`Journal`], in order with what other parts of a test's simulated world tell it.
+//! dial at once, a socket's, or a TCP address's for a provider made [private](Sim::private),
+//! or, for one made [listening](Sim::listening), waits for the gateway to dial it, behind the
+//! stand-in TLS edge ([`edge`](test_support::edge)); says hello and answers the session's requests,
+//! running each command by its program, which may make ops or judge a payload ([`Sim`]). What it
+//! does that a run acts on may go to a [`Journal`], in order with what other parts of a test's
+//! simulated world tell it.
 
 #![expect(
     clippy::unwrap_used,
@@ -16,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -34,9 +36,9 @@ use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, StatusReply, TransferStatus,
 };
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RESULT_MAX_BYTES,
-    RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, TcpDial, ToSandbox, dir_mode,
-    file_mode, frame, log_dir, out_dir, pumpkin_dir,
+    Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, Listening, PROTOCOL_VERSION,
+    RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, TcpDial,
+    ToSandbox, dir_mode, file_mode, frame, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Offers};
 use serde_json::{Value, json};
@@ -180,6 +182,7 @@ pub(crate) struct Sim {
 enum Reach {
     Local,
     Private,
+    Listen,
 }
 
 /// What the parts of a test's simulated world saw, in the order they told it, each from the
@@ -421,6 +424,17 @@ impl Sim {
         self
     }
 
+    /// This provider, whose sandboxes listen on the loopback, behind the stand-in TLS edge, and
+    /// take the session of the gateway that dials them and presents their grants, as one of
+    /// a [listening](Meeting::Listen) one's do, its create giving the endpoint.
+    #[must_use]
+    pub(crate) fn listening(self) -> Self {
+        Self {
+            reach: Reach::Listen,
+            ..self
+        }
+    }
+
     /// The permission bits of the directory that held each create's socket directory, in the
     /// order of the creates that dialed a socket.
     pub(crate) fn modes(&self) -> Vec<u32> {
@@ -651,6 +665,7 @@ impl Provider for Sim {
         match self.reach {
             Reach::Local => Meeting::Local(self),
             Reach::Private => Meeting::Private(self),
+            Reach::Listen => Meeting::Listen(self),
         }
     }
 
@@ -662,14 +677,27 @@ impl Provider for Sim {
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
         let gateway = Gateway::Socket(dial.dir.join(SOCKET_NAME));
-        self.made(create, (gateway, None))
+        self.made(create, (gateway, None, None))
     }
 }
 
 impl Creator<TcpDial> for Sim {
     fn create(&self, create: &Create, dial: TcpDial) -> Result<Created, String> {
         let TcpDial { gateway, grant } = dial;
-        self.made(create, (Gateway::Tcp(gateway), Some(grant)))
+        self.made(create, (Gateway::Tcp(gateway), Some(grant), None))
+    }
+}
+
+impl Creator<Listening, (Created, Endpoint)> for Sim {
+    fn create(&self, create: &Create, dial: Listening) -> Result<(Created, Endpoint), String> {
+        let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|error| {
+            format!("the simulated sandbox can't listen on the loopback: {error}")
+        })?;
+        let port = loopback.local_addr().unwrap().port();
+        let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+        let gateway = Gateway::Listen(loopback, Deadline::at_unix(create.by.since_epoch()));
+        let created = self.made(create, (gateway, None, Some(dial.grant)))?;
+        Ok((created, endpoint))
     }
 }
 
@@ -687,7 +715,7 @@ impl Sim {
         self.holds(create)?;
         let path = self.own("the `sandboxd`", create.sandboxd.as_str())?;
         let digest = self.own("the image", create.image.as_str())?;
-        let (gateway, presented) = met;
+        let (gateway, presented, awaited) = met;
         let Faults {
             made,
             dialing,
@@ -711,7 +739,7 @@ impl Sim {
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
-            .spawn(move || sandboxd(&gateway, mute, hung, &hello, model, &ours))
+            .spawn(move || sandboxd(&gateway, mute, hung, (&hello, awaited), model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
         let late = made == Made::Slow && {
             thread::sleep(SLOW_CREATE.min(by.remaining().unwrap_or_default()));
@@ -780,10 +808,19 @@ enum Gateway {
     Socket(PathBuf),
     /// At this TCP address, which other sandboxes dial too.
     Tcp(SocketAddr),
+    /// Where this listener listens, on the loopback, which the gateway dials until the deadline,
+    /// the create's, past which its `sandboxd` gives up, as `sandboxd --by` does, but with no
+    /// slack, as its clock is the host's.
+    Listen(TcpListener, Deadline),
 }
 
-/// Where a simulated sandbox meets the gateway, and the grant its hello presents there.
-type Met = (Gateway, Option<RegistrationGrant>);
+/// Where a simulated sandbox meets the gateway, the grant its hello presents there, and the one
+/// the gateway's answer is to present.
+type Met = (
+    Gateway,
+    Option<RegistrationGrant>,
+    Option<RegistrationGrant>,
+);
 
 impl Gateway {
     /// The permission bits of the directory that holds a socket's directory.
@@ -793,7 +830,7 @@ impl Gateway {
                 let parent = fs::metadata(socket.parent()?.parent()?).unwrap();
                 Some(parent.permissions().mode() & 0o777)
             }
-            Self::Tcp(_) => None,
+            Self::Tcp(_) | Self::Listen(..) => None,
         }
     }
 }
@@ -802,14 +839,40 @@ impl Gateway {
 enum Connection {
     Unix(UnixStream),
     Tcp(TcpStream),
+    Tls(tls::Stream),
 }
 
 impl Connection {
-    /// Dials `gateway`.
-    fn dial(gateway: &Gateway) -> io::Result<Self> {
+    /// Dials `gateway`, or takes the connection that dials it, over the stand-in edge's TLS, once
+    /// one does, unless the sandbox is deleted first.
+    fn dial(gateway: &Gateway, shared: &Mutex<Status>) -> io::Result<Self> {
         match gateway {
             Gateway::Socket(socket) => UnixStream::connect(socket).map(Self::Unix),
             Gateway::Tcp(address) => TcpStream::connect(address).map(Self::Tcp),
+            Gateway::Listen(listener, by) => {
+                listener.set_nonblocking(true)?;
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if status(shared).deleted {
+                                return Err(io::Error::other("the sandbox was deleted"));
+                            }
+                            if by.remaining().is_none() {
+                                let given_up = "no gateway claimed the sandbox by its deadline";
+                                return Err(io::Error::other(given_up));
+                            }
+                            thread::sleep(AWAIT_POLL);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                stream.set_nonblocking(false)?;
+                let by = Deadline::after(Duration::from_secs(60));
+                test_support::edge::server()
+                    .accept(stream, by)
+                    .map(Self::Tls)
+            }
         }
     }
 
@@ -817,6 +880,7 @@ impl Connection {
         match self {
             Self::Unix(stream) => stream.try_clone().map(Self::Unix),
             Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            Self::Tls(stream) => stream.try_clone().map(Self::Tls),
         }
     }
 
@@ -824,6 +888,9 @@ impl Connection {
         match self {
             Self::Unix(stream) => stream.shutdown(how),
             Self::Tcp(stream) => stream.shutdown(how),
+            // A TLS stream ends both ways at once; no test of a listening sandbox ends only its
+            // reads.
+            Self::Tls(stream) => stream.shutdown(),
         }
     }
 }
@@ -833,6 +900,7 @@ impl Read for Connection {
         match self {
             Self::Unix(stream) => stream.read(buf),
             Self::Tcp(stream) => stream.read(buf),
+            Self::Tls(stream) => (&*stream).read(buf),
         }
     }
 }
@@ -842,6 +910,7 @@ impl Write for Connection {
         match self {
             Self::Unix(stream) => stream.write(buf),
             Self::Tcp(stream) => stream.write(buf),
+            Self::Tls(stream) => (&*stream).write(buf),
         }
     }
 
@@ -849,6 +918,7 @@ impl Write for Connection {
         match self {
             Self::Unix(stream) => stream.flush(),
             Self::Tcp(stream) => stream.flush(),
+            Self::Tls(stream) => (&*stream).flush(),
         }
     }
 }
@@ -1056,14 +1126,14 @@ fn stop(sandbox: Sandbox) {
 const NEVER_DIALS: &str = "sandboxd: a simulated one, which never dials\n";
 
 /// A sandbox's fake `sandboxd`, whose console its create has written: if `mute`, it waits until
-/// the sandbox is deleted if `hung`, and else ends; or else it [dials](dial), saying `hello`.
-/// Once its sandbox is deleted, it takes
+/// the sandbox is deleted if `hung`, and else ends; or else it [dials](dial), saying `hello`,
+/// and awaiting the grant given, if any, in the answer. Once its sandbox is deleted, it takes
 /// [`ENDING`] to end.
 fn sandboxd(
     gateway: &Gateway,
     mute: bool,
     hung: bool,
-    hello: &Value,
+    hello: (&Value, Option<RegistrationGrant>),
     model: bool,
     shared: &Mutex<Status>,
 ) {
@@ -1080,10 +1150,16 @@ fn sandboxd(
     }
 }
 
-/// Dials `gateway`, opens the session with `hello`, and serves it until the session ends, the
-/// sandbox is deleted, or it is stalled, with the model endpoint if `model`.
-fn dial(gateway: &Gateway, hello: &Value, model: bool, shared: &Mutex<Status>) {
-    let dialed = Connection::dial(gateway).and_then(|connection| {
+/// Dials `gateway`, or takes its connection, opens the session with `hello`, its answer
+/// presenting the grant awaited, if any, and serves it until the session ends, the sandbox is
+/// deleted, or it is stalled, with the model endpoint if `model`.
+fn dial(
+    gateway: &Gateway,
+    (hello, awaited): (&Value, Option<RegistrationGrant>),
+    model: bool,
+    shared: &Mutex<Status>,
+) {
+    let dialed = Connection::dial(gateway, shared).and_then(|connection| {
         let other = connection.try_clone()?;
         Ok((connection, other))
     });
@@ -1094,7 +1170,7 @@ fn dial(gateway: &Gateway, hello: &Value, model: bool, shared: &Mutex<Status>) {
         Ok((mut connection, other)) => {
             status.connection = Some(other);
             drop(status);
-            if open(&mut connection, hello) {
+            if open(&mut connection, hello, awaited.as_ref()) {
                 serve(connection, model, shared);
             }
         }
@@ -1102,6 +1178,7 @@ fn dial(gateway: &Gateway, hello: &Value, model: bool, shared: &Mutex<Status>) {
             let at = match gateway {
                 Gateway::Socket(socket) => socket.display().to_string(),
                 Gateway::Tcp(address) => address.to_string(),
+                Gateway::Listen(listener, _) => listener.local_addr().unwrap().to_string(),
             };
             let failed = format!("sandboxd: connecting to the gateway at {at} failed: {error}");
             status.console.push_str(&failed);
@@ -1109,14 +1186,15 @@ fn dial(gateway: &Gateway, hello: &Value, model: bool, shared: &Mutex<Status>) {
     }
 }
 
-/// Opens the session on `connection` with `hello`: whether the gateway accepted it.
-fn open(connection: &mut Connection, hello: &Value) -> bool {
+/// Opens the session on `connection` with `hello`: whether the gateway accepted it, presenting
+/// `awaited`.
+fn open(connection: &mut Connection, hello: &Value, awaited: Option<&RegistrationGrant>) -> bool {
     let sent = frame::write(connection, hello, &[]);
     let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
     // Unlike `sandboxd`, it prints no refusal: a run reads the console of a start that failed as
     // soon as the refusal is sent, so what it found would depend on a race. A connection may also
     // end before the session opens, as a delete ends it.
-    matches!(answer, Ok(Some((HelloReply::Accepted, _))))
+    matches!(answer, Ok(Some((HelloReply::Accepted { grant }, _))) if grant.as_ref() == awaited)
 }
 
 /// A step of a command that makes ops.
