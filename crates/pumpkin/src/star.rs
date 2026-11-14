@@ -8,7 +8,6 @@
 //! below the root on disk, as no component on its way from the root may be a symbolic link
 //! ([`Root::reach`]).
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
@@ -69,8 +68,10 @@ impl fmt::Display for Entry {
 /// its entry file's, that holds [`MARKER`] as anything but a directory. The marker is a regular
 /// file of comments alone, as this pumpkin reads nothing else there. Beside it, each path below it
 /// that [`Root::reach`] has reached.
-// Reached on the one thread that evaluates the task, through `&self`, as a recipe's check is.
-struct Root(PathBuf, RefCell<BTreeSet<String>>);
+struct Root {
+    dir: PathBuf,
+    reached: BTreeSet<String>,
+}
 
 /// What a path below the root names.
 #[derive(Clone, Copy)]
@@ -144,17 +145,21 @@ impl Root {
             below.push(component);
             at = parent;
         }
-        let root = Self(at.to_owned(), RefCell::default());
+        let mut root = Self {
+            dir: at.to_owned(),
+            reached: BTreeSet::new(),
+        };
         // A component that isn't UTF-8 is no label's, as the label's parse then says.
         let below: Vec<_> = below
             .iter()
             .rev()
             .map(|part| part.to_string_lossy())
             .collect();
-        let label = Label::parse(&format!("//{}", below.join("/")))
-            .map_err(|error| format!("the entry, below the root {}: {error}", root.0.display()))?;
+        let label = Label::parse(&format!("//{}", below.join("/"))).map_err(|error| {
+            format!("the entry, below the root {}: {error}", root.dir.display())
+        })?;
         // Named by its whole path, as the root the entry's labels are below is found, not given.
-        let place = root.0.join(MARKER);
+        let place = root.dir.join(MARKER);
         let marker = root.text(MARKER);
         let marker = marker.map_err(|error| format!("{}: {error}", place.display()))?;
         comments_only(&marker).map_err(|problem| format!("{}:{problem}", place.display()))?;
@@ -169,8 +174,8 @@ impl Root {
     ///
     /// Fails if `below` names nothing or no `kind`, or if one of its components is a link or
     /// can't be looked up.
-    fn reach(&self, below: &str, kind: Kind) -> Result<PathBuf, String> {
-        let mut path = self.0.clone();
+    fn reach(&mut self, below: &str, kind: Kind) -> Result<PathBuf, String> {
+        let mut path = self.dir.clone();
         let mut reached = String::new();
         let mut components = below.split('/').peekable();
         while let Some(component) = components.next() {
@@ -206,19 +211,22 @@ impl Root {
                 ));
             }
         }
-        self.1.borrow_mut().insert(below.to_owned());
+        self.reached.insert(below.to_owned());
         Ok(path)
     }
 
-    /// The bytes of the regular file at `below`, reached as [`Root::reach`] reaches it.
-    fn bytes(&self, below: &str) -> Result<Vec<u8>, String> {
+    /// The path and the bytes of the regular file at `below`, reached as [`Root::reach`] reaches
+    /// it.
+    fn bytes(&mut self, below: &str) -> Result<(PathBuf, Vec<u8>), String> {
         let path = self.reach(below, Kind::File)?;
-        fs::read(path).map_err(|error| format!("`{below}` can't be read: {error}"))
+        let bytes = fs::read(&path).map_err(|error| format!("`{below}` can't be read: {error}"))?;
+        Ok((path, bytes))
     }
 
     /// The text of the regular file at `below`, reached as [`Root::reach`] reaches it.
-    fn text(&self, below: &str) -> Result<String, String> {
-        String::from_utf8(self.bytes(below)?)
+    fn text(&mut self, below: &str) -> Result<String, String> {
+        let (_, bytes) = self.bytes(below)?;
+        String::from_utf8(bytes)
             .map_err(|error| format!("`{below}` isn't UTF-8 ({error}): write it in UTF-8"))
     }
 
@@ -227,7 +235,7 @@ impl Root {
     /// directory below the root, as [`Root::reach`] reaches it; and a recipe, in the directory
     /// that `engine::mounted` says holds it, that is no regular file there, or that
     /// `recipe::check` refuses, with its target and args.
-    fn recipe(&self, declared: &Recipe, contexts: &[&str]) -> Vec<String> {
+    fn recipe(&mut self, declared: &Recipe, contexts: &[&str]) -> Vec<String> {
         let Recipe {
             context,
             recipe: _,
@@ -255,7 +263,7 @@ impl Root {
                     .collect(),
             };
             let checked =
-                (self.bytes(&below)).and_then(|text| recipe::check(&below, &text, &given));
+                (self.bytes(&below)).and_then(|(_, text)| recipe::check(&below, &text, &given));
             problems.extend(checked.err());
         }
         problems
@@ -310,7 +318,7 @@ impl Root {
             args,
             repository: _,
         } = recipe;
-        let dir = |label: &Label| self.0.join(label.path());
+        let dir = |label: &Label| self.dir.join(label.path());
         let context = BuildContext {
             dir: Some(dir(context)),
             mounts: (mounts.iter())
@@ -354,10 +362,10 @@ impl Root {
             format!("the recipe's directory {} can't be found ({error}): name the recipe by a path that exists", dir.display())
         })?;
         let below = dir.join(name);
-        let below = below.strip_prefix(&self.0).map_err(|_| {
+        let below = below.strip_prefix(&self.dir).map_err(|_| {
             format!(
                 "`{path}` isn't below the task's root, {}: name a recipe of the task",
-                self.0.display()
+                self.dir.display()
             )
         })?;
         match below.to_str() {
@@ -412,7 +420,7 @@ pub(crate) fn reached(
     args: &Args,
 ) -> Result<Result<(PathBuf, BTreeSet<String>), Problems>, String> {
     checked(entry, args, |Task { root, .. }| {
-        Ok(Ok((root.0.clone(), root.1.borrow().clone())))
+        Ok(Ok((root.dir.clone(), root.reached.clone())))
     })
 }
 
@@ -456,7 +464,7 @@ pub(crate) type Tags = BTreeMap<Image, String>;
 /// A task, [`checked`], on the thread that evaluated it, which its plan can't leave: its
 /// workflow, and how to build its images.
 pub(crate) struct Task<'r> {
-    root: &'r Root,
+    root: &'r mut Root,
     plan: Plan,
     workflow: Workflow,
 }
@@ -486,7 +494,7 @@ impl Task<'_> {
             workflow: _,
         } = self;
         let mut builds = Builds::new(admission);
-        let built = plan.build(jobs(), |ready| builds.step(root, engine, ready))?;
+        let built = plan.build(jobs(), |ready| builds.step(&*root, engine, ready))?;
         Ok((built, builds.tags))
     }
 }
@@ -515,13 +523,12 @@ pub(crate) fn lock(
             &below,
             plan.recipes().filter(|(declared, _)| picked(declared)),
         )?;
-        let path = root.reach(&below, Kind::File)?;
-        let text = root.bytes(&below)?;
+        let (path, text) = root.bytes(&below)?;
         let fetch = FetchStage::read(&below, &text, stage)?;
         let engine = reach()?;
         let mut unadmitted = ();
         let mut builds = Builds::new(&mut unadmitted);
-        let step = |ready: Vec<(usize, Declared<'_, Built>)>| builds.step(root, &engine, ready);
+        let step = |ready: Vec<(usize, Declared<'_, Built>)>| builds.step(&*root, &engine, ready);
         let written = plan.build_for(
             jobs(),
             picked,
@@ -697,7 +704,7 @@ pub(crate) fn checked<T: Send>(
         };
         match plan.check(|recipe, contexts| root.recipe(recipe, contexts)) {
             Ok(workflow) => then(Task {
-                root: &root,
+                root: &mut root,
                 plan,
                 workflow,
             }),
