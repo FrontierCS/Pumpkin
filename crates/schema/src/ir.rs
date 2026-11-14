@@ -13,6 +13,7 @@
 //! fit together, and the limits a protocol bounds.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
@@ -69,7 +70,8 @@ pub struct Role {
     /// ([`Workflow::place`](crate::workflow::Workflow::place)).
     pub needs: Needs,
     pub runtime: Runtime,
-    /// The role's routes out; absent, the role has none. Only the agent may have one.
+    /// The role's routes out; absent, the role has none. A runner has none; the agent's model
+    /// route is open while it works, a judge's while its command runs, in each of its calls.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
     /// The ops the role may use while it works; absent, none. The agent holds judge calls,
@@ -289,12 +291,83 @@ impl Egress {
     }
 }
 
-/// Access to the model provider.
+/// Access to the model provider: an entry for each API in which the role's code writes model
+/// requests, one at least, and each API in one entry alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<ApiRoute>", into = "Vec<ApiRoute>")]
+pub struct ModelRoute(Vec<ApiRoute>);
+
+impl ModelRoute {
+    /// Its entries, in the IR's order.
+    pub fn as_slice(&self) -> &[ApiRoute] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<ApiRoute>> for ModelRoute {
+    type Error = String;
+
+    fn try_from(entries: Vec<ApiRoute>) -> Result<Self, Self::Error> {
+        if entries.is_empty() {
+            return Err("no APIs: a model route has an entry for one at least".to_owned());
+        }
+        let mut seen = BTreeSet::new();
+        if let Some(entry) = entries.iter().find(|entry| !seen.insert(entry.api)) {
+            return Err(format!(
+                "the API `{}` has more than one entry: give each API one, which lists every \
+                 model its requests may name",
+                entry.api
+            ));
+        }
+        Ok(Self(entries))
+    }
+}
+
+impl From<ModelRoute> for Vec<ApiRoute> {
+    fn from(route: ModelRoute) -> Self {
+        route.0
+    }
+}
+
+/// A model route's entry for one API.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelRoute {
+pub struct ApiRoute {
+    /// The API that the requests are written in.
+    pub api: Api,
     /// The models that requests may name.
     pub models: Models,
+}
+
+/// An API of model providers', in which a role's code writes its model requests. It shows as
+/// the IR names it.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Api {
+    /// OpenAI's Responses API, which Codex speaks.
+    Responses,
+    /// OpenAI's Chat Completions API, which most clients of a provider that speaks OpenAI's API
+    /// write.
+    Chat,
+}
+
+impl fmt::Display for Api {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Responses => "responses",
+            Self::Chat => "chat",
+        })
+    }
 }
 
 /// Permission for the role that holds it to use an op while it works.

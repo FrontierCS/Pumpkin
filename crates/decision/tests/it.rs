@@ -77,9 +77,13 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        if let Some(at) = line.strip_suffix(" model") {
+        if let Some(asked) = line.strip_suffix(" model") {
+            let (at, caller) = match asked.split_once(" @") {
+                Some((at, job)) => (at, Caller::Job(JobId(job.parse().unwrap()))),
+                None => (asked, Caller::Agent),
+            };
             let at = Duration::from_millis(at.parse().unwrap());
-            let allowed = if core.model_requests_allowed(at) {
+            let allowed = if core.model_requests_allowed(caller, at) {
                 "allowed"
             } else {
                 "refused"
@@ -2215,6 +2219,107 @@ fn judges_leasing(ir: &mut Value) {
         }
         ir["roles"][judge]["grants"] = json!([grant]);
     }
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+fn call_model_routes() {
+    check(
+        |ir| ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(10),
+        r#"
+        0 agent_started
+        1000 judge train 10
+        1500 @0 model
+        2000 judge_started 0
+        2000 @0 model
+        2100 @1 model
+        11999 @0 model
+        12000 @0 model
+        12000 model
+        12000 judge_exited 0
+        12000 @0 model
+        12100 collected 0 {"raw_score": 1}
+        12200 judge train 10
+        13000 judge_started 1
+        13100 @1 model
+        14000 judge_timed_out 1
+        14000 @1 model
+        14100 collected 1 {"raw_score": 1}
+        14200 judge train 10
+        15000 judge_started 2
+        15100 submit submit 10
+        15200 agent_exited 0
+        15200 @2 model
+        15200 model
+        15300 judge_failed 2 the call was stopped
+        16000 judge_started 3
+        16000 @3 model
+        16000 model
+        17000 judge_exited 3
+        17000 @3 model
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1000 judge train 10
+              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 10s
+            1500 @0 model
+              model requests refused
+            2000 judge_started 0
+            2000 @0 model
+              model requests allowed
+            2100 @1 model
+              model requests refused
+            11999 @0 model
+              model requests allowed
+            12000 @0 model
+              model requests refused
+            12000 model
+              model requests allowed
+            12000 judge_exited 0
+            12000 @0 model
+              model requests refused
+            12100 collected 0 {"raw_score": 1}
+            12200 judge train 10
+              reply to op 2: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":11990}}
+              start job 1 of train on op 2's payload of 10 bytes, with a timeout of 10s
+            13000 judge_started 1
+            13100 @1 model
+              model requests allowed
+            14000 judge_timed_out 1
+            14000 @1 model
+              model requests refused
+            14100 collected 1 {"raw_score": 1}
+            14200 judge train 10
+              reply to op 3: {"kind":"judge","job":2,"remaining":{"calls":97,"seconds":11989}}
+              start job 2 of train on op 3's payload of 10 bytes, with a timeout of 10s
+            15000 judge_started 2
+            15100 submit submit 10
+              reply to op 4: {"kind":"submit","state":"stored","remaining_seconds":17984}
+            15200 agent_exited 0
+              stop job 2
+              tear down the agent
+              (tick due at 18210000)
+            15200 @2 model
+              model requests refused
+            15200 model
+              model requests refused
+            15300 judge_failed 2 the call was stopped
+              start job 3 of score on op 4's payload of 10 bytes, with a timeout of 120s
+            16000 judge_started 3
+            16000 @3 model
+              model requests allowed
+            16000 model
+              model requests refused
+            17000 judge_exited 3
+            17000 @3 model
+              model requests refused
+        "#]],
+    );
 }
 
 #[test]

@@ -344,7 +344,7 @@ pub struct Sandbox {
     pub needs: Needs,
     /// The role's place in the IR, where placing it reports what is wrong.
     pub(crate) at: JsonPointer,
-    /// Only the agent's may be set.
+    /// None for a runner's.
     pub model_route: Option<ModelRoute>,
 }
 

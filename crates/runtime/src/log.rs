@@ -130,12 +130,16 @@ impl<'h, H: Host> Log<'h, H> {
         self.sync()
     }
 
-    /// Appends the record of `answer`, how the route answered the agent's model request
-    /// numbered `request`: `{"kind": "model_answered", "request": n, "upstream_status": u,
+    /// Appends the record of `answer`, how `caller`'s route answered its model request numbered
+    /// `request`: `{"kind": "model_answered", "caller": c, "request": n, "upstream_status": u,
     /// "answer": a}`, with `"request_id": i` if the upstream named its id for the request, where
     /// `u` is the upstream's status, or `null` if no response came, and `a` the [`Answer`]'s kind,
     /// with a refusal's or a bar's status and message, but never a body.
-    fn model_answered(&mut self, request: u64, answer: &Answer) -> Result<(), String> {
+    fn model_answered(
+        &mut self,
+        (caller, request): (Caller, u64),
+        answer: &Answer,
+    ) -> Result<(), String> {
         let (upstream_status, request_id, answer) = match answer {
             Answer::Forwarded { status, request_id } => {
                 (Some(*status), request_id, json!({ "kind": "forwarded" }))
@@ -159,6 +163,7 @@ impl<'h, H: Host> Log<'h, H> {
         };
         let mut event = json!({
             "kind": "model_answered",
+            "caller": caller_json(caller),
             "request": request,
             "upstream_status": upstream_status,
             "answer": answer,
@@ -251,9 +256,9 @@ impl<'h, H: Host> Log<'h, H> {
 pub(super) enum Entry {
     /// A note ([`Log::note`]).
     Note(String),
-    /// How the route answered a model request of the agent's, by its number
+    /// How a route answered a model request of the caller's, by its number
     /// ([`Log::model_answered`]).
-    ModelAnswered(u64, Answer),
+    ModelAnswered((Caller, u64), Answer),
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as its session says them:
     /// `{"kind": "sandbox_gpus", "sandbox": n, "gpus": [m, ...]}`, where `n` is its name within the
     /// run, and each `m` a GPU's model, as `nvidia-smi` names it. A sandbox whose `sandboxd` saw

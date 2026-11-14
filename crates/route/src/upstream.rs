@@ -1,15 +1,15 @@
 //! Sending a closed model request to the model provider, and streaming its response back.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::io::{self, Read};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::{fmt, fs};
 
 use gateway::{IncomingModelRequest, ModelResponse};
-use schema::ir::{ModelName, Name};
+use schema::ir::{Api, ModelName, Name};
 use schema::sandbox::frame;
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
@@ -73,7 +73,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // Within the body, the harness gives up on a stream that stays silent this long, and asks again,
 // so a live provider never keeps it waiting longer; waiting on past it, a request would hold one
 // of its sandbox's places in flight (`MAX_MODEL_REQUESTS_IN_FLIGHT`) for a client that has gone.
-// Before the head, the harness waits without a bound of its own, so this bound and `until` end
+// Before the head, the harness waits without a bound of its own, so this bound and the deadline end
 // that wait: the harness asks for a stream, whose head the provider sends before any of the
 // model's output, so a head this late is a stall as well. A provider that takes none of the
 // request for as long has stalled too. A long response that keeps coming is never cut by it.
@@ -81,11 +81,12 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The model provider's endpoint: an `https` URL that names no user, or an `http` URL to a
 /// loopback IP address. A port, if it names one, is a number up to 65535.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UpstreamUrl(Uri);
 
 /// The API key that the model provider takes, read from its file. It is never shown: it has no
 /// `Debug` or `Display`, and goes nowhere but upstream.
+#[derive(Clone)]
 pub struct Key(HeaderValue);
 
 /// The model provider's endpoint, with its key, which forwards closed requests.
@@ -134,15 +135,37 @@ pub enum Answer {
     },
 }
 
-/// How a run serves its workflow's model route.
+/// How a run serves a model route's entry for one API: the upstream that its requests reach, of
+/// which the run makes an [`Upstream`] for each sandbox that it serves.
 pub struct Serving {
     /// The name that the deployment gives the upstream, which the run log shows.
     pub name: Name,
-    /// The upstream that the route's requests reach.
-    pub upstream: Upstream,
+    pub api: Api,
+    /// The upstream's endpoint for `api`.
+    pub url: UpstreamUrl,
+    pub key: Key,
     /// The name that the upstream takes for each model it serves, by the name that a route
     /// allows.
     pub models: BTreeMap<ModelName, ModelName>,
+}
+
+impl fmt::Debug for Serving {
+    // The key shows nothing.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            name,
+            api,
+            url,
+            key: _,
+            models,
+        } = self;
+        (f.debug_struct("Serving")
+            .field("name", name)
+            .field("api", api))
+        .field("url", url)
+        .field("models", models)
+        .finish_non_exhaustive()
+    }
 }
 
 impl TryFrom<String> for UpstreamUrl {
@@ -221,8 +244,8 @@ impl Key {
 }
 
 impl Upstream {
-    /// The endpoint at `url`, which takes `key`.
-    pub fn new(url: UpstreamUrl, key: Key) -> Self {
+    /// The endpoint at `url`, which takes `key`, with connections of its own.
+    pub fn new(url: &UpstreamUrl, key: &Key) -> Self {
         let agent = ureq::Agent::config_builder()
             // The provider's own errors reach the client as the provider gave them.
             .http_status_as_error(false)
@@ -241,36 +264,33 @@ impl Upstream {
             .timeout_per_write(Some(IDLE_TIMEOUT))
             .build()
             .into();
-        let UpstreamUrl(url) = url;
-        let Key(authorization) = key;
+        let (UpstreamUrl(url), Key(authorization)) = (url, key);
         Self {
-            url,
-            authorization,
+            url: url.clone(),
+            authorization: authorization.clone(),
             agent,
             shut_down: OnceLock::new(),
             refused: OnceLock::new(),
         }
     }
 
-    /// Sends `closed` upstream and streams the response back to `request`'s client by `by`, with
-    /// only the headers a harness reads, giving up at `until` or once the upstream stalls. The
-    /// client hears 504 if it gives up before the head, the route's end if shut down by then
-    /// ([`Refusal::ended`]), 502 if the upstream gives no answer or codes the body, 400 if it
-    /// refuses the key or the request, and else the response, cut short if it breaks off.
+    /// Sends `closed` upstream and streams the response back to `client` by its deadline, with
+    /// only the headers a harness reads, giving up at it or
+    /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
+    /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
+    /// the key or the request is refused, and else the response, cut short if it breaks off.
     ///
     /// # Errors
     ///
-    /// Fails if the response's head is too long for a frame, if `by` passes, or the session ends.
+    /// Fails if the head is too long for a frame, the deadline passes, or the session ends.
     pub(crate) fn forward(
         &self,
         closed: &Closed,
-        request: IncomingModelRequest,
-        until: Deadline,
-        by: Deadline,
+        client: Client,
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
         let call = self.agent.post(self.url.clone()).config();
-        let call = call.timeout_global(bound(until)).build();
+        let call = call.timeout_global(bound(client.by)).build();
         let call = closed
             .headers()
             .iter()
@@ -278,34 +298,22 @@ impl Upstream {
         let call = call.header(AUTHORIZATION, &self.authorization);
         let response = match call.send(closed.body()) {
             Ok(response) => response,
-            Err(_) if self.was_shut_down() => {
-                return refuse(Refusal::ended(), None, None, request, by, answered);
+            Err(error) => {
+                let refusal = if self.was_shut_down() {
+                    Refusal::ended()
+                } else {
+                    unanswered(&error)
+                };
+                return refuse(refusal, (None, None), client, answered);
             }
-            Err(error) => return refuse(unanswered(&error), None, None, request, by, answered),
         };
         let status = response.status().as_u16();
         let request_id = request_id(response.headers());
-        // Passed on, either would be a status that a harness tries again until its deadline. A
-        // 401 refuses the deployment's key, which every later request carries; a 403 may turn on
-        // what the request asked for, which the agent chose, so it ends no route.
-        if status == 401 {
-            let _ = self.refused.set(());
-            let refusal = Refusal::key_refused();
-            return refuse(refusal, Some(status), request_id, request, by, answered);
-        }
-        if status == 403 {
-            let refusal = Refusal::forbidden();
-            return refuse(refusal, Some(status), request_id, request, by, answered);
-        }
-        if coded(response.headers()) {
-            // The request accepts no coding, and the harness decodes none: a coded body would
-            // reach it as bytes it can't read, whether `content-encoding` stayed behind or not.
-            let message = "the model provider coded its answer, though the request asked for it \
-                           uncoded: try again";
-            let coded = refusal(Status::BadGateway, message.to_owned());
-            return refuse(coded, Some(status), request_id, request, by, answered);
+        if let Some(refusal) = self.refusal(status, response.headers()) {
+            return refuse(refusal, (Some(status), request_id), client, answered);
         }
         let headers = returned(response.headers(), closed);
+        let Client { request, by } = client;
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
             Err(error) => {
@@ -330,49 +338,61 @@ impl Upstream {
         }
     }
 
-    /// Answers `request` for the agent, by `by`: refuses it unless `allowed`, or once the
-    /// upstream has shut down ([`Upstream::shutdown`]) or the model provider has refused the
-    /// key, and else has `route` close it and forwards it upstream, which is given up on at `by`
-    /// too. It calls `forwarding` before it forwards a request, and tells `answered` how it
-    /// answered ([`Answer`]), before the answer's end is written.
-    ///
-    /// Whether the answer reached the agent isn't told: writing it fails only for a response's
-    /// head too long for a frame, or as the agent's session ends, which the run log shows.
-    pub fn serve(
+    /// The refusal that answers in place of the upstream's response with `status` and
+    /// `headers`, if one does: a 401, which refuses the key, and which the upstream keeps, a 403,
+    /// or a coded body.
+    fn refusal(&self, status: u16, headers: &HeaderMap) -> Option<Refusal> {
+        // Passed on, either would be a status that a harness tries again until its deadline. A
+        // 401 refuses the deployment's key, which every later request carries; a 403 may turn on
+        // what the request asked for, which the agent chose, so it ends no route.
+        if status == 401 {
+            let _ = self.refused.set(());
+            Some(Refusal::key_refused())
+        } else if status == 403 {
+            Some(Refusal::forbidden())
+        } else if coded(headers) {
+            // The request accepts no coding, and the harness decodes none: a coded body would
+            // reach it as bytes it can't read, whether `content-encoding` stayed behind or not.
+            let message = "the model provider coded its answer, though the request asked for it \
+                           uncoded: try again";
+            Some(refusal(Status::BadGateway, message.to_owned()))
+        } else {
+            None
+        }
+    }
+
+    /// Answers `client`'s request, which `route` takes, as [`serve`] says.
+    fn serve(
         &self,
         route: &Route,
-        request: IncomingModelRequest,
+        client: Client,
         allowed: bool,
-        by: Deadline,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) {
         let taken = if !allowed || self.was_shut_down() {
             Err(Refusal::ended())
-        } else if self.refused.get().is_some() {
+        } else if self.key_was_refused() {
             Err(Refusal::key_refused())
         } else {
-            route.close(&request.request)
+            route.close(&client.request.request)
         };
         let _ = match taken {
             Ok(closed) => {
                 forwarding();
-                self.forward(&closed, request, by, by, answered)
+                self.forward(&closed, client, answered)
             }
-            Err(refusal) => {
-                answered(refusal.barred());
-                refusal.answer(request, by)
-            }
+            Err(refusal) => barred(refusal, client, answered),
         };
     }
 
-    /// Whether the model provider has refused the key with a 401 ([`Upstream::serve`]), which
+    /// Whether the model provider has refused the key with a 401 ([`serve`]), which
     /// ends the route.
     pub fn key_was_refused(&self) -> bool {
         self.refused.get().is_some()
     }
 
-    /// Gives up on every exchange in flight and every later one ([`Upstream::serve`]), which
+    /// Gives up on every exchange in flight and every later one ([`serve`]), which
     /// ends the route: before the response's head, its client gets the refusal for the route's
     /// end (`Refusal::ended`), as does a later request; within the body, it gets the response
     /// cut short. One still resolving the provider's name, or connecting to it, is given up on
@@ -390,6 +410,53 @@ impl Upstream {
     }
 }
 
+/// Answers `request` for the sandbox that made it, by `by`, through the entry of `entries`, each
+/// a route's entry for one API and its upstream, whose endpoint it names.
+///
+/// One that names none is refused with a 404 that names each. The entry's upstream refuses it
+/// unless `allowed`, or once it has shut down ([`Upstream::shutdown`]) or its key was refused,
+/// and else forwards it closed, giving up at `by` too. It calls `forwarding` first, and tells
+/// `answered` how it answered ([`Answer`]) and through which entry's index, before the answer's
+/// end is written.
+// Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
+// too long for a frame, or as the sandbox's session ends, which the run log shows.
+pub fn serve(
+    entries: &[(Route, Upstream)],
+    request: IncomingModelRequest,
+    allowed: bool,
+    by: Deadline,
+    forwarding: impl FnOnce(),
+    answered: impl FnOnce(Option<usize>, Answer),
+) {
+    let taken = entries
+        .iter()
+        .position(|(route, _)| route.takes(&request.request));
+    let client = Client { request, by };
+    let Some(index) = taken else {
+        let path = &client.request.request.path;
+        let refusal = Refusal::unserved(path, entries.iter().map(|(route, _)| route));
+        let _ = barred(refusal, client, |answer| answered(None, answer));
+        return;
+    };
+    let (route, upstream) = &entries[index];
+    let answered = |answer| answered(Some(index), answer);
+    upstream.serve(route, client, allowed, forwarding, answered);
+}
+
+/// A request to answer, and by when its answer is due.
+pub(crate) struct Client {
+    request: IncomingModelRequest,
+    by: Deadline,
+}
+
+/// Answers `client`'s request with `refusal`, before it reached the upstream, once `answered` is
+/// told so.
+fn barred(refusal: Refusal, client: Client, answered: impl FnOnce(Answer)) -> io::Result<()> {
+    let Client { request, by } = client;
+    answered(refusal.barred());
+    refusal.answer(request, by)
+}
+
 /// The time that `until` leaves the exchange: none once it has passed, and no bound if it is
 /// never reached.
 fn bound(until: Deadline) -> Option<Duration> {
@@ -400,16 +467,15 @@ fn bound(until: Deadline) -> Option<Duration> {
     }
 }
 
-/// Answers `request` with `refusal` by `by`, in place of the upstream's response with the status
-/// `upstream_status` and the request id `request_id`, if one came, once `answered` is told so.
+/// Answers `client`'s request with `refusal`, in place of the upstream's response with the
+/// status and request id `upstream`, if one came, once `answered` is told so.
 fn refuse(
     refusal: Refusal,
-    upstream_status: Option<u16>,
-    request_id: Option<String>,
-    request: IncomingModelRequest,
-    by: Deadline,
+    (upstream_status, request_id): (Option<u16>, Option<String>),
+    client: Client,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
+    let Client { request, by } = client;
     answered(refusal.answered(upstream_status, request_id));
     refusal.answer(request, by)
 }

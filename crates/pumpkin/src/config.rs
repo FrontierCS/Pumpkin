@@ -4,9 +4,9 @@
 //! provider's kind, and holding that kind's own settings ([`Kind`]), whose classes of sandbox a
 //! run's roles are placed in ([`by_name`](Providers::by_name)); and the model upstreams that a
 //! workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
-//! [`serving`](Upstreams::serving) picks the one that serves it. [`Config`] and the types it
-//! holds say what each key means; every key is required, but for `upstreams` and `docker.cpus`,
-//! and any other refused.
+//! [`serving`](Upstreams::serving) picks the one that serves each entry of a route. [`Config`]
+//! and the types it holds say what each key means; every key is required, but for `upstreams`
+//! and `docker.cpus`, and any other refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use docker::CpuList;
 use engine::ContextName;
-use route::{self, Key, Serving, UpstreamUrl};
-use schema::ir::{ModelName, Models, Name};
+use route::{Key, Serving, UpstreamUrl};
+use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
 
@@ -85,9 +85,9 @@ pub(crate) struct Upstreams(BTreeMap<Name, Upstream>);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Upstream {
-    /// The endpoint of the API, read from its base URL ([`endpoint`]).
-    #[serde(deserialize_with = "endpoint")]
-    url: UpstreamUrl,
+    /// The base URL of the API, below which each API's endpoint is ([`endpoint`]).
+    #[serde(deserialize_with = "base")]
+    url: String,
     /// The file that holds the API's key, which [`read`] puts below the configuration's
     /// directory unless it is absolute.
     // The configuration names a key by its file, and holds none, so that it can be shown and
@@ -161,13 +161,23 @@ impl<T> Providers<T> {
 }
 
 impl Upstreams {
-    /// How a run serves a model route that allows `models`: through the upstream that serves
-    /// every one of them, with the key read from its file.
+    /// How a run serves `route`: each of its entries, in its order, through the upstream that
+    /// serves every model the entry allows, with the key read from its file.
     ///
     /// # Errors
     ///
-    /// Fails if no upstream serves every model, or if the key can't be read.
-    pub(crate) fn serving(self, models: &Models) -> Result<Serving, String> {
+    /// Fails if no upstream serves every model of an entry, or if a key can't be read.
+    pub(crate) fn serving(&self, route: &ModelRoute) -> Result<Vec<Serving>, String> {
+        route
+            .as_slice()
+            .iter()
+            .map(|entry| self.serves(entry))
+            .collect()
+    }
+
+    /// How a run serves `entry`, an entry of a route, as [`Upstreams::serving`] says.
+    fn serves(&self, entry: &ApiRoute) -> Result<Serving, String> {
+        let ApiRoute { api, models } = entry;
         let serves = |upstream: &Upstream| {
             let served =
                 |model: &ModelName| upstream.models.iter().any(|served| served.name == *model);
@@ -178,9 +188,8 @@ impl Upstreams {
         } else {
             "list them all under one"
         };
-        // At most one does: each model is listed once, and a route allows one at least.
-        let Some((name, upstream)) = self.0.into_iter().find(|(_, upstream)| serves(upstream))
-        else {
+        // At most one does: each model is listed once, and an entry allows one at least.
+        let Some((name, upstream)) = self.0.iter().find(|(_, upstream)| serves(upstream)) else {
             let named: Vec<String> = models
                 .as_slice()
                 .iter()
@@ -196,33 +205,44 @@ impl Upstreams {
             key_file,
             models,
         } = upstream;
-        let upstream = route::Upstream::new(url, Key::read(&key_file)?);
         let models = models
-            .into_iter()
-            .map(|model| (model.name, model.upstream_name));
-        let models = models.collect();
+            .iter()
+            .map(|model| (model.name.clone(), model.upstream_name.clone()));
         Ok(Serving {
-            name,
-            upstream,
-            models,
+            name: name.clone(),
+            api: *api,
+            url: UpstreamUrl::try_from(endpoint(url, *api))?,
+            key: Key::read(key_file)?,
+            models: models.collect(),
         })
     }
 }
 
-/// The endpoint of an upstream's API, read from its base URL: `/responses` below it, once the
-/// URL's ending `/`, if it has one, is dropped. A base URL with a query or a fragment is refused.
-fn endpoint<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UpstreamUrl, D::Error> {
+/// An upstream's base URL, without its ending `/`, if it has one, and refused if it has a query
+/// or a fragment, or as [`UpstreamUrl`] refuses it.
+fn base<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let url = String::deserialize(deserializer)?;
     // The path added would end up within a query or a fragment. The URL itself isn't repeated,
     // as `UpstreamUrl` doesn't repeat it, since it may name a user's credential.
     if url.contains(['?', '#']) {
         return Err(de::Error::custom(
             "the upstream's URL has a query or a fragment: name the API's base URL alone, below \
-             which the route reaches `/responses`",
+             which the route reaches each API's endpoint",
         ));
     }
-    let endpoint = format!("{}/responses", url.strip_suffix('/').unwrap_or(&url));
-    UpstreamUrl::try_from(endpoint).map_err(de::Error::custom)
+    let base = url.strip_suffix('/').unwrap_or(&url).to_owned();
+    UpstreamUrl::try_from(base.clone()).map_err(de::Error::custom)?;
+    Ok(base)
+}
+
+/// The endpoint of `api` below `base`, an upstream's base URL: `/responses` for
+/// [`Api::Responses`], and `/chat/completions` for [`Api::Chat`].
+fn endpoint(base: &str, api: Api) -> String {
+    let path = match api {
+        Api::Responses => "/responses",
+        Api::Chat => "/chat/completions",
+    };
+    format!("{base}{path}")
 }
 
 /// The configuration in the file at `path`, a machine's.

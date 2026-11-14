@@ -8,16 +8,17 @@ use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::{fs, iter, thread};
+use std::{fs, iter, slice, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
 use route::{Answer as Told, Key, Route, Upstream, UpstreamUrl};
+use schema::ir::Api;
 use stdx::Deadline;
 use test_support::HUNG;
 use test_support::http::{read_request, write_chunk};
 
-use super::{fake_sandbox, meeting, models, next_model_request, post};
+use super::{Request, chat, fake_sandbox, meeting, models, next_model_request, post};
 
 /// The key file's text, whose key goes upstream.
 const KEY: &str = "sk-test-0123\n";
@@ -36,7 +37,14 @@ const STREAM_HEAD: &str = "content-type: text/event-stream\r\nopenai-model: m-la
 /// The two parts of the stand-in's streamed body.
 const PARTS: [&str; 2] = [
     "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
-    "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":8},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":3}}}}\n\n",
+];
+
+/// The two parts of the stand-in's streamed body for Chat Completions, the second with the usage
+/// that the request asked for.
+const CHAT_PARTS: [&str; 2] = [
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"7\"}}],\"usage\":null}\n\n",
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":16},\"completion_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\ndata: [DONE]\n\n",
 ];
 
 /// A case: its name, its upstream's URL and the text of its key file (`None` for no file), how
@@ -45,6 +53,8 @@ const PARTS: [&str; 2] = [
 /// allowed (`Some(allowed)`).
 struct Case {
     name: &'static str,
+    /// The API of the route's entry, whose client's request the sandbox sends.
+    api: Api,
     url: &'static str,
     key: Option<&'static str>,
     answer: Option<Answer>,
@@ -56,6 +66,8 @@ struct Case {
 enum Answer {
     /// With a stream in two parts, the second once the sandbox has heard the first.
     Streams,
+    /// With a stream of Chat Completions in two parts, as [`Answer::Streams`] does.
+    ChatStreams,
     /// With an error of its own, a 429.
     Refuses,
     /// With a refusal, of the key or the request: a 401 or a 403.
@@ -77,6 +89,7 @@ enum Answer {
 fn case(name: &'static str, answer: Answer) -> Case {
     Case {
         name,
+        api: Api::Responses,
         url: STAND_IN,
         key: Some(KEY),
         answer: Some(answer),
@@ -92,9 +105,10 @@ fn unanswered(name: &'static str) -> Case {
     }
 }
 
-/// Makes each case's upstream, and through each that it makes, forwards the harness's request,
-/// sent by a sandbox of a role whose route allows `m-large`, to the stand-in, answering by a
-/// deadline that only a hang reaches. Checks what came of each against `expect`.
+/// Makes each case's upstream, and through each that it makes, forwards the request of a client
+/// of the case's API, sent by a sandbox of a role whose route allows `m-large` and `m-small`, to
+/// the stand-in, answering by a deadline that only a hang reaches. Checks what came of each against
+/// `expect`.
 fn check(cases: &[Case], expect: &Expect) {
     // Kept if the test fails.
     let dir = tempfile::Builder::new()
@@ -104,7 +118,7 @@ fn check(cases: &[Case], expect: &Expect) {
         .keep();
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
-    let made: Vec<Result<Upstream, String>> = (0..)
+    let made: Vec<Result<(Route, Upstream), String>> = (0..)
         .zip(cases)
         .map(|(n, case)| upstream(case, &dir.join(format!("key-{n}")), &address))
         .collect();
@@ -120,20 +134,18 @@ fn check(cases: &[Case], expect: &Expect) {
     // Its sockets fit in a socket's address by this path to their directory.
     let (_sockets, registration, socket) = meeting(&dir);
     let requests = (forwarded.iter())
-        .flat_map(|case| iter::repeat_n(post(|_| {}), 1 + usize::from(case.then.is_some())))
+        .flat_map(|case| iter::repeat_n(request(case.api), 1 + usize::from(case.then.is_some())))
         .collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts)));
     let (sender, arrivals) = mpsc::channel();
     let by = Deadline::after(HUNG);
     let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
     let session = accepted.unwrap();
-    let route = Route::new(models(["m-large"]));
-    let sent = post(|_| {}).3;
     let mut outcomes = Vec::new();
-    for (case, upstream) in cases.iter().zip(&made) {
-        let Ok(upstream) = upstream else { continue };
-        let served = serve_case(case, upstream, &route, &arrivals, &held);
-        outcomes.push((served, upstream.key_was_refused()));
+    for (case, entry) in cases.iter().zip(&made) {
+        let Ok(entry) = entry else { continue };
+        let served = serve_case(case, entry, &arrivals, &held);
+        outcomes.push((served, entry.1.key_was_refused()));
     }
     let mut heard = sandbox.join().unwrap().into_iter();
     let mut received = stand_in.join().unwrap().into_iter();
@@ -146,7 +158,10 @@ fn check(cases: &[Case], expect: &Expect) {
             let Err(refused) = made else {
                 let (served, key_refused) = outcomes.next().unwrap();
                 let got = match case.answer {
-                    Some(_) => got(received.next().unwrap(), &sent, &mut first),
+                    Some(_) => {
+                        let sent = request(case.api).3;
+                        got(received.next().unwrap(), &sent, &mut first)
+                    }
                     None => "nothing".to_owned(),
                 };
                 let mut line = format!("{}: the stand-in got {got}", case.name);
@@ -166,13 +181,12 @@ fn check(cases: &[Case], expect: &Expect) {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// Serves `case`'s request, and its second if it has one, with `upstream`, and returns how it
+/// Serves `case`'s request, and its second if it has one, with `entry`, and returns how it
 /// answered each. For a case whose stand-in holds the request, the route ends once `held` says
 /// that it does.
 fn serve_case(
     case: &Case,
-    upstream: &Upstream,
-    route: &Route,
+    entry: &(Route, Upstream),
     arrivals: &Receiver<Arrival>,
     held: &Receiver<()>,
 ) -> Vec<Option<Told>> {
@@ -180,49 +194,59 @@ fn serve_case(
     let incoming = next_model_request(arrivals);
     let first = if case.answer == Some(Answer::Holds) {
         thread::scope(|scope| {
-            let served = scope.spawn(move || serve_one(upstream, route, incoming, true, by));
+            let served = scope.spawn(move || serve_one(entry, incoming, true, by));
             held.recv_timeout(HUNG).unwrap();
-            upstream.shutdown();
+            entry.1.shutdown();
             served.join().unwrap()
         })
     } else {
-        serve_one(upstream, route, incoming, true, by)
+        serve_one(entry, incoming, true, by)
     };
     let mut served = vec![first];
     if let Some(allowed) = case.then {
         let incoming = next_model_request(arrivals);
-        served.push(serve_one(upstream, route, incoming, allowed, by));
+        served.push(serve_one(entry, incoming, allowed, by));
     }
     served
 }
 
-/// Serves `incoming` with `upstream`, and returns how it answered.
+/// Serves `incoming` with `entry`, a route's only one, and returns how it answered.
 fn serve_one(
-    upstream: &Upstream,
-    route: &Route,
+    entry: &(Route, Upstream),
     incoming: IncomingModelRequest,
     allowed: bool,
     by: Deadline,
 ) -> Option<Told> {
     let mut told = None;
-    upstream.serve(
-        route,
+    let answered = |_, answer| told = Some(answer);
+    route::serve(
+        slice::from_ref(entry),
         incoming,
         allowed,
         by,
         || {},
-        |answer| told = Some(answer),
+        answered,
     );
     told
 }
 
-/// The upstream that `case` names, with its key file at `key`, or why it can't be made.
-fn upstream(case: &Case, key: &Path, address: &str) -> Result<Upstream, String> {
+/// The request that a client of `api` sends.
+fn request(api: Api) -> Request {
+    match api {
+        Api::Responses => post(|_| {}),
+        Api::Chat => chat(|_| {}),
+    }
+}
+
+/// The route's entry for `case`'s API that allows `m-large` and `m-small`, with the upstream that
+/// `case` names, its key file at `key`, or why the upstream can't be made.
+fn upstream(case: &Case, key: &Path, address: &str) -> Result<(Route, Upstream), String> {
     if let Some(text) = case.key {
         fs::write(key, text).unwrap();
     }
     let url = UpstreamUrl::try_from(case.url.replace("{stand-in}", address))?;
-    Ok(Upstream::new(url, Key::read(key)?))
+    let route = Route::new(case.api, models(["m-large", "m-small"]));
+    Ok((route, Upstream::new(&url, &Key::read(key)?)))
 }
 
 /// What the stand-in received, as `(head, body)`: a head that is the `first` it received shown
@@ -259,16 +283,20 @@ fn serve(
         // What the sandbox heard of earlier answers.
         while heard_part.try_recv().is_ok() {}
         match answer {
-            Answer::Streams | Answer::BreaksOff => {
+            Answer::Streams | Answer::ChatStreams | Answer::BreaksOff => {
+                let parts = match answer {
+                    Answer::ChatStreams => CHAT_PARTS,
+                    _ => PARTS,
+                };
                 write!(connection, "HTTP/1.1 200 OK\r\n{STREAM_HEAD}").unwrap();
-                write_chunk(&mut connection, PARTS[0]);
+                write_chunk(&mut connection, parts[0]);
                 let heard = heard_part.recv_timeout(HUNG);
                 assert!(
                     heard.is_ok(),
                     "the sandbox heard nothing of the stream's first part"
                 );
-                if answer == Answer::Streams {
-                    write_chunk(&mut connection, PARTS[1]);
+                if answer != Answer::BreaksOff {
+                    write_chunk(&mut connection, parts[1]);
                     write_chunk(&mut connection, "");
                 }
             }
@@ -321,6 +349,10 @@ fn serve(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn forward() {
     check(
         &[
@@ -373,9 +405,14 @@ fn forward() {
                 key: Some("sk-test 0123\n"),
                 ..unanswered("a key with a space")
             },
+            Case {
+                api: Api::Chat,
+                url: "http://{stand-in}/v1/chat/completions",
+                ..case("a stream of Chat Completions", Answer::ChatStreams)
+            },
         ],
         &expect![[r#"
-            a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); key refused: false
+            a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); key refused: false
             the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); key refused: false
             the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); key refused: true
             the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { status: 429, request_id: None }); the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); key refused: false
@@ -391,7 +428,8 @@ fn forward() {
             not a URL: the upstream's URL is not a URL (invalid uri character): name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
             no key file: the key file <dir>/key-14 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
             an empty key file: the key file <dir>/key-15 holds no API key: write the key alone, on one line
-            a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line"#]],
+            a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line
+            a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1") }); key refused: false"#]],
     );
 }
 

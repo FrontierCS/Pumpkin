@@ -1,6 +1,7 @@
 //! The run's children: sandboxes that the core starts for a part of the run, each on a thread of
-//! its own, in a fresh sandbox, passive but for a judge's that holds grants, which a driver of its
-//! kind drives: a judge call's, the `judge` module's, or a lease's, the `lease` module's.
+//! its own, in a fresh sandbox, passive but for a judge's that holds grants or has a model route,
+//! which a driver of its kind drives: a judge call's, the `judge` module's, or a lease's, the
+//! `lease` module's.
 //!
 //! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
 //! reports the child's end only once its sandbox is deleted; a sandbox that can't be deleted fails
@@ -14,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use decision::{Event, JobId, Request};
-use gateway::{Arrival, Session, Trees};
+use gateway::{Arrival, IncomingModelRequest, Session, Trees};
 use provider::UnixTime;
 use schema::sandbox::OpPayloadLimit;
 
@@ -55,8 +56,8 @@ pub(super) struct Deadlines {
 /// What reaches a child's thread through its inbox.
 pub(super) enum Message<O> {
     /// What its session's reader handed over ([`Registration::accept`]): its commands' exits
-    /// and its end, and the ops of a session that takes them, as a judge's that holds grants
-    /// does; no session of a child takes model requests.
+    /// and its end, and the ops and model requests of a session that takes them, as a judge's
+    /// that holds grants, or has a model route, does.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
     Session(Arrival),
@@ -79,6 +80,13 @@ pub(super) enum Report {
         job: JobId,
         request: Request,
         trees: Trees,
+    },
+    /// A model request that job `job`'s call's sandbox made, at the time `at` the thread took it,
+    /// which the loop numbers and answers.
+    Model {
+        at: Duration,
+        job: JobId,
+        incoming: IncomingModelRequest,
     },
     /// Why the child's sandbox couldn't be deleted, which fails the run.
     Undeleted(String),

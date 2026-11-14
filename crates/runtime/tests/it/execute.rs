@@ -10,6 +10,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -29,7 +30,7 @@ use provider::{
 use route::Serving;
 use runtime::{Ending, Host, Record, Recorded, Run, System, new_id};
 use schema::ir::{self, Image, ModelName};
-use schema::workflow::Placed;
+use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
@@ -287,20 +288,19 @@ fn executed<H: Shown>(
 ) -> String {
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
-    let route = ir.roles.iter().find_map(|role| role.egress.model.as_ref());
-    let stand_in = route.map(|_| StandIn::start());
-    let serving =
-        (route.zip(stand_in.as_ref())).map(|(route, stand_in)| stand_in.serving(&runs.dir, route));
+    let routed = ir.roles.iter().any(|role| role.egress.model.is_some());
+    let stand_in = routed.then(StandIn::start);
     let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
     let ready: BTreeMap<&str, &Ready> = ready.collect();
     let placed = placed_on(&ir, &ready).unwrap();
+    let servings = StandIn::servings(stand_in.as_ref(), placed.workflow(), &runs.dir);
     let hard_end = lasts(&placed);
     let id = new_id(SystemTime::now()).unwrap();
     let record = runs.dir.join(id.as_str());
     let interrupting = interrupting(providers, at, &record);
     let on = providers_of(&placed, |name| named(&interrupting, name));
     let recorded = Recorded { args: &[] };
-    let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, serving, recorded);
+    let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, &servings, recorded);
     let run = run.unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = record.join("sockets");
@@ -413,7 +413,8 @@ fn left(providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
 
 /// A stand-in for a model provider, on the loopback, which answers a request whose input is
 /// `stream` with a whole stream that echoes the request's line, its `authorization` and its
-/// body, one whose input is `stall` with a stream's head and first part, then nothing, until
+/// body, one whose input is a number with that number as its whole body, one whose input is
+/// `stall` with a stream's head and first part, then nothing, until
 /// its client hangs up, one whose input is `expired` with a 401, as a provider refuses an
 /// expired key, one whose input is `forbidden` with a 403, and one whose input is `down` with a
 /// 502 that names its id for the request. Each stream's head names in
@@ -433,14 +434,20 @@ impl StandIn {
         let address = listener.local_addr().unwrap().to_string();
         let (stops, stopped) = mpsc::channel();
         let thread = thread::spawn(move || {
-            let mut hung_up = Vec::new();
+            // Each connection is answered on a thread of its own, so that a stream it stalls
+            // holds no other request.
+            let mut answering = Vec::new();
             for connection in listener.incoming() {
                 if stopped.try_recv().is_ok() {
                     break;
                 }
-                hung_up.extend(answer(connection.unwrap()));
+                let connection = connection.unwrap();
+                answering.push(thread::spawn(move || answer(connection)));
             }
-            hung_up
+            let answered = answering
+                .into_iter()
+                .map(|answering| answering.join().unwrap());
+            answered.flatten().collect()
         });
         Self {
             address,
@@ -449,9 +456,24 @@ impl StandIn {
         }
     }
 
-    /// How a run serves `route` through it, with its key in a file in `dir`.
-    fn serving(&self, dir: &Path, route: &ir::ModelRoute) -> Serving {
-        let models = route.models.as_slice().iter().map(ModelName::as_str);
+    /// How a run serves each role's route in `workflow` through `stand_in`, which is there if a
+    /// role has one, with its key in a file in `dir`.
+    fn servings(stand_in: Option<&Self>, workflow: &Workflow, dir: &Path) -> ByRole<Vec<Serving>> {
+        let servings = workflow.by_role(|(_, sandbox)| {
+            let entries = sandbox
+                .model_route
+                .iter()
+                .flat_map(ir::ModelRoute::as_slice);
+            let served = entries.map(|entry| stand_in.unwrap().serving(dir, entry));
+            Ok::<_, Infallible>(served.collect())
+        });
+        let Ok(servings) = servings;
+        servings
+    }
+
+    /// How a run serves `entry`, a route's, through it, with its key in a file in `dir`.
+    fn serving(&self, dir: &Path, entry: &ir::ApiRoute) -> Serving {
+        let models = entry.models.as_slice().iter().map(ModelName::as_str);
         let models: Vec<&str> = models.collect();
         serving(
             dir,
@@ -482,6 +504,18 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
         Some("down") => Some(("502 Bad Gateway", "x-request-id: req-502\r\n")),
         _ => None,
     };
+    if let Some(number) = input["input"][1]["content"]
+        .as_str()
+        .filter(|text| text.parse::<u64>().is_ok())
+    {
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{number}",
+            number.len()
+        );
+        connection.write_all(answer.as_bytes()).unwrap();
+        return None;
+    }
     if let Some((status, id)) = refused {
         let refused = format!(
             "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\n{id}content-length: 7\r\n\
@@ -743,7 +777,7 @@ fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
 
 /// `ir`, with a model route for its agent that allows `m-large`.
 fn routed(mut ir: Value) -> Value {
-    let route = json!({ "models": ["m-large"] });
+    let route = json!([{ "api": "responses", "models": ["m-large"] }]);
     ir["roles"][0]["egress"] = json!({ "model": route });
     ir
 }
@@ -1104,18 +1138,18 @@ fn interrupted_publishing_image() {
         SANDBOXD,
         At::PublishImage,
         &expect![[r#"
-            was interrupted by SIGTERM
-            it started: false
-            it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"]
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"signal":"SIGTERM","state":"interrupted"}
-            log.jsonl:
-            socket directories left: false
-            their directory's mode at each create: []
-            listed once it ended: []"#]],
+        was interrupted by SIGTERM
+        it started: false
+        it returned within 60 s: true
+        it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"]
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        payloads hold: []
+        provider.json is what the provider declared: true
+        outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+        log.jsonl:
+        socket directories left: false
+        their directory's mode at each create: []
+        listed once it ended: []"#]],
     );
 }
 
@@ -2619,16 +2653,16 @@ fn model_requests() {
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kind":"model_answered","request":1,"upstream_status":null},"seq":5}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"upstream_status":200},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":2,"upstream_status":200},"seq":8}
             {"at_ns":"<ns>","note":"model request 3 goes upstream","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":401},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kind":"model_answered","request":3,"upstream_status":401},"seq":10}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1188 bytes","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
@@ -2675,15 +2709,15 @@ fn model_upstream_refusals() {
             outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","state":"failed"}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"kind":"model_answered","request":0,"upstream_status":403},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"caller":"agent","kind":"model_answered","request":0,"upstream_status":403},"seq":4}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":1,"upstream_status":200},"seq":6}
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kind":"model_answered","request":2,"upstream_status":401},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kind":"model_answered","request":3,"upstream_status":null},"seq":9}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1083 bytes","seq":12}
@@ -2732,20 +2766,20 @@ fn model_provider_down() {
             outcome.json: {"reason":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","state":"failed"}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":4}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
             {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kind":"model_answered","request":3,"upstream_status":null},"seq":9}
             {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 867 bytes","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":4,"upstream_status":200},"seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kind":"model_answered","request":4,"upstream_status":200},"seq":14}
             {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","seq":15}
             its last record came before the agent's teardown was to end
             the agent's standard output:
@@ -2780,11 +2814,11 @@ fn model_barred_is_no_failure() {
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kind":"model_answered","request":1,"upstream_status":null},"seq":5}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 567 bytes","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":8}
@@ -2817,12 +2851,12 @@ fn model_provider_recovers() {
             outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":1,"upstream_status":200},"seq":6}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 444 bytes","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
@@ -2861,16 +2895,16 @@ fn model_provider_down_at_the_deadline() {
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
             {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":6}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 217 bytes","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":1,"upstream_status":200},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kind":"model_answered","request":1,"upstream_status":200},"seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
@@ -2906,14 +2940,14 @@ fn model_stream_cut() {
             outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
@@ -2952,14 +2986,14 @@ fn model_grace_cut() {
             outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"the agent's model route goes to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
             {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
@@ -2972,6 +3006,202 @@ fn model_grace_cut() {
             the model endpoint at each create: [true, false]
             listed once it ended: []
             a stalled stream's client hung up before the agent's teardown was to end"#]],
+    );
+}
+
+/// `ir`, with a model route for judge `judge`, 1 for the train judge or 2 for the score's, that
+/// allows `m-small`, whose command takes `steps` (`ops`), and a timeout of 20 s for each of the
+/// train judge's calls, shorter than what the agent's deadline leaves any call.
+fn judge_routed(mut ir: Value, judge: usize, steps: &[&str]) -> Value {
+    let route = json!([{ "api": "responses", "models": ["m-small"] }]);
+    ir["roles"][judge]["egress"] = json!({ "model": route });
+    let argv: Vec<&str> = iter::once("ops").chain(steps.iter().copied()).collect();
+    ir["roles"][judge]["runtime"]["judge"]["command"]["argv"] = json!(argv);
+    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
+    ir
+}
+
+// A run whose score judge asks its model while its command runs, in the final phase, once the
+// agent's route has ended, and scores the submission with the number the model answered: the
+// run log notes each role's route as the run starts, and names the caller of each model
+// request it records.
+#[test]
+fn judge_model() {
+    let argv = ["ops", "model m-large stream", "finalize submit 6"];
+    let ir = judge_routed(
+        routed(ops_workflow(&argv, 30)),
+        2,
+        &["model m-small 7", "result"],
+    );
+    check(
+        &System,
+        "judge-model",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(7))
+            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/log/command.stdout, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":7,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`final_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":5}
+            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 353 bytes","seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
+            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kind":"model_answered","request":1,"upstream_status":200},"seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":15}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+            job 0's standard output:
+            model request 0: 200 [("content-type", "text/plain")] 7
+            socket directories left: false
+            their directory's mode at each create: ["700", "700"]
+            the model endpoint at each create: [true, true]
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose agent's model request streams while its train judge's call asks its own model,
+// and the call's result, the number the model answered, reaches the agent; then the call asks
+// again, and exits with that request in flight: its route ends with its command, so the request
+// is cut short then, while the agent's stream goes on until the agent exits.
+#[test]
+fn judge_and_agent_model() {
+    let argv = [
+        "ops",
+        "ask m-large stall",
+        "judge train 3",
+        "await 0 completed",
+        "submit submit 6",
+        "exit",
+    ];
+    let steps = ["model m-small 5", "result", "ask m-small stall", "exit"];
+    let ir = judge_routed(routed(ops_workflow(&argv, 30)), 1, &steps);
+    check(
+        &System,
+        "judge-and-agent-model",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/log/command.stdout, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
+            payloads hold: ["xxx", "xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+            {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
+            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kind":"model_answered","request":1,"upstream_status":200},"seq":8}
+            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"job-0","kind":"model_answered","request":2,"upstream_status":200},"seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"score":5}},"observed_ns":"<ns>","seq":13}
+            {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":5},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":17}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":18}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kind":"model_answered","request":0,"upstream_status":200},"seq":19}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":22}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":23}
+            its last record came before the agent's teardown was to end
+            the agent's standard output:
+            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+            job 0's standard output:
+            model request 0: 200 [("content-type", "text/plain")] 5
+            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-small")] event: response.created\n\n
+            socket directories left: false
+            their directory's mode at each create: ["700", "700", "700"]
+            the model endpoint at each create: [true, true, false]
+            listed once it ended: []
+            a stalled stream's client hung up before the agent's teardown was to end
+            a stalled stream's client hung up before the agent's teardown was to end"#]],
+    );
+}
+
+// A run whose train judge's call hears that the model provider refused its route's key, with a
+// 401: the call gives no result, and though the agent goes on and its submission is judged, the
+// run fails, as the refusal is the deployment's fault, never the agent's.
+#[test]
+fn judge_key_refused() {
+    let argv = [
+        "ops",
+        "judge train 3",
+        "await 0 errored",
+        "finalize submit 6",
+    ];
+    let ir = judge_routed(ops_workflow(&argv, 30), 1, &["model m-small expired"]);
+    check(
+        &System,
+        "judge-key-refused",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/log/command.stdout, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
+            payloads hold: ["xxx", "xxxxxx"]
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":1}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":4}
+            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"job-0","kind":"model_answered","request":0,"upstream_status":401},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":15}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":17}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":18}
+            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","seq":19}
+            its last record came before the agent's teardown was to end
+            job 0's standard output:
+            model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+            socket directories left: false
+            their directory's mode at each create: ["700", "700", "700"]
+            the model endpoint at each create: [false, true, false]
+            listed once it ended: []"#]],
     );
 }
 
@@ -2998,10 +3228,13 @@ fn holds_until_its_end() {
     let prepare = |name: &str| {
         let placed = placed(&ir, sim.ready()).unwrap();
         let dir = runs.dir.join(name);
+        let Ok(unrouted) = placed
+            .workflow()
+            .by_role(|_| Ok::<_, Infallible>(Vec::new()));
         let on = providers_of(&placed, |_| &sim);
         let recorded = Recorded { args: &[] };
         let id = new_id(SystemTime::now()).unwrap();
-        Run::prepare(&System, placed, on, &dir, id, None, recorded)
+        Run::prepare(&System, placed, on, &dir, id, &unrouted, recorded)
     };
     let prepared = |run: &Result<Run<'_, System>, String>| match run {
         Ok(_) => "prepared".to_owned(),

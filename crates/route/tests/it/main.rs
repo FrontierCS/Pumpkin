@@ -19,7 +19,7 @@ use std::{fs, thread};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
 use route::{Key, Route, Upstream, UpstreamUrl};
-use schema::ir::{ModelName, Name};
+use schema::ir::{Api, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -38,7 +38,8 @@ fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
 }
 
 /// Sends each case's request over a session, as a sandbox of a role whose route allows `m-large`
-/// and `m-small`, and serves it as the session's owner: it shows what the stand-in model
+/// and `m-small` through the Responses API and through Chat Completions, and serves it as the
+/// session's owner: it shows what the stand-in model
 /// provider received of each that the route admitted, or the refusal that the sandbox heard,
 /// and checks them against `expect`.
 fn check(cases: &[(&str, Request)], expect: &Expect) {
@@ -48,7 +49,6 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
         .tempdir()
         .unwrap()
         .keep();
-    let route = Route::new(models(["m-large", "m-small"]));
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
     let (receipts, received) = mpsc::channel();
@@ -64,8 +64,15 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     });
     let key = dir.join("key");
     fs::write(&key, "sk-test-0123\n").unwrap();
-    let url = UpstreamUrl::try_from(format!("http://{address}/v1/responses")).unwrap();
-    let upstream = Upstream::new(url, Key::read(&key).unwrap());
+    let entry = |api, path: &str| {
+        let url = UpstreamUrl::try_from(format!("http://{address}/v1/{path}")).unwrap();
+        let route = Route::new(api, models(["m-large", "m-small"]));
+        (route, Upstream::new(&url, &Key::read(&key).unwrap()))
+    };
+    let entries = [
+        entry(Api::Responses, "responses"),
+        entry(Api::Chat, "chat/completions"),
+    ];
     // Its sockets fit in a socket's address by this path to their directory.
     let (_sockets, registration, socket) = meeting(&dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
@@ -80,7 +87,8 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
             let incoming = next_model_request(&arrivals);
             let mut forwarded = false;
             let by = Deadline::after(HUNG);
-            upstream.serve(&route, incoming, true, by, || forwarded = true, drop);
+            let answered = |_, _| {};
+            route::serve(&entries, incoming, true, by, || forwarded = true, answered);
             forwarded.then(|| {
                 let (line, headers, body) = received.recv_timeout(HUNG).unwrap();
                 let body = if &body == sent {
@@ -250,6 +258,47 @@ fn post(edit: impl FnOnce(&mut Value)) -> Request {
     edit(&mut body);
     let body = body.to_string().into_bytes();
     ("POST", "/responses".to_owned(), harness_headers(), body)
+}
+
+/// The request headers of a client of Chat Completions, with ones that must stay behind.
+fn chat_headers() -> Vec<(String, String)> {
+    [
+        ("host", "127.0.0.1:11235"),
+        ("content-type", "application/json"),
+        ("accept", "application/json"),
+        ("authorization", "Bearer the-sandbox's-own"),
+        ("openai-organization", "org-1"),
+        ("user-agent", "OpenAI/Python 1.99.0"),
+        ("x-stainless-lang", "python"),
+    ]
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .to_vec()
+}
+
+/// A client's request of Chat Completions with `edit` applied to its body: streamed, with its
+/// usage, a function its model may call, and an image inline.
+fn chat(edit: impl FnOnce(&mut Value)) -> Request {
+    let mut body = json!({
+        "model": "m-small",
+        "stream": true,
+        "stream_options": { "include_usage": true },
+        "messages": [
+            { "role": "system", "content": "Grade the answer." },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "hi" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            }
+        ],
+        "tools": [{ "type": "function", "function": { "name": "grade", "parameters": {} } }],
+        "tool_choice": "auto"
+    });
+    edit(&mut body);
+    let body = body.to_string().into_bytes();
+    let path = "/v1/chat/completions".to_owned();
+    ("POST", path, chat_headers(), body)
 }
 
 /// The harness's request with `name: value` added to its headers.
@@ -467,9 +516,68 @@ fn closure() {
             audio by URL: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`audio_url` holds a URL the provider would fetch, which the route refuses: send the content inline, as a `data:` URL","param":null,"type":"invalid_request_error"}}
             a header value with a line break: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the header `x-codex-window-id` holds a control character: send values without any but tab","param":null,"type":"invalid_request_error"}}
             a header value with a NUL: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the header `x-codex-window-id` holds a control character: send values without any but tab","param":null,"type":"invalid_request_error"}}
-            compaction: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/responses/compact` is not served: send POST /responses","param":null,"type":"invalid_request_error"}}
-            a long path: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is not served: send POST /responses","param":null,"type":"invalid_request_error"}}
-            models: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/models` is not served: send POST /responses","param":null,"type":"invalid_request_error"}}
+            compaction: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/responses/compact` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
+            a long path: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
+            models: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/models` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
             another method: 405 [("content-type", "application/json"), ("allow", "POST")] {"error":{"code":null,"message":"`GET /responses` is not served: send POST /responses","param":null,"type":"invalid_request_error"}}"#]],
+    );
+}
+
+#[test]
+fn chat_closure() {
+    let image = |url: &str| json!({ "type": "image_url", "image_url": { "url": url } });
+    check(
+        &[
+            ("the client's", chat(|_| {})),
+            ("not stored", chat(|body| body["store"] = json!(false))),
+            ("stored", chat(|body| body["store"] = json!(true))),
+            (
+                "another model",
+                chat(|body| body["model"] = json!("m-huge")),
+            ),
+            (
+                "web search",
+                chat(|body| body["web_search_options"] = json!({})),
+            ),
+            (
+                "a hosted tool",
+                chat(|body| body["tools"][0] = json!({ "type": "web_search_preview" })),
+            ),
+            (
+                "a hosted tool chosen",
+                chat(|body| body["tool_choice"] = json!({ "type": "web_search_preview" })),
+            ),
+            (
+                "an image by URL",
+                chat(|body| body["messages"][1]["content"][1] = image("https://example.com/a.png")),
+            ),
+            (
+                "a stored file",
+                chat(|body| {
+                    body["messages"][1]["content"][1] =
+                        json!({ "type": "file", "file": { "file_id": "file-1" } });
+                }),
+            ),
+            ("another method", {
+                let (_, path, headers, body) = chat(|_| {});
+                ("GET", path, headers, body)
+            }),
+            ("without /v1", {
+                let (method, _, headers, body) = chat(|_| {});
+                (method, "/chat/completions".to_owned(), headers, body)
+            }),
+        ],
+        &expect![[r#"
+            the client's: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent
+            not stored: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "369"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent
+            stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: leave it out, or set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
+            another model: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large` or `m-small`","param":null,"type":"invalid_request_error"}}
+            web search: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`web_search_options` has the provider search the web, which the route refuses: leave it out","param":null,"type":"invalid_request_error"}}
+            a hosted tool: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the tool `web_search_preview` runs on the provider's side, which the route refuses: declare client-side tools only (function or custom)","param":null,"type":"invalid_request_error"}}
+            a hosted tool chosen: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the tool choice `web_search_preview` names a tool that runs on the provider's side, which the route refuses: choose `auto`, `none`, `required`, or a client-side tool (function, custom or allowed_tools)","param":null,"type":"invalid_request_error"}}
+            an image by URL: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`url` holds a URL the provider would fetch, which the route refuses: send the content inline, as a `data:` URL","param":null,"type":"invalid_request_error"}}
+            a stored file: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`file_id` refers to a file stored on the provider's side, which the route refuses: send the content inline","param":null,"type":"invalid_request_error"}}
+            another method: 405 [("content-type", "application/json"), ("allow", "POST")] {"error":{"code":null,"message":"`GET /v1/chat/completions` is not served: send POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
+            without /v1: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/chat/completions` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}"#]],
     );
 }

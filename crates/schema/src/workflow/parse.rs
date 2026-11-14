@@ -113,7 +113,6 @@ impl<'ir> Parser<'ir> {
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(at, id, agent, grants),
                 ir::Runtime::Judge(judge) => {
-                    self.routeless(&at, (name, "a judge"), model.is_some());
                     let list = at.token("grants");
                     let held = grants.iter().enumerate();
                     for (index, grant) in
@@ -132,7 +131,14 @@ impl<'ir> Parser<'ir> {
                     self.judge(&at, id, judge);
                 }
                 ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
-                    self.routeless(&at, (name, "a runner"), model.is_some());
+                    if model.is_some() {
+                        self.errors.report(
+                            at.token("egress").token("model"),
+                            format!(
+                                "`{name}` is a runner, and runners have no model route: remove it"
+                            ),
+                        );
+                    }
                     if !grants.is_empty() {
                         self.errors.report(
                             at.token("grants"),
@@ -149,17 +155,6 @@ impl<'ir> Parser<'ir> {
                 }
             }
             self.role_ids.entry(name.as_str()).or_insert(id);
-        }
-    }
-
-    /// Reports a model route, if `routed`, on role `name`, of the kind `kind` names, at `at`:
-    /// only the agent has one.
-    fn routeless(&mut self, at: &JsonPointer, (name, kind): (&Name, &str), routed: bool) {
-        if routed {
-            self.errors.report(
-                at.token("egress").token("model"),
-                format!("`{name}` is {kind}, and only the agent has a model route: remove it"),
-            );
         }
     }
 

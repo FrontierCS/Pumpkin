@@ -109,12 +109,15 @@ fn tasks() {
               "roles": [
                 {
                   "egress": {
-                    "model": {
-                      "models": [
-                        "model-large",
-                        "model-small"
-                      ]
-                    }
+                    "model": [
+                      {
+                        "api": "responses",
+                        "models": [
+                          "model-large",
+                          "model-small"
+                        ]
+                      }
+                    ]
                   },
                   "grants": [
                     {
@@ -252,19 +255,22 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 3938 prefixes evaluate
+            == tasks/literal/task.star: 2 of 3960 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
               "roles": [
                 {
                   "egress": {
-                    "model": {
-                      "models": [
-                        "model-large",
-                        "model-small"
-                      ]
-                    }
+                    "model": [
+                      {
+                        "api": "responses",
+                        "models": [
+                          "model-large",
+                          "model-small"
+                        ]
+                      }
+                    ]
                   },
                   "grants": [
                     {
@@ -576,7 +582,7 @@ fn lib() {
 
             == lib/images.star: 0 of 3435 prefixes evaluate
 
-            == lib/judged.star: 0 of 3836 prefixes evaluate
+            == lib/judged.star: 0 of 3858 prefixes evaluate
 
             == lib/parts.star: 0 of 1455 prefixes evaluate"#]],
     );

@@ -9,8 +9,8 @@ Names in backticks are for symbol search.
 Pumpkin runs workflows, in which an agent works and judges score what it submits. A workflow is
 data, JSON in Pumpkin's IR: its roles, each an agent, a judge or a runner (one agent, its judges,
 and the runners that they lease); the grants each role holds, the agent's judge calls, leases and
-one submission, and a judge's leases; the model route of the agent, if it has one; and the
-score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a
+one submission, and a judge's leases; the model route of each role that has one, the agent or a
+judge; and the score, the judge whose verdict ends the run. Each instance of a role is a sandbox, a
 judge's afresh for each call and a runner's for each lease, whose supervisor, `sandboxd`, meets the
 host, dialing it, and serves one session: the host puts and collects files, starts and kills
 commands and freezes the sandbox, and code in the sandbox makes ops with `sandboxctl`, such as a
@@ -174,14 +174,16 @@ observes and returns the `Action`s the runtime is to perform, until one ends the
 - **Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
   left, and the fields its judge declares (`ResultSpec`), so the workflow decides its feedback.
 
-**`crates/route`.** The model route: `Route` closes the model requests that an
-agent's sandbox makes over its session, and `Upstream` forwards a closed one to the model provider
-and says how it answered (`Answer`); `Serving` is the upstream that serves a run's route, with the
-model names it takes. The crate holds the route's rules and all that reaches the model provider,
-so the model provider's TLS client (`ureq`, with `rustls` and `ring`) is in this crate alone.
+**`crates/route`.** The model route: `Route` closes the model requests that the sandbox of a role
+with a route makes over its session, an entry's for each API, and `Upstream` forwards a closed one
+to the model provider and says how it answered (`Answer`), as `serve` does for each request;
+`Serving` is the upstream that serves an entry of a run's route, its endpoint and key, of which
+the run makes an `Upstream` for each sandbox it serves, with the model names it takes. The crate
+holds the route's rules and all that reaches the model provider, so the model provider's TLS
+client (`ureq`, with `rustls` and `ring`) is in this crate alone.
 - **Architecture Invariant:** the route stays closed: a request reaches the models its workflow
   allows and nothing else of the model provider's, so a response carries nothing but what its own
-  request sent. The rules are in the crate's docs.
+  request sent. The rules of each API are the `closure` module's.
 - **Architecture Invariant:** the route knows no run: of Pumpkin's crates it depends on
   `gateway`, `schema` and `stdx` only, and the runtime depends on it, never the
   reverse; what the run does with an answer, its health and fault rule, is the runtime's.
@@ -192,9 +194,11 @@ its provider's `Meeting` says, timed by its `Host`, whose clock makes the inboxe
 wait on (`System`, the machine's), keeping the run's record, whose files `record` lays out, and
 its run log, whose records `log` does, each synced through the host. A judge call or a lease is a
 child of the run (`child`), on a thread of its own, which `judge` or `lease` drives. `model`
-serves the agent's model requests through `route`'s `Route` and `Upstream`, and judges the model
-provider's answers, until the work phase ends (`model_requests_allowed`), or the provider refuses
-the route's key.
+serves the model requests of each sandbox whose role has a route through `route`'s `Route` and an
+`Upstream` of the sandbox's own, and judges the model provider's answers: the agent's until the
+work phase ends, a judge call's while its command runs (`model_requests_allowed`), or until the
+provider refuses an entry's key, which fails the run as the deployment's fault, but for one heard
+after the agent's final submission locked the selection, on a route that served before it.
 - **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs, and
   every lease it or they held, are gone, so nothing the agent started runs while its submission
   is judged; and a run ends only once the final judge's leases are gone too.
@@ -269,7 +273,7 @@ remove what a run that has ended left (`Record::reap`), on each provider that it
 (`Reaching`); what a command says of an ending or a refusal ends with the commands to run next
 (`next`). It reads the machine's configuration (`config`, TOML): the Docker context; the
 providers, each by name and kind, `docker`; and the model upstreams that a workflow's model
-route may reach, of which it hands `Run` the one that serves the route (`Serving`).
+route may reach, of which it hands `Run` the one that serves each entry of a route (`Serving`).
 - **Architecture Invariant:** only `style` runs the formatter, buildifier, and Pumpkin's interface
   holds none of its flags or forms: each file's text goes to it, and `style` reads what it gives
   back, so another formatter can take its place.
