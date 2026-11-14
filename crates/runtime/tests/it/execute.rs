@@ -251,13 +251,10 @@ fn interrupt_once_started(record: &Path) {
     panic!("the agent didn't start in a minute");
 }
 
-/// What `sim`'s platform shows of a run that the provider's calls don't: the mode of the
-/// directory that held each create's socket directory, whether each create asked for the
-/// model endpoint, if one did, and its journal, if it has one.
+/// What `sim`'s platform shows of a run that the provider's calls don't: whether each create
+/// asked for the model endpoint, if one did, and its journal, if it has one.
 fn shown(sim: &Sim) -> Vec<String> {
-    let modes = sim.modes().into_iter().map(|mode| format!("{mode:o}"));
-    let modes: Vec<String> = modes.collect();
-    let mut lines = vec![format!("their directory's mode at each create: {modes:?}")];
+    let mut lines = Vec::new();
     let endpoints = sim.models();
     if endpoints.contains(&true) {
         lines.push(format!("the model endpoint at each create: {endpoints:?}"));
@@ -284,11 +281,7 @@ fn agent_tag(placed: &Placed) -> BTreeMap<ir::Image, String> {
 
 /// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one, on
 /// `host`, executes it on `providers`, where its roles are placed ([`placed_on`]), with
-/// `sandboxd`, and checks what becomes of it ([`executed`]): what `execute` returns, the record,
-/// its log ([`logged`]), when its last record came ([`when`]), what the sandboxes printed, what
-/// the platform shows ([`shown`]) and what the run's list finds once it has ended. It shows the
-/// socket directories, the stand-in's address, the record, as made and once made, and the runs
-/// directory as `<sockets>`, `<stand-in>`, `<partial>`, `<record>` and `<runs>`.
+/// `sandboxd`, and checks what becomes of it ([`executed`]).
 fn check(
     host: &impl Shown,
     name: &str,
@@ -297,21 +290,42 @@ fn check(
     sandboxd: &str,
     expect: &Expect,
 ) {
-    expect.assert_eq(&executed(host, name, providers, ir, sandboxd, None));
+    expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &[]));
+}
+
+/// What a test of a run shows of it, or does to it, beyond what [`executed`] shows of each run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Also {
+    /// A SIGTERM interrupts the run at a step, as each provider is [`Interrupting`]; it shows too
+    /// whether the run started, whether it returned within [`WAITED`], and what it published.
+    Interrupted(At),
+    /// The record's files.
+    Listing,
+    /// The usage that `outcome.json` records.
+    Usage,
+    /// Each model exchange that the record keeps, as kept ([`kept_exchanges`]).
+    Exchanges,
 }
 
 /// What [`check`] checks of `ir`'s run, as test `name`, on `host`, with `sandboxd`, on
-/// `providers`; for a run that a SIGTERM
-/// interrupts `at` a step, each provider is [`Interrupting`], and it shows too whether the run
-/// started, and whether it returned within [`WAITED`], and what it published.
+/// `providers`, and what it shows `also`. It fails unless what holds of every run holds of this
+/// one ([`held`], [`kept_exchanges`], [`left`]), and its socket directories are gone. It shows
+/// what `execute` returned, the log ([`logged`]), when its last record came ([`when`]), what the
+/// sandboxes printed, the stand-in's hang-ups, and what departs from the normal run. It shows the
+/// socket directories, the stand-in's address, the record, as made and once made, and the runs
+/// directory as `<sockets>`, `<stand-in>`, `<partial>`, `<record>` and `<runs>`.
 fn executed<H: Shown>(
     host: &H,
     name: &str,
     providers: &[(&'static str, &Sim)],
     ir: &Value,
     sandboxd: &str,
-    at: Option<At>,
+    also: &[Also],
 ) -> String {
+    let at = also.iter().find_map(|also| match also {
+        Also::Interrupted(at) => Some(*at),
+        Also::Listing | Also::Usage | Also::Exchanges => None,
+    });
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
     let routed = ir.roles.iter().any(|role| role.egress.model.is_some());
@@ -338,19 +352,11 @@ fn executed<H: Shown>(
     let before = unix_ns();
     let mut lines = interrupted_at(run, providers, sandboxd, at);
     let started = before..=unix_ns();
-    lines.push(format!("record: {}", files(&record).join(", ")));
-    lines.extend(sandboxes(&record));
-    let payloads = fs::read_dir(record.join("payloads")).into_iter().flatten();
-    let mut payloads: Vec<String> = payloads
-        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
-        .collect();
-    payloads.sort();
-    lines.push(format!("payloads hold: {payloads:?}"));
-    lines.extend(declared(&record, providers));
-    let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
-    lines.push(format!("outcome.json: {}", compact_outcome(&outcome)));
+    let log = read_log(&record);
+    let held = held(name, &record, &log, providers, also, &lines[0]);
+    lines.extend(held);
     lines.push("log.jsonl:".to_owned());
-    let (log, start, last) = logged(&record, &started, H::SCRIPTED);
+    let (log, start, last) = logged(log, &started, H::SCRIPTED);
     lines.extend(log);
     lines.extend(final_judge_stderr(&record));
     if let Some(last) = last {
@@ -361,11 +367,15 @@ fn executed<H: Shown>(
         lines.push("its log's last record was written once the hard end had passed".to_owned());
     }
     lines.extend(standard_outputs(&record));
-    lines.extend(kept_exchanges(&record));
-    lines.push(format!("socket directories left: {}", sockets.exists()));
-    lines.extend(left(providers, &tag.unwrap()));
     let address = stand_in.as_ref().map(|stand_in| stand_in.address.clone());
-    for hung_up in stand_in.into_iter().flat_map(StandIn::stop) {
+    let (received, hung_ups) = stand_in.map(StandIn::stop).unwrap_or_default();
+    let exchanges = kept_exchanges(name, &record, received);
+    if also.contains(&Also::Exchanges) {
+        lines.extend(exchanges);
+    }
+    assert!(!sockets.exists(), "{name}: its socket directories are left");
+    lines.extend(left(name, providers, &tag.unwrap()));
+    for hung_up in hung_ups {
         // A run whose stream stalled has started. The stand-in reads the clock after the
         // hang-up, so this errs late.
         let hung_up = Duration::from_nanos(hung_up - start.unwrap());
@@ -387,10 +397,51 @@ fn executed<H: Shown>(
     })
 }
 
-/// What `record`, a run's, keeps of each model exchange, by its number: the request, as kept
-/// and as rebuilt ([`Record::model_request`]), and the answer's body, each line break shown as
-/// `\n`; and how many conversation items it keeps, each once.
-fn kept_exchanges(record: &Path) -> Vec<String> {
+/// What [`executed`] shows of the files in `record`, a run's, as test `name`, beside its log,
+/// `log`: the listing and the usage if the test shows them `also`, each `sandbox.json` that isn't
+/// of a deleted sandbox ([`undeleted`]), the payloads kept, and of a run on more than one of
+/// `providers`, where it placed each role. It fails unless `provider.json` holds what each
+/// declared ([`declared`]), and `outcome.json` what `returned`, the line that shows what
+/// `execute` returned, shows ([`outcome_holds`], [`usage_holds`]).
+fn held(
+    name: &str,
+    record: &Path,
+    log: &[Value],
+    providers: &[(&str, &Sim)],
+    also: &[Also],
+    returned: &str,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if also.contains(&Also::Listing) {
+        lines.push(format!("record: {}", files(record).join(", ")));
+    }
+    lines.extend(undeleted(name, record, log));
+    let payloads = fs::read_dir(record.join("payloads")).into_iter().flatten();
+    let mut payloads: Vec<String> = payloads
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    payloads.sort();
+    if !payloads.is_empty() {
+        lines.push(format!("payloads hold: {payloads:?}"));
+    }
+    lines.extend(declared(name, record, providers));
+    let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
+    let usage = outcome_holds(name, returned, &outcome, log);
+    let shows = also.contains(&Also::Usage);
+    usage_holds(name, record, log, &usage, providers, shows);
+    if shows {
+        let usage = compact_outcome(&json!({ "usage": usage }).to_string());
+        let usage: Value = serde_json::from_str(&usage).unwrap();
+        lines.push(format!("outcome.json's usage: {}", usage["usage"]));
+    }
+    lines
+}
+
+/// What `record`, a run's, keeps of each model exchange, by its number: the request, as kept, and
+/// the answer's body, each line break shown as `\n`; and how many conversation items it keeps,
+/// each once. It fails, as test `name`, unless the requests that the log says went upstream
+/// rebuild ([`Record::model_request`]) to the bodies that the stand-in `received`, byte for byte.
+fn kept_exchanges(name: &str, record: &Path, mut received: Vec<Vec<u8>>) -> Vec<String> {
     let dir = record.join("model");
     let kept: Vec<String> = fs::read_dir(&dir)
         .into_iter()
@@ -402,19 +453,37 @@ fn kept_exchanges(record: &Path) -> Vec<String> {
         .collect();
     numbers.sort_unstable();
     numbers.dedup();
+    let opened = Record::open(record).unwrap();
+    let upstream = (read_log(record).into_iter()).filter_map(|logged| {
+        let note = logged["note"].as_str()?;
+        let number = note.strip_prefix("model request ")?;
+        number.strip_suffix(" goes upstream")?.parse().ok()
+    });
+    let mut rebuilt: Vec<Vec<u8>> = upstream
+        .map(|number| opened.model_request(number).unwrap())
+        .collect();
+    rebuilt.sort();
+    received.sort();
+    assert!(
+        rebuilt == received,
+        "{name}: the requests that went upstream rebuild to {:?}, but the stand-in received {:?}",
+        rebuilt
+            .iter()
+            .map(|body| String::from_utf8_lossy(body))
+            .collect::<Vec<_>>(),
+        received
+            .iter()
+            .map(|body| String::from_utf8_lossy(body))
+            .collect::<Vec<_>>(),
+    );
     let shown = |bytes: &[u8]| String::from_utf8_lossy(bytes).replace('\n', "\\n");
     let read = |number: u64, part: &str| {
         shown(&fs::read(dir.join(format!("{number}.{part}"))).unwrap_or_default())
     };
-    let opened = Record::open(record).unwrap();
     let mut lines: Vec<String> = (numbers.into_iter())
         .map(|number| {
             let (request, response) = (read(number, "request"), read(number, "response"));
-            let rebuilt = shown(&opened.model_request(number).unwrap());
-            format!(
-                "model exchange {number} kept: request {request}; rebuilt {rebuilt}; response \
-                 {response}"
-            )
+            format!("model exchange {number} kept: request {request}; response {response}")
         })
         .collect();
     if let Ok(items) = fs::read_dir(dir.join("items")) {
@@ -423,10 +492,187 @@ fn kept_exchanges(record: &Path) -> Vec<String> {
     lines
 }
 
+/// The records of the run log in `record`, a run's, each as JSON; none for a run that failed
+/// before it started, which has no log.
+fn read_log(record: &Path) -> Vec<Value> {
+    let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
+    (log.lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// Each `sandbox.json` in `record`, a run's, that isn't of a sandbox deleted with no report, and
+/// each console that a sandbox printed ([`sandboxes`]). It fails, as test `name`, unless `log`,
+/// the run's, records the delete of each sandbox that it leaves out, by its id and provider.
+fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
+    let deletes: Vec<&Value> = (log.iter())
+        .filter(|logged| logged["event"]["kind"] == "sandbox_deleted")
+        .map(|logged| &logged["event"])
+        .collect();
+    let normal = |line: &str| {
+        let (whose, sandbox) = line.split_once("/sandbox.json: ")?;
+        let sandbox: Value = serde_json::from_str(sandbox).unwrap();
+        let gone = sandbox["delete"] == json!({ "state": "deleted" });
+        (gone && sandbox["report"].is_null()).then(|| {
+            let (_, dir) = whose.rsplit_once(", ").unwrap();
+            let named = match dir.split_once('/') {
+                Some(("jobs", number)) => format!("job-{number}"),
+                Some(("leases", number)) => format!("lease-{number}"),
+                _ => dir.to_owned(),
+            };
+            let delete = json!({
+                "id": sandbox["id"],
+                "kind": "sandbox_deleted",
+                "provider": sandbox["provider"],
+                "sandbox": named,
+            });
+            assert!(
+                deletes.contains(&&delete),
+                "{name}: the log records no delete of {dir}'s sandbox: {sandbox}"
+            );
+        })
+    };
+    let lines = sandboxes(record).into_iter();
+    lines.filter(|line| normal(line).is_none()).collect()
+}
+
+/// The usage that `outcome`, a run's `outcome.json`, records. It fails, as test `name`, unless
+/// the rest is what `returned`, the line that shows what `execute` returned, shows, and for a
+/// run that finished, what `log`, its log, records that it finished with.
+fn outcome_holds(name: &str, returned: &str, outcome: &str, log: &[Value]) -> Value {
+    let mut outcome: Value = serde_json::from_str(outcome).unwrap();
+    let usage = outcome.as_object_mut().unwrap().remove("usage");
+    let finished = (log.iter())
+        .flat_map(|logged| logged["actions"].as_array().into_iter().flatten())
+        .find(|action| action["kind"] == "finish");
+    let expected = if let Some(reason) = returned.strip_prefix("failed: ") {
+        json!({ "reason": reason, "state": "failed" })
+    } else if let Some(signal) = returned.strip_prefix("was interrupted by ") {
+        json!({ "signal": signal, "state": "interrupted" })
+    } else {
+        let mut expected = finished.unwrap()["outcome"].clone();
+        expected["state"] = "finished".into();
+        let score = Some(&expected["score"]).filter(|score| !score.is_null());
+        let shown = format!("finished, with score {score:?}");
+        assert_eq!(returned, shown, "{name}: `execute` returned another score");
+        expected
+    };
+    assert_eq!(
+        outcome, expected,
+        "{name}: outcome.json holds another outcome"
+    );
+    usage.unwrap_or_default()
+}
+
+/// Fails, as test `name`, unless `usage`, what `outcome.json` in `record`, a run's, records,
+/// counts its sandboxes as [`sandboxes_hold`] says, given `log`, the run's, and `providers`, and
+/// each kept model request; and, unless the test `shows` it, records no tokens and no call's
+/// usage.
+fn usage_holds(
+    name: &str,
+    record: &Path,
+    log: &[Value],
+    usage: &Value,
+    providers: &[(&str, &Sim)],
+    shows: bool,
+) {
+    if usage.is_null() {
+        // A run that never started records no usage.
+        return;
+    }
+    sandboxes_hold(name, record, log, usage, providers);
+    let kept = fs::read_dir(record.join("model")).into_iter().flatten();
+    let kept = kept.filter(|entry| {
+        let name = entry.as_ref().unwrap().file_name();
+        name.to_str().unwrap().ends_with(".request")
+    });
+    let requests = usage["model_requests"].as_u64().unwrap();
+    assert_eq!(
+        requests,
+        kept.count() as u64,
+        "{name}: usage {usage} counts other requests"
+    );
+    if !shows {
+        let none = json!({ "input": 0, "output": 0, "responses": 0 });
+        assert_eq!(
+            usage["tokens"], none,
+            "{name}: usage {usage} shows no tokens"
+        );
+        assert!(
+            usage.get("calls").is_none(),
+            "{name}: usage {usage} shows no calls"
+        );
+    }
+}
+
+/// Fails, as test `name`, unless `usage`, what `outcome.json` in `record`, a run's, records,
+/// counts each sandbox start that `log`, the run's, records, and of each of `providers` at least
+/// its creates of each class; each sandbox whose `sandbox.json` records no delete, by its
+/// provider; and times each class's leased use if the run leased.
+fn sandboxes_hold(
+    name: &str,
+    record: &Path,
+    log: &[Value],
+    usage: &Value,
+    providers: &[(&str, &Sim)],
+) {
+    let counted = usage["sandboxes"].as_array().unwrap();
+    let leased = record.join("leases").exists();
+    let (mut creates, mut undeleted) = (BTreeMap::new(), BTreeMap::new());
+    for counts in counted {
+        let provider = counts["provider"].as_str().unwrap().to_owned();
+        let class = counts["class"].as_str().unwrap().to_owned();
+        creates.insert((provider.clone(), class), counts["count"].as_u64().unwrap());
+        *undeleted.entry(provider).or_insert(0) += counts["undeleted"].as_u64().unwrap_or(0);
+        let timed = ["busy_ns", "charged_ns"].map(|time| counts.get(time).is_some());
+        assert_eq!(
+            timed, [leased; 2],
+            "{name}: usage {counts} times leased use"
+        );
+    }
+    let starts = (log.iter())
+        .flat_map(|logged| logged["actions"].as_array().into_iter().flatten())
+        .filter(|action| action["kind"].as_str().unwrap().starts_with("start_"));
+    let started = starts.count() as u64;
+    assert_eq!(
+        creates.values().sum::<u64>(),
+        started,
+        "{name}: usage {usage} counts other starts"
+    );
+    let (mut made, mut left) = (BTreeMap::new(), BTreeMap::new());
+    for (provider, sim) in providers {
+        left.insert((*provider).to_owned(), 0);
+        for class in sim.classes() {
+            let key = ((*provider).to_owned(), class.as_str().to_owned());
+            *made.entry(key).or_insert(0) += 1;
+        }
+    }
+    for line in sandboxes(record) {
+        let Some((_, sandbox)) = line.split_once("/sandbox.json: ") else {
+            continue;
+        };
+        let sandbox: Value = serde_json::from_str(sandbox).unwrap();
+        if sandbox["delete"]["state"] != "deleted" {
+            *left.get_mut(sandbox["provider"].as_str().unwrap()).unwrap() += 1;
+        }
+    }
+    for (key, count) in made {
+        let counted = creates.get(&key).copied().unwrap_or(0);
+        assert!(
+            counted >= count,
+            "{name}: usage {usage} counts fewer than {key:?}'s {count} creates"
+        );
+    }
+    assert_eq!(
+        undeleted, left,
+        "{name}: usage {usage} counts other sandboxes undeleted"
+    );
+}
+
 /// Whether `provider.json` in `record`, a run's, holds what each of `providers` declared, by its
-/// name, with how its sandboxes meet the gateway; and, of a run on more than one, where it places
-/// each role.
-fn declared(record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
+/// name, with how its sandboxes meet the gateway, which fails test `name` if not; and, of a run
+/// on more than one, where it places each role.
+fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
     let recorded = fs::read_to_string(record.join("provider.json")).unwrap();
     let recorded: Value = serde_json::from_str(&recorded).unwrap();
     let reach = |provider: &Sim| match provider.meeting() {
@@ -439,31 +685,44 @@ fn declared(record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
         ready["reach"] = reach(provider).into();
         ((*name).to_owned(), ready)
     });
-    let declared = recorded["providers"] == Value::Object(expected.collect());
-    // A run on one provider shows what it shows of it by no name.
+    let expected = Value::Object(expected.collect());
+    assert_eq!(
+        recorded["providers"], expected,
+        "{name}: provider.json holds what no provider declared"
+    );
+    // A run on one provider places each role on it.
     if providers.len() == 1 {
-        return vec![format!(
-            "provider.json is what the provider declared: {declared}"
-        )];
+        return Vec::new();
     }
-    vec![
-        format!("provider.json is what each provider declared: {declared}"),
-        format!("provider.json places the roles: {}", recorded["roles"]),
-    ]
+    vec![format!(
+        "provider.json places the roles: {}",
+        recorded["roles"]
+    )]
 }
 
-/// What each of `providers` shows of run `tag` once it has ended: what its platform shows
-/// ([`shown`]), and what its list finds; and, of a run on more than one, by each one's name, what
-/// it published, and the class of each create, too.
-fn left(providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
+/// What each of `providers` shows of run `tag` once it has ended: its journal ([`shown`]), and
+/// what its list finds, if anything; and, of a run on more than one, by each one's name, what it
+/// published, and the class of each create, too. It fails test `name` unless each socket
+/// directory's directory was `700` at each create.
+fn left(name: &str, providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
     let listed = |provider: &Sim| {
         let listed = provider.list(tag).unwrap();
         let listed = listed.into_iter().map(|Listed { id, ended: _ }| id);
         listed.map(|id| id.as_str().to_owned()).collect::<Vec<_>>()
     };
+    for (_, provider) in providers {
+        let modes = provider.modes();
+        assert!(
+            modes.iter().all(|mode| *mode == 0o700),
+            "{name}: the socket directories' directory had modes {modes:?} at its creates"
+        );
+    }
     if let [(_, provider)] = providers {
         let mut lines = shown(provider);
-        lines.push(format!("listed once it ended: {:?}", listed(provider)));
+        let listed = listed(provider);
+        if !listed.is_empty() {
+            lines.push(format!("listed once it ended: {listed:?}"));
+        }
         return lines;
     }
     let mut lines = Vec::new();
@@ -472,10 +731,10 @@ fn left(providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
         lines.extend(shown(provider).iter().map(|line| format!("{name}: {line}")));
         let classes: Vec<String> = provider.classes().into_iter().map(String::from).collect();
         lines.push(format!("{name}: the class at each create: {classes:?}"));
-        lines.push(format!(
-            "{name} listed once it ended: {:?}",
-            listed(provider)
-        ));
+        let listed = listed(provider);
+        if !listed.is_empty() {
+            lines.push(format!("{name} listed once it ended: {listed:?}"));
+        }
     }
     lines
 }
@@ -492,9 +751,9 @@ fn left(providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
 struct StandIn {
     address: String,
     stops: Sender<()>,
-    /// Returns when the client of each stream it stalled hung up, in nanoseconds since the Unix
-    /// epoch.
-    thread: JoinHandle<Vec<u64>>,
+    /// Returns the body of each request it received, and when the client of each stream it
+    /// stalled hung up, in nanoseconds since the Unix epoch.
+    thread: JoinHandle<(Vec<Vec<u8>>, Vec<u64>)>,
 }
 
 impl StandIn {
@@ -516,7 +775,8 @@ impl StandIn {
             let answered = answering
                 .into_iter()
                 .map(|answering| answering.join().unwrap());
-            answered.flatten().collect()
+            let (received, hung_up): (Vec<_>, Vec<_>) = answered.unzip();
+            (received, hung_up.into_iter().flatten().collect())
         });
         Self {
             address,
@@ -551,19 +811,20 @@ impl StandIn {
         )
     }
 
-    /// Stops it, and returns when the client of each stream it stalled hung up, as its thread
-    /// does.
-    fn stop(self) -> Vec<u64> {
+    /// Stops it, and returns what its thread does: the body of each request it received, and
+    /// when the client of each stream it stalled hung up.
+    fn stop(self) -> (Vec<Vec<u8>>, Vec<u64>) {
         self.stops.send(()).unwrap();
         drop(TcpStream::connect(&self.address).unwrap());
         self.thread.join().unwrap()
     }
 }
 
-/// Answers the request on `connection` as [`StandIn`] says, and returns when its client hung
-/// up, if the stand-in stalled its stream.
-fn answer(mut connection: TcpStream) -> Option<u64> {
+/// Answers the request on `connection` as [`StandIn`] says, and returns its body, and when its
+/// client hung up, if the stand-in stalled its stream.
+fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     let (line, headers, body) = read_request(&mut BufReader::new(&connection));
+    let received = body.clone();
     let key = headers.iter().find(|(name, _)| name == "authorization");
     let input: Value = serde_json::from_slice(&body).unwrap();
     let said = input["input"][1]["content"].as_str();
@@ -573,17 +834,14 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
         Some("down") => Some(("502 Bad Gateway", "x-request-id: req-502\r\n")),
         _ => None,
     };
-    if let Some(number) = input["input"][1]["content"]
-        .as_str()
-        .filter(|text| text.parse::<u64>().is_ok())
-    {
+    if let Some(number) = said.filter(|text| text.parse::<u64>().is_ok()) {
         let answer = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\
              connection: close\r\n\r\n{number}",
             number.len()
         );
         connection.write_all(answer.as_bytes()).unwrap();
-        return None;
+        return (received, None);
     }
     if let Some((status, id)) = refused {
         let refused = format!(
@@ -591,7 +849,7 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
              connection: close\r\n\r\nrefused"
         );
         connection.write_all(refused.as_bytes()).unwrap();
-        return None;
+        return (received, None);
     }
     let streams = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nopenai-model: {}\r\n\
@@ -614,7 +872,7 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
             &format!("event: response.completed\ndata: {completed}\n\n"),
         );
         write_chunk(&mut connection, "");
-        return None;
+        return (received, None);
     }
     if said == Some("limited") {
         // As a provider answered a rate limit, with a 200.
@@ -624,17 +882,17 @@ fn answer(mut connection: TcpStream) -> Option<u64> {
              event: error\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\",\"param\":null}\n\n",
         );
         write_chunk(&mut connection, "");
-        return None;
+        return (received, None);
     }
     if said == Some("stream") {
         write_chunk(&mut connection, &echo);
         write_chunk(&mut connection, "");
-        return None;
+        return (received, None);
     }
     write_chunk(&mut connection, "event: response.created\n\n");
     // What the client sends is read until it hangs up, as its end shows that it has.
     let _ = io::copy(&mut connection, &mut io::sink());
-    Some(unix_ns())
+    (received, Some(unix_ns()))
 }
 
 /// A host as a test shows its run: whether its clock reads only the times its script sets, so
@@ -651,7 +909,7 @@ impl Shown for SimHost {
     const SCRIPTED: bool = true;
 }
 
-/// The records of the run log in `record`, a run's, one per line, once [`in_order`] has checked
+/// The records of `log`, a run's ([`read_log`]), one per line, once [`in_order`] has checked
 /// them; when the run started, in nanoseconds since the Unix epoch; and its last record's time.
 /// It leaves out the `status` ops answered, alone, while their job or lease was queued, starting,
 /// running or closing, or while the lease's transfer ran, whose number depends on timing, and
@@ -660,16 +918,11 @@ impl Shown for SimHost {
 /// shown only if 0, and the time left in a reply as `<s>`; a run of more than 64 `x`s, which a
 /// command of the simulated provider's prints, as `<n x>`.
 fn logged(
-    record: &Path,
+    log: Vec<Value>,
     started: &RangeInclusive<u64>,
     scripted: bool,
 ) -> (Vec<String>, Option<u64>, Option<Duration>) {
     let (mut records, mut start, mut polls) = (Vec::new(), None, 0);
-    // A run that fails before it starts has no log.
-    let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
-    let log: Vec<Value> = (log.lines())
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
     let last = in_order(&log);
     for mut logged in log {
         let actions = logged["actions"].as_array().map_or(0, Vec::len);
@@ -881,11 +1134,6 @@ fn deleted_by_the_sweep() {
         REFUSED_ONCE,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -893,10 +1141,7 @@ fn deleted_by_the_sweep() {
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
             {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":5}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -910,11 +1155,7 @@ fn sweep_unrecorded() {
         REFUSED_ONCE,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agent/.sandbox.json.partial: the simulated host's sync failed
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agent/.sandbox.json.partial: the simulated host's sync failed","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","undeleted":1}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -922,10 +1163,7 @@ fn sweep_unrecorded() {
             {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
             {"at_ns":"0","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agent/.sandbox.json.partial: the simulated host's sync failed","seq":5}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -933,62 +1171,56 @@ fn sweep_unrecorded() {
 fn unshown() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][0]["image"] = json!(sim::image(UNSHOWN).as_str());
-    check(
+    let shown = executed(
         &System,
         "unshown",
         &[(PROVIDER, &Sim::new())],
         &ir,
         UNDELETABLE,
-        &expect![[r#"
-            failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","undeleted":1}],"tokens":{"input":0,"output":0,"responses":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
-            {"at_ns":"<ns>","note":"sandbox sim-1's console wasn't kept: the simulated console of sim-1 can't be read: create one with another `sandboxd`","seq":4}
-            {"at_ns":"<ns>","note":"sandbox sim-1's console wasn't kept: the simulated console of sim-1 can't be read: create one with another `sandboxd`","seq":5}
-            {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":6}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: ["sim-1"]"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
+        record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+        the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
+        {"at_ns":"<ns>","note":"sandbox sim-1's console wasn't kept: the simulated console of sim-1 can't be read: create one with another `sandboxd`","seq":4}
+        {"at_ns":"<ns>","note":"sandbox sim-1's console wasn't kept: the simulated console of sim-1 can't be read: create one with another `sandboxd`","seq":5}
+        {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":6}
+        its last record came before the agent's teardown was to end
+        listed once it ended: ["sim-1"]"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
 fn unstarted_undeletable() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][0]["image"] = json!(sim::image(MUTE).as_str());
-    check(
+    let shown = executed(
         &System,
         "unstarted-undeletable",
         &[(PROVIDER, &Sim::new())],
         &ir,
         UNDELETABLE,
-        &expect![[r#"
-            failed: deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
-            the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","undeleted":1}],"tokens":{"input":0,"output":0,"responses":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`"},"observed_ns":"<ns>","seq":1}
-            {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
-            {"at_ns":"<ns>","note":"the run failed: deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: ["sim-1"]"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        failed: deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
+        record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+        the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
+        the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`"},"observed_ns":"<ns>","seq":1}
+        {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
+        {"at_ns":"<ns>","note":"the run failed: deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
+        its last record came before the agent's teardown was to end
+        listed once it ended: ["sim-1"]"#]]
+    .assert_eq(&shown);
 }
 
 // A run whose agent's command exits: its exit ends the work phase without a submission, and
@@ -999,30 +1231,25 @@ fn exits() {
     let mut ir = workflow(&["exit", "3"]);
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
     // Its class priced, so that `outcome.json` prices its sandbox.
-    check(
+    let shown = executed(
         &System,
         "exits",
         &[(PROVIDER, &Sim::new().priced(0.25))],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","usd":"<usd>","usd_per_hour":0.25}],"tokens":{"input":0,"output":0,"responses":0},"usd":"<usd>"},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":3}},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+        &[Also::Usage],
     );
+    expect![[r#"
+        finished, with score None
+        outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","usd":"<usd>","usd_per_hour":0.25}],"tokens":{"input":0,"output":0,"responses":0},"usd":"<usd>"}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":3}},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
+        its last record came before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -1039,11 +1266,6 @@ fn crashes() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1053,10 +1275,7 @@ fn crashes() {
             {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1074,11 +1293,6 @@ fn stalls() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"124000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1088,10 +1302,7 @@ fn stalls() {
             {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":5}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            its last record came once the agent's teardown was to end, before the hard end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came once the agent's teardown was to end, before the hard end"#]],
     );
 }
 
@@ -1111,7 +1322,7 @@ fn unstarted() {
             &[(PROVIDER, &Sim::new())],
             &ir,
             sandboxd,
-            None,
+            &[],
         )
     };
     let (listed, left_out) = (on("unstarted", MUTE), on("unstarted-left-out", VANISHING));
@@ -1126,21 +1337,13 @@ fn unstarted() {
     );
     expect![[r#"
         finished, with score None
-        record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-        the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
         the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
-        payloads hold: []
-        provider.json is what the provider declared: true
-        outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":1}
         {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":3}
-        its last record came before the agent's teardown was to end
-        socket directories left: false
-        their directory's mode at each create: ["700"]
-        listed once it ended: []"#]].assert_eq(&listed);
+        its last record came before the agent's teardown was to end"#]].assert_eq(&listed);
 }
 
 // A run that SIGTERM interrupts stops as one that fails does, deleting its sandboxes, and records
@@ -1159,7 +1362,7 @@ fn interrupted(name: &str, startup: u64, ir: &Value, sandboxd: &str, at: At, exp
         &providers,
         ir,
         sandboxd,
-        Some(at),
+        &[Also::Interrupted(at)],
     ));
 }
 
@@ -1173,18 +1376,11 @@ fn interrupted_publishing_sandboxd() {
         SANDBOXD,
         At::PublishSandboxd,
         &expect![[r#"
-        was interrupted by SIGTERM
-        it started: false
-        it returned within 60 s: true
-        it published: ["sandboxd /sim/sandboxd"]
-        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-        payloads hold: []
-        provider.json is what the provider declared: true
-        outcome.json: {"signal":"SIGTERM","state":"interrupted"}
-        log.jsonl:
-        socket directories left: false
-        their directory's mode at each create: []
-        listed once it ended: []"#]],
+            was interrupted by SIGTERM
+            it started: false
+            it returned within 60 s: true
+            it published: ["sandboxd /sim/sandboxd"]
+            log.jsonl:"#]],
     );
 }
 
@@ -1202,18 +1398,11 @@ fn interrupted_publishing_image() {
         SANDBOXD,
         At::PublishImage,
         &expect![[r#"
-        was interrupted by SIGTERM
-        it started: false
-        it returned within 60 s: true
-        it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111"]
-        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-        payloads hold: []
-        provider.json is what the provider declared: true
-        outcome.json: {"signal":"SIGTERM","state":"interrupted"}
-        log.jsonl:
-        socket directories left: false
-        their directory's mode at each create: []
-        listed once it ended: []"#]],
+            was interrupted by SIGTERM
+            it started: false
+            it returned within 60 s: true
+            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111"]
+            log.jsonl:"#]],
     );
 }
 
@@ -1231,20 +1420,12 @@ fn interrupted_agent_start() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/hung", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18360000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":1}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":2}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1265,13 +1446,8 @@ fn interrupted_judge_start() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1279,10 +1455,7 @@ fn interrupted_judge_start() {
             {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1303,20 +1476,12 @@ fn interrupted_working() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"330000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
             {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":3}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1338,13 +1503,7 @@ fn interrupted_lease_start() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, leases/0/console.txt, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             lease 0's console, leases/0/console.txt: "sandboxd: a simulated one, which never dials\n"
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1352,10 +1511,7 @@ fn interrupted_lease_start() {
             {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1376,21 +1532,13 @@ fn interrupted_last_batch() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":3}},"observed_ns":"<ns>","seq":2}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":4}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1408,21 +1556,13 @@ fn unlistable() {
         UNLISTABLE,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"184000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":1}
             {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":3}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1439,47 +1579,35 @@ fn mismatched() {
         LATER,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"},"observed_ns":"<ns>","seq":1}
             {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":3}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
 #[test]
 fn lost() {
-    check(
+    let shown = executed(
         &System,
         "lost",
         &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         LOST,
-        &expect![[r#"
-            finished, with score None
-            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":1}
-            {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":3}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        finished, with score None
+        record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":1}
+        {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":2}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":3}
+        its last record came before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -1492,11 +1620,7 @@ fn undeletable() {
         UNDELETABLE,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","undeleted":1}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1504,31 +1628,25 @@ fn undeletable() {
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
             {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":4}
             its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
             listed once it ended: ["sim-1"]"#]],
     );
 }
 
 #[test]
 fn unpublished() {
-    check(
+    let shown = executed(
         &System,
         "unpublished",
         &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         UNPUBLISHED,
-        &expect![[r#"
-            failed: publishing `sandboxd` on provider `simulated` failed: /sim/unpublished can't be published by the simulated provider: name another path
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"publishing `sandboxd` on provider `simulated` failed: /sim/unpublished can't be published by the simulated provider: name another path","state":"failed"}
-            log.jsonl:
-            socket directories left: false
-            their directory's mode at each create: []
-            listed once it ended: []"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        failed: publishing `sandboxd` on provider `simulated` failed: /sim/unpublished can't be published by the simulated provider: name another path
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        log.jsonl:"#]]
+    .assert_eq(&shown);
 }
 
 // A run whose judge's image the provider can't publish: the run fails before it starts, naming
@@ -1537,23 +1655,19 @@ fn unpublished() {
 fn unpublished_image() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][1]["image"] = json!(sim::image(UNPUBLISHED).as_str());
-    check(
+    let shown = executed(
         &System,
         "unpublished-image",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            failed: publishing role `train_judge`'s image on provider `simulated` failed: sha256:2f73696d2f756e7075626c697368656400000000000000000000000000000000 can't be published by the simulated provider: name another image
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"publishing role `train_judge`'s image on provider `simulated` failed: sha256:2f73696d2f756e7075626c697368656400000000000000000000000000000000 can't be published by the simulated provider: name another image","state":"failed"}
-            log.jsonl:
-            socket directories left: false
-            their directory's mode at each create: []
-            listed once it ended: []"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        failed: publishing role `train_judge`'s image on provider `simulated` failed: sha256:2f73696d2f756e7075626c697368656400000000000000000000000000000000 can't be published by the simulated provider: name another image
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        log.jsonl:"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -1581,14 +1695,7 @@ fn ops() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/sandbox.json, jobs/2/console.txt, jobs/2/log/collected, jobs/2/out/collected, jobs/2/out/evidence/, jobs/2/out/result.json, jobs/2/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
-            job 2's sandbox, jobs/2/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
             payloads hold: ["slow", "xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1617,10 +1724,7 @@ fn ops() {
             {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":24}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":25}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":26}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1633,16 +1737,11 @@ fn swapped_payload() {
         &[(PROVIDER, &Sim::new())],
         &ops_workflow(&["ops", "finalize submit 6"], 30),
         SANDBOXD,
-        Some(At::SwapPayloads),
+        &[Also::Interrupted(At::SwapPayloads)],
     );
     expect![[r#"
         finished, with score None
-        record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-        the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-        job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
         payloads hold: ["yyyyyyyyy"]
-        provider.json is what the provider declared: true
-        outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"<record>/payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd holds 9 bytes of digest sha256:cf0da94d4b6a0de4d83a79dfe964489ba50a38aef90bc406aed5558fee383781: expected the payload's 6 bytes of digest sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1653,47 +1752,39 @@ fn swapped_payload() {
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":6}
         {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"error","reason":"<record>/payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd holds 9 bytes of digest sha256:cf0da94d4b6a0de4d83a79dfe964489ba50a38aef90bc406aed5558fee383781: expected the payload's 6 bytes of digest sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"<record>/payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd holds 9 bytes of digest sha256:cf0da94d4b6a0de4d83a79dfe964489ba50a38aef90bc406aed5558fee383781: expected the payload's 6 bytes of digest sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd"},"observed_ns":"<ns>","seq":7}
         the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
-        its last record came before the agent's teardown was to end
-        socket directories left: false
-        their directory's mode at each create: ["700", "700"]
-        listed once it ended: []"#]].assert_eq(&swapped);
+        its last record came before the agent's teardown was to end"#]].assert_eq(&swapped);
 }
 
 // A run whose agent finalizes a submission whose final judge writes a result over the most a
 // result may hold: the result is removed from the record, and the run finishes with no score.
 #[test]
 fn result_over_the_limit() {
-    check(
+    let shown = executed(
         &System,
         "result-over-the-limit",
         &[(PROVIDER, &Sim::new())],
         &ops_workflow(&["ops", "finalize submit large"], 30),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["large"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"invalid":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}
-            the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        finished, with score None
+        record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
+        payloads hold: ["large"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"observed_ns":"<ns>","seq":2}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":3}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+        {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"invalid":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}
+        the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
+        its last record came before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -1712,12 +1803,7 @@ fn crashes_with_an_op_in_flight() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             payloads hold: ["xxxxxxxxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1731,10 +1817,7 @@ fn crashes_with_an_op_in_flight() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped before its command started"},"observed_ns":"<ns>","seq":11}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1753,11 +1836,7 @@ fn judge_starts_past_the_deadline() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"272000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1767,10 +1846,7 @@ fn judge_starts_past_the_deadline() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: the simulated create gave up at its deadline, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":7}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1789,13 +1865,8 @@ fn judge_placed_apart() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"simulated"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1806,10 +1877,7 @@ fn judge_placed_apart() {
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":8}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -1836,50 +1904,42 @@ fn spans_providers() {
     for reach in [Sim::private, Sim::listening] {
         let (here, there) = (Sim::new().named("here"), there(reach(Sim::new())));
         let providers = [("here", &here), ("there", &there)];
-        check(
+        let shown = executed(
             &System,
             "spans-providers",
             &providers,
             &ir,
             SANDBOXD,
-            &expect![[r#"
-                finished, with score Some(Number(6))
-                record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-                the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"here","report":null}
-                job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"there","report":null}
-                job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"there","report":null}
-                payloads hold: ["xxxxxx"]
-                provider.json is what each provider declared: true
-                provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"here"},"final_judge":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"train_judge":{"class":"brief","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"}}
-                outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-                log.jsonl:
-                {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-                {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-                {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
-                {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
-                {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
-                {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":5}
-                {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":6}
-                {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":7}
-                {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":8}
-                {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
-                {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":10}
-                {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":11}
-                {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":12}
-                {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-                {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":14}
-                {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
-                its last record came before the agent's teardown was to end
-                socket directories left: false
-                here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-                here: their directory's mode at each create: ["700"]
-                here: the class at each create: ["sim"]
-                here listed once it ended: []
-                there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-                there: their directory's mode at each create: []
-                there: the class at each create: ["brief", "sim"]
-                there listed once it ended: []"#]],
+            &[Also::Usage],
         );
+        expect![[r#"
+            finished, with score Some(Number(6))
+            payloads hold: ["xxxxxx"]
+            provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"here"},"final_judge":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"train_judge":{"class":"brief","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"}}
+            outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":7}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
+            its last record came before the agent's teardown was to end
+            here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            here: the class at each create: ["sim"]
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there: the class at each create: ["brief", "sim"]"#]]
+        .assert_eq(&shown);
     }
 }
 
@@ -1898,12 +1958,9 @@ fn sweeps_each_provider() {
         SANDBOXD,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"here","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what each provider declared: true
             provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000"},"provider":"here"},"final_judge":{"class":"sim","image":{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"train_judge":{"class":"sim","image":{"digest":"sha256:2f73696d2f6c6f73740000000000000000000000000000000000000000000000"},"provider":"there"}}
-            outcome.json: {"reason":"deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here","undeleted":1},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1915,15 +1972,11 @@ fn sweeps_each_provider() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":null},"seq":7}
             {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":8}
             its last record came before the agent's teardown was to end
-            socket directories left: false
             here published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000"]
-            here: their directory's mode at each create: ["700"]
             here: the class at each create: ["sim"]
             here listed once it ended: ["sim-1"]
             there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6c6f73740000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            there: their directory's mode at each create: ["700"]
-            there: the class at each create: ["sim"]
-            there listed once it ended: []"#]],
+            there: the class at each create: ["sim"]"#]],
     );
 }
 
@@ -1968,16 +2021,10 @@ fn watches_each_provider() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"here","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"here","report":null}
             job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"there","report":null}
             job 1's console, jobs/1/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
-            provider.json is what each provider declared: true
             provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"provider":"here"},"final_judge":{"class":"sim","image":{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"near_judge":{"class":"sim","image":{"digest":"sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"},"provider":"here"},"train_judge":{"class":"brief","image":{"digest":"sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000"},"provider":"there"}}
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"250000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1993,15 +2040,10 @@ fn watches_each_provider() {
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":12}
             its last record came before the agent's teardown was to end
-            socket directories left: false
             here published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
-            here: their directory's mode at each create: ["700", "700"]
             here: the class at each create: ["sim", "sim"]
-            here listed once it ended: []
             there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            there: their directory's mode at each create: ["700"]
-            there: the class at each create: ["brief"]
-            there listed once it ended: []"#]],
+            there: the class at each create: ["brief"]"#]],
     );
 }
 
@@ -2030,13 +2072,8 @@ fn judge_stalls() {
         SANDBOXD,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/e5b6a7364e8a1049a9236dacfa24768ccffd3c4b671dc8b02953625844789b97, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             job 1's sandbox, jobs/1/sandbox.json: {"delete":{"reason":"sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-3","provider":"simulated","report":null}
             payloads hold: ["stall", "xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"deleting the sandbox failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated","undeleted":1}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"8000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2051,8 +2088,6 @@ fn judge_stalls() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
             {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":11}
             its last record came once the agent's teardown was to end, before the hard end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
             listed once it ended: ["sim-3"]"#]],
     );
 }
@@ -2071,12 +2106,7 @@ fn abandoned() {
         SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             payloads hold: ["slow"]
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2090,10 +2120,7 @@ fn abandoned() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"observed_ns":"<ns>","seq":9}
             {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":10}
             its last record came once the hard end had passed
-            its log's last record was written once the hard end had passed
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its log's last record was written once the hard end had passed"#]],
     );
 }
 
@@ -2114,12 +2141,7 @@ fn deleted_while_torn_down() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             payloads hold: ["slow"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"34000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2130,10 +2152,7 @@ fn deleted_while_torn_down() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":7}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the call was stopped"},"observed_ns":"<ns>","seq":8}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2155,13 +2174,8 @@ fn reported_before_the_hard_end() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2174,10 +2188,7 @@ fn reported_before_the_hard_end() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":9}
             its last record came once the hard end had passed
-            its log's last record was written once the hard end had passed
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            listed once it ended: []"#]],
+            its log's last record was written once the hard end had passed"#]],
     );
 }
 
@@ -2198,11 +2209,7 @@ fn reported_past_the_deadline() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2212,10 +2219,7 @@ fn reported_past_the_deadline() {
             {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
             {"actions":[],"at_ns":"30500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"30500000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"30500000000","seq":7}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2236,11 +2240,7 @@ fn reported_past_the_hard_end() {
         SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2250,10 +2250,7 @@ fn reported_past_the_hard_end() {
             {"actions":[],"at_ns":"3600000000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"3600000000000","seq":5}
             {"actions":[],"at_ns":"3600000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
             {"at_ns":"3600000000000","note":"the run failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":7}
-            its last record came once the hard end had passed
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came once the hard end had passed"#]],
     );
 }
 
@@ -2269,11 +2266,7 @@ fn torn_down_past_the_hard_end() {
         LINGERING,
         &expect![[r#"
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2284,10 +2277,7 @@ fn torn_down_past_the_hard_end() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"<ns>","seq":6}
             {"at_ns":"<ns>","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final judge's timeout and its sandboxes' startups","seq":7}
             its last record came once the hard end had passed
-            its log's last record was written once the hard end had passed
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its log's last record was written once the hard end had passed"#]],
     );
 }
 
@@ -2311,11 +2301,6 @@ fn late_ops() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2326,10 +2311,7 @@ fn late_ops() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
             {"actions":[{"kind":"reply","op":2,"reply":{"kind":"refused","message":"the work phase has ended: make no more ops"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":7}
             {"at_ns":"<ns>","note":"op 2's reply wasn't sent: the agent's sandbox is gone","seq":8}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2350,11 +2332,7 @@ fn taken_past_the_deadline() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2367,10 +2345,7 @@ fn taken_past_the_deadline() {
             {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":8}
             {"actions":[],"at_ns":"30500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
             {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}}],"at_ns":"30500000000","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"30500000000","seq":10}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2390,11 +2365,6 @@ fn held_by_a_slow_sync() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2406,10 +2376,7 @@ fn held_by_a_slow_sync() {
             {"at_ns":"30500000000","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":7}
             {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, nothing; log, nothing","seq":8}
             {"actions":[],"at_ns":"30500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2435,11 +2402,6 @@ fn started_late() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"25000000000","event":{"kind":"agent_started"},"observed_ns":"25000000000","seq":1}
@@ -2448,10 +2410,7 @@ fn started_late() {
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"55000000000","event":{"kind":"tick"},"observed_ns":"55000000000","seq":4}
             {"at_ns":"55000000000","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
             {"actions":[],"at_ns":"55000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
     let slow = SlowSync {
         record: 0,
@@ -2466,18 +2425,11 @@ fn started_late() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it"}}}],"at_ns":"35000000000","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it"},"observed_ns":"35000000000","seq":1}
             {"at_ns":"35000000000","note":"the agent's sandbox never started: nothing was collected","seq":2}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: []
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2491,21 +2443,13 @@ fn sync_fails() {
         SANDBOXD,
         &expect![[r#"
             failed: <record>/log.jsonl: the simulated host's sync failed
-            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"<record>/log.jsonl: the simulated host's sync failed","state":"failed","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
             {"actions":[{"kind":"reply","op":0,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"0","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":2}
             {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":3}
             {"at_ns":"0","note":"the run failed: <record>/log.jsonl: the simulated host's sync failed","seq":4}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2524,11 +2468,6 @@ fn refusal_held_by_a_slow_sync() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2538,10 +2477,7 @@ fn refusal_held_by_a_slow_sync() {
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}}],"at_ns":"30500000000","event":{"kind":"tick"},"observed_ns":"30500000000","seq":5}
             {"at_ns":"30500000000","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
             {"actions":[],"at_ns":"30500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -2558,11 +2494,6 @@ fn syncs() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2572,8 +2503,6 @@ fn syncs() {
             {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
             {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":6}
             its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700"]
             the journal:
               fsync <partial>/.record.json.partial
               fsync <partial>
@@ -2602,8 +2531,7 @@ fn syncs() {
               fsync <record>/agent
               fdatasync <record>/log.jsonl, through record 6
               fsync <record>/.outcome.json.partial
-              fsync <record>
-            listed once it ended: []"#]],
+              fsync <record>"#]],
     );
 }
 
@@ -2611,68 +2539,65 @@ fn syncs() {
 // work phase.
 #[test]
 fn model_requests() {
+    // The first request's last item holds what JSON escapes, and what it writes as UTF-8, in a
+    // list in an object, which its rebuild must give back byte for byte.
     let argv = [
         "ops",
-        "model m-large stream",
+        "model m-large stream \"quoted\"\\back\nline\u{1}\ttab/é→😀",
         "model m-huge stream",
         "finalize submit 6",
         "model m-large usage",
         "model m-large limited",
         "model m-large expired",
     ];
-    check(
+    let shown = executed(
         &System,
         "model-requests",
         &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/2.request, model/2.response, model/3.request, model/3.response, model/4.request, model/4.response, model/items/6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57, model/items/6bc0b5dcffbd963414c779a049374557aba7edf0b7655c06cfd15b83b4901d9d, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/7b6c4b476ddef378a1d5d3f8d8aede1f77d78e9f85b27ee071a96779b90da7df, model/items/af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":5,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
-            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":273,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"seq":8}
-            {"at_ns":"<ns>","note":"model request 3 goes upstream","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","failed":{"code":"rate_limit_exceeded"},"kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/3.request"},"response":{"bytes":281,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":200},"seq":10}
-            {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":7,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream_status":401},"seq":12}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1566 bytes","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":18}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":19}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
-            model request 3: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
-            model request 4: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model exchange 1 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6bc0b5dcffbd963414c779a049374557aba7edf0b7655c06cfd15b83b4901d9d"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"usage","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
-            model exchange 3 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:7b6c4b476ddef378a1d5d3f8d8aede1f77d78e9f85b27ee071a96779b90da7df"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"limited","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
-            model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"expired","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model items kept: 5
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            the model endpoint at each create: [true, false]
-            listed once it ended: []"#]],
+        &[Also::Usage, Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score Some(Number(6))
+        payloads hold: ["xxxxxx"]
+        outcome.json's usage: {"model_requests":5,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":294,"bytes":272,"items":{"count":3,"field":"input"},"path":"model/0.request"},"response":{"bytes":372,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
+        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":273,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"seq":8}
+        {"at_ns":"<ns>","note":"model request 3 goes upstream","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","failed":{"code":"rate_limit_exceeded"},"kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/3.request"},"response":{"bytes":281,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":200},"seq":10}
+        {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":7,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream_status":401},"seq":12}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1686 bytes","seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":15}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":16}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":17}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":18}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":19}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 3: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
+        model request 4: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a","sha256:55d2a41f5ef0f1adb28a4e2d4420c19e5c857ee46121cc479a8f7bc2fdac819b"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model exchange 1 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6bc0b5dcffbd963414c779a049374557aba7edf0b7655c06cfd15b83b4901d9d"],"model":"vendor/m-large","store":false}; response data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model exchange 3 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:7b6c4b476ddef378a1d5d3f8d8aede1f77d78e9f85b27ee071a96779b90da7df"],"model":"vendor/m-large","store":false}; response event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
+        model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; response refused
+        model items kept: 6
+        the model endpoint at each create: [true, false]"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -2685,56 +2610,50 @@ fn model_upstream_refusals() {
         "model m-large stream",
         "finalize submit 6",
     ];
-    check(
+    let shown = executed(
         &System,
         "model-upstream-refusals",
         &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
-        &expect![[r#"
-            failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/2.request, model/2.response, model/3.request, model/3.response, model/items/6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/8b4bb900d130b1b6642e6f25e0464280105b882a02c27bd9e008556adbe2d34f, model/items/af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","state":"failed","usage":{"model_requests":4,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"caller":"agent","kept":{"request":{"body_bytes":177,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":403},"seq":4}
-            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
-            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":167,"bytes":167,"path":"model/3.request"},"response":{"bytes":191,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1083 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":17}
-            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":18}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}
-            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-            model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b4bb900d130b1b6642e6f25e0464280105b882a02c27bd9e008556adbe2d34f"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"forbidden","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"expired","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model exchange 3 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-large","store":false}; response {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-            model items kept: 4
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            the model endpoint at each create: [true, false]
-            listed once it ended: []"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"caller":"agent","kept":{"request":{"body_bytes":177,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":403},"seq":4}
+        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":167,"bytes":167,"path":"model/3.request"},"response":{"bytes":191,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1083 bytes","seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":17}
+        {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":18}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}
+        model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+        model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b4bb900d130b1b6642e6f25e0464280105b882a02c27bd9e008556adbe2d34f"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 3 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-large","store":false}; response {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+        model items kept: 4
+        the model endpoint at each create: [true, false]"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -2748,136 +2667,118 @@ fn model_provider_down() {
         "ask m-large stall",
         "exit",
     ];
-    check(
+    let shown = executed(
         &System,
         "model-provider-down",
         &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
-        &expect![[r#"
-            failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/2.request, model/2.response, model/3.request, model/3.response, model/4.request, model/4.response, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963, model/items/af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a, model/items/ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","state":"failed","usage":{"model_requests":5,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":7,"path":"model/1.response"}},"kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
-            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/3.request"},"response":{"bytes":153,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
-            {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 867 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":25,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream_status":200},"seq":14}
-            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","seq":15}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model request 1: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-            model request 2: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-            model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model request 4: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"down","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"down","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model exchange 3 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stall","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response event: response.created\n\n
-            model items kept: 4
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            the model endpoint at each create: [true]
-            listed once it ended: []
-            a stalled stream's client hung up before the agent's teardown was to end"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":7,"path":"model/1.response"}},"kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
+        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/3.request"},"response":{"bytes":153,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+        {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 867 bytes","seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":25,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream_status":200},"seq":14}
+        {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","seq":15}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model request 1: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+        model request 2: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+        model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model request 4: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 3 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
+        model items kept: 4
+        the model endpoint at each create: [true]
+        a stalled stream's client hung up before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
 fn model_barred_is_no_failure() {
     let argv = ["ops", "model m-large stream", "model m-huge stream", "exit"];
-    check(
+    let shown = executed(
         &System,
         "model-barred",
         &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 567 bytes","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":8}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model exchange 1 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-            model items kept: 2
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            the model endpoint at each create: [true]
-            listed once it ended: []"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score None
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 567 bytes","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":8}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model exchange 1 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model items kept: 2
+        the model endpoint at each create: [true]"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
 fn model_provider_recovers() {
     let argv = ["ops", "model m-large down", "model m-large stream"];
-    check(
+    let shown = executed(
         &System,
         "model-provider-recovers",
         &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a, model/items/ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67, outcome.json, payloads/, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            payloads hold: []
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
-            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
-            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 444 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"down","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model items kept: 3
-            socket directories left: false
-            their directory's mode at each create: ["700"]
-            the model endpoint at each create: [true]
-            listed once it ended: []"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score None
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
+        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 444 bytes","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+        model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model items kept: 3
+        the model endpoint at each create: [true]"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -2888,94 +2789,82 @@ fn model_provider_down_at_the_deadline() {
         "model m-large down",
         "model m-large stall",
     ];
-    check(
+    let shown = executed(
         &System,
         "model-provider-down-at-the-deadline",
         &[(PROVIDER, &Sim::new())],
         &routed(short_workflow(&argv, 2)),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963, model/items/ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
-            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":6}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 217 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":25,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":14}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"down","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response refused
-            model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stall","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response event: response.created\n\n
-            model items kept: 3
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            the model endpoint at each create: [true, false]
-            listed once it ended: []
-            a stalled stream's client hung up before the agent's teardown was to end"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score Some(Number(6))
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
+        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":6}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 217 bytes","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":25,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":14}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+        model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
+        model items kept: 3
+        the model endpoint at each create: [true, false]
+        a stalled stream's client hung up before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
 fn model_stream_cut() {
     let argv = ["ops", "submit submit slow", "model m-large stall"];
-    check(
+    let shown = executed(
         &System,
         "model-stream-cut",
         &[(PROVIDER, &Sim::new())],
         &routed(short_workflow(&argv, 2)),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score None
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["slow"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
-            {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":12}
-            the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stall","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response event: response.created\n\n
-            model items kept: 2
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            the model endpoint at each create: [true, false]
-            listed once it ended: []
-            a stalled stream's client hung up before the agent's teardown was to end"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score None
+        payloads hold: ["slow"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
+        {"actions":[{"kind":"finish","outcome":{"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}}],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":12}
+        the final judge's standard error, as `wait` finds it: Ok("jobs/0/log/command.stderr")
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
+        model items kept: 2
+        the model endpoint at each create: [true, false]
+        a stalled stream's client hung up before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -2984,45 +2873,39 @@ fn model_grace_cut() {
     let mut ir = routed(ops_workflow(&argv, 30));
     // So that the grace runs out while the agent still waits on the stalled stream.
     ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(1);
-    check(
+    let shown = executed(
         &System,
         "model-grace-cut",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":12}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stall","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response event: response.created\n\n
-            model items kept: 2
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            the model endpoint at each create: [true, false]
-            listed once it ended: []
-            a stalled stream's client hung up before the agent's teardown was to end"#]],
+        &[Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score Some(Number(6))
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":12}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
+        model items kept: 2
+        the model endpoint at each create: [true, false]
+        a stalled stream's client hung up before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 /// `ir`, with a model route for judge `judge`, 1 for the train judge or 2 for the score's, that
@@ -3045,50 +2928,45 @@ fn judge_model() {
         2,
         &["model m-small 7", "result"],
     );
-    check(
+    let shown = executed(
         &System,
         "judge-model",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(7))
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/log/command.stdout, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/5559c1b7a436c81115685858ea5a05bca66397f56a0d93101977bad52de50aea, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":7,"state":"finished","usage":{"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"at_ns":"<ns>","note":"`final_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":5}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 353 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
-            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
-            {"actions":[{"kind":"finish","outcome":{"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":15}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            job 0's standard output:
-            model request 0: 200 [("content-type", "text/plain")] 7
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-            model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:5559c1b7a436c81115685858ea5a05bca66397f56a0d93101977bad52de50aea"],"model":"vendor/m-small","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"7","role":"user","type":"message"}],"model":"vendor/m-small","store":false}; response 7
-            model items kept: 3
-            socket directories left: false
-            their directory's mode at each create: ["700", "700"]
-            the model endpoint at each create: [true, true]
-            listed once it ended: []"#]],
+        &[Also::Usage, Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score Some(Number(7))
+        payloads hold: ["xxxxxx"]
+        outcome.json's usage: {"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"at_ns":"<ns>","note":"`final_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":5}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 353 bytes","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
+        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
+        {"actions":[{"kind":"finish","outcome":{"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":15}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        job 0's standard output:
+        model request 0: 200 [("content-type", "text/plain")] 7
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:5559c1b7a436c81115685858ea5a05bca66397f56a0d93101977bad52de50aea"],"model":"vendor/m-small","store":false}; response 7
+        model items kept: 3
+        the model endpoint at each create: [true, true]"#]]
+    .assert_eq(&shown);
 }
 
 // The call's route ends with its command, so its request in flight is cut short, while the
@@ -3105,63 +2983,57 @@ fn judge_and_agent_model() {
     ];
     let steps = ["model m-small 5", "result", "ask m-small stall", "exit"];
     let ir = judge_routed(routed(ops_workflow(&argv, 30)), 1, &steps);
-    check(
+    let shown = executed(
         &System,
         "judge-and-agent-model",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/log/command.stdout, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/log/command.stdout, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/2.request, model/2.response, model/items/3fbcedef56e9b2dbf2b7bf88532bd068ca2537a4aed6e1e9ea74a494abba2fc2, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, model/items/8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
-            payloads hold: ["xxx", "xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"calls":[{"grant":"train","job":0,"model_requests":2,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":3,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
-            {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
-            {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":8}
-            {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"job-0","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":25,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":200},"seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"score":5}},"observed_ns":"<ns>","seq":13}
-            {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":5},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":14}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":15}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":22}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":23}
-            its last record came before the agent's teardown was to end
-            the agent's standard output:
-            model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
-            job 0's standard output:
-            model request 0: 200 [("content-type", "text/plain")] 5
-            model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-small")] event: response.created\n\n
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stall","role":"user","type":"message"}],"model":"vendor/m-large","store":false}; response event: response.created\n\n
-            model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:3fbcedef56e9b2dbf2b7bf88532bd068ca2537a4aed6e1e9ea74a494abba2fc2"],"model":"vendor/m-small","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"5","role":"user","type":"message"}],"model":"vendor/m-small","store":false}; response 5
-            model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-small","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stall","role":"user","type":"message"}],"model":"vendor/m-small","store":false}; response event: response.created\n\n
-            model items kept: 3
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
-            the model endpoint at each create: [true, true, false]
-            listed once it ended: []
-            a stalled stream's client hung up before the agent's teardown was to end
-            a stalled stream's client hung up before the agent's teardown was to end"#]],
+        &[Also::Usage, Also::Exchanges],
     );
+    expect![[r#"
+        finished, with score Some(Number(6))
+        payloads hold: ["xxx", "xxxxxx"]
+        outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":2,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":3,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
+        {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+        {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
+        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":8}
+        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"job-0","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":25,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":200},"seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"score":5}},"observed_ns":"<ns>","seq":13}
+        {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":5},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":14}
+        {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":15}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":17}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":18}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":19}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":22}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":23}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.created\n\n
+        job 0's standard output:
+        model request 0: 200 [("content-type", "text/plain")] 5
+        model request 1: 200 [("content-type", "text/event-stream"), ("openai-model", "m-small")] event: response.created\n\n
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
+        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:3fbcedef56e9b2dbf2b7bf88532bd068ca2537a4aed6e1e9ea74a494abba2fc2"],"model":"vendor/m-small","store":false}; response 5
+        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-small","store":false}; response event: response.created\n\n
+        model items kept: 3
+        the model endpoint at each create: [true, true, false]
+        a stalled stream's client hung up before the agent's teardown was to end
+        a stalled stream's client hung up before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 // The model provider's refusal of the call's key is the deployment's fault, never the agent's,
@@ -3175,52 +3047,46 @@ fn judge_key_refused() {
         "finalize submit 6",
     ];
     let ir = judge_routed(ops_workflow(&argv, 30), 1, &["model m-small expired"]);
-    check(
+    let shown = executed(
         &System,
         "judge-key-refused",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/log/command.stdout, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, model/0.request, model/0.response, model/items/6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57, model/items/7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, payloads/cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
-            payloads hold: ["xxx", "xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"reason":"the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","state":"failed","usage":{"calls":[{"grant":"train","job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":4}
-            {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"job-0","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":401},"seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":11}
-            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":17}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":18}
-            {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","seq":19}
-            its last record came before the agent's teardown was to end
-            job 0's standard output:
-            model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-            model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-small","store":false}; rebuilt {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"expired","role":"user","type":"message"}],"model":"vendor/m-small","store":false}; response refused
-            model items kept: 2
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
-            the model endpoint at each create: [false, true, false]
-            listed once it ended: []"#]],
+        &[Also::Usage, Also::Exchanges],
     );
+    expect![[r#"
+        failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again
+        payloads hold: ["xxx", "xxxxxx"]
+        outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":4}
+        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"job-0","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":401},"seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}
+        {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"invalid_result","message":"the judge wrote no valid result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":10}
+        {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":11}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":15}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":17}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":18}
+        {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","seq":19}
+        its last record came before the agent's teardown was to end
+        job 0's standard output:
+        model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-small","store":false}; response refused
+        model items kept: 2
+        the model endpoint at each create: [false, true, false]"#]]
+    .assert_eq(&shown);
 }
 
 /// Nanoseconds since the Unix epoch.
@@ -3345,13 +3211,7 @@ fn leases() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/0/collected, leases/0/log/0/command.stdout, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/log/2/collected, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3381,10 +3241,7 @@ fn leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":25}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":26}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":27}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -3412,14 +3269,7 @@ fn lease_ends() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/0/collected, leases/0/out/collected, leases/0/sandbox.json, leases/1/console.txt, leases/1/log/0/collected, leases/1/out/collected, leases/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            lease 1's sandbox, leases/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3445,10 +3295,7 @@ fn lease_ends() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":22}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":23}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -3474,12 +3321,7 @@ fn lease_unstarted() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/, leases/1/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3500,10 +3342,7 @@ fn lease_unstarted() {
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":16}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":17}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":18}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -3548,66 +3387,60 @@ fn lease_transfers() {
     agent["dirs"].as_array_mut().unwrap().push(shut);
     let files = agent["files"].as_array_mut().unwrap();
     files.extend([blob, tool, read_only, shared, key]);
-    check(
+    let shown = executed(
         &System,
         "lease-transfers",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/back/collected, agent/out/back/config.toml, agent/out/back/ro, agent/out/back/shared, agent/out/back/shut/key, agent/out/back/tool*, agent/out/collected, agent/out/got/collected, agent/out/got/command.stdout, agent/out/replaced/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","op":1,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":8,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"lease","lease":0,"remaining":{"commands":7,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/.codex","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/in","transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"reply","op":3,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer","transfer":0},"lease":0,"remaining":{"commands":7,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":7}
-            {"actions":[{"kind":"reply","op":4,"reply":{"kind":"lease","lease":0,"remaining":{"commands":6,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"argv":["list","/work/in"],"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"argv":["list","/work/in"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0,"stderr":"","stdout":"0644 collected: collected\n0600 config.toml: model = \"gpt-6-astra\"\n\n0444 ro: r\n0666 shared: s\n0551 shut/\n0600 shut/key: k\n0750 tool: true"},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"kind":"reply","op":5,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"command":1,"end":{"exited":{"code":0}},"kind":"command","stderr":"","stdout":"0644 collected: collected\n0600 config.toml: model = \"gpt-6-astra\"\n\n0444 ro: r\n0666 shared: s\n0551 shut/\n0600 shut/key: k\n0750 tool: true"},"lease":0,"remaining":{"commands":6,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"reply","op":6,"reply":{"kind":"lease","lease":0,"remaining":{"commands":5,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/.codex","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/in","transfer":2}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":6,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"putting the tree at /work/in in the runner failed: /work/in: File exists (os error 17): the tree's root becomes /work/in, which must not exist: give `--replace` to replace it"},"kind":"transfer_ended","lease":0,"transfer":2},"observed_ns":"<ns>","seq":12}
-            {"actions":[{"kind":"reply","op":7,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"failed":"putting the tree at /work/in in the runner failed: /work/in: File exists (os error 17): the tree's root becomes /work/in, which must not exist: give `--replace` to replace it"},"kind":"transfer","transfer":2},"lease":0,"remaining":{"commands":5,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":13}
-            {"actions":[{"kind":"reply","op":8,"reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","from":"/pumpkin/log/1","kind":"transfer","lease":0,"max_bytes":256,"to":"/pumpkin/out/got","transfer":3}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":8,"request":{"from":"/pumpkin/log/1","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"<ns>","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":145,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":3},"observed_ns":"<ns>","seq":15}
-            {"actions":[{"kind":"reply","op":9,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":145,"entries":2}},"kind":"transfer","transfer":3},"lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":9,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":16}
-            {"actions":[{"kind":"reply","op":10,"reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","from":"/work/in","kind":"transfer","lease":0,"max_bytes":256,"to":"/pumpkin/out/back","transfer":4}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":10,"request":{"from":"/work/in","kind":"lease_get","lease":0,"to":"/pumpkin/out/back"}},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer_ended","lease":0,"transfer":4},"observed_ns":"<ns>","seq":18}
-            {"actions":[{"kind":"reply","op":11,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer","transfer":4},"lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":11,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":19}
-            {"actions":[{"kind":"reply","op":12,"reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"replace","from":"/pumpkin/log","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/in","transfer":5}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":12,"request":{"kind":"lease_put","lease":0,"replace":true,"to":"/work/in","tree":"/pumpkin/log"}},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":5},"observed_ns":"<ns>","seq":21}
-            {"actions":[{"kind":"reply","op":13,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer","transfer":5},"lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":13,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":22}
-            {"actions":[{"kind":"reply","op":14,"reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","from":"/work/in","kind":"transfer","lease":0,"max_bytes":256,"to":"/pumpkin/out/replaced","transfer":6}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":14,"request":{"from":"/work/in","kind":"lease_get","lease":0,"to":"/pumpkin/out/replaced"}},"observed_ns":"<ns>","seq":23}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":6},"observed_ns":"<ns>","seq":24}
-            {"actions":[{"kind":"reply","op":15,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer","transfer":6},"lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":15,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":25}
-            {"actions":[{"kind":"reply","op":16,"reply":{"kind":"lease","lease":0,"remaining":{"commands":0,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/big","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/big","transfer":7}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":16,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/big","tree":"/workspace/big"}},"observed_ns":"<ns>","seq":26}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"collecting /workspace/big failed: the tree's files hold more than 256 bytes"},"kind":"transfer_ended","lease":0,"transfer":7},"observed_ns":"<ns>","seq":27}
-            {"actions":[{"kind":"reply","op":17,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"failed":"collecting /workspace/big failed: the tree's files hold more than 256 bytes"},"kind":"transfer","transfer":7},"lease":0,"remaining":{"commands":0,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":17,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":28}
-            {"actions":[{"kind":"reply","op":18,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":18,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":29}
-            {"actions":[{"kind":"close_lease","lease":0},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":30}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 10 files of 201 bytes; log, 1 file of 9 bytes","seq":31}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":32}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":33}
-            {"actions":[{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":34}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":35}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":36}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":37}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":38}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
-            listed once it ended: []"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        finished, with score Some(Number(6))
+        record: agent/console.txt, agent/log/collected, agent/out/back/collected, agent/out/back/config.toml, agent/out/back/ro, agent/out/back/shared, agent/out/back/shut/key, agent/out/back/tool*, agent/out/collected, agent/out/got/collected, agent/out/got/command.stdout, agent/out/replaced/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[{"kind":"reply","op":1,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":8,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":4}
+        {"actions":[{"kind":"reply","op":2,"reply":{"kind":"lease","lease":0,"remaining":{"commands":7,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/.codex","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/in","transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":6}
+        {"actions":[{"kind":"reply","op":3,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer","transfer":0},"lease":0,"remaining":{"commands":7,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":7}
+        {"actions":[{"kind":"reply","op":4,"reply":{"kind":"lease","lease":0,"remaining":{"commands":6,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"argv":["list","/work/in"],"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"argv":["list","/work/in"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0,"stderr":"","stdout":"0644 collected: collected\n0600 config.toml: model = \"gpt-6-astra\"\n\n0444 ro: r\n0666 shared: s\n0551 shut/\n0600 shut/key: k\n0750 tool: true"},"observed_ns":"<ns>","seq":9}
+        {"actions":[{"kind":"reply","op":5,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"command":1,"end":{"exited":{"code":0}},"kind":"command","stderr":"","stdout":"0644 collected: collected\n0600 config.toml: model = \"gpt-6-astra\"\n\n0444 ro: r\n0666 shared: s\n0551 shut/\n0600 shut/key: k\n0750 tool: true"},"lease":0,"remaining":{"commands":6,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":10}
+        {"actions":[{"kind":"reply","op":6,"reply":{"kind":"lease","lease":0,"remaining":{"commands":5,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/.codex","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/in","transfer":2}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":6,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"putting the tree at /work/in in the runner failed: /work/in: File exists (os error 17): the tree's root becomes /work/in, which must not exist: give `--replace` to replace it"},"kind":"transfer_ended","lease":0,"transfer":2},"observed_ns":"<ns>","seq":12}
+        {"actions":[{"kind":"reply","op":7,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"failed":"putting the tree at /work/in in the runner failed: /work/in: File exists (os error 17): the tree's root becomes /work/in, which must not exist: give `--replace` to replace it"},"kind":"transfer","transfer":2},"lease":0,"remaining":{"commands":5,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":13}
+        {"actions":[{"kind":"reply","op":8,"reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","from":"/pumpkin/log/1","kind":"transfer","lease":0,"max_bytes":256,"to":"/pumpkin/out/got","transfer":3}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":8,"request":{"from":"/pumpkin/log/1","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"<ns>","seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":145,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":3},"observed_ns":"<ns>","seq":15}
+        {"actions":[{"kind":"reply","op":9,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":145,"entries":2}},"kind":"transfer","transfer":3},"lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":9,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":16}
+        {"actions":[{"kind":"reply","op":10,"reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","from":"/work/in","kind":"transfer","lease":0,"max_bytes":256,"to":"/pumpkin/out/back","transfer":4}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":10,"request":{"from":"/work/in","kind":"lease_get","lease":0,"to":"/pumpkin/out/back"}},"observed_ns":"<ns>","seq":17}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer_ended","lease":0,"transfer":4},"observed_ns":"<ns>","seq":18}
+        {"actions":[{"kind":"reply","op":11,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer","transfer":4},"lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":11,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":19}
+        {"actions":[{"kind":"reply","op":12,"reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"replace","from":"/pumpkin/log","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/in","transfer":5}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":12,"request":{"kind":"lease_put","lease":0,"replace":true,"to":"/work/in","tree":"/pumpkin/log"}},"observed_ns":"<ns>","seq":20}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":5},"observed_ns":"<ns>","seq":21}
+        {"actions":[{"kind":"reply","op":13,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer","transfer":5},"lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":13,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":22}
+        {"actions":[{"kind":"reply","op":14,"reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","from":"/work/in","kind":"transfer","lease":0,"max_bytes":256,"to":"/pumpkin/out/replaced","transfer":6}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":14,"request":{"from":"/work/in","kind":"lease_get","lease":0,"to":"/pumpkin/out/replaced"}},"observed_ns":"<ns>","seq":23}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":6},"observed_ns":"<ns>","seq":24}
+        {"actions":[{"kind":"reply","op":15,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer","transfer":6},"lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":15,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":25}
+        {"actions":[{"kind":"reply","op":16,"reply":{"kind":"lease","lease":0,"remaining":{"commands":0,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/big","kind":"transfer","lease":0,"max_bytes":256,"to":"/work/big","transfer":7}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":16,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/big","tree":"/workspace/big"}},"observed_ns":"<ns>","seq":26}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"collecting /workspace/big failed: the tree's files hold more than 256 bytes"},"kind":"transfer_ended","lease":0,"transfer":7},"observed_ns":"<ns>","seq":27}
+        {"actions":[{"kind":"reply","op":17,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":{"end":{"failed":"collecting /workspace/big failed: the tree's files hold more than 256 bytes"},"kind":"transfer","transfer":7},"lease":0,"remaining":{"commands":0,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":17,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":28}
+        {"actions":[{"kind":"reply","op":18,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":18,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":29}
+        {"actions":[{"kind":"close_lease","lease":0},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":30}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 10 files of 201 bytes; log, 1 file of 9 bytes","seq":31}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":32}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":33}
+        {"actions":[{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":34}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":35}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":36}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":37}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":38}
+        its last record came before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 // The collect from the agent's sandbox waits, so the run goes on deciding meanwhile, answering
@@ -3629,46 +3462,40 @@ fn transfer_cut() {
         "await_transfer 0 failed",
         "finalize submit 6",
     ];
-    check(
+    let shown = executed(
         &System,
         "transfer-cut",
         &[(PROVIDER, &Sim::new())],
         &lease_workflow(&argv, 30, RUNNER),
         SANDBOXD,
-        &expect![[r#"
-            finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[{"kind":"reply","op":0,"reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","op":1,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/held","kind":"transfer","lease":0,"max_bytes":64,"to":"/work/in","transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/held"}},"observed_ns":"<ns>","seq":5}
-            {"actions":[{"kind":"reply","op":3,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":2,"kind":"lease","name":"gpu","remaining":{"commands":3,"cumulative_seconds":null,"instance_seconds":600,"instances":1},"transfer_bytes":64},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"reply","op":4,"reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"the lease's end cut the transfer short: collecting /workspace/held failed: stopped before the tree was whole"},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":8}
-            {"actions":[{"kind":"reply","op":5,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":13}
-            {"actions":[{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":17}
-            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":18}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
-            listed once it ended: []"#]],
+        &[Also::Listing],
     );
+    expect![[r#"
+        finished, with score Some(Number(6))
+        record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[{"kind":"reply","op":0,"reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[{"kind":"reply","op":1,"reply":{"busy_seconds":"<s>","elapsed_seconds":"<s>","failure":null,"idle_seconds":"<s>","kind":"lease_status","last":null,"lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1},"state":"ready"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":4}
+        {"actions":[{"kind":"reply","op":2,"reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","from":"/workspace/held","kind":"transfer","lease":0,"max_bytes":64,"to":"/work/in","transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/held"}},"observed_ns":"<ns>","seq":5}
+        {"actions":[{"kind":"reply","op":3,"reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":2,"kind":"lease","name":"gpu","remaining":{"commands":3,"cumulative_seconds":null,"instance_seconds":600,"instances":1},"transfer_bytes":64},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":6}
+        {"actions":[{"kind":"reply","op":4,"reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"the lease's end cut the transfer short: collecting /workspace/held failed: stopped before the tree was whole"},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":8}
+        {"actions":[{"kind":"reply","op":5,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":9}
+        {"actions":[{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":13}
+        {"actions":[{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":15}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":17}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":18}
+        its last record came before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 /// [`ops_workflow`]'s workflow, with `argv` as the agent's command, and a deadline of 30 s, whose
@@ -3724,14 +3551,7 @@ fn judge_leases() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3761,10 +3581,7 @@ fn judge_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":25}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":26}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":27}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -3780,13 +3597,7 @@ fn score_leases() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(7))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":7,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3809,10 +3620,7 @@ fn score_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":18}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":19}
             {"actions":[{"kind":"finish","outcome":{"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":20}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -3838,13 +3646,7 @@ fn lease_starts_by_its_holders_end() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, leases/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3865,10 +3667,7 @@ fn lease_starts_by_its_holders_end() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":16}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":17}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":18}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }
 
@@ -3896,14 +3695,7 @@ fn judge_exits_leasing() {
         SANDBOXD,
         &expect![[r#"
             finished, with score Some(Number(6))
-            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/evidence/, jobs/1/out/result.json, jobs/1/sandbox.json, leases/0/console.txt, leases/0/log/0/collected, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-4","provider":"simulated","report":null}
-            lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-3","provider":"simulated","report":null}
             payloads hold: ["xxxxxx"]
-            provider.json is what the provider declared: true
-            outcome.json: {"score":6,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3927,9 +3719,6 @@ fn judge_exits_leasing() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":19}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":20}
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":21}
-            its last record came before the agent's teardown was to end
-            socket directories left: false
-            their directory's mode at each create: ["700", "700", "700", "700"]
-            listed once it ended: []"#]],
+            its last record came before the agent's teardown was to end"#]],
     );
 }

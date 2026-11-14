@@ -1,1 +1,0 @@
-{"arguments":"{\"cmd\":\"rg -n \\\"precision::f64|__frag_base.*f64|fragment.*f64\\\" /usr/local/cuda-12.8/targets/x86_64-linux/include | head -100\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":20000}","call_id":"call_0747b51de92e43828243eeea","id":"fc_call_0747b51de92e43828243eeea","name":"exec_command","status":"completed","type":"function_call"}
