@@ -65,6 +65,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut run = Run {
         workflow: placed.workflow(),
         ops: 0,
+        caller: Caller::Agent,
         jobs: BTreeMap::new(),
         tick_due: None,
         transcript: String::new(),
@@ -127,6 +128,8 @@ struct Run<'w> {
     workflow: &'w Workflow,
     /// The ops made so far.
     ops: u64,
+    /// Who makes the line's op: the agent, unless the line names a job's call.
+    caller: Caller,
     /// What each job was made under, for its result's spec.
     jobs: BTreeMap<JobId, JudgeCall>,
     /// When the core last said it next wants a tick, once it has.
@@ -136,6 +139,14 @@ struct Run<'w> {
 
 impl Run<'_> {
     fn event(&mut self, event: &str) -> Event {
+        let (caller, event) = match event.strip_prefix('@') {
+            Some(called) => {
+                let (job, event) = called.split_once(' ').unwrap();
+                (Caller::Job(JobId(job.parse().unwrap())), event)
+            }
+            None => (Caller::Agent, event),
+        };
+        self.caller = caller;
         let words: Vec<&str> = event.splitn(3, ' ').collect();
         let job = || JobId(words[1].parse().unwrap());
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
@@ -300,7 +311,7 @@ impl Run<'_> {
         self.ops += 1;
         Event::OpArrived {
             op: OpId(self.ops),
-            caller: Caller::Agent,
+            caller: self.caller,
             request,
         }
     }
@@ -405,6 +416,7 @@ impl Run<'_> {
 fn holder_text(holder: Caller) -> String {
     match holder {
         Caller::Agent => String::new(),
+        Caller::Job(job) => format!(" for job {}", job.0),
     }
 }
 
@@ -657,7 +669,8 @@ fn one_call_at_a_time() {
               start job 1 of train on op 6's payload of 10 bytes, with a timeout of 11999s
             4000 judge_failed 1 the judge's sandbox did not connect
             4100 judge train 10
-              refuse op 7: `train` has no calls left of the 2 it allows: make no more calls to it
+              reply to op 7: {"kind":"judge","job":2,"remaining":{"calls":0,"seconds":11999}}
+              start job 2 of train on op 7's payload of 10 bytes, with a timeout of 11999s
             4200 status 1
               reply to op 8: {"kind":"status","job":1,"state":"errored","failure":{"code":"judge_error","message":"the judge failed before giving a result"},"remaining":{"calls":0,"seconds":11999}}
         "#]],
@@ -1873,7 +1886,7 @@ fn lease_grants_apart() {
 #[test]
 fn lease_start_bounds() {
     check(
-        leasing,
+        judges_leasing,
         r"
         0 agent_started
         1000 lease_open gpu
@@ -1881,9 +1894,15 @@ fn lease_start_bounds() {
         1200 lease_status 0
         1300 lease_failed 0 the runner's sandbox didn't start: it was given up
         1400 lease_status 0
+        2000 judge train 10
+        3000 judge_started 0
+        3100 @0 lease_open box
+        53000 judge_timed_out 0
+        53000 lease_failed 1 the runner's sandbox didn't start: it was given up
+        53100 judge_failed 0 the judge ran past its timeout
         54000 lease_open gpu
         18000000 tick
-        18000000 lease_failed 1 the runner's sandbox didn't start: it was given up
+        18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
         ",
         &expect![[r#"
             start
@@ -1902,14 +1921,25 @@ fn lease_start_bounds() {
             1300 lease_failed 0 the runner's sandbox didn't start: it was given up
             1400 lease_status 0
               reply to op 4: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":0,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":null,"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
-            54000 lease_open gpu
-              reply to op 5: {"kind":"lease","lease":1,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
-              open lease 1 of gpu, as instance 0, started by 18000000
-            18000000 tick
+            2000 judge train 10
+              reply to op 5: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 5's payload of 10 bytes, with a timeout of 50s
+            3000 judge_started 0
+            3100 @0 lease_open box
+              reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 1 of box for job 0, as instance 0, started by 53000
+            53000 judge_timed_out 0
               close lease 1
+            53000 lease_failed 1 the runner's sandbox didn't start: it was given up
+            53100 judge_failed 0 the judge ran past its timeout
+            54000 lease_open gpu
+              reply to op 7: {"kind":"lease","lease":2,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
+              open lease 2 of gpu, as instance 0, started by 18000000
+            18000000 tick
+              close lease 2
               tear down the agent
               (tick due at 18210000)
-            18000000 lease_failed 1 the runner's sandbox didn't start: it was given up
+            18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
               finish: no score; work ended at the deadline; no submission
         "#]],
     );
@@ -2159,6 +2189,303 @@ fn lease_slots() {
             5300 lease_open gpu
               reply to op 10: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}}
               open lease 2 of gpu, as instance 0, started by 18000000
+        "#]],
+    );
+}
+
+/// [`leasing`]'s workflow, whose judges each lease a runner of their own under a grant named
+/// `box`: `train_judge` `train_box`, 1 at a time, each for 100 s, and 2 commands in all, and
+/// `final_judge` `final_box`, 1 at a time, each for 30 s; and whose train calls time out after
+/// 50 s.
+fn judges_leasing(ir: &mut Value) {
+    leasing(ir);
+    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(50);
+    let boxes = [("train_box", 1, "4", 100), ("final_box", 2, "5", 30)];
+    for (name, judge, image, seconds) in boxes {
+        let mut runner = ir["roles"][3].clone();
+        runner["name"] = json!(name);
+        runner["image"] = json!(format!("sha256:{}", image.repeat(64)));
+        ir["roles"].as_array_mut().unwrap().push(runner);
+        let mut grant = json!({ "lease": {
+            "name": "box", "role": name, "instances": 1, "instance_seconds": seconds,
+            "transfer_bytes": 4096,
+        } });
+        if judge == 1 {
+            grant["lease"]["commands"] = json!(2);
+        }
+        ir["roles"][judge]["grants"] = json!([grant]);
+    }
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+fn judge_leases() {
+    check(
+        judges_leasing,
+        r#"
+        0 agent_started
+        1000 judge train 10
+        1100 @0 ops
+        2000 judge_started 0
+        2100 @0 ops
+        2200 @0 lease_open box
+        2300 @0 lease_open gpu
+        2400 @0 status 0
+        2500 @0 submit submit 10
+        2600 @0 judge train 10
+        2700 lease_status 0
+        2800 lease_open gpu
+        2900 @0 lease_status 1
+        3000 @0 lease_run 1 - true
+        3100 @0 lease_close 1
+        3200 @7 ops
+        4000 lease_ready 0
+        4100 @0 lease_run 0 - check
+        4200 command_ended 0 0 0 7
+        4300 @0 lease_status 0
+        4400 @0 lease_put 0 /pumpkin/in /work/in
+        4500 transfer_ended 0 1 moved 2 10
+        4600 lease_get 0 /work/in /in
+        4700 @0 lease_get 0 /work/in /in
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1000 judge train 10
+              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
+            1100 @0 ops
+              refuse op 2: the call's command has ended: make no more ops
+            2000 judge_started 0
+            2100 @0 ops
+              reply to op 3: {"kind":"ops","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"lease","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
+            2200 @0 lease_open box
+              reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 0 of box for job 0, as instance 0, started by 52000
+            2300 @0 lease_open gpu
+              refuse op 5: you hold no grant named `gpu`: call one that `ops` lists
+            2400 @0 status 0
+              refuse op 6: you have no job 0: ask about a job that one of your calls returned
+            2500 @0 submit submit 10
+              refuse op 7: you hold no grant named `submit`: call one that `ops` lists
+            2600 @0 judge train 10
+              refuse op 8: you hold no grant named `train`: call one that `ops` lists
+            2700 lease_status 0
+              refuse op 9: you have no lease 0: name one that `lease open` returned
+            2800 lease_open gpu
+              reply to op 10: {"kind":"lease","lease":1,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
+              open lease 1 of gpu, as instance 0, started by 18000000
+            2900 @0 lease_status 1
+              refuse op 11: you have no lease 1: name one that `lease open` returned
+            3000 @0 lease_run 1 - true
+              refuse op 12: you have no lease 1: name one that `lease open` returned
+            3100 @0 lease_close 1
+              refuse op 13: you have no lease 1: name one that `lease open` returned
+            3200 @7 ops
+              refuse op 14: the call's command has ended: make no more ops
+            4000 lease_ready 0
+              (tick due at 104000)
+            4100 @0 lease_run 0 - check
+              reply to op 15: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
+              run command 0 of lease 0, ["check"], with a timeout of None
+            4200 command_ended 0 0 0 7
+            4300 @0 lease_status 0
+              reply to op 16: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"7","stderr":""},"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
+            4400 @0 lease_put 0 /pumpkin/in /work/in
+              reply to op 17: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":0}}
+              put /pumpkin/in to /work/in as transfer 1 of lease 0 for job 0, of at most 4096 bytes
+            4500 transfer_ended 0 1 moved 2 10
+            4600 lease_get 0 /work/in /in
+              refuse op 18: you have no lease 0: name one that `lease open` returned
+            4700 @0 lease_get 0 /work/in /in
+              refuse op 19: `box` has no commands left of the 2 it allows, a transfer counting as one: run and move no more
+        "#]],
+    );
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+fn call_leases() {
+    check(
+        judges_leasing,
+        r#"
+        0 agent_started
+        1000 judge train 10
+        2000 judge_started 0
+        2100 @0 lease_open box
+        2200 @0 lease_open box
+        3000 lease_ready 0
+        3100 @0 lease_run 0 49 a
+        3200 @0 lease_run 0 47 a
+        3300 command_ended 0 0 0
+        3400 @0 lease_run 0 - b
+        3500 command_ended 0 1 0
+        3600 @0 lease_run 0 - c
+        4000 judge_exited 0
+        4100 @0 lease_status 0
+        4200 collected 0 {"raw_score": 1}
+        4300 status 0
+        4400 judge train 10
+        5000 lease_ended 0
+        5100 status 0
+        5200 judge train 10
+        6000 judge_started 1
+        6100 @1 lease_open box
+        6200 lease_ready 1
+        6300 @1 lease_run 1 - a
+        7000 judge_failed 1 the judge's session ended
+        8000 lease_ended 1
+        8100 judge train 10
+        9000 judge_started 2
+        9100 @2 lease_open box
+        9200 lease_ready 2
+        9250 submit submit 10
+        9300 agent_exited 0
+        9400 judge_failed 2 the call was stopped
+        9500 lease_ended 2
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1000 judge train 10
+              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
+            2000 judge_started 0
+            2100 @0 lease_open box
+              reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 0 of box for job 0, as instance 0, started by 52000
+            2200 @0 lease_open box
+              refuse op 3: `box` has 1 leases open, as many as it allows at once: open another once `lease status` says one has ended
+            3000 lease_ready 0
+              (tick due at 103000)
+            3100 @0 lease_run 0 49 a
+              refuse op 4: the timeout of 49 s is longer than lease 0 has left, 48 s: run it again as `sandboxctl lease run 0 --timeout 48 -- a`
+            3200 @0 lease_run 0 47 a
+              reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
+              run command 0 of lease 0, ["a"], with a timeout of Some(47s)
+            3300 command_ended 0 0 0
+            3400 @0 lease_run 0 - b
+              reply to op 6: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":0}}
+              run command 1 of lease 0, ["b"], with a timeout of None
+            3500 command_ended 0 1 0
+            3600 @0 lease_run 0 - c
+              refuse op 7: `box` has no commands left of the 2 it allows, a transfer counting as one: run and move no more
+            4000 judge_exited 0
+              close lease 0
+              (tick due at 18000000)
+            4100 @0 lease_status 0
+              refuse op 8: the call's command has ended: make no more ops
+            4200 collected 0 {"raw_score": 1}
+            4300 status 0
+              reply to op 9: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":11998}}
+            4400 judge train 10
+              refuse op 10: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+            5000 lease_ended 0
+            5100 status 0
+              reply to op 11: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"scored":true,"remaining":{"calls":99,"seconds":11998}}
+            5200 judge train 10
+              reply to op 12: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":11998}}
+              start job 1 of train on op 12's payload of 10 bytes, with a timeout of 50s
+            6000 judge_started 1
+            6100 @1 lease_open box
+              reply to op 13: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 1 of box for job 1, as instance 0, started by 56000
+            6200 lease_ready 1
+              (tick due at 106200)
+            6300 @1 lease_run 1 - a
+              reply to op 14: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
+              run command 0 of lease 1, ["a"], with a timeout of None
+            7000 judge_failed 1 the judge's session ended
+              close lease 1
+              (tick due at 18000000)
+            8000 lease_ended 1
+            8100 judge train 10
+              reply to op 15: {"kind":"judge","job":2,"remaining":{"calls":97,"seconds":11997}}
+              start job 2 of train on op 15's payload of 10 bytes, with a timeout of 50s
+            9000 judge_started 2
+            9100 @2 lease_open box
+              reply to op 16: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 2 of box for job 2, as instance 0, started by 59000
+            9200 lease_ready 2
+              (tick due at 109200)
+            9250 submit submit 10
+              reply to op 17: {"kind":"submit","state":"stored","remaining_seconds":17990}
+            9300 agent_exited 0
+              stop job 2
+              close lease 2
+              tear down the agent
+              (tick due at 18210000)
+            9400 judge_failed 2 the call was stopped
+            9500 lease_ended 2
+              start job 3 of score on op 17's payload of 10 bytes, with a timeout of 120s
+        "#]],
+    );
+}
+
+#[test]
+fn score_leases() {
+    check(
+        judges_leasing,
+        r#"
+        0 agent_started
+        1000 submit submit 10
+        2000 agent_exited 0
+        3000 judge_started 0
+        3100 @0 ops
+        3200 @0 lease_open box
+        4000 lease_ready 0
+        4100 @0 lease_run 0 - check
+        34000 tick
+        34100 @0 lease_open box
+        34200 lease_ended 0
+        34300 @0 lease_open box
+        35000 judge_exited 0
+        35100 collected 0 {"raw_score": 7}
+        36000 lease_ended 1
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1000 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":17999}
+            2000 agent_exited 0
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 18210000)
+            3000 judge_started 0
+            3100 @0 ops
+              reply to op 2: {"kind":"ops","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"lease","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
+            3200 @0 lease_open box
+              reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
+              open lease 0 of box for job 0, as instance 0, started by 123000
+            4000 lease_ready 0
+              (tick due at 34000)
+            4100 @0 lease_run 0 - check
+              reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":29,"cumulative_seconds":null,"commands":null}}
+              run command 0 of lease 0, ["check"], with a timeout of None
+            34000 tick
+              close lease 0
+              (tick due at 18210000)
+            34100 @0 lease_open box
+              refuse op 5: `box` has 1 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `lease status` says one has ended
+            34200 lease_ended 0
+            34300 @0 lease_open box
+              reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
+              open lease 1 of box for job 0, as instance 0, started by 123000
+            35000 judge_exited 0
+              close lease 1
+            35100 collected 0 {"raw_score": 7}
+            36000 lease_ended 1
+              finish: score 7; work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, returning {"raw_score":7}
         "#]],
     );
 }

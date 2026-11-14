@@ -33,8 +33,8 @@ struct Parser<'ir> {
     agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
     judges: BTreeMap<RoleId, Judge>,
     runners: BTreeMap<RoleId, Runner>,
-    /// Every role whose lease grants are parsed, the first agent, at its place in the IR, with
-    /// the grants it holds.
+    /// Every role whose lease grants are parsed, the first agent, then each judge with grants in
+    /// the IR's order, at its place in the IR, with the grants it holds.
     holders: Vec<(JsonPointer, RoleId, &'ir [ir::Grant])>,
 }
 
@@ -114,13 +114,20 @@ impl<'ir> Parser<'ir> {
                 ir::Runtime::Agent(agent) => self.agent(at, id, agent, grants),
                 ir::Runtime::Judge(judge) => {
                     self.routeless(&at, (name, "a judge"), model.is_some());
-                    if !grants.is_empty() {
+                    let list = at.token("grants");
+                    let held = grants.iter().enumerate();
+                    for (index, grant) in
+                        held.filter(|(_, grant)| !matches!(grant, ir::Grant::Lease(_)))
+                    {
                         self.errors.report(
-                            at.token("grants"),
+                            place(&list, index, grant),
                             format!(
-                                "`{name}` is a judge, and judges hold no grants yet: remove them"
+                                "`{name}` is a judge, and judges hold only lease grants: remove it"
                             ),
                         );
+                    }
+                    if !grants.is_empty() {
+                        self.holders.push((at.clone(), id, grants));
                     }
                     self.judge(&at, id, judge);
                 }
@@ -391,7 +398,8 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// Reports, at `at`, the agent's runner `runner` if its image is a judge's.
+    /// Reports, at `at`, the agent's runner `runner` if its image is a judge's
+    /// ([`ir::LeaseGrant::role`]).
     fn agents_runner(&mut self, at: &JsonPointer, runner: RoleId) -> Result<(), Reported> {
         let (role, image) = (&self.roles[runner.0].name, &self.roles[runner.0].image);
         let judge = (self.judges.keys()).find(|judge| self.roles[judge.0].image == *image);

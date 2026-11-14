@@ -47,15 +47,21 @@ const PUMPKIN: Limits = Limits {
 
 /// The roles of `placed` that are placed on `provider`, as [`Provider::reserve`] takes them:
 /// in the work phase, the agent, the judge of each of its judge grants, each grant running one
-/// call at a time, and the runner of each of its lease grants, as many as the grant's leases open
-/// at once; then the score's judge alone, which starts only once they have gone.
+/// call at a time, and the runner of each lease grant those hold, as many as the grant's leases
+/// open at once; then the score's judge, with the runners it leases, which start only once they
+/// have gone.
 pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
     let workflow = placed.workflow();
+    let scorer = workflow.score().slot.judge().role();
     let judges = (workflow.judge_grants()).map(|(_, grant)| grant.judge().role());
-    let runners = (workflow.lease_grants()).map(|(_, grant)| grant.runner.role());
+    let runners = |last: bool| {
+        (workflow.lease_grants())
+            .filter(move |(_, grant)| (grant.holder == scorer) == last)
+            .map(|(_, grant)| grant.runner.role())
+    };
     let agent = iter::once(workflow.agent().role);
-    let work: Vec<RoleId> = agent.chain(judges).chain(runners).collect();
-    let last = vec![workflow.score().slot.judge().role()];
+    let work: Vec<RoleId> = agent.chain(judges).chain(runners(false)).collect();
+    let last: Vec<RoleId> = iter::once(scorer).chain(runners(true)).collect();
     let on = |roles: Vec<RoleId>| -> Vec<Role> {
         (roles.into_iter())
             .filter(|&role| placed.placement(role).provider == *provider)

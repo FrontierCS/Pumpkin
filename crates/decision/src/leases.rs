@@ -1,15 +1,20 @@
 //! The leases that lease grants open, the meter they keep, and when the core ends them.
 //!
+//! Each lease has a holder ([`Caller`]), the agent or a judge's call, whose grant's limits it
+//! counts against: a grant's meter is its holder's, so each call of a judge starts with its
+//! grants' limits whole.
+//!
 //! A lease counts against its grant's `instances` from when it is accepted until its sandbox is
 //! gone. Its time runs from when its runner is ready, as the runtime observed it, until the core
 //! closes it, or the runtime reports its runner failed: the core closes it at its holder's close,
 //! at the end of its own time (its grant's
 //! [`instance_seconds`](schema::ir::LeaseGrant::instance_seconds), or less as its holder asked),
 //! at the end of its grant's
-//! ([`cumulative_seconds`](schema::ir::LeaseGrant::cumulative_seconds)), or at the work phase's
-//! end. The grant's time left is what it allows less what its leases have used, which each of its
-//! leases that is ready spends at once, so the core closes them all once it has run out, and its
-//! tick comes then ([`Core::tick_due`]).
+//! ([`cumulative_seconds`](schema::ir::LeaseGrant::cumulative_seconds)), at the work phase's
+//! end, or, for a call's, once the call's command has ended. The grant's time left is what it
+//! allows less what its holder's leases have used, which each of them that is ready spends at
+//! once, so the core closes them all once it has run out, and its tick comes then
+//! ([`Core::tick_due`]).
 //!
 //! A lease runs one command or transfer at a time, and each counts against its grant's `commands`
 //! once accepted, even if it fails to start. Of its time, it is busy from when the core accepts a
@@ -301,6 +306,12 @@ impl Leases {
 
     pub(super) fn all_ended(&self) -> bool {
         (self.0.iter()).all(|lease| matches!(lease.state, State::Ended { .. }))
+    }
+
+    /// Whether `holder` holds a lease that hasn't ended.
+    pub(super) fn holds(&self, holder: Caller) -> bool {
+        (self.0.iter())
+            .any(|lease| lease.holder == holder && !matches!(lease.state, State::Ended { .. }))
     }
 
     /// What `holder`'s leases of `grant` have used by `now`.

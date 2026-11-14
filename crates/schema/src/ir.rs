@@ -1,7 +1,7 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (one agent, its judges, with their [`Slot`]s, and the runners it
-//! leases), the [`Grant`]s each role holds, and the [`Score`], which judges what the agent
+//! A workflow is data: [`Role`]s (one agent, its judges, with their [`Slot`]s, and the runners
+//! they lease), the [`Grant`]s each role holds, and the [`Score`], which judges what the agent
 //! submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
@@ -29,9 +29,9 @@ pub use values::{
 /// A run has two phases. In the work phase, the run starts the agent, which works until it
 /// exits, finalizes a submission or reaches its deadline, calls the judges its grants name and
 /// leases their runners. In the final phase, which starts once the agent's sandbox and every call
-/// and lease it made are gone, the [`Score`] judge judges the selection: the finalized
-/// submission, else the latest one stored. Only the run, which keeps the submissions, lives
-/// through both phases.
+/// and lease it made, and every lease its calls made, are gone, the [`Score`] judge judges the
+/// selection: the finalized submission, else the latest one stored. Only the run, which keeps the
+/// submissions, lives through both phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
@@ -72,8 +72,9 @@ pub struct Role {
     /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The ops the role may use while it works; absent, none. Only the agent holds any: judge
-    /// calls, leases, and exactly one submit grant.
+    /// The ops the role may use while it works; absent, none. The agent holds judge calls,
+    /// leases, and exactly one submit grant; a judge may hold leases, which each of its calls
+    /// uses afresh, while its command runs; a runner holds none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<Grant>,
 }
@@ -306,7 +307,7 @@ pub enum Grant {
 }
 
 impl Grant {
-    /// The name the agent uses the grant by. Unique among the agent's grants.
+    /// The name its holder uses the grant by. Unique among the role's grants.
     pub fn name(&self) -> &Name {
         match self {
             Self::Judge(JudgeGrant { name, .. })
@@ -341,16 +342,20 @@ pub struct JudgeGrant {
     pub call_timeout_seconds: NonZeroU64,
 }
 
-/// Leases runners of one role: each lease is a fresh instance of the role, which runs the
-/// commands its holder sends, one at a time, until the holder closes it, its time runs out, or the
-/// work phase ends.
+/// Leases runners of one role, each a fresh instance of the role, which runs the commands its
+/// holder sends.
 ///
-/// A lease's time runs from when its runner is ready until it ends.
+/// A lease runs one command at a time, until the holder closes it, its time runs out, or the
+/// holder's work ends: the work phase, for the agent; its command, for a judge's call. Its time
+/// runs from when its runner is ready until it ends. A judge's limits are each call's: a call
+/// starts with all of them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseGrant {
     pub name: Name,
-    /// The runner role, which no other lease grant names, and whose image is no judge's.
+    /// The runner role, which no other lease grant names. An agent's runner has an image that no
+    /// judge has: a judge's files are in its image alone, so a runner that a judge trusts with
+    /// them runs that image, and any other runner a judge leases may share the agent's runner's.
     pub role: Name,
     /// The most leases open at once, each until its runner is gone.
     pub instances: NonZeroU32,

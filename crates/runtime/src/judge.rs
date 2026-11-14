@@ -1,18 +1,19 @@
 //! Judge calls, each a child of the run ([`child`](super::child)): [`call`] puts the call's
 //! payload in its slot ([`slot_payload`](schema::sandbox::slot_payload)), runs the judge's
-//! command until it exits, its timeout passes or the core stops the call, and [`outputs`]
-//! collects and parses the judge's result under its [`ResultSpec`](schema::ir::ResultSpec).
+//! command until it exits, its timeout passes or the core stops the call, relaying the ops of a
+//! judge that holds grants to the loop meanwhile, and [`outputs`] collects and parses the judge's
+//! result under its [`ResultSpec`](schema::ir::ResultSpec).
 
-use std::convert::Infallible;
 use std::path::Path;
 use std::time::Duration;
 use std::{fs, io};
 
 use decision::{Event, JobId, JudgeResult};
-use gateway::{Arrival, Put, Session};
+use gateway::{Arrival, IncomingOp, Put, Session};
+use schema::sandbox::op::OpReply;
 use schema::sandbox::{
-    RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir, pumpkin_dir,
-    result_file, slot_dir, slot_payload,
+    OpPayloadLimit, RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir,
+    pumpkin_dir, result_file, slot_dir, slot_payload,
 };
 use schema::workflow::{Judge, SlotId};
 use stdx::Context;
@@ -21,10 +22,10 @@ use super::child::{Child, Message, Report};
 use super::host::deadline;
 use super::record::Stored;
 use super::sandbox::{collect, launch};
-use super::{Clock, Host, Inbox};
+use super::{Clock, Host, Inbox, request};
 
-/// A judge call, as its thread drives it, in its child of the run, which takes no orders but the
-/// core's stop.
+/// A judge call, as its thread drives it, in its child of the run, whose orders are the core's
+/// replies to its ops.
 pub(super) struct Call {
     pub(super) job: JobId,
     /// The slot the payload is put in, whose judge's sandbox and command the call runs, as the
@@ -46,17 +47,19 @@ enum Ended {
 /// Runs `call` to its end in `child`, as a child of the run runs ([`child::run`]).
 ///
 /// [`child::run`]: super::child::run
-pub(super) fn run<H: Host>(call: &Call, child: &mut Child<'_, H, Infallible>) {
-    super::child::run(child, |child, session| judge(call, child, session));
+pub(super) fn run<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>) {
+    let workflow = child.sandboxes.workflow();
+    let role = call.slot.judge().role();
+    // A judge's ops carry no payload: it holds lease grants alone.
+    let ops = (workflow.lease_grants())
+        .any(|(_, grant)| grant.holder == role)
+        .then_some(OpPayloadLimit::NONE);
+    super::child::run(child, ops, |child, session| judge(call, child, session));
 }
 
 /// Runs `call` in `child`'s sandbox, whose session is `session`, and returns the report of its
 /// end.
-fn judge<H: Host>(
-    call: &Call,
-    child: &mut Child<'_, H, Infallible>,
-    session: &mut Session,
-) -> Event {
+fn judge<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>, session: &mut Session) -> Event {
     let job = call.job;
     let failed = |reason: String| Event::JudgeFailed { job, reason };
     if child.stopped() {
@@ -66,7 +69,7 @@ fn judge<H: Host>(
         Ok(timeout) => timeout,
         Err(reason) => return failed(reason),
     };
-    let ended = match wait(child, job, timeout) {
+    let ended = match wait(child, job, timeout, session) {
         Ok(ended) => ended,
         Err(reason) => return failed(format!("the judge's session ended: {reason}")),
     };
@@ -88,7 +91,7 @@ fn judge<H: Host>(
 /// then reports the start. Returns when the command's timeout ends, since the run started.
 fn start<H: Host>(
     call: &Call,
-    child: &Child<'_, H, Infallible>,
+    child: &Child<'_, H, OpReply>,
     session: &mut Session,
 ) -> Result<Duration, String> {
     let payload = call.payload.read()?;
@@ -111,46 +114,76 @@ fn start<H: Host>(
 }
 
 /// Waits for the command of job `job` to exit, until `timeout`, a time since the run started, or
-/// for a stop, and reports its exit or its timeout. Fails with the reason the session ended, if
-/// it ended first.
+/// for a stop, and reports its exit or its timeout; meanwhile relays each op its sandbox makes on
+/// `session` to the loop, and answers it with the reply the loop sends back. Fails with the reason
+/// the session ended, if it ended first.
 fn wait<H: Host>(
-    child: &mut Child<'_, H, Infallible>,
+    child: &mut Child<'_, H, OpReply>,
     job: JobId,
     timeout: Duration,
+    session: &mut Session,
 ) -> Result<Ended, String> {
-    match child.inbox.wait(timeout) {
-        None => {
-            child.event(Event::JudgeTimedOut { job });
-            Ok(Ended::Ran)
+    // The session hands out an op only once the one before it has been answered.
+    let mut asked: Option<IncomingOp> = None;
+    let by = deadline(&child.clock, timeout);
+    loop {
+        match child.inbox.wait(timeout) {
+            None => {
+                child.event(Event::JudgeTimedOut { job });
+                return Ok(Ended::Ran);
+            }
+            Some(Message::Stop) => return Ok(Ended::Stopped),
+            Some(Message::Order(reply)) => {
+                let Some(op) = asked.take() else {
+                    unreachable!(
+                        "job {}'s call was sent a reply to no op, though the loop replies only \
+                         to the op the call relayed, once",
+                        job.0
+                    )
+                };
+                if let Err(error) = session.reply(op, reply, by) {
+                    child.note(format!("job {}'s op's reply failed: {error}", job.0));
+                }
+            }
+            Some(Message::Session(Arrival::Op(incoming))) => {
+                let (request, unanswered) = request(incoming);
+                asked = Some(unanswered.into_incoming());
+                let (at, trees) = (child.clock.now(), session.trees());
+                child.report(Report::Op {
+                    at,
+                    job,
+                    request,
+                    trees,
+                });
+            }
+            Some(Message::Session(Arrival::Refused(refused))) => {
+                let message = refused.message();
+                if let Err(error) = session.refuse(refused, by) {
+                    child.note(format!("job {}'s op's refusal failed: {error}", job.0));
+                }
+                child.note(format!("job {}'s op was refused: {message}", job.0));
+            }
+            // The sandbox runs one command, so the exit is its.
+            Some(Message::Session(Arrival::Exited { process: _, status })) => {
+                child.event(Event::JudgeExited { job, status });
+                return Ok(Ended::Ran);
+            }
+            Some(Message::Session(Arrival::Ended { reason })) => return Err(reason),
+            // No type excludes a model request here, since one `Arrival` serves sessions with
+            // model requests and without.
+            Some(Message::Session(Arrival::ModelRequest(_))) => unreachable!(
+                "job {}'s session handed out a model request, though it was accepted without \
+                 model requests, so one breaks the protocol, which ends the session, and arrives \
+                 as its end",
+                job.0
+            ),
         }
-        Some(Message::Stop) => Ok(Ended::Stopped),
-        Some(Message::Order(never)) => match never {},
-        // The sandbox runs one command, so the exit is its.
-        Some(Message::Session(Arrival::Exited { process: _, status })) => {
-            child.event(Event::JudgeExited { job, status });
-            Ok(Ended::Ran)
-        }
-        Some(Message::Session(Arrival::Ended { reason })) => Err(reason),
-        // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
-        // the kind of session.
-        Some(Message::Session(Arrival::Op(_) | Arrival::Refused(_))) => unreachable!(
-            "job {}'s passive session handed out an op, though it was accepted without an op \
-             payload limit, and such a session ends on an op instead (`Registration::accept`)",
-            job.0
-        ),
-        // No type excludes a model request here, since one `Arrival` serves sessions with model
-        // requests and without.
-        Some(Message::Session(Arrival::ModelRequest(_))) => unreachable!(
-            "job {}'s session handed out a model request, though it was accepted without model \
-             requests, so one breaks the protocol, which ends the session, and arrives as its end",
-            job.0
-        ),
     }
 }
 
 /// Collects [`out_dir()`] into the record, and parses the result that `judge` wrote there.
 fn outputs<H: Host>(
-    child: &Child<'_, H, Infallible>,
+    child: &Child<'_, H, OpReply>,
     judge: &Judge,
     session: &mut Session,
 ) -> Result<JudgeResult, String> {
@@ -185,6 +218,6 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// The judge whose slot `slot` is, as the workflow of `child`'s sandboxes finds it.
-fn judge_of<'r, H: Host>(child: &Child<'r, H, Infallible>, slot: SlotId) -> &'r Judge {
+fn judge_of<'r, H: Host>(child: &Child<'r, H, OpReply>, slot: SlotId) -> &'r Judge {
     child.sandboxes.workflow().judge(slot.judge())
 }
