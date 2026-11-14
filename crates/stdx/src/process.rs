@@ -5,7 +5,7 @@
 //!
 //! A wait for whichever of several children exits first is [`wait_any`].
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -55,6 +55,24 @@ pub fn command(program: impl AsRef<OsStr>, environment: Environment) -> Command 
         Environment::Inherited => {}
     }
     command
+}
+
+/// The names of the variables of this process's environment that cargo sets for the package it
+/// builds, runs or tests: `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*`.
+///
+/// A `cargo` that this process runs is to get none of them: some build scripts, such as ring's,
+/// rerun when one of them changes, so a nested build with another package's would rebuild such a
+/// crate, and every crate that depends on it, and the next build outside it would again.
+pub fn cargo_package_vars() -> Vec<OsString> {
+    env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            name.to_str().is_some_and(|name| {
+                name.starts_with("CARGO_PKG_")
+                    || matches!(name, "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH")
+            })
+        })
+        .collect()
 }
 
 /// Runs `command` as [`Command::output`] does, with no standard input, in a process group of its

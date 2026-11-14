@@ -16,9 +16,9 @@ use serde_json::Value;
 use test_support::{docker_context, sandboxd};
 
 use super::{
-    INFO, Scratch, StandIn, Step, alive, build_first, check, containers, ended, engine, files,
-    invocation, machine, poll, ran, record, report, sandboxes, signal, through_shell, with_room,
-    workflow,
+    IMAGE, INFO, Scratch, StandIn, Step, alive, build_first, check, containers, ended, engine,
+    files, invocation, machine, poll, ran, record, report, sandboxes, signal, through_shell,
+    with_room, workflow,
 };
 
 /// `pumpkin wait` for the run that `output`, `pumpkin run`'s in `scratch`, named, once its
@@ -114,10 +114,11 @@ fn unbuilt(name: &str) -> String {
 }
 
 /// What becomes of a `pumpkin run` of the stand-in's `task` in a scratch directory of its own,
-/// `name`, against a stand-in engine of which `docker info` prints `info`.
-fn on_engine(name: &str, task: &str, info: &str) -> String {
+/// `name`, against a stand-in engine of which `docker info` prints `info`, and `docker image
+/// inspect` prints `image`.
+fn on_engine(name: &str, task: &str, info: &str, image: &str) -> String {
     let scratch = Scratch::new(name);
-    let stand_in = StandIn::with(&scratch, info);
+    let stand_in = StandIn::with(&scratch, info, image);
     let text = ran(
         stand_in.run(&format!("{task}/task.star"), &[]),
         &scratch.0,
@@ -137,9 +138,26 @@ fn does_not_start() {
     let mut steps = vec![Step::from(stand_in.run("lacking/task.star", &[]))];
     steps.push(Step::Ran(unlogged("unlogged")));
     steps.push(Step::Ran(unbuilt("unbuilt")));
+    // As an engine of the classic store reports its graph driver's status, and as one before
+    // Docker 28.0, or one that drops the experimental field, inspects an image.
+    let containerd = r#"["driver-type","io.containerd.snapshotter.v1"]"#;
+    let classic = INFO.replace(containerd, r#"["Backing Filesystem","extfs"]"#);
+    steps.push(Step::Ran(on_engine("classic", "stand-in", &classic, IMAGE)));
+    let descriptor = r#","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    steps.push(Step::Ran(on_engine(
+        "undescribed",
+        "stand-in",
+        INFO,
+        &IMAGE.replace(descriptor, ""),
+    )));
     // An engine that can't limit a container's swap, of a task whose image it would build.
     let unlimited = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
-    steps.push(Step::Ran(on_engine("unlimited", "unbuilt", &unlimited)));
+    steps.push(Step::Ran(on_engine(
+        "unlimited",
+        "unbuilt",
+        &unlimited,
+        IMAGE,
+    )));
     for (at, whom, signal, released) in [
         ("context", Whom::Driver, "KILL", false),
         ("context", Whom::Driver, "TERM", false),
@@ -167,10 +185,10 @@ fn does_not_start() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
@@ -191,6 +209,18 @@ fn does_not_start() {
             pumpkin: unbuilt/task.star: the task has 1 problem
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
             a record was made: false
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: the Docker engine of context `default` doesn't keep its images in the containerd image store, as `docker info` reports no `driver-type` of `io.containerd.snapshotter.v1`, so it can't find an image by its manifest's digest: turn the store on, as `"features": {"containerd-snapshotter": true}` in the engine's `daemon.json` does
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: run <id> records into <scratch>/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one","state":"failed"}
+            printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: reaching provider `local` failed: the Docker engine of context `default` can't enforce every limit a sandbox has: `docker info` reports SwapLimit false: use an engine that reports each true

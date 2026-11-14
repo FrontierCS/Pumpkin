@@ -10,29 +10,32 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::cell::Cell;
 use std::io::{Read as _, Write};
-use std::net::Shutdown;
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fs, panic};
 
 use expect_test::{Expect, expect};
 use gateway::{
-    Arrival, IncomingModelRequest, IncomingOp, Process, Put, Registration, Session, Sockets,
+    Arrival, GatewayAddress, GrantListener, IncomingModelRequest, IncomingOp, Process, Put,
+    Registration, Session, Sockets,
 };
 use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
 use schema::sandbox::op::{OpReply, OpsReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Hello, HelloReply, Launch, MAX_HELLO_BYTES, MAX_MODEL_REQUEST_BYTES,
+    HELLO_TIMEOUT, Hello, HelloReply, Launch, MAX_HELLO_BYTES, MAX_MODEL_REQUEST_BYTES,
     MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, PROTOCOL_VERSION,
-    RegistrationGrant, RelativePath, SOCKET_NAME, SocketDial, ToSandbox, file_mode, frame,
+    REGISTRATION_GRANT_BYTES, RegistrationGrant, RelativePath, SOCKET_NAME, SocketDial, TcpDial,
+    ToSandbox, file_mode, frame,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -53,6 +56,11 @@ type Opening = fn(&mut UnixStream);
 /// a slow link, whose end no event marks. A request by a [`hung`] deadline outlasts it, so no
 /// outcome rests on a margin; a bound of the gateway's own shorter than it would show.
 const PAUSE: Duration = Duration::from_millis(300);
+
+/// How long a grant listener gives a peer to say its hello, where a silent one shows the bound:
+/// each other peer says its hello as it dials, which the listener reads even once the bound has
+/// passed, so no outcome rests on a margin.
+const HELLO_BOUND: Duration = Duration::from_millis(500);
 
 /// A request's deadline that passes soon, while the fake sandbox waits for the gateway to hang
 /// up ([`until_hang_up`]).
@@ -1486,7 +1494,353 @@ fn hellos() {
     );
 }
 
+/// A grant listener on a port of the loopback that the kernel picks, which gives each peer
+/// `hello_timeout` to say its hello, and the address that the dial of the grant it issues first
+/// names.
+fn listen(hello_timeout: Duration) -> (GrantListener, SocketAddr) {
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let address = GatewayAddress::try_from(loopback).unwrap();
+    let listener = GrantListener::bind(&address, hello_timeout).unwrap();
+    let (TcpDial { gateway, grant: _ }, _) = listener.issue().unwrap();
+    (listener, gateway)
+}
+
+/// A fake sandbox's connection to `address`, whose reads give up after [`HUNG`], which only a
+/// test that hangs waits.
+fn dial(address: SocketAddr) -> TcpStream {
+    let connection = TcpStream::connect(address).unwrap();
+    connection.set_read_timeout(Some(HUNG)).unwrap();
+    connection
+}
+
+/// The gateway's answer to a hello on `connection`: its first frame, or `none` if it closes the
+/// connection first.
+fn answered(connection: &mut TcpStream) -> String {
+    match frame::read::<Value>(connection) {
+        Ok(Some((answer, _))) => answer.to_string(),
+        Ok(None) => "none".to_owned(),
+        Err(error) => format!("{:?}: {error}", error.kind()),
+    }
+}
+
+/// Dials `address`, says `hello`, and returns the gateway's answer.
+fn present(address: SocketAddr, hello: &Value) -> String {
+    let mut connection = dial(address);
+    frame::write(&mut connection, hello, &[]).unwrap();
+    answered(&mut connection)
+}
+
+/// A grant that `listener`, at `address`, issues, as the dial to that address that it issues,
+/// and its registration.
+fn issue(listener: &GrantListener, address: SocketAddr) -> (RegistrationGrant, Registration) {
+    let (TcpDial { gateway, grant }, registration) = listener.issue().unwrap();
+    assert_eq!(gateway, address, "the address the dial names");
+    (grant, registration)
+}
+
+/// The hello that presents `grant`.
+fn granted(grant: &RegistrationGrant) -> Value {
+    serde_json::to_value(hello(Some(grant.clone()))).unwrap()
+}
+
 /// The hello that presents `grant`, if any, and names no GPU.
 fn hello(grant: Option<RegistrationGrant>) -> Hello {
     Hello { grant, gpus: None }
+}
+
+/// The messages a fake sandbox named `name` sends in answer to the request on `stream`.
+type Named = fn(stream: u32, name: &str) -> Vec<Value>;
+
+/// Fails the request on `stream` with the sandbox's `name`.
+fn named(stream: u32, name: &str) -> Vec<Value> {
+    vec![json!({ "type": "failed", "stream": stream, "message": format!("I am {name}") })]
+}
+
+/// A fake sandbox, named as `said` says, that dials `address` once `pause` has passed and says
+/// `hello`, then tells `said` the gateway's answer, after its name. It then answers the session's
+/// first request with `answer`'s messages, and reads until the session ends.
+fn sandbox(
+    address: SocketAddr,
+    hello: Value,
+    pause: Duration,
+    answer: Named,
+    said: (Sender<String>, &'static str),
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        thread::sleep(pause);
+        let mut connection = dial(address);
+        frame::write(&mut connection, &hello, &[]).unwrap();
+        let opened = answered(&mut connection);
+        let (said, name) = said;
+        said.send(format!("{name}: {opened}")).unwrap();
+        if opened != r#"{"type":"accepted"}"# {
+            return;
+        }
+        let (request, _) = frame::read::<ToSandbox>(&mut connection).unwrap().unwrap();
+        for message in answer(stream_of(&request).unwrap(), name) {
+            frame::write(&mut connection, &message, &[]).unwrap();
+        }
+        while let Ok(Some(_)) = frame::read::<ToSandbox>(&mut connection) {}
+    })
+}
+
+/// Two fake sandboxes named `name` that each dial `address` and say `hello` at once, and tell
+/// `said` the gateway's answer ([`sandbox`]).
+fn twice(
+    address: SocketAddr,
+    hello: &Value,
+    said: &Sender<String>,
+    name: &'static str,
+) -> [JoinHandle<()>; 2] {
+    [(); 2].map(|()| {
+        let said = (said.clone(), name);
+        sandbox(address, hello.clone(), Duration::ZERO, named, said)
+    })
+}
+
+/// What came of `registration`'s accept by `by`, taking no ops or model requests, and of a
+/// freeze on the session it opens, which the sandbox answers as it chooses.
+fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
+    let (sender, _arrivals) = mpsc::channel();
+    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+    outcome(accepted.and_then(|mut session| session.freeze(hung())))
+}
+
+/// Hellos that the gateway at `address` refuses, as they are of another version or form, or
+/// present no grant of `listener`'s that opens a session; and the accept of a grant by a passed
+/// deadline.
+fn refusals(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+    let [(late, late_registration), (dropped, dropped_registration)] =
+        [(); 2].map(|()| issue(listener, address));
+    let waited = accept_and_freeze(late_registration, Deadline::after(Duration::ZERO));
+    drop(dropped_registration);
+    let foreign = granted(&RegistrationGrant::from([7; REGISTRATION_GRANT_BYTES]));
+    let hellos = [
+        ("no grant", json!({ "version": PROTOCOL_VERSION })),
+        (
+            "a later version",
+            json!({ "version": PROTOCOL_VERSION + 1 }),
+        ),
+        (
+            "a field this version lacks",
+            json!({ "version": PROTOCOL_VERSION, "later": true }),
+        ),
+        ("a grant it didn't issue", foreign),
+    ];
+    let mut lines: Vec<String> = (hellos.iter())
+        .map(|(name, hello)| format!("{name}: {}", present(address, hello)))
+        .collect();
+    lines.extend([
+        format!("an accept by a passed deadline: {waited}"),
+        format!("  its grant: {}", present(address, &granted(&late))),
+        format!(
+            "a grant whose registration dropped: {}",
+            present(address, &granted(&dropped))
+        ),
+    ]);
+    lines
+}
+
+/// A sandbox that presents at `address` a grant `listener` issued for it, after a pause, so that
+/// its accept most likely waits for it, which accepts it with ops; and what came of its session,
+/// in which it opens a payload-free op, and of its grant, presented again.
+fn awaited(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+    let (said, heard) = mpsc::channel();
+    let (grant, registration) = issue(listener, address);
+    let hello = granted(&grant);
+    let answer: Named = |s, _| vec![done(s).0, op(0, json!({ "kind": "ops" }), 0).0];
+    let sandbox = sandbox(address, hello.clone(), PAUSE, answer, (said, "awaited"));
+    let ops = Some(OpPayloadLimit::NONE);
+    let (sender, arrivals) = mpsc::channel();
+    let accepted = registration.accept(hung(), ops, false, sender, |arrival| arrival, || false);
+    let mut session = accepted.unwrap();
+    let frozen = outcome(session.freeze(hung()));
+    let mut lines = vec![format!("{}; freeze: {frozen}", heard.recv().unwrap())];
+    let op = next_op(&arrivals);
+    lines.push(format!("  its op: {:?}", op.op));
+    session.reply(op, no_grants(), hung()).unwrap();
+    drop(session);
+    sandbox.join().unwrap();
+    lines.push(format!("  its grant, again: {}", present(address, &hello)));
+    lines
+}
+
+/// Sandboxes `a` and `b`, which present at `address` the grants `listener` issued for them before
+/// either is accepted, each [`twice`], so that the gateway refuses one of each as presented
+/// already, which shows it holds the other before either accept; and what came of their sessions,
+/// accepted in reverse order, each of which reaches its own sandbox, which fails the gateway's
+/// first request with its name.
+fn early(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+    let (said, heard) = mpsc::channel();
+    let pairs = ["a", "b"].map(|name| {
+        let (grant, registration) = issue(listener, address);
+        let sandboxes = twice(address, &granted(&grant), &said, name);
+        (name, registration, sandboxes)
+    });
+    let mut refused: Vec<String> = (0..2).map(|_| heard.recv().unwrap()).collect();
+    refused.sort();
+    let mut lines = vec![format!("presented early: {}", refused.join("; "))];
+    for (name, registration, sandboxes) in pairs.into_iter().rev() {
+        let accepted = accept_and_freeze(registration, hung());
+        lines.push(format!("  {name} accepted, then a freeze: {accepted}"));
+        for sandbox in sandboxes {
+            sandbox.join().unwrap();
+        }
+    }
+    lines
+}
+
+/// A sandbox that presents at `address`, [`twice`], a grant `listener` issued for it, whose
+/// registration then drops unaccepted; and what came of its connections, and of its grant,
+/// presented again.
+fn dropped(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+    let (said, heard) = mpsc::channel();
+    let (grant, registration) = issue(listener, address);
+    let hello = granted(&grant);
+    let sandboxes = twice(address, &hello, &said, "c");
+    let refused = heard.recv().unwrap();
+    drop(registration);
+    let closed = heard.recv().unwrap();
+    for sandbox in sandboxes {
+        sandbox.join().unwrap();
+    }
+    vec![
+        format!("a registration dropped once presented: {refused}; then {closed}"),
+        format!("  its grant: {}", present(address, &hello)),
+    ]
+}
+
+/// A registration whose sandbox never presents its grant, and whose accept is stopped while it
+/// waits; and what came of the accept, whether it returned before its far-off deadline, and
+/// what came of its grant, presented after.
+fn stopped_accept(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+    let (grant, registration) = issue(listener, address);
+    let by = hung();
+    // Stopped at its third look, as it waits.
+    let looks = Cell::new(0);
+    let stopped = || {
+        looks.set(looks.get() + 1);
+        looks.get() > 2
+    };
+    let (sender, _) = mpsc::channel();
+    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, stopped);
+    let accepted = outcome(accepted.map(drop));
+    // `Other` alone would also come of a wait that reads the stop only at its deadline.
+    let returned = by.remaining().map_or("past", |_| "before");
+    vec![
+        format!("an accept stopped as it waits returned {returned} its deadline: {accepted}"),
+        format!("  its grant: {}", present(address, &granted(&grant))),
+    ]
+}
+
+/// A sandbox that presents at `address` the grant whose registration's accept, `waiting`, has
+/// waited as the other meetings ran; and what came of it.
+fn meet(address: SocketAddr, grant: &RegistrationGrant, waiting: JoinHandle<String>) -> String {
+    let (said, heard) = mpsc::channel();
+    let hello = granted(grant);
+    let sandbox = sandbox(address, hello, Duration::ZERO, named, (said, "meanwhile"));
+    let accepted = waiting.join().unwrap();
+    sandbox.join().unwrap();
+    let heard = heard.recv().unwrap();
+    format!("the accept waiting meanwhile: {heard}; then a freeze: {accepted}")
+}
+
+/// Holds as many silent connections to a listener of its own as it reads hellos from at once,
+/// and dials one more, which hears nothing.
+fn crowd() -> String {
+    let (_listener, address) = listen(HELLO_TIMEOUT);
+    let silent: Vec<TcpStream> = (0..100).map(|_| dial(address)).collect();
+    let heard = answered(&mut dial(address));
+    drop(silent);
+    format!("one past the hellos read at once: heard {heard}")
+}
+
+/// Says 101 hellos, one more than a listener of its own reads at once, each once the one before
+/// has its answer, which shows that a hello's place comes back once it is read; and their answers,
+/// a run of equal ones told once.
+fn turns() -> String {
+    let (_listener, address) = listen(HELLO_TIMEOUT);
+    let hello = json!({ "version": PROTOCOL_VERSION });
+    let mut heard: Vec<String> = (0..=100).map(|_| present(address, &hello)).collect();
+    heard.dedup();
+    format!("101 hellos, each in turn: {}", heard.join("; "))
+}
+
+#[test]
+fn gateway_addresses() {
+    check(
+        |_| {
+            let addresses = [
+                "127.0.0.1:0",
+                "10.0.0.7:7433",
+                "[::1]:7433",
+                "0.0.0.0:7433",
+                "[::]:7433",
+                "[::ffff:0.0.0.0]:7433",
+            ];
+            (addresses.iter())
+                .map(|address| {
+                    let parsed = GatewayAddress::try_from(address.parse::<SocketAddr>().unwrap());
+                    let parsed = parsed.map_or_else(|error| error, |_| "taken".to_owned());
+                    format!("{address}: {parsed}")
+                })
+                .collect()
+        },
+        &expect![[r#"
+            127.0.0.1:0: taken
+            10.0.0.7:7433: taken
+            [::1]:7433: taken
+            0.0.0.0:7433: the gateway's address 0.0.0.0:7433 is unspecified, which no sandbox can dial: name the address its sandboxes dial
+            [::]:7433: the gateway's address [::]:7433 is unspecified, which no sandbox can dial: name the address its sandboxes dial
+            [::ffff:0.0.0.0]:7433: the gateway's address [::ffff:0.0.0.0]:7433 is unspecified, which no sandbox can dial: name the address its sandboxes dial"#]],
+    );
+}
+
+#[test]
+fn registrations() {
+    check(
+        |_| {
+            let (listener, address) = listen(HELLO_BOUND);
+            let mut silent = dial(address);
+            // An accept that waits while the meetings run, so that the grant `awaited`'s sandbox
+            // presents must reach its own accept, of two waiting.
+            let (meanwhile_grant, meanwhile) = issue(&listener, address);
+            let waiting = thread::spawn(|| accept_and_freeze(meanwhile, hung()));
+            let mut lines = refusals(&listener, address);
+            for meeting in [awaited, early, dropped, stopped_accept] {
+                lines.extend(meeting(&listener, address));
+            }
+            lines.push(meet(address, &meanwhile_grant, waiting));
+            let untold = answered(&mut silent);
+            lines.push(format!("the peer silent from the first: heard {untold}"));
+            drop(listener);
+            let refused = TcpStream::connect(address).map(drop).map_err(|e| e.kind());
+            lines.push(format!("a dial once the listener dropped: {refused:?}"));
+            lines.extend([crowd(), turns()]);
+            lines
+        },
+        &expect![[r#"
+            no grant: {"message":"the hello presents no registration grant: expected the one the gateway issued for the sandbox, at an address that several sandboxes share","type":"refused"}
+            a later version: {"message":"sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
+            a field this version lacks: {"message":"the hello isn't of sandbox protocol 0's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}
+            a grant it didn't issue: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            an accept by a passed deadline: TimedOut: no sandbox presented the registration grant by the deadline: expected the sandbox it was issued for to present it while the deadline lasts
+              its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            a grant whose registration dropped: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            awaited: {"type":"accepted"}; freeze: ok
+              its op: Ops
+              its grant, again: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            presented early: a: {"message":"the registration grant was presented already, on another connection: expected it once, as a grant opens one session","type":"refused"}; b: {"message":"the registration grant was presented already, on another connection: expected it once, as a grant opens one session","type":"refused"}
+              b accepted, then a freeze: Other: I am b
+              a accepted, then a freeze: Other: I am a
+            a registration dropped once presented: c: {"message":"the registration grant was presented already, on another connection: expected it once, as a grant opens one session","type":"refused"}; then c: none
+              its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            an accept stopped as it waits returned before its deadline: Other: the accept was stopped before a sandbox presented the registration grant: expected the sandbox it was issued for to present it before the stop
+              its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            the accept waiting meanwhile: meanwhile: {"type":"accepted"}; then a freeze: Other: I am meanwhile
+            the peer silent from the first: heard none
+            a dial once the listener dropped: Err(ConnectionRefused)
+            one past the hellos read at once: heard none
+            101 hellos, each in turn: {"message":"the hello presents no registration grant: expected the one the gateway issued for the sandbox, at an address that several sandboxes share","type":"refused"}"#]],
+    );
 }

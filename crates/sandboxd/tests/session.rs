@@ -1,5 +1,6 @@
 //! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
-//! sandbox's own ([`Meeting`]). `sandboxd` runs here as an ordinary process, not as a sandbox's first process, and a temporary directory stands in for
+//! sandbox's own, or at a TCP address on the loopback ([`Meeting`]). `sandboxd` runs here as an
+//! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
 //! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
 //! `/pumpkin`, nor the model endpoint, at a port of the sandbox's own loopback: the Docker
 //! provider's tests make ops and model requests, in real sandboxes. A fake gateway sends
@@ -15,6 +16,9 @@
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io::{self, Read};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -24,13 +28,14 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Process, Put, Session, Sockets};
+use gateway::{Arrival, GatewayAddress, GrantListener, Process, Put, Session, Sockets};
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
 use schema::sandbox::frame::MAX_BODY_BYTES;
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RelativePath, Root,
-    SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, frame,
+    Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, PROTOCOL_VERSION,
+    RelativePath, Root, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, TcpDial, ToSandbox, dir_mode,
+    file_mode, frame,
 };
 use serde_json::{Value, json};
 use stdx::process::Environment;
@@ -40,11 +45,18 @@ use test_support::hung;
 /// to find the programs they run.
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
+/// A registration grant that no gateway of the tests issues.
+const GRANT: &str = "00112233445566778899aabbccddeeff";
+
 /// Where a test's `sandboxd` meets the gateway.
 #[derive(Clone, Copy)]
 enum Meeting {
-    /// At a socket of the sandbox's own.
+    /// At a socket of the sandbox's own, with [`GRANT`] in `sandboxd`'s environment all the same,
+    /// which a command shows it doesn't get.
     Socket,
+    /// At a grant listener's address on the loopback, as a provider starts `sandboxd` for the
+    /// dial that the listener issued: with its address and its grant ([`TcpDial`]).
+    Tcp,
 }
 
 /// What issued a sandbox's meeting, which lasts as long as the sandbox.
@@ -54,6 +66,8 @@ enum Meeting {
 )]
 enum Gateway {
     Sockets(Sockets),
+    /// The listener, and the address it listens at.
+    Tcp(GrantListener, SocketAddr),
 }
 
 /// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
@@ -89,8 +103,20 @@ impl Sandbox {
                 let sockets = Sockets::create(root.join("sockets")).unwrap();
                 let name = Name::try_from("sandbox".to_owned()).unwrap();
                 let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
-                sandboxd.arg(dir.join(SOCKET_NAME));
+                sandboxd
+                    .arg(dir.join(SOCKET_NAME))
+                    .env(SANDBOXD_GRANT, GRANT);
                 (Gateway::Sockets(sockets), registration)
+            }
+            Meeting::Tcp => {
+                let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+                let address = GatewayAddress::try_from(loopback).unwrap();
+                let listener = GrantListener::bind(&address, HELLO_TIMEOUT).unwrap();
+                let (TcpDial { gateway, grant }, registration) = listener.issue().unwrap();
+                sandboxd
+                    .arg(gateway.to_string())
+                    .env(SANDBOXD_GRANT, grant.digits());
+                (Gateway::Tcp(listener, gateway), registration)
             }
         };
         let sandboxd = sandboxd.spawn().unwrap();
@@ -227,6 +253,19 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
+/// An address on the loopback, at a port the kernel picked, where nothing listens.
+fn unlistened() -> SocketAddr {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    // A child that another test spawns holds a copy of each descriptor until it executes its
+    // program, which keeps a dropped listener listening, so a dial there would meet it, then a
+    // reset, and a listen there would fail. Shut down for reads, a listener stops listening and
+    // frees its port, in every copy, at once.
+    let socket = TcpStream::from(OwnedFd::from(listener));
+    socket.shutdown(Shutdown::Read).unwrap();
+    address
+}
+
 /// The IDs of the processes whose working directory is in the sandbox at `root`, as the
 /// commands started there and whatever they start have, polled every 10 ms until `done` holds
 /// of them or `timeout` passes. A process that has exited has no working directory, so a
@@ -318,8 +357,9 @@ impl Sandbox {
 
 #[test]
 fn gpus() {
-    // A stand-in that names two GPUs, as `nvidia-smi` does, if asked as `sandboxd` asks.
-    let named = r#"[ "$*" = "--query-gpu=name --format=csv,noheader" ] || exit 1
+    // A stand-in that names two GPUs, as `nvidia-smi` does, if asked as `sandboxd` asks, without
+    // the grant.
+    let named = r#"[ "$*" = "--query-gpu=name --format=csv,noheader" ] && [ -z "$SANDBOXD_GRANT" ] || exit 1
 printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
     let long = format!(
         "for i in $(seq 12); do echo 'NVIDIA {}'; done",
@@ -327,6 +367,7 @@ printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
     );
     let cases = [
         ("named, at a socket", Meeting::Socket, Some(named)),
+        ("named, over TCP", Meeting::Tcp, Some(named)),
         ("none on PATH", Meeting::Socket, None),
         (
             "failing",
@@ -349,6 +390,7 @@ printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
     });
     let expected = expect![[r#"
         named, at a socket: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
+        named, over TCP: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
         none on PATH: None
         failing: None
         naming none: None
@@ -368,7 +410,22 @@ fn judge() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+    check(
+        Meeting::Tcp,
+        judging,
+        &expect![[r#"
+            exited: Code(3)
+            out/empty/
+            out/evidence/payload: 2109497 bytes
+            out/result.json: {"bytes": 2109497}
+            payload collected intact: true
+            log/1.stderr: warning
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -390,7 +447,7 @@ fn judging(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE in $(pwd)"
+        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} in $(pwd)"
         echo warning >&2
         exit 3"#;
     let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
@@ -820,6 +877,68 @@ fn hello_answers() {
 }
 
 #[test]
+fn over_tcp() {
+    check(
+        Meeting::Tcp,
+        |sandbox| {
+            let Gateway::Tcp(_, address) = sandbox.gateway else {
+                panic!("the sandbox was to meet the gateway over TCP");
+            };
+            let unissued = sandboxd(&[address.to_string().as_ref()], Some(OsStr::new(GRANT)));
+            let refused = ended(unissued).replace(&address.to_string(), "$GATEWAY");
+            vec![format!("a grant the gateway didn't issue: {refused}")]
+        },
+        &expect![[r#"
+            a grant the gateway didn't issue: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
+fn refused_before_the_session() {
+    check(
+        Meeting::Socket,
+        |_| {
+            // Never accepted from: a `sandboxd` that dialed it would wait on, unanswered.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = listener.local_addr().unwrap().to_string();
+            let closed = unlistened().to_string();
+            let (short, not_utf8) = (OsStr::new("0123456789abcdef"), OsStr::from_bytes(b"\xff"));
+            let cases = [
+                ("a relative socket path", "gateway.sock", None),
+                ("a host's name", "localhost:7433", None),
+                ("no grant", &at, None),
+                ("a grant too short", &at, Some(short)),
+                ("a grant not UTF-8", &at, Some(not_utf8)),
+                ("nothing listening", &closed, Some(OsStr::new(GRANT))),
+            ];
+            let mut lines: Vec<String> = (cases.into_iter())
+                .map(|(case, gateway, grant)| {
+                    let ended = ended(sandboxd(&[gateway.as_ref()], grant));
+                    format!("{case}: {}", ended.replace(&closed, "$CLOSED"))
+                })
+                .collect();
+            listener.set_nonblocking(true).unwrap();
+            lines.push(format!("dialed: {}", listener.accept().is_ok()));
+            lines
+        },
+        &expect![[r#"
+            a relative socket path: exit status: 1: sandboxd: can't parse `gateway`, `gateway.sock` is neither a Unix socket's absolute path nor a TCP address: give one, such as `/run/gateway.sock` or `192.0.2.1:7433`: see `sandboxd --help`
+            a host's name: exit status: 1: sandboxd: can't parse `gateway`, `localhost:7433` is neither a Unix socket's absolute path nor a TCP address: give one, such as `/run/gateway.sock` or `192.0.2.1:7433`: see `sandboxd --help`
+            no grant: exit status: 1: sandboxd: SANDBOXD_GRANT is not set: set it to the registration grant issued for the sandbox, which a sandboxd that meets its gateway over TCP presents
+            a grant too short: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            a grant not UTF-8: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            nothing listening: exit status: 1: sandboxd: connecting to the gateway at $CLOSED failed: Connection refused (os error 111)
+            dialed: false
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
 fn reading_while_collecting() {
     check(
         Meeting::Socket,
@@ -925,7 +1044,7 @@ fn accepting_gateway(socket: &Path) -> (UnixStream, Child) {
 fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     let gateway = UnixListener::bind(socket).unwrap();
     gateway.set_nonblocking(true).unwrap();
-    let sandboxd = sandboxd(&[socket.as_ref()]);
+    let sandboxd = sandboxd(&[socket.as_ref()], None);
     // A `sandboxd` that never connects fails the test rather than hang it.
     let by = hung();
     let mut connection = loop {
@@ -948,10 +1067,14 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     (connection, sandboxd, hello)
 }
 
-/// A `sandboxd` run with `args`, with its standard error piped.
-fn sandboxd(args: &[&OsStr]) -> Child {
+/// A `sandboxd` run with `args`, with `grant` in its environment's `SANDBOXD_GRANT`, if any, and
+/// its standard error piped.
+fn sandboxd(args: &[&OsStr], grant: Option<&OsStr>) -> Child {
     let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
     sandboxd.args(args).stderr(Stdio::piped());
+    if let Some(grant) = grant {
+        sandboxd.env(SANDBOXD_GRANT, grant);
+    }
     sandboxd.spawn().unwrap()
 }
 

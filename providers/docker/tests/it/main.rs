@@ -810,7 +810,7 @@ fn ready() {
         "a report of {reported}, and the classes {}",
         ready["classes"]
     );
-    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and the classes {"container":{"offers":{"cpu_features":"<the host's, with sse2: true>","cpu_millis":"<the host's>","cpu_model":null,"gpu":null,"memory_bytes":"<the host's>"},"startup_seconds":540}}"#]]
+    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "platform", "security"], and the classes {"container":{"offers":{"cpu_features":"<the host's, with sse2: true>","cpu_millis":"<the host's>","cpu_model":null,"gpu":null,"memory_bytes":"<the host's>"},"startup_seconds":540}}"#]]
     .assert_eq(&ready);
 }
 
@@ -992,7 +992,7 @@ fn failed_start() {
             missing: publishing `sandboxd` failed: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
             not_utf8: publishing `sandboxd` failed: <dir>/sandboxd� can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8
             unexecutable: `docker start …: fix what Docker reports
-            unpulled: the engine of context `<context>` has no image sha256:0000000000000000000000000000000000000000000000000000000000000000: build or load it there first, as the provider pulls none
+            unpulled: the engine of context `<context>` has no image sha256:0000000000000000000000000000000000000000000000000000000000000000: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it
             left: []"#]],
     );
 }

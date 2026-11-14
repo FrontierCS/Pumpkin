@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
@@ -23,6 +23,7 @@ use std::{fs, iter};
 
 use decision::lasts;
 use expect_test::{Expect, expect};
+use gateway::{GatewayAddress, GrantListener};
 use provider::{
     Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation, Role,
     RunTag, SandboxId, SandboxdRef, Sweep,
@@ -30,6 +31,7 @@ use provider::{
 use route::Serving;
 use runtime::{Ending, Host, Record, Recorded, Run, System, new_id};
 use schema::ir::{self, Image, ModelName};
+use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -143,6 +145,7 @@ impl Provider for Interrupting<'_> {
     fn meeting(&self) -> Meeting<'_> {
         match self.sim.meeting() {
             Meeting::Local(_) => Meeting::Local(self),
+            Meeting::Private(_) => Meeting::Private(self),
         }
     }
 
@@ -184,9 +187,10 @@ fn interrupting<'a>(
         .collect()
 }
 
-/// Executes `run` with `sandboxd`, interrupted `at` a step, if given, by the [`Interrupting`]
-/// providers it was prepared on: what `execute` returns, and for an interrupted run, whether it
-/// started, whether it returned within [`WAITED`], and what it published.
+/// Executes `run` with `sandboxd`, and a grant listener on the loopback if one of `providers` is
+/// private, interrupted `at` a step, if given, by the [`Interrupting`] providers it was prepared
+/// on: what `execute` returns, and for an interrupted run, whether it started, whether it returned
+/// within [`WAITED`], and what it published.
 fn interrupted_at(
     run: Run<'_, impl Host>,
     providers: &[(&'static str, &Sim)],
@@ -194,13 +198,20 @@ fn interrupted_at(
     at: Option<At>,
 ) -> Vec<String> {
     let record = run.dir().to_owned();
+    let private = (providers.iter())
+        .any(|(_, provider)| matches!(provider.meeting(), Meeting::Private(_)))
+        .then(|| {
+            let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let address = GatewayAddress::try_from(loopback).unwrap();
+            GrantListener::bind(&address, HELLO_TIMEOUT).unwrap()
+        });
     let waited = Deadline::after(Duration::from_secs(WAITED));
     let mut ran = false;
     let executed = thread::scope(|scope| {
         if at == Some(At::AgentStarted) {
             scope.spawn(|| interrupt_once_started(&record));
         }
-        run.execute(Path::new(sandboxd), || {
+        run.execute(Path::new(sandboxd), private.as_ref(), || {
             ran = true;
             Ok(())
         })
@@ -364,6 +375,7 @@ fn declared(record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
     let recorded: Value = serde_json::from_str(&recorded).unwrap();
     let reach = |provider: &Sim| match provider.meeting() {
         Meeting::Local(_) => "local",
+        Meeting::Private(_) => "private",
     };
     let expected = (providers.iter()).map(|(name, provider)| {
         let mut ready = json!(provider.ready());
@@ -1141,7 +1153,7 @@ fn interrupted_publishing_image() {
         was interrupted by SIGTERM
         it started: false
         it returned within 60 s: true
-        it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"]
+        it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111"]
         record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
         payloads hold: []
         provider.json is what the provider declared: true
@@ -1166,7 +1178,7 @@ fn interrupted_agent_start() {
             was interrupted by SIGTERM
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/hung", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            it published: ["sandboxd /sim/hung", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
@@ -1200,7 +1212,7 @@ fn interrupted_judge_start() {
             was interrupted by SIGTERM
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
@@ -1238,7 +1250,7 @@ fn interrupted_working() {
             was interrupted by SIGTERM
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: []
@@ -1273,7 +1285,7 @@ fn interrupted_lease_start() {
             was interrupted by SIGTERM
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
+            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
             record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, leases/0/console.txt, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"simulated","report":null}
@@ -1311,7 +1323,7 @@ fn interrupted_last_batch() {
             finished, with score None
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: []
@@ -1771,9 +1783,10 @@ fn there(sim: Sim) -> Sim {
 // A run on two simulated providers, the agent on `here` and the judges on [`there`], the train
 // judge, which needs the CPU model [`BRIEF`], in that class, whose agent and judges share
 // an image, which each provider publishes itself, and each refuses a reference that the other
-// published: the agent makes a judge call and a final submission, which the final judge scores,
-// each sandbox is created in its role's class, and each provider is left with none of the run's
-// sandboxes; the record says where each role is placed, and each provider's reach.
+// published; `there` is private, so its sandboxes dial the run's grant listener, and `here`'s dial
+// their sockets: the agent makes a judge call and a final submission, which the final judge
+// scores, each sandbox is created in its role's class, and each provider is left with none of the
+// run's sandboxes; the record says where each role is placed, and each provider's reach.
 #[test]
 fn spans_providers() {
     let argv = [
@@ -1785,7 +1798,7 @@ fn spans_providers() {
     let mut ir = ops_workflow(&argv, 30);
     ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
     ir["roles"][0]["image"] = ir["roles"][1]["image"].clone();
-    let (here, there) = (Sim::new().named("here"), there(Sim::new()));
+    let (here, there) = (Sim::new().named("here"), there(Sim::new().private()));
     let providers = [("here", &here), ("there", &there)];
     check(
         &System,
@@ -1822,12 +1835,12 @@ fn spans_providers() {
             {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
             its last record came before the agent's teardown was to end
             socket directories left: false
-            here published: ["sandboxd /sim/sandboxd", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             here: their directory's mode at each create: ["700"]
             here: the class at each create: ["sim"]
             here listed once it ended: []
-            there published: ["sandboxd /sim/sandboxd", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            there: their directory's mode at each create: ["700", "700"]
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there: their directory's mode at each create: []
             there: the class at each create: ["brief", "sim"]
             there listed once it ended: []"#]],
     );
@@ -1874,7 +1887,7 @@ fn sweeps_each_provider() {
             here: their directory's mode at each create: ["700"]
             here: the class at each create: ["sim"]
             here listed once it ended: ["sim-1"]
-            there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6c6f73740000000000000000000000000000000000000000000000", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6c6f73740000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             there: their directory's mode at each create: ["700"]
             there: the class at each create: ["sim"]
             there listed once it ended: []"#]],
@@ -1955,11 +1968,11 @@ fn watches_each_provider() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":12}
             its last record came before the agent's teardown was to end
             socket directories left: false
-            here published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
+            here published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
             here: their directory's mode at each create: ["700", "700"]
             here: the class at each create: ["sim", "sim"]
             here listed once it ended: []
-            there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             there: their directory's mode at each create: ["700"]
             there: the class at each create: ["brief"]
             there listed once it ended: []"#]],
@@ -3241,7 +3254,7 @@ fn holds_until_its_end() {
         Err(error) => format!("refused: {error}"),
     };
     let execute = |run: Run<'_, System>| {
-        let executed = run.execute(Path::new(SANDBOXD), || Ok(()));
+        let executed = run.execute(Path::new(SANDBOXD), None, || Ok(()));
         match executed {
             Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
             Err(stopped) => stopped.to_string(),

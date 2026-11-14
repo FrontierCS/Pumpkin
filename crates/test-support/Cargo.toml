@@ -9,6 +9,16 @@ publish.workspace = true
 test = false
 doctest = false
 
+[[bin]]
+name = "aws"
+path = "src/bin/aws.rs"
+test = false
+
+[[bin]]
+name = "instance"
+path = "src/bin/instance.rs"
+test = false
+
 [dependencies]
 gateway = { path = "../gateway" }
 provider = { path = "../provider" }

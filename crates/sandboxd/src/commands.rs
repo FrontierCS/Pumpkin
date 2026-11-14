@@ -21,7 +21,7 @@ use std::process::{self, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::{io, thread};
 
-use schema::sandbox::{ExitStatus, FromSandbox, Launch};
+use schema::sandbox::{ExitStatus, FromSandbox, Launch, SANDBOXD_GRANT};
 use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
 
@@ -194,6 +194,7 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
     let child = stdx::process::command(program, Environment::Inherited)
         .args(argv.args())
+        .env_remove(SANDBOXD_GRANT)
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
         .current_dir(cwd.as_str())
         .stdin(stdin)

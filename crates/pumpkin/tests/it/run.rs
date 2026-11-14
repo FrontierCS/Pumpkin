@@ -12,16 +12,17 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread::{self, JoinHandle};
-use std::{env, fs};
+use std::{env, fs, iter};
 
 use expect_test::{Expect, expect};
 use provider::{RunTag, Sweep as _};
+use schema::ec2_boot::Start;
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
 use test_support::{BUSYBOX, WORKFLOW, docker_context, files, sandboxd, standard_outputs};
 
 use super::{
-    LOCAL, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first, check, containers, cpu_list,
+    EC2, LOCAL, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first, check, containers, cpu_list,
     docker_table, engine, invocation, ledger, machine, machine_cores, machine_cpus, ran, record,
     report, siblings, through_shell, with_room, workflow,
 };
@@ -167,9 +168,10 @@ fn usage() {
 
                     --sandboxd <path>
                         The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
-                        builds it.
+                        builds it, with the static ec2-boot beside it, which an ec2 provider's
+                        instances boot with.
                         Default: the one beside this pumpkin, where `cargo xtask install` puts
-                        one
+                        both
 
                     --wait
                         Follow the run to its end, as `pumpkin wait` does, and print its
@@ -221,8 +223,9 @@ fn usage() {
               sandboxes, and its outcome.json says which signal interrupted it. A signal
               ignored as `run` starts stays ignored. SIGKILL to the driver leaves the run
               lost, with its sandboxes, which `pumpkin cancel` removes: its containers,
-              labelled pumpkin.run=<id>, and its socket directories in the record's sockets/,
-              which `cancel` removes too.
+              labelled pumpkin.run=<id>, and its EC2 instances, tagged pumpkin:run=<id>, which
+              end at the run's hard end all the same; and its socket directories in the
+              record's sockets/, which `cancel` removes too.
             $ pumpkin wait -h
             exit status: Some(0)
             printed:
@@ -306,7 +309,7 @@ fn usage() {
               the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
               `pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
               signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
-              provider that it ran on, as `pumpkin reap --help` says,
+              provider that it ran on, Docker or EC2, as `pumpkin reap --help` says,
               and prints its outcome.json, then says how the run ended, as `pumpkin wait`
               does.
             $ pumpkin reap --help
@@ -335,19 +338,23 @@ fn usage() {
                    others all the same.
                 2  A usage error.
                 3  Only that a provider of a run, which `reap` names, can't be reached, as
-                   when its Docker context is gone, so what the run left there may remain.
+                   when its Docker context is gone, or the configuration that ran the run no
+                   longer names it, so what the run left there may remain.
 
               Of each run whose driver has ended, `reap` deletes the sandboxes of the run that
               remain on each provider that it ran on, such as one that a create given up at
               its deadline made: on the Docker engine of the context that the record's
-              provider.json names, the containers labelled pumpkin.run=<id>. It removes the
-              run's socket directories, in the record's sockets/, and a lost run's record it
-              marks failed, as its driver ended without an outcome.json. It leaves a live run
-              to its driver: `pumpkin cancel` stops one.
+              provider.json names, the containers labelled pumpkin.run=<id>; and on each
+              provider of kind ec2, as the configuration that ran the run names it, the one
+              its record.json's flags name or else the default, the EC2 instances tagged
+              pumpkin:run=<id>. It removes the run's socket directories, in the record's
+              sockets/, and a lost run's record it marks failed, as its driver ended without
+              an outcome.json. It leaves a live run to its driver: `pumpkin cancel` stops one.
 
               Each sandbox that `reap` removes it notes in the record's reaps.jsonl, with the
               time; and each that the record holds undeleted, but that its provider no longer
-              lists, it says, and notes there as gone.
+              lists, as when the configuration now points to another region, it says, and
+              notes there as gone.
             $ pumpkin help --help
             exit status: Some(0)
             printed:
@@ -374,14 +381,30 @@ fn usage() {
               pumpkin.toml, the machine's configuration, which every `pumpkin run` and
               `pumpkin build` reads: the file that --config names,
               $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
-              Every key is required, but those of the [upstreams.<name>] tables, and any
-              other key is refused.
+              Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
+              and any other key is refused.
 
-              Example:
+              Example, of a machine whose runs go to EC2:
                 [docker]
                 context = "default"
 
-                [providers.local.docker]
+                [providers.aws.ec2]
+                region = "us-west-1"
+                repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
+
+                [providers.aws.ec2.timer]
+                group = "pumpkin"
+                role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer"
+
+                [providers.aws.ec2.classes.judge]
+                template = "lt-0123456789abcdef0"
+                version = 1
+                vcpus = 8
+                memory_mib = 16384
+                cpu_features = ["avx2"]
+
+                [gateway]
+                private = "172.31.0.10:7433"
 
                 [upstreams.gateway]
                 url = "https://gateway.example/v1"
@@ -398,10 +421,41 @@ fn usage() {
               roles on, as provider <name>, of kind <kind>, whose table holds that kind's own
               settings:
                 docker        Sandboxes on the engine of [docker]; it takes no settings. A
-                              provider of this kind is the configuration's one provider. Its
-                              one class, `container`, offers the CPUs that sandboxes may be
-                              given, the machine's memory, the flags that /proc/cpuinfo lists
-                              for every CPU, no CPU model and no GPU.
+                              provider of this kind is the configuration's one provider, as
+                              a machine runs its roles either on its own engine or on others,
+                              of kind ec2. Its one class, `container`, offers the CPUs that
+                              sandboxes may be given, the machine's memory, the flags that
+                              /proc/cpuinfo lists for every CPU, no CPU model and no GPU.
+                ec2           Sandboxes on EC2 instances of their own, in the envelope that
+                              its settings name, which pull their images from it, pushed
+                              there from the engine of [docker]; they dial [gateway]'s
+                              private address. It runs `aws`, AWS CLI v2, from PATH, with the
+                              credentials that `aws` finds, such as the instance's role.
+                              Its settings:
+                  region        The envelope's AWS region, which every call names.
+                  classes       Each class of sandbox, by its name; one at least: its
+                                `template`, the ID of its launch template, and `version`, the
+                                template's version that its instances launch from; `vcpus`
+                                and `memory_mib`, its instance type's CPUs and memory, in
+                                MiB, of which a role gets all the CPUs and all the memory but
+                                a share the instance keeps; and `cpu_features`, its CPU's
+                                flags, and `cpu_model`, its CPU's model, as /proc/cpuinfo
+                                names them: without `cpu_features`, the class states no
+                                flag, and without `cpu_model`, no model, and a class that
+                                states a model is offered only to roles that need it; and
+                                `usd_per_hour`, what an instance costs an hour, if given.
+                  repositories  The envelope's ECR repositories: `roles`, of the roles'
+                                images, and `sandboxd`, of the images that hold sandboxd.
+                  timer         The sandboxes' timer, which terminates each instance at its
+                                run's hard end: `group`, its EventBridge Scheduler schedule
+                                group, and `role_arn`, the ARN of the role that its schedules
+                                terminate instances with.
+
+              [gateway], where the gateway meets the sandboxes that dial it over a network:
+                private       The address, ip:port, that the sandboxes of an ec2 provider
+                              dial: one of this machine's on the envelope's network, at a
+                              port that its security group admits. A run listens there while
+                              it places a role on such a provider, so one such run at a time.
 
               [upstreams.<name>], for each upstream that a workflow's model route may reach:
                 url           The base URL of its API: https, or http to a loopback IP
@@ -724,10 +778,10 @@ fn modes() {
             $ umask 002 && PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs shared/runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/shared/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/shared/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/shared/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/shared/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true
             shared: 755
             shared/runs: 755
@@ -743,10 +797,10 @@ fn modes_under_a_stricter_umask() {
             $ umask 077 && PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs shared/runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/shared/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/shared/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/shared/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/shared/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true
             shared: 700
             shared/runs: 700
@@ -821,18 +875,18 @@ fn ancestors() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs sticky/runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/sticky/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/sticky/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/sticky/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/sticky/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs link/runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/own/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/own/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/own/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/link/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true"#]],
     );
     for runs in ["shared/runs", "shared/sealed"] {
@@ -853,10 +907,10 @@ fn ancestors_writable_by_their_group() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs private/runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/private/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/private/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/private/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/private/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true"#]]
     } else {
         expect![[r#"
@@ -1106,6 +1160,202 @@ fn refusals() {
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshot"
 )]
+fn ec2() {
+    let scratch = Scratch::new("ec2");
+    let _stand_in = StandIn::new(&scratch);
+    // Beside `sandboxd`, where the provider finds the boot that its image holds too.
+    scratch.write_sandboxd("ec2-boot");
+    std::os::unix::fs::symlink(test_support::aws(), scratch.0.join("bin/aws")).unwrap();
+    let config = |gateway: &str| format!("{}\n{EC2}\n{gateway}", docker_table("default"));
+    let mut misfit = workflow("", &["true"]);
+    misfit["roles"][1]["needs"]["gpu"] = json!({ "count": 1, "model": "NVIDIA H100 80GB HBM3" });
+    misfit["roles"][2]["needs"]["memory_bytes"] = json!(1u64 << 40);
+    scratch.write_task("toobig", &misfit);
+    let (here, afar) = (
+        "[gateway]\nprivate = \"127.0.0.1:0\"\n",
+        "[gateway]\nprivate = \"192.0.2.1:7433\"\n",
+    );
+    // A repository the envelope lacks, so that `aws` can't be reached.
+    let absent = |config: String| config.replace("\"pumpkin/roles\"", "\"pumpkin/absent\"");
+    scratch.write("ec2.toml", &config(here));
+    scratch.write("afar.toml", &config(afar));
+    scratch.write("ungated.toml", &config(""));
+    let listening = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let taken = listening.local_addr().unwrap().to_string();
+    let at_taken = format!("[gateway]\nprivate = \"{taken}\"\n");
+    scratch.write("taken.toml", &config(&at_taken));
+    scratch.write("absent.toml", &absent(config(here)));
+    let run_of = |entry: &str, runs: &str, config: &str| {
+        let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
+        command.args([
+            "--wait",
+            "--runs",
+            runs,
+            "--config",
+            &format!("{config}.toml"),
+        ]);
+        let bin = scratch.0.join("bin");
+        command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        command
+    };
+    let run = |config: &str| run_of("stand-in/task.star", config, config);
+    let on_ec2 = run("ec2");
+    let invoked = invocation(&on_ec2);
+    let mut on_ec2 = on_ec2;
+    let output = on_ec2.output().unwrap();
+    let mut shown = vec![report(invoked, &output, &scratch.0, false)];
+    let record = fs::read_dir(scratch.0.join("ec2")).unwrap().next().unwrap();
+    let provided = fs::read_to_string(record.unwrap().path().join("provider.json")).unwrap();
+    let provided: Value = serde_json::from_str(&provided).unwrap();
+    shown.push(format!(
+        "provider.json declares {:?}, of which aws:\n{:#}\nand places the roles: {}",
+        provided["providers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        provided["providers"]["aws"],
+        provided["roles"]
+    ));
+    let steps = iter::once(Step::Ran(shown.join("\n")));
+    let configs = ["afar", "taken", "ungated", "absent"];
+    let steps = steps.chain(configs.map(|config| Step::Run(run(config))));
+    let misfit = ran(
+        run_of("toobig/task.star", "misfit", "ec2"),
+        &scratch.0,
+        false,
+    );
+    let calls = fs::read_to_string(scratch.0.join("bin/calls")).unwrap();
+    let launched = calls.lines().any(|line| line == "run-instances");
+    let recorded = scratch.0.join("misfit").exists();
+    let misfit = format!("{misfit}\na record: {recorded}; an instance launched: {launched}");
+    let steps = steps.chain([Step::Ran(misfit)]);
+    check(
+        &scratch,
+        steps,
+        false,
+        &[(&taken, "<taken>")],
+        &expect![[r#"
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --wait --runs ec2 --config ec2.toml
+            exit status: Some(1)
+            pumpkin: run <id> records into <scratch>/ec2/<id>
+            pumpkin: publishing run <id>'s images on provider `aws`: it starts once they are there
+            pumpkin: run <id> failed: publishing `sandboxd` on provider `aws` failed: `docker load` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/ec2/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/ec2 --config <scratch>/ec2.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+            outcome.json: {"reason":"publishing `sandboxd` on provider `aws` failed: `docker load` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports","state":"failed"}
+            printed outcome.json: true
+            provider.json declares ["aws"], of which aws:
+            {
+              "classes": {
+                "agent": {
+                  "offers": {
+                    "cpu_features": [],
+                    "cpu_millis": 32000,
+                    "cpu_model": null,
+                    "gpu": null,
+                    "memory_bytes": 262123028480
+                  },
+                  "startup_seconds": 1740
+                },
+                "judge": {
+                  "offers": {
+                    "cpu_features": [],
+                    "cpu_millis": 8000,
+                    "cpu_model": null,
+                    "gpu": null,
+                    "memory_bytes": 14388559872
+                  },
+                  "startup_seconds": 1740
+                }
+              },
+              "reach": "private",
+              "report": {
+                "account": "123456789012",
+                "caller": "arn:aws:sts::123456789012:assumed-role/host/i-0fedcba9876543210",
+                "classes": {
+                  "agent": {
+                    "cpu_features": [],
+                    "cpu_model": null,
+                    "memory_mib": 262144,
+                    "template": "lt-0aaaaaaaaaaaaaaaa",
+                    "vcpus": 32,
+                    "version": 7
+                  },
+                  "judge": {
+                    "cpu_features": [],
+                    "cpu_model": null,
+                    "memory_mib": 16384,
+                    "template": "lt-0bbbbbbbbbbbbbbbb",
+                    "vcpus": 8,
+                    "version": 2
+                  }
+                },
+                "cli": "aws-cli/2.38.1 Python/3.14.6 Linux/7.0.0 exe/x86_64.stand-in",
+                "docker": {
+                  "client_version": "29.0.0",
+                  "context": "default",
+                  "endpoint": "unix:///stand-in.sock",
+                  "engine_version": "29.0.0",
+                  "kernel": "6.0",
+                  "os": "stand-in",
+                  "platform": "linux/amd64",
+                  "security": {
+                    "apparmor": false,
+                    "rootless": true,
+                    "seccomp_profile": "builtin",
+                    "userns": false
+                  }
+                },
+                "region": "us-west-1",
+                "repositories": {
+                  "roles": {
+                    "name": "pumpkin/roles",
+                    "uri": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles"
+                  },
+                  "sandboxd": {
+                    "name": "pumpkin/sandboxd",
+                    "uri": "123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd"
+                  }
+                },
+                "timer": {
+                  "group": "pumpkin",
+                  "role_arn": "arn:aws:iam::123456789012:role/pumpkin-timer"
+                }
+              }
+            }
+            and places the roles: {"agent":{"class":"judge","provider":"aws"},"final_judge":{"class":"judge","provider":"aws"},"train_judge":{"class":"judge","provider":"aws"}}
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --wait --runs afar --config afar.toml
+            exit status: Some(1)
+            pumpkin: afar.toml: the grant listener can't bind 192.0.2.1:7433: Cannot assign requested address (os error 99): name in `[gateway] private` an address of this machine's where no other run listens
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --wait --runs taken --config taken.toml
+            exit status: Some(1)
+            pumpkin: taken.toml: the grant listener can't bind <taken>: Address already in use (os error 98): name in `[gateway] private` an address of this machine's where no other run listens
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --wait --runs ungated --config ungated.toml
+            exit status: Some(1)
+            pumpkin: ungated.toml: roles are placed on provider `aws`, whose sandboxes dial the gateway on a private network, but `[gateway]` names no `private` address: name the address of this machine's that they dial
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --wait --runs absent --config absent.toml
+            exit status: Some(1)
+            pumpkin: reaching provider `aws` failed: AWS described no repository `pumpkin/absent`: expected each repository named to exist
+            pumpkin: to run it again: pumpkin run --runs <scratch>/absent --config <scratch>/absent.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run toobig/task.star --sandboxd sandboxd --wait --runs misfit --config ec2.toml
+            exit status: Some(1)
+            pumpkin: toobig/task.star: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs
+            pumpkin: toobig/task.star: /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 262123028480 bytes of memory, fewer than its 1099511627776; `aws`'s `judge` offers 14388559872 bytes of memory, fewer than its 1099511627776: offer a class that meets its needs, or change its needs
+            pumpkin: toobig/task.star: placing the workflow's roles in the classes that ec2.toml's providers offer has 2 problems
+            pumpkin: to run it again: pumpkin run --runs <scratch>/misfit --config <scratch>/ec2.toml --sandboxd <scratch>/sandboxd <scratch>/toobig/task.star
+            a record: false; an instance launched: false"#]],
+    );
+    for refused in ["afar", "taken", "ungated", "absent", "misfit"] {
+        assert!(!scratch.0.join(refused).exists(), "{refused} made a record");
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn configurations() {
     let scratch = Scratch::new("configurations");
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
@@ -1143,6 +1393,12 @@ fn configurations() {
         "context",
         "valued",
         "second",
+        "mixed",
+        "bundled",
+        "regional",
+        "unspecified",
+        "portless",
+        "public",
         "docked",
         "conf/unkeyed",
     ]);
@@ -1257,7 +1513,7 @@ fn configurations() {
                |
             11 | [placement.agent]
                |  ^^^^^^^^^
-            unknown field `placement`, expected one of `docker`, `providers`, `upstreams`
+            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/placed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config podman.toml
             exit status: Some(1)
@@ -1265,7 +1521,7 @@ fn configurations() {
               |
             9 | [providers.local.podman]
               |                  ^^^^^^
-            unknown variant `podman`, expected `docker`
+            unknown variant `podman`, expected `docker` or `ec2`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/podman.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config context.toml
             exit status: Some(1)
@@ -1287,6 +1543,50 @@ fn configurations() {
             exit status: Some(1)
             pumpkin: second.toml: providers `local` and `remote` are each of kind `docker`, so each would be the machine's one Docker engine, `[docker]`'s: keep one of them
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/second.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config mixed.toml
+            exit status: Some(1)
+            pumpkin: mixed.toml: provider `local` is of kind `docker`, beside `aws`: a machine runs its roles either on its own engine or on other providers, so keep `local` alone, or remove it
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/mixed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config bundled.toml
+            exit status: Some(1)
+            pumpkin: bundled.toml: TOML parse error at line 7, column 74
+              |
+            7 | repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd", bundles = "pumpkin/bundles" }
+              |                                                                          ^^^^^^^
+            unknown field `bundles`, expected `roles` or `sandboxd`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/bundled.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config regional.toml
+            exit status: Some(1)
+            pumpkin: regional.toml: TOML parse error at line 5, column 10
+              |
+            5 | region = "us_west_1"
+              |          ^^^^^^^^^^^
+            `us_west_1` is not an AWS region: use one such as `us-west-1`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/regional.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config unspecified.toml
+            exit status: Some(1)
+            pumpkin: unspecified.toml: TOML parse error at line 5, column 11
+              |
+            5 | private = "0.0.0.0:7433"
+              |           ^^^^^^^^^^^^^^
+            the gateway's address 0.0.0.0:7433 is unspecified, which no sandbox can dial: name the address its sandboxes dial
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/unspecified.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config portless.toml
+            exit status: Some(1)
+            pumpkin: portless.toml: TOML parse error at line 5, column 11
+              |
+            5 | private = "172.31.0.10"
+              |           ^^^^^^^^^^^^^
+            `172.31.0.10` is not an IP address and a port: name one such as `172.31.0.10:7433`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/portless.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config public.toml
+            exit status: Some(1)
+            pumpkin: public.toml: TOML parse error at line 5, column 1
+              |
+            5 | public = "203.0.113.1:7433"
+              | ^^^^^^
+            unknown field `public`, expected `private`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/public.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config docked.toml
             exit status: Some(1)
             pumpkin: docked.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: add an `[upstreams.<name>]` that lists them
@@ -1311,8 +1611,12 @@ fn configurations() {
 /// context `nowhere` and two upstreams, its key in `conf/key`; `docked`, without upstreams; and,
 /// to be refused, one for each rule a configuration breaks, as its name says (a missing context,
 /// TOML errors, keys, upstreams, URLs, unserved models, `[placement]`, provider kinds and their
-/// settings); and `conf/unkeyed`, whose key file is missing. Each but `undocked` ends with
-/// [`LOCAL`]'s tables, changed as its name says.
+/// settings, [`EC2`]'s tables, the gateway's address); and `conf/unkeyed`, whose key file is
+/// missing. Each but `undocked` ends with [`LOCAL`]'s tables, changed as its name says.
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the configurations, a line or a few each"
+)]
 fn write_configurations(scratch: &Scratch) {
     let table = |name: &str, model: &str| {
         format!(
@@ -1355,6 +1659,27 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
         ("context", gateway.clone()),
         ("valued", gateway.clone()),
         ("second", gateway.clone()),
+        ("mixed", EC2.to_owned()),
+        (
+            "bundled",
+            EC2.replace(
+                " sandboxd = \"pumpkin/sandboxd\" }",
+                " sandboxd = \"pumpkin/sandboxd\", bundles = \"pumpkin/bundles\" }",
+            ),
+        ),
+        ("regional", EC2.replace("\"us-west-1\"", "\"us_west_1\"")),
+        (
+            "unspecified",
+            "[gateway]\nprivate = \"0.0.0.0:7433\"\n".to_owned(),
+        ),
+        (
+            "portless",
+            "[gateway]\nprivate = \"172.31.0.10\"\n".to_owned(),
+        ),
+        (
+            "public",
+            "[gateway]\npublic = \"203.0.113.1:7433\"\n".to_owned(),
+        ),
         ("conf/unkeyed", gateway.replace("\"key\"", "\"missing\"")),
     ];
     for (name, config) in configs {
@@ -1582,6 +1907,157 @@ fn runs_on_docker() {
     );
     upstream.stop();
     wait_for_each_run(&scratch, &sandboxd);
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
+fn runs_on_ec2() {
+    let scratch = Scratch::new("ec2-docker");
+    let sandboxd = sandboxd().to_str().unwrap().to_owned();
+    let context = docker_context();
+    let engine = engine(&scratch, &context);
+    let bin = scratch.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(test_support::aws(), bin.join("aws")).unwrap();
+    // The stand-in's hosts start this `sandboxd`; and its repositories hold every image.
+    scratch.write("bin/sandboxd", &sandboxd);
+    let found = r#"digest=$(printf '%s\n' "$@" | sed --quiet 's/^imageDigest=//p')
+echo '{"images": [{"imageId": {"imageDigest": "'"$digest"'"}}], "failures": []}'
+"#;
+    scratch.write("bin/ecr batch-get-image", found);
+    let gateway = "[gateway]\nprivate = \"127.0.0.1:0\"\n";
+    let config = format!("{}\n{EC2}\n{gateway}", docker_table(&context));
+    scratch.write("ec2.toml", &config);
+    let submit = format!("printf six > six && {SANDBOXCTL_PATH} submit submit six --finalize");
+    scratch.write_task("submits", &workflow("", &["sh", "-c", &submit]));
+    build_first(&scratch, "submits", "ec2.toml");
+    let mut run = scratch.pumpkin(&[
+        "run",
+        "submits/task.star",
+        "--sandboxd",
+        &sandboxd,
+        "--wait",
+    ]);
+    run.args(["--runs", "runs", "--config", "ec2.toml"]);
+    let path = env::var_os("PATH").unwrap_or_default();
+    let path = env::join_paths(iter::once(bin.clone()).chain(env::split_paths(&path)));
+    run.env("PATH", path.unwrap());
+    let invoked = invocation(&run).replace(&env::var("PATH").unwrap_or_default(), "<PATH>");
+    let output = with_room(&mut run);
+    let rootful = !engine.report().security.rootless;
+    let mut shown = vec![report(invoked, &output, &scratch.0, rootful)];
+    shown.push(format!("the envelope's instances: {:?}", instances(&bin)));
+    shown.push(format!("the envelope's schedules: {:?}", schedules(&bin)));
+    shown.extend(grant_kept(&bin, &scratch.0.join("runs")));
+    // The images' digests change with each build.
+    let started = started(&bin);
+    let (role, sandboxd_image) = (started.role_image, started.sandboxd_image);
+    let names = [
+        (&sandboxd[..], "<sandboxd>"),
+        (&role[..], "<role image>"),
+        (&sandboxd_image[..], "<sandboxd image>"),
+    ];
+    check(
+        &scratch,
+        [Step::Ran(shown.join("\n"))],
+        rootful,
+        &names,
+        &expect![[r#"
+            $ PATH=<scratch>/bin:<PATH> pumpkin run submits/task.star --sandboxd <sandboxd> --wait --runs runs --config ec2.toml
+            exit status: Some(3)
+            pumpkin: run <id> records into <scratch>/runs/<id>
+            pumpkin: publishing run <id>'s images on provider `aws`: it starts once they are there
+            pumpkin: run <id> started
+            pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
+            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: sandbox i-00000000000000001: the directories under `/pumpkin` can't be put in the sandbox: the sandbox ended the session: expected its `sandboxd` to put them, as the role's user, who owns `/pumpkin`; its console ends: pumpkin-ec2: pulled <role image>: <role image>
+            pumpkin-ec2: pulled <sandboxd image>: <sandboxd image>
+            pumpkin-ec2: sandboxd: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: No such file or directory (os error 2): expected nothing there yet, in a directory this user can write to; its record is <scratch>/runs/<id>
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/ec2.toml --sandboxd <sandboxd> <scratch>/submits/task.star
+            record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"i-00000000000000001","provider":"aws","report":{"ami":"ami-078a05cb041c4f0b8","timer":{"group":"pumpkin","name":"<id>.i-00000000000000001"}}}
+            the agent's console, agent/console.txt: "pumpkin-ec2: pulled <role image>: <role image>\npumpkin-ec2: pulled <sandboxd image>: <sandboxd image>\npumpkin-ec2: sandboxd: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: No such file or directory (os error 2): expected nothing there yet, in a directory this user can write to\n"
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox i-00000000000000001: the directories under `/pumpkin` can't be put in the sandbox: the sandbox ended the session: expected its `sandboxd` to put them, as the role's user, who owns `/pumpkin`; its console ends: pumpkin-ec2: pulled <role image>: <role image>\npumpkin-ec2: pulled <sandboxd image>: <sandboxd image>\npumpkin-ec2: sandboxd: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: No such file or directory (os error 2): expected nothing there yet, in a directory this user can write to"}}
+            printed outcome.json: true
+            the envelope's instances: ["i-00000000000000001: terminated"]
+            the envelope's schedules: []
+            the record holds the grant of the instance's user data: false
+            its consoles that hold a value of a grant's form: 0
+            the agent's console lines that say what the boot pulled:
+              pumpkin-ec2: pulled <role image>: <role image>
+              pumpkin-ec2: pulled <sandboxd image>: <sandboxd image>"#]],
+    );
+}
+
+/// Each instance of the stand-in `aws` in `bin`, with its state, sorted.
+fn instances(bin: &Path) -> Vec<String> {
+    let instances = fs::read_dir(bin.join("instances")).unwrap();
+    let mut instances: Vec<String> = (instances.map(|entry| entry.unwrap().path()))
+        .map(|instance| {
+            let state = fs::read_to_string(instance.join("state")).unwrap();
+            let id = instance.file_name().unwrap().to_string_lossy().into_owned();
+            format!("{id}: {}", state.trim())
+        })
+        .collect();
+    instances.sort();
+    instances
+}
+
+/// The schedules of group `pumpkin` that the stand-in `aws` in `bin` holds, sorted.
+fn schedules(bin: &Path) -> Vec<String> {
+    let schedules = fs::read_dir(bin.join("schedules/pumpkin")).unwrap();
+    let mut schedules: Vec<String> = (schedules.map(|entry| entry.unwrap().file_name()))
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    schedules.sort();
+    schedules
+}
+
+/// The start in the user data of instance `i-00000000000000001` of the stand-in `aws` in `bin`.
+fn started(bin: &Path) -> Start {
+    let user_data = fs::read_to_string(bin.join("user-data-i-00000000000000001")).unwrap();
+    test_support::start_of(&user_data).unwrap()
+}
+
+/// Whether the record of the one run in `runs` holds the grant in the user data of instance
+/// `i-00000000000000001` of the stand-in `aws` in `bin`, how many of its consoles hold a value of
+/// a grant's form: exactly as many lowercase hexadecimal digits as a grant has, with no
+/// hexadecimal digit on either side, which a 64-digit digest isn't, and the lines of the agent's
+/// console that say what the boot pulled.
+fn grant_kept(bin: &Path, runs: &Path) -> Vec<String> {
+    let grant = serde_json::to_value(started(bin).grant).unwrap();
+    let grant = grant.as_str().unwrap();
+    let run = fs::read_dir(runs).unwrap().next().unwrap().unwrap().path();
+    let kept = files(&run).into_iter().filter(|file| !file.ends_with('/'));
+    let kept: Vec<(String, Vec<u8>)> = kept
+        .map(|file| {
+            let bytes = fs::read(run.join(&file)).unwrap();
+            (file, bytes)
+        })
+        .collect();
+    let holds = |bytes: &[u8]| bytes.windows(grant.len()).any(|at| at == grant.as_bytes());
+    let held = kept.iter().any(|(_, bytes)| holds(bytes));
+    let hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
+    let shaped = |bytes: &[u8]| {
+        bytes
+            .split(|byte| !hex(byte))
+            .any(|run| run.len() == grant.len())
+    };
+    let consoles = kept
+        .iter()
+        .filter(|(file, _)| file.ends_with("console.txt"));
+    let shaped = consoles.filter(|(_, bytes)| shaped(bytes)).count();
+    let console = fs::read_to_string(run.join("agent/console.txt")).unwrap();
+    let mut lines = vec![
+        format!("the record holds the grant of the instance's user data: {held}"),
+        format!("its consoles that hold a value of a grant's form: {shaped}"),
+        "the agent's console lines that say what the boot pulled:".to_owned(),
+    ];
+    let pulled = console
+        .lines()
+        .filter(|line| line.starts_with("pumpkin-ec2: pulled "));
+    lines.extend(pulled.map(|line| format!("  {line}")));
+    lines
 }
 
 /// What the judges of the run whose agent makes ops do with the payload in their slot: for

@@ -5,6 +5,7 @@
 //! share, with how a sandbox meets the gateway. The crate depends on `serde` and `serde_json`
 //! alone, because `sandboxd`, a small static binary, depends on it.
 
+pub mod ec2_boot;
 pub mod ir;
 pub mod sandbox;
 pub mod workflow;

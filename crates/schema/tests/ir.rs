@@ -717,6 +717,10 @@ fn checked_values() {
             fixture_with(&format!("{agent}/name"), json!("../escaped")),
             fixture_with(&format!("{agent}/image"), json!(format!("sha256:{HEX}"))),
             fixture_with(&format!("{agent}/image"), json!("ubuntu:24.04")),
+            fixture_with(
+                &format!("{agent}/image"),
+                json!(format!("ubuntu@sha256:{HEX}")),
+            ),
             fixture_with(&format!("{command}/cwd"), json!("workspace")),
             fixture_with(&format!("{command}/cwd"), json!("/workspace/")),
             fixture_with(&format!("{command}/argv"), json!([])),
@@ -749,7 +753,8 @@ fn checked_values() {
             `bad\nname` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             `../escaped` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             parsed
-            `ubuntu:24.04` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`
+            `ubuntu:24.04` is not an image's manifest digest: name the image by that digest alone, `sha256:` and 64 lowercase hexadecimal digits
+            `ubuntu@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` is not an image's manifest digest: name the image by that digest alone, `sha256:` and 64 lowercase hexadecimal digits
             `workspace` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
             `/workspace/` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
             the command is empty: it needs a program
@@ -767,6 +772,7 @@ fn checked_values() {
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
     );
+    assert_eq!(valid::<ir::Image>(&format!("sha256:{HEX}")).hex(), HEX);
 }
 
 #[test]
@@ -956,7 +962,7 @@ fn broken_leases() {
             /roles/3: `gpu` is a runner that no lease grant names: name it from one
             /roles/0/grants/3/lease/role: `gpu` is named by `agent`'s lease grant `gpu` and `agent`'s `again`: name each runner from one grant
             /roles/3: `gpu` is a runner that no lease grant names: name it from one
-            /roles/0/grants/1/lease/role: `gpu` runs judge `train_judge`'s image, example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge has
+            /roles/0/grants/1/lease/role: `gpu` runs judge `train_judge`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge has
             /roles/0/grants/1/lease/role: no role is named `ghost`: name one listed in `roles`
             /roles/3: `gpu` is a runner that no lease grant names: name it from one
             /score/role: `gpu` is a runner: name a judge

@@ -60,4 +60,9 @@ impl Workspace {
     pub(crate) fn docker(&self) -> PathBuf {
         self.0.join("docker")
     }
+
+    /// The directory of what providers of kind `ec2` write on this machine ([`ec2::Ec2`]).
+    pub(crate) fn ec2(&self) -> PathBuf {
+        self.0.join("ec2")
+    }
 }

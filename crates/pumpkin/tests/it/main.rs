@@ -556,6 +556,15 @@ fn docker_table(context: &str) -> String {
 /// each role of [`workflow`]'s fits.
 const LOCAL: &str = "[providers.local.docker]\n";
 
+/// The table of a provider, `aws`, of kind `ec2`, whose settings name the envelope that
+/// [`test_support::aws`] describes.
+const EC2: &str = r#"[providers.aws.ec2]
+region = "us-west-1"
+classes = { agent = { template = "lt-0aaaaaaaaaaaaaaaa", version = 7, vcpus = 32, memory_mib = 262144 }, judge = { template = "lt-0bbbbbbbbbbbbbbbb", version = 2, vcpus = 8, memory_mib = 16384 } }
+repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
+timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
+"#;
+
 /// Makes `scratch`'s directory `dir`, and links `pumpkin` there; returns the link's path.
 fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let dir = scratch.0.join(dir);
@@ -593,8 +602,12 @@ fn machine(context: &str) -> String {
 const BUILDS: &str = "# The stand-in builds this recipe.";
 
 /// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
-/// on a host of 8 GiB of memory.
-const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"CPUSet":true,"PidsLimit":true,"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"MemTotal":8589934592}"#;
+/// on a host of 8 GiB of memory, and keeps its images in the containerd image store.
+const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"CPUSet":true,"PidsLimit":true,"DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"MemTotal":8589934592}"#;
+
+/// What `docker image inspect` prints of the stand-in's engine's image: a manifest for its
+/// platform, `linux/amd64`.
+const IMAGE: &str = r#"{"Os":"linux","Architecture":"amd64","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}}"#;
 
 /// A stand-in `docker` in a scratch directory, for the `pumpkin run`s that [`run`](Self::run)
 /// makes: an engine whose one image is that of the task `stand-in`, ID all zeros, which lacks the
@@ -607,14 +620,15 @@ struct StandIn<'a> {
 }
 
 impl<'a> StandIn<'a> {
-    /// The stand-in for an engine that [`INFO`] describes.
+    /// The stand-in for an engine that [`INFO`] and [`IMAGE`] describe.
     fn new(scratch: &'a Scratch) -> Self {
-        Self::with(scratch, INFO)
+        Self::with(scratch, INFO, IMAGE)
     }
 
     /// The stand-in for an engine of which `docker info` prints `info`, with the scratch
-    /// directory's name as its ID ([`ledger`]).
-    fn with(scratch: &'a Scratch, info: &str) -> Self {
+    /// directory's name as its ID ([`ledger`]), and `docker image inspect` prints `image` of its
+    /// image.
+    fn with(scratch: &'a Scratch, info: &str, image: &str) -> Self {
         let id = scratch.0.file_name().unwrap().to_str().unwrap();
         let info = info.replace(r#""MemTotal""#, &format!(r#""ID":"{id}","MemTotal""#));
         let dir = scratch.0.display();
@@ -629,8 +643,8 @@ shift
 # The build's look for an image by its tag, `image inspect --format {{{{.Id}}}} -- <tag>`, is a
 # command of its own to hold.
 name=$1
-case "$1 $6" in
-    "image pumpkin/"*) name=lookup ;;
+case "$1 $2 $4" in
+    "image inspect "*.Id*) name=lookup ;;
 esac
 if [ -e "{dir}/hold-$name" ]; then
     echo $PPID > "{dir}/at-$name.tmp" && mv "{dir}/at-$name.tmp" "{dir}/at-$name"
@@ -643,16 +657,21 @@ fi
 case $1 in
     context) echo unix:///stand-in.sock ;;
     info) echo '{info}' ;;
+    version) echo linux/amd64 ;;
     # `image inspect --format <format> -- <image>`, which says it has no image that the engine
-    # lacks, or for the tag `pumpkin/lacking:<digest>`, the image that the engine lacks; for the
-    # tag `pumpkin/unbuilt:<digest>`, no image, which a build then fails to make.
-    image) case $6 in
-        pumpkin/lacking:*) echo {absent} ;;
-        pumpkin/built:*) grep -qxF "$6" "{dir}/tagged" 2>/dev/null && echo {built} ||
-            {{ echo "Error: No such image: $6" >&2; exit 1; }} ;;
-        pumpkin/unbuilt:*) echo "Error: No such image: $6" >&2; exit 1 ;;
-        {absent}) echo "Error response from daemon: No such image: $6" >&2; exit 1 ;;
-        *) echo {digest} ;;
+    # lacks, or for the tag `pumpkin/lacking:<digest>`, the image that the engine lacks, `image
+    # inspect --format {{{{.Id}}}} -- <tag>`; and for the tag `pumpkin/unbuilt:<digest>`, no
+    # image, which a build then fails to make
+    image) case $name in
+        lookup) case $6 in
+            pumpkin/lacking:*) echo {absent} ;;
+            pumpkin/built:*) grep -qxF "$6" "{dir}/tagged" 2>/dev/null && echo {built} ||
+                {{ echo "Error: No such image: $6" >&2; exit 1; }} ;;
+            pumpkin/unbuilt:*) echo "Error: No such image: $6" >&2; exit 1 ;;
+            *) echo {digest} ;;
+        esac ;;
+        *) if [ "$6" = {absent} ]; then echo "Error response from daemon: No such image: $6" >&2; exit 1; fi
+           echo '{image}' ;;
     esac ;;
     container) ;;
     # `build ... --file <recipe> --iidfile <file> -- <stage>`, which writes the image's ID there.

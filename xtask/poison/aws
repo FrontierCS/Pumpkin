@@ -1,0 +1,6 @@
+#!/bin/sh
+# The `aws` that `cargo xtask ci` puts first on the tests' `PATH`, so that a test that runs `aws`
+# without a stand-in first on its own `PATH` fails, rather than reaching AWS with this host's
+# credentials.
+echo "a test ran \`aws $*\` without a stand-in: put one first on its \`PATH\`" >&2
+exit 1

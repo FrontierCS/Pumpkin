@@ -86,11 +86,20 @@ fn report() {
         security: _,
         kernel,
         os,
+        platform,
     } = engine().report();
-    let named = [endpoint, client_version, engine_version, kernel, os];
+    let platform = platform.to_string();
+    let named = [
+        endpoint,
+        client_version,
+        engine_version,
+        kernel,
+        os,
+        &platform,
+    ];
     let mut lines = vec![
         format!(
-            "endpoint, versions, kernel and OS named: {}",
+            "endpoint, versions, kernel, OS and platform named: {}",
             named.iter().all(|named| !named.is_empty())
         ),
         ContextName::try_from(String::new()).unwrap_err(),
@@ -103,14 +112,62 @@ fn report() {
         lines.push(format!("{wrong}: …: {todo}"));
     }
     expect![[r#"
-        endpoint, versions, kernel and OS named: true
+        endpoint, versions, kernel, OS and platform named: true
         the Docker context's name is empty: name one that `docker context ls` lists
         the Docker context `pumpkin-missing` can't be read: …: name one that `docker context ls` lists
         the Docker context `--help` can't be read: …: name one that `docker context ls` lists"#]]
     .assert_eq(&lines.join("\n"));
 }
 
-// A build is tagged by its inputs, and found by that tag rather than built again: another
+// An image the engine doesn't have is refused, not pulled; and so are an index, of an image for
+// the engine's platform and one for another, and an image for that other platform alone.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+fn platforms() {
+    check(
+        "platforms",
+        |fixture| {
+            let mut builds = Builds::new(fixture);
+            let platform = &engine().report().platform;
+            let shown = platform.to_string();
+            let other = if shown == "linux/amd64" {
+                "linux/arm64"
+            } else {
+                "linux/amd64"
+            };
+            let index = builds.build_for("Dockerfile", &format!("{shown},{other}"));
+            let foreign = builds.build_for("Dockerfile", other);
+            let unpulled = Image::try_from(format!("sha256:{}", "0".repeat(64))).unwrap();
+            // The two built images' digests hold this process's ID, and the platforms are the
+            // engine's.
+            let shown = [
+                (index.as_str(), "<index>"),
+                (foreign.as_str(), "<foreign>"),
+                (shown.as_str(), "<platform>"),
+                (other, "<other>"),
+            ];
+            let mut lines = Vec::new();
+            for (what, image) in [
+                ("unpulled", unpulled),
+                ("index", index.clone()),
+                ("foreign", foreign.clone()),
+            ] {
+                let refused = engine().check_platform(&image, platform, "the engine runs");
+                let refused = redact(fixture, &refused.unwrap_err());
+                let refused =
+                    (shown.iter()).fold(refused, |refused, (from, to)| refused.replace(from, to));
+                lines.push(format!("{what}: {refused}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            unpulled: the engine of context `<context>` has no image sha256:0000000000000000000000000000000000000000000000000000000000000000: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it
+            index: <index> names an `application/vnd.oci.image.index.v1+json`, not an image's manifest: name an image built for one platform with no attestation, as by `docker build --provenance=false`, whose ID is its manifest's digest
+            foreign: <foreign> is an image for <other>, but the engine runs <platform>: name an image for <platform>"#]],
+    );
+}
+
+// A build is tagged by its inputs, and its image is a manifest for the engine's platform. And it is found by that tag rather than built again: another
 // file's content, another mode or another recipe gives another tag, and the same inputs give
 // the image their tag names, even one another build made. A recipe, here a text, may build on
 // an image it is given as a named context, and is refused without it; and it gets that image
@@ -145,6 +202,10 @@ fn builds() {
                 running.exists()
             ));
             fs::remove_dir_all(&running).unwrap();
+            let built = Image::try_from(builds.seen[0].clone()).unwrap();
+            let platform = &engine().report().platform;
+            let checked = engine().check_platform(&built, platform, "the engine runs");
+            lines.push(format!("for the engine's platform: {checked:?}"));
             let [first] = <[String; 1]>::try_from(builds.tags(&builds.seen[0])).unwrap();
             run(&["image", "rm", &first]);
             put(&dir, "file", "two", 0o644);
@@ -206,6 +267,7 @@ fn builds() {
         &expect![[r#"
             built: A, tagged :1
             left by an ended process, then: false; by a running one: true
+            for the engine's platform: Ok(())
             another content: B, tagged :2
             the first inputs, their tag moved to B: B, tagged :1 :2
             another mode: C, tagged :3
@@ -540,6 +602,25 @@ impl<'f> Builds<'f> {
             tags.join(" "),
             stray.unwrap_or_default()
         )
+    }
+
+    /// The ID of an image of `recipe` for `platforms`, `<os>/<architecture>` each, separated by
+    /// commas, which is an index if there are several: built by `docker build` itself, as
+    /// [`Engine::build`] builds for the engine's platform alone, and tagged in the repository.
+    fn build_for(&mut self, recipe: &str, platforms: &str) -> Image {
+        let dir = self.fixture.dir.path().join("context");
+        let tag = format!("{}:{}", self.repository, platforms.replace(['/', ','], "-"));
+        let build = docker()
+            .args(["build", "--quiet", "--provenance=false"])
+            .args([format!("--platform={platforms}"), format!("--tag={tag}")])
+            .arg("--file")
+            .args([dir.join(recipe), dir])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{build:?}");
+        let id = String::from_utf8(build.stdout).unwrap().trim().to_owned();
+        first_seen(&mut self.seen, &id);
+        Image::try_from(id).unwrap()
     }
 
     /// The manifest of `image`, as `docker image save` writes it.

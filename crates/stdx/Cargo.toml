@@ -10,7 +10,7 @@ test = false
 
 [dependencies]
 libc.workspace = true
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["net", "process"] }
 
 [dev-dependencies]
 expect-test.workspace = true

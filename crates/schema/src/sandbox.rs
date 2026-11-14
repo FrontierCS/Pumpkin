@@ -1,9 +1,10 @@
 //! The sandbox protocol, v0: what the gateway and `sandboxd` say to each other over a session.
 //!
 //! A session is one connection, which lasts as long as its sandbox and identifies it: to a socket
-//! of the sandbox's own. `sandboxd` sends a [`Hello`] first, and the gateway answers with a
-//! [`HelloReply`], accepting its own [`PROTOCOL_VERSION`] alone. Every version keeps that order, the [`frame`] encoding, a hello's `version` and size
-//! ([`MAX_HELLO_BYTES`]), a reply's `type` and a refusal's `message`.
+//! of the sandbox's own, or by a hello that presents its [`RegistrationGrant`]. `sandboxd` sends
+//! a [`Hello`] first, and the gateway answers with a [`HelloReply`], accepting its own
+//! [`PROTOCOL_VERSION`] alone. Every version keeps that order, the [`frame`] encoding, a hello's
+//! `version` and size ([`MAX_HELLO_BYTES`]), a reply's `type` and a refusal's `message`.
 //!
 //! Both sides send [`frame`]s: [`ToSandbox`] from the gateway, [`FromSandbox`] from `sandboxd`;
 //! a reply names its request's stream, a number the gateway uses once. Files move as trees of
@@ -23,6 +24,7 @@
 //! workflow puts nothing there ([`RolePath`](crate::ir::RolePath)).
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -387,7 +389,7 @@ impl TryFrom<String> for RegistrationGrant {
 }
 
 impl RegistrationGrant {
-    /// Its digits, as its JSON form writes them.
+    /// Its digits, as [`SANDBOXD_GRANT`] holds them, and its JSON form writes them.
     pub fn digits(&self) -> String {
         crate::ir::values::hex(&self.0)
     }
@@ -430,8 +432,36 @@ pub struct SocketDial {
     pub dir: PathBuf,
 }
 
+/// Where a sandbox's `sandboxd` dials the gateway on a private network, `gateway`, and the grant
+/// its hello presents there, issued for this sandbox alone (`gateway::GrantListener`).
+///
+/// The gateway listens before the create, and `sandboxd` dials once as it starts: `gateway` its
+/// argument, `grant`'s digits in [`SANDBOXD_GRANT`]. The grant opens the session for the first
+/// hello that presents it, so the provider shows it to this `sandboxd` alone: in its environment,
+/// never in an argument, a log or the console, nothing else running as the role's user until the
+/// session opens. The session is cleartext, so `gateway` is on a private network of the run's.
+#[derive(Debug)]
+pub struct TcpDial {
+    pub gateway: SocketAddr,
+    pub grant: RegistrationGrant,
+}
+
 /// The name of a [`SocketDial`]'s socket in its directory.
 pub const SOCKET_NAME: &str = "s";
+
+/// The environment variable that holds, as its digits, the [`RegistrationGrant`] that a
+/// `sandboxd` presents in its hello where it dials its gateway at a TCP address.
+///
+/// A provider that starts `sandboxd` for a [`TcpDial`] sets it, and `sandboxd` keeps it from
+/// every command it starts.
+// The environment, not `argv`, which every process may read through `/proc`: a process's
+// environment is open only to those that may trace it. The role's code runs as `sandboxd`'s
+// user, which may until `sandboxd` is non-dumpable, and may keep a handle opened by then, so what
+// keeps the grant from that code is that none of it runs before the hello, which spends the
+// grant: `sandboxd` starts each command after it, and before it only the image's `nvidia-smi`,
+// to name the sandbox's GPUs, without this variable, once it is non-dumpable; and the provider
+// starts nothing else as the role's user before it (`TcpDial`).
+pub const SANDBOXD_GRANT: &str = "SANDBOXD_GRANT";
 
 /// The gateway's answer to the session's first frame, with an empty body: `{"type":"accepted"}`,
 /// or a refusal.

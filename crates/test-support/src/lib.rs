@@ -3,8 +3,10 @@
 //! of its commands' standard output ([`standard_outputs`]) and of its sandboxes, with their
 //! consoles ([`sandboxes`]); a directory's listing ([`files`]); for the tests that need Docker or
 //! the static `sandboxd`, the engine they reach ([`docker`]), the pinned image they build on
-//! ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]); and a stand-in HTTP server's end of a
-//! connection ([`http`]).
+//! ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]); stand-ins for the `aws` and `docker` command
+//! lines ([`aws`], [`stand_in_docker`]) and for the commands an EC2 instance's boot runs
+//! ([`instance`]); the start that an EC2 sandbox's user data holds ([`start_of`]); and a stand-in
+//! HTTP server's end of a connection ([`http`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -20,6 +22,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::{fs, io, iter};
 
+use schema::ec2_boot::Start;
 use schema::sandbox::command_stdout;
 use stdx::Deadline;
 use stdx::process::Environment;
@@ -112,6 +115,84 @@ pub fn build(dockerfile: &str, contexts: &[(&str, &str)], tag: &str) -> String {
     let build = build.wait_with_output().unwrap();
     assert!(build.status.success(), "{build:?}");
     String::from_utf8(build.stdout).unwrap().trim().to_owned()
+}
+
+/// The stand-in for the `aws` command line, which answers as AWS CLI v2 would.
+///
+/// It is this package's `aws` binary, whose module doc describes the envelope it answers for,
+/// built now, so that a test of any package runs the current source. A test finds it on `PATH`
+/// through a link to it, named `aws`, in a directory of the test's own.
+///
+/// # Panics
+///
+/// Panics if cargo can't build it, or reports no executable for it.
+pub fn aws() -> PathBuf {
+    built("aws")
+}
+
+/// The stand-in for the commands that `ec2-boot` runs on an EC2 sandbox's instance: `docker`,
+/// `nft` and `shutdown`.
+///
+/// It is this package's `instance` binary, built now, as [`aws`] is. A test finds it on `PATH`
+/// through links to it, each named as a command, in a directory of the test's own.
+///
+/// # Panics
+///
+/// Panics if cargo can't build it, or reports no executable for it.
+pub fn instance() -> PathBuf {
+    built("instance")
+}
+
+/// This package's binary `name`, built now.
+fn built(name: &str) -> PathBuf {
+    let mut cargo = stdx::process::command(env!("CARGO"), Environment::Inherited);
+    for var in stdx::process::cargo_package_vars() {
+        cargo.env_remove(var);
+    }
+    cargo.current_dir(env!("CARGO_MANIFEST_DIR"));
+    cargo.args([
+        "build",
+        "--quiet",
+        "--locked",
+        "--package",
+        "test-support",
+        "--bin",
+        name,
+    ]);
+    let output = cargo
+        .arg("--message-format=json-render-diagnostics")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cargo failed to build the stand-in `{name}`: {output:?}"
+    );
+    let messages = String::from_utf8(output.stdout).unwrap();
+    for line in messages.lines() {
+        let message: serde_json::Value = serde_json::from_str(line).unwrap();
+        if message["reason"] == "compiler-artifact"
+            && message["target"]["name"] == name
+            && let Some(executable) = message["executable"].as_str()
+        {
+            return executable.into();
+        }
+    }
+    panic!("cargo reported no executable for the stand-in `{name}`: {messages}");
+}
+
+/// The start that `user_data`, an EC2 sandbox's, hands `ec2-boot`: the JSON on its one line that
+/// begins with `{`, or none, if no such line parses as a start.
+pub fn start_of(user_data: &str) -> Option<Start> {
+    let line = user_data.lines().find(|line| line.starts_with('{'))?;
+    serde_json::from_str(line).ok()
+}
+
+/// The stand-in for the `docker` command line, which reaches an engine without Docker.
+///
+/// It runs Docker's own instead where its header says; a test finds it on `PATH` beside
+/// [`aws`]'s, through a link to it, named `docker`, in a directory of the test's own.
+pub fn stand_in_docker() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/docker")
 }
 
 /// The static `sandboxd` that `PUMPKIN_SANDBOXD` names, by its canonical path.

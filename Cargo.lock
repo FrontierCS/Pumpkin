@@ -9,6 +9,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "aws"
+version = "0.0.0"
+dependencies = [
+ "engine",
+ "schema",
+ "serde",
+ "serde_json",
+ "stdx",
+]
+
+[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -151,9 +162,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "ec2"
+version = "0.0.0"
+dependencies = [
+ "aws",
+ "engine",
+ "expect-test",
+ "gateway",
+ "provider",
+ "schema",
+ "serde",
+ "serde_json",
+ "stdx",
+ "tempfile",
+ "test-support",
+]
+
+[[package]]
+name = "ec2-boot"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "schema",
+ "serde_json",
+ "stdx",
+ "tempfile",
+ "test-support",
+]
+
+[[package]]
 name = "engine"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "expect-test",
  "recipe",
  "schema",
@@ -339,10 +380,13 @@ dependencies = [
 name = "pumpkin"
 version = "0.0.0"
 dependencies = [
+ "aws",
  "clap",
  "docker",
+ "ec2",
  "engine",
  "expect-test",
+ "gateway",
  "lang",
  "libc",
  "provider",
@@ -832,6 +876,7 @@ dependencies = [
  "proc-macro2",
  "serde_json",
  "sha2",
+ "stdx",
  "tempfile",
  "xflags",
  "xshell",

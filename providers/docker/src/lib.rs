@@ -207,18 +207,12 @@ impl Provider for Docker<'_> {
     }
 
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
-    // engine has the image, and names it as it is.
+    // engine has the image, for its own platform, and names it as it is.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
-        let context = &self.engine.report().context;
-        match engine::image_id(context, image.as_str()) {
-            Ok(Some(_)) => Ok(ImageRef::from(image.to_string())),
-            Ok(None) => Err(format!(
-                "the engine of context `{}` has no image {image}: build or load it there first, \
-                 as the provider pulls none",
-                context.as_str()
-            )),
-            Err(error) => Err(engine::fix_reported(&error)),
-        }
+        let report = self.engine.report();
+        let runs = format!("the engine of context `{}` runs", report.context.as_str());
+        (self.engine).check_platform(image, &report.platform, &runs)?;
+        Ok(ImageRef::from(image.to_string()))
     }
 
     // A sandbox mounts `sandboxd` from the host, so a publish checks that it can be mounted, and

@@ -1,7 +1,7 @@
 //! `reap`: what it removes of the runs that have ended, or are lost, and what it leaves.
 
 use std::fs::{self, File};
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, symlink};
 use std::path::Path;
 use std::process::Stdio;
 
@@ -9,7 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    INFO, Scratch, Step, check, invocation, poll, ran, report, write_gone, write_on, write_record,
+    EC2, INFO, Scratch, Step, check, docker_table, install, invocation, poll, ran, report,
+    write_gone, write_on, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -199,6 +200,211 @@ esac
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
             rm --force --volumes cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
         "#]],
+    );
+}
+
+/// A lost run on `local`, of kind `docker`, and `aws`, of kind `ec2`, which left a sandbox on
+/// each.
+const SPREAD: &str = "20261108-120700-0a000008";
+
+/// A lost run on `aws`, which left a sandbox there, and which `cancel` reaps.
+const CANCELLED: &str = "20261108-120800-0a000009";
+
+/// A lost run on `aws`, whose configuration is gone.
+const UNCONFIGURED: &str = "20261108-120900-0a00000a";
+
+/// A lost run on `aws`, which the configuration that ran it no longer names.
+const UNNAMED: &str = "20261108-121100-0a00000c";
+
+/// A run that no record names, whose sandbox on `aws` a reap leaves.
+const OTHER: &str = "20261108-121000-0a00000b";
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the stand-ins' sandboxes, the steps and their snapshot"
+)]
+fn reaps_providers() {
+    let scratch = Scratch::new("reaps_providers");
+    let bin = scratch.0.join("bin");
+    let installed = install(&scratch, ".pumpkin/installed");
+    let (calls, container) = (scratch.0.join("docker-calls"), "c".repeat(64));
+    let docker = format!(
+        r#"#!/bin/sh
+# `--context=<name>` comes first.
+shift
+echo "$*" >> "{}"
+case $1 in
+    context) echo unix:///stand-in.sock ;;
+    info) echo '{INFO}' ;;
+    container) case "$*" in
+        *label=pumpkin.run={SPREAD}*|*id={container}*) echo "{container} exited {SPREAD}" ;;
+    esac ;;
+    rm) ;;
+    *) echo "the stand-in has no such command" >&2; exit 1 ;;
+esac
+"#,
+        calls.display()
+    );
+    let path = write_on(&scratch, SPREAD, "default", None, &docker);
+    symlink(test_support::aws(), bin.join("aws")).unwrap();
+    let config = scratch.0.join("pumpkin.toml");
+    scratch.write(
+        "pumpkin.toml",
+        &format!("{}\n{EC2}", docker_table("default")),
+    );
+    scratch.write(
+        "bare.toml",
+        &format!(
+            "{}\n{}",
+            docker_table("default"),
+            "[providers.local.docker]\n"
+        ),
+    );
+    // Each run's record, which names the configuration that ran it, and what each of its
+    // providers reported, of which a reap reads only a Docker engine's context.
+    let records = [
+        (SPREAD, &["local", "aws"][..], config.clone()),
+        (CANCELLED, &["aws"], config),
+        (UNCONFIGURED, &["aws"], scratch.0.join("gone.toml")),
+        (UNNAMED, &["aws"], scratch.0.join("bare.toml")),
+    ];
+    for (id, providers, config) in records {
+        write_record(&scratch, id, true, None);
+        let args = [
+            "--runs".to_owned(),
+            scratch.0.join("runs").display().to_string(),
+            "--config".to_owned(),
+            config.display().to_string(),
+        ];
+        let record = json!({ "record_version": "pumpkin.record/v0", "args": args });
+        scratch.write(&format!("runs/{id}/record.json"), &record);
+        let reports = providers.iter().map(|&name| {
+            let report = match name {
+                "local" => json!({ "context": "default" }),
+                _ => json!({ "region": "us-west-1" }),
+            };
+            (name.to_owned(), json!({ "report": report }))
+        });
+        let provided = json!({ "providers": reports.collect::<serde_json::Map<_, _>>() });
+        scratch.write(&format!("runs/{id}/provider.json"), &provided);
+    }
+    // The sandboxes that each record holds: on each provider, one the provider lists, which the
+    // reap removes; and one on `aws` that its list misses, as one in another region would be.
+    let held = [
+        (SPREAD, "agent", "local", "c".repeat(64), false),
+        (
+            SPREAD,
+            "jobs/0",
+            "aws",
+            "i-00000000000000038".to_owned(),
+            false,
+        ),
+        (
+            SPREAD,
+            "jobs/2",
+            "aws",
+            "i-0000000000000000f".to_owned(),
+            false,
+        ),
+        (
+            CANCELLED,
+            "jobs/0",
+            "aws",
+            "i-00000000000000039".to_owned(),
+            false,
+        ),
+    ];
+    for (run, dir, provider, id, deleted) in held {
+        let mut sandbox = json!({ "provider": provider, "id": id, "report": {} });
+        if deleted {
+            sandbox["delete"] = json!({ "state": "deleted" });
+        }
+        scratch.write(&format!("runs/{run}/{dir}/sandbox.json"), &sandbox);
+    }
+    // An instance of each run's on the stand-in `aws`, running.
+    let instances = [SPREAD, CANCELLED, OTHER].map(|run| {
+        let id = format!("i-{:017x}", run.as_bytes()[run.len() - 1]);
+        scratch.write(&format!("bin/instances/{id}/state"), "running\n");
+        scratch.write(&format!("bin/instances/{id}/run"), run);
+        id
+    });
+    let command = |program: &Path, args: &[&str]| {
+        let mut command = scratch.program(program, args);
+        command.args(["--runs", "runs"]).env("PATH", &path);
+        ran(command, &scratch.0, false)
+    };
+    let mut steps = vec![
+        command(&installed, &["cancel", CANCELLED]),
+        command(&installed, &["reap"]),
+    ];
+    let states = instances.iter().map(|id| {
+        let state = fs::read_to_string(bin.join(format!("instances/{id}/state"))).unwrap();
+        format!("{id}: {}", state.trim())
+    });
+    steps.push(format!(
+        "the stand-in aws's instances:\n{}",
+        states.collect::<Vec<_>>().join("\n")
+    ));
+    for run in [SPREAD, CANCELLED] {
+        let reaps = fs::read_to_string(scratch.0.join(format!("runs/{run}/reaps.jsonl"))).unwrap();
+        let reaps = reaps.lines().map(|line| {
+            let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
+            line["at_ns"] = json!("<at>");
+            line.to_string()
+        });
+        steps.push(format!(
+            "{run}'s reaps.jsonl:\n{}",
+            reaps.collect::<Vec<_>>().join("\n")
+        ));
+    }
+    let called = fs::read_to_string(&calls).unwrap();
+    steps.push(format!("docker was called with:\n{}", called.trim_end()));
+    check(
+        &scratch,
+        steps.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin cancel 20261108-120800-0a000009 --runs runs
+            exit status: Some(0)
+            pumpkin: run 20261108-120800-0a000009 left 1 sandbox on provider `aws`, now removed: i-00000000000000039
+            pumpkin: run 20261108-120800-0a000009 was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run 20261108-120800-0a000009 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120800-0a000009
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml
+            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
+            $ PATH=<scratch>/bin:/usr/bin:/bin <scratch>/.pumpkin/installed/pumpkin reap --runs runs
+            exit status: Some(3)
+            pumpkin: run 20261108-120700-0a000008's sandbox i-0000000000000000f on provider `aws`, which its record holds undeleted, isn't listed there now: it has ended since, or the provider is reached elsewhere than the run reached it, as when the configuration that ran the run, or the Docker context, has moved to another region, profile or engine since; if so, put it back as it was when the run ran, and reap again: pumpkin reap --runs <scratch>/runs
+            pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `aws`, now removed: i-00000000000000038
+            pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `local`, now removed: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+            pumpkin: run 20261108-120700-0a000008 was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run 20261108-120900-0a00000a's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120900-0a00000a, to stop reaping it
+            pumpkin: run 20261108-120900-0a00000a was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run 20261108-121100-0a00000c's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/bare.toml, names no provider `aws`: put its `[providers.aws]` table back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-121100-0a00000c, to stop reaping it
+            pumpkin: run 20261108-121100-0a00000c was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: 2 runs ran on a provider that can't be reached, as said above: what each left there may remain
+            pumpkin: to reap again once it can be reached: pumpkin reap --runs <scratch>/runs
+            printed:
+              20261108-120700-0a000008
+              20261108-120900-0a00000a
+              20261108-121100-0a00000c
+            the stand-in aws's instances:
+            i-00000000000000038: terminated
+            i-00000000000000039: terminated
+            i-00000000000000062: running
+            20261108-120700-0a000008's reaps.jsonl:
+            {"at_ns":"<at>","id":"i-00000000000000038","provider":"aws","reaped":"removed"}
+            {"at_ns":"<at>","id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","provider":"local","reaped":"removed"}
+            {"at_ns":"<at>","id":"i-0000000000000000f","provider":"aws","reaped":"gone"}
+            20261108-120800-0a000009's reaps.jsonl:
+            {"at_ns":"<at>","id":"i-00000000000000039","provider":"aws","reaped":"removed"}
+            docker was called with:
+            context inspect --format {{.Endpoints.docker.Host}} -- default
+            info --format {{json .}}
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-120700-0a000008
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+            rm --force --volumes cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"#]],
     );
 }
 

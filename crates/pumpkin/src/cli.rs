@@ -207,9 +207,10 @@ Default: $HOME/.config/pumpkin/pumpkin.toml")]
     pub(crate) config: Option<String>,
     #[arg(long, value_name = "path", value_parser = utf8(RECORDED), help = "\
 The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
-builds it.
+builds it, with the static ec2-boot beside it, which an ec2 provider's
+instances boot with.
 Default: the one beside this pumpkin, where `cargo xtask install` puts
-one")]
+both")]
     pub(crate) sandboxd: Option<String>,
     #[arg(
         long,
@@ -483,8 +484,9 @@ record's driver.pid, as SIGINT and SIGHUP do too: the run removes its
 sandboxes, and its outcome.json says which signal interrupted it. A signal
 ignored as `run` starts stays ignored. SIGKILL to the driver leaves the run
 lost, with its sandboxes, which `pumpkin cancel` removes: its containers,
-labelled pumpkin.run=<id>, and its socket directories in the record's sockets/,
-which `cancel` removes too.";
+labelled pumpkin.run=<id>, and its EC2 instances, tagged pumpkin:run=<id>, which
+end at the run's hard end all the same; and its socket directories in the
+record's sockets/, which `cancel` removes too.";
 
 const WAIT_NOTES: &str = "\
 Examples:
@@ -523,7 +525,7 @@ A live run's driver, whose pid is in the record's driver.pid, gets SIGTERM, and
 the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
 `pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
 signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
-provider that it ran on, as `pumpkin reap --help` says,
+provider that it ran on, Docker or EC2, as `pumpkin reap --help` says,
 and prints its outcome.json, then says how the run ended, as `pumpkin wait`
 does.";
 
@@ -602,33 +604,53 @@ Exit status:
      others all the same.
   2  A usage error.
   3  Only that a provider of a run, which `reap` names, can't be reached, as
-     when its Docker context is gone, so what the run left there may remain.
+     when its Docker context is gone, or the configuration that ran the run no
+     longer names it, so what the run left there may remain.
 
 Of each run whose driver has ended, `reap` deletes the sandboxes of the run that
 remain on each provider that it ran on, such as one that a create given up at
 its deadline made: on the Docker engine of the context that the record's
-provider.json names, the containers labelled pumpkin.run=<id>. It removes the
-run's socket directories, in the record's sockets/, and a lost run's record it
-marks failed, as its driver ended without an outcome.json. It leaves a live run
-to its driver: `pumpkin cancel` stops one.
+provider.json names, the containers labelled pumpkin.run=<id>; and on each
+provider of kind ec2, as the configuration that ran the run names it, the one
+its record.json's flags name or else the default, the EC2 instances tagged
+pumpkin:run=<id>. It removes the run's socket directories, in the record's
+sockets/, and a lost run's record it marks failed, as its driver ended without
+an outcome.json. It leaves a live run to its driver: `pumpkin cancel` stops one.
 
 Each sandbox that `reap` removes it notes in the record's reaps.jsonl, with the
 time; and each that the record holds undeleted, but that its provider no longer
-lists, it says, and notes there as gone.";
+lists, as when the configuration now points to another region, it says, and
+notes there as gone.";
 
 /// `pumpkin help config`, the machine's configuration.
 const CONFIG: &str = "\
 pumpkin.toml, the machine's configuration, which every `pumpkin run` and
 `pumpkin build` reads: the file that --config names,
 $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
-Every key is required, but those of the [upstreams.<name>] tables, and any
-other key is refused.
+Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
+and any other key is refused.
 
-Example:
+Example, of a machine whose runs go to EC2:
   [docker]
   context = \"default\"
 
-  [providers.local.docker]
+  [providers.aws.ec2]
+  region = \"us-west-1\"
+  repositories = { roles = \"pumpkin/roles\", sandboxd = \"pumpkin/sandboxd\" }
+
+  [providers.aws.ec2.timer]
+  group = \"pumpkin\"
+  role_arn = \"arn:aws:iam::123456789012:role/pumpkin-timer\"
+
+  [providers.aws.ec2.classes.judge]
+  template = \"lt-0123456789abcdef0\"
+  version = 1
+  vcpus = 8
+  memory_mib = 16384
+  cpu_features = [\"avx2\"]
+
+  [gateway]
+  private = \"172.31.0.10:7433\"
 
   [upstreams.gateway]
   url = \"https://gateway.example/v1\"
@@ -645,10 +667,41 @@ Example:
 roles on, as provider <name>, of kind <kind>, whose table holds that kind's own
 settings:
   docker        Sandboxes on the engine of [docker]; it takes no settings. A
-                provider of this kind is the configuration's one provider. Its
-                one class, `container`, offers the CPUs that sandboxes may be
-                given, the machine's memory, the flags that /proc/cpuinfo lists
-                for every CPU, no CPU model and no GPU.
+                provider of this kind is the configuration's one provider, as
+                a machine runs its roles either on its own engine or on others,
+                of kind ec2. Its one class, `container`, offers the CPUs that
+                sandboxes may be given, the machine's memory, the flags that
+                /proc/cpuinfo lists for every CPU, no CPU model and no GPU.
+  ec2           Sandboxes on EC2 instances of their own, in the envelope that
+                its settings name, which pull their images from it, pushed
+                there from the engine of [docker]; they dial [gateway]'s
+                private address. It runs `aws`, AWS CLI v2, from PATH, with the
+                credentials that `aws` finds, such as the instance's role.
+                Its settings:
+    region        The envelope's AWS region, which every call names.
+    classes       Each class of sandbox, by its name; one at least: its
+                  `template`, the ID of its launch template, and `version`, the
+                  template's version that its instances launch from; `vcpus`
+                  and `memory_mib`, its instance type's CPUs and memory, in
+                  MiB, of which a role gets all the CPUs and all the memory but
+                  a share the instance keeps; and `cpu_features`, its CPU's
+                  flags, and `cpu_model`, its CPU's model, as /proc/cpuinfo
+                  names them: without `cpu_features`, the class states no
+                  flag, and without `cpu_model`, no model, and a class that
+                  states a model is offered only to roles that need it; and
+                  `usd_per_hour`, what an instance costs an hour, if given.
+    repositories  The envelope's ECR repositories: `roles`, of the roles'
+                  images, and `sandboxd`, of the images that hold sandboxd.
+    timer         The sandboxes' timer, which terminates each instance at its
+                  run's hard end: `group`, its EventBridge Scheduler schedule
+                  group, and `role_arn`, the ARN of the role that its schedules
+                  terminate instances with.
+
+[gateway], where the gateway meets the sandboxes that dial it over a network:
+  private       The address, ip:port, that the sandboxes of an ec2 provider
+                dial: one of this machine's on the envelope's network, at a
+                port that its security group admits. A run listens there while
+                it places a role on such a provider, so one such run at a time.
 
 [upstreams.<name>], for each upstream that a workflow's model route may reach:
   url           The base URL of its API: https, or http to a loopback IP

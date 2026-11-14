@@ -2,18 +2,21 @@
 //! engine, by the context that reaches it, in `[docker]`; the providers that a run may place its
 //! roles on, each a table of its own, `[providers.<name>]`, which holds one table, named for the
 //! provider's kind, and holding that kind's own settings ([`Kind`]), whose classes of sandbox a
-//! run's roles are placed in ([`by_name`](Providers::by_name)); and the model upstreams that a
-//! workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
+//! run's roles are placed in ([`by_name`](Providers::by_name)); the addresses where the gateway
+//! meets the sandboxes that dial it over a network, in `[gateway]`; and the model upstreams that
+//! a workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
 //! [`serving`](Upstreams::serving) picks the one that serves each entry of a route. [`Config`]
-//! and the types it holds say what each key means; every key is required, but for `upstreams`
-//! and `docker.cpus`, and any other refused.
+//! and the types it holds say what each key means; every key is required, but for `gateway`'s,
+//! `upstreams` and `docker.cpus`, and any other refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use docker::CpuList;
 use engine::ContextName;
+use gateway::GatewayAddress;
 use route::{Key, Serving, UpstreamUrl};
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, de};
@@ -23,6 +26,7 @@ use stdx::Context;
 pub(crate) struct Config {
     pub(crate) docker: Docker,
     pub(crate) providers: Providers<Kind>,
+    pub(crate) gateway: Gateway,
     pub(crate) upstreams: Upstreams,
 }
 
@@ -32,11 +36,8 @@ pub(crate) struct Config {
 struct Tables {
     docker: Option<Docker>,
     /// The providers, by name. TOML refuses two tables of one name.
-    #[expect(
-        clippy::zero_sized_map_values,
-        reason = "a provider's table names its kind alone, as the one kind takes no settings"
-    )]
     providers: Option<BTreeMap<Name, Kind>>,
+    gateway: Option<Gateway>,
     /// Empty if absent.
     #[serde(default)]
     upstreams: Upstreams,
@@ -61,6 +62,10 @@ pub(crate) struct Docker {
 pub(crate) enum Kind {
     /// The machine's Docker engine, [`Docker`], which takes no settings of its own.
     Docker(Empty),
+    /// An envelope on EC2, which its settings name, whose sandboxes pull what they run from it,
+    /// pushed there from the machine's Docker engine, and dial the gateway at
+    /// [`private`](Gateway::private).
+    Ec2(ec2::Settings),
 }
 
 /// The table of a kind that takes no settings, which holds no key.
@@ -70,6 +75,18 @@ pub(crate) enum Kind {
     expecting = "an empty table, as the provider's kind takes no settings"
 )]
 pub(crate) struct Empty {}
+
+/// Where the gateway meets the sandboxes that dial it over a network, by where their providers
+/// reach it ([`Meeting`](provider::Meeting)).
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Gateway {
+    /// The address, `ip:port`, that a private provider's sandboxes dial, read by [`address`]: an
+    /// address of this machine's on the network it shares with them, which a run that places a
+    /// role on such a provider listens at. `None` if absent.
+    #[serde(default, deserialize_with = "address")]
+    pub(crate) private: Option<GatewayAddress>,
+}
 
 /// The providers of a machine, by name, each a `T`, such as its [`Kind`]: one of kind
 /// [`docker`](Kind::Docker) at most.
@@ -111,16 +128,14 @@ impl Providers<Kind> {
     ///
     /// # Errors
     ///
-    /// Fails, naming them, if more than one provider is of kind `docker`.
-    #[expect(
-        clippy::zero_sized_map_values,
-        reason = "a provider's table names its kind alone, as the one kind takes no settings"
-    )]
+    /// Fails, naming them, if more than one provider is of kind `docker`, or if one is beside a
+    /// provider of another kind.
     fn new(providers: BTreeMap<Name, Kind>) -> Result<Self, String> {
-        let mut docker = Vec::new();
+        let (mut docker, mut remote) = (Vec::new(), Vec::new());
         for (name, kind) in &providers {
             match kind {
                 Kind::Docker(Empty {}) => docker.push(format!("`{name}`")),
+                Kind::Ec2(_) => remote.push(format!("`{name}`")),
             }
         }
         // Each would be the machine's one engine, under another name, and would list the others'
@@ -132,6 +147,18 @@ impl Providers<Kind> {
                 "providers {} and {last} are each of kind `docker`, so each would be the machine's \
                  one Docker engine, `[docker]`'s: keep one of them",
                 others.join(", ")
+            ));
+        }
+        // A run places each role in the smallest class that fits it, of every provider's, so the
+        // engine's one class beside other providers' would take whichever roles this machine's
+        // memory happens to fit.
+        if let [local] = &docker[..]
+            && !remote.is_empty()
+        {
+            return Err(format!(
+                "provider {local} is of kind `docker`, beside {}: a machine runs its roles either \
+                 on its own engine or on other providers, so keep {local} alone, or remove it",
+                remote.join(" and ")
             ));
         }
         Ok(Self(providers))
@@ -157,6 +184,11 @@ impl<T> Providers<T> {
     /// Each provider, by its name.
     pub(crate) fn by_name(&self) -> &BTreeMap<Name, T> {
         &self.0
+    }
+
+    /// Provider `name`, if a table names it.
+    pub(crate) fn get(&self, name: &Name) -> Option<&T> {
+        self.0.get(name)
     }
 }
 
@@ -245,6 +277,21 @@ fn endpoint(base: &str, api: Api) -> String {
     format!("{base}{path}")
 }
 
+/// A [`Gateway`] address, read from `ip:port`, such as `172.31.0.10:7433`, and refused if
+/// unspecified, as [`GatewayAddress`] says.
+fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayAddress>, D::Error> {
+    let address = String::deserialize(deserializer)?;
+    let parsed: SocketAddr = address.parse().map_err(|_| {
+        de::Error::custom(format!(
+            "`{}` is not an IP address and a port: name one such as `172.31.0.10:7433`",
+            address.escape_debug()
+        ))
+    })?;
+    GatewayAddress::try_from(parsed)
+        .map(Some)
+        .map_err(de::Error::custom)
+}
+
 /// The configuration in the file at `path`, a machine's.
 ///
 /// # Errors
@@ -274,6 +321,7 @@ pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     let Tables {
         docker,
         providers,
+        gateway,
         mut upstreams,
     } = parsed
         .map_err(|error| error.to_string().trim_end().to_owned())
@@ -298,6 +346,7 @@ pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     Ok(Config {
         docker,
         providers,
+        gateway: gateway.unwrap_or_default(),
         upstreams,
     })
 }
