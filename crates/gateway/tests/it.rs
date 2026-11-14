@@ -1458,10 +1458,10 @@ fn hellos() {
         &expect![[r#"
             this version: heard {"type":"accepted"}; ok
             a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 0's form: unknown field `later`, expected `version` or `grant`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 0's form: unknown field `later`, expected `version` or `grant`
+            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 0's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 0's form: unknown field `later`, expected one of `version`, `grant`, `gpus`
             this version, with a grant: heard {"message":"the hello presents a registration grant on a socket of the sandbox's own, which identifies it: expected none there","type":"refused"}; InvalidData: the gateway refused the session: the hello presents a registration grant on a socket of the sandbox's own, which identifies it: expected none there
             a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            a length a byte over a hello's, and nothing more: heard {"message":"the hello is 256 bytes: a hello holds at most 255","type":"refused"}; InvalidData: the gateway refused the session: the hello is 256 bytes: a hello holds at most 255
+            a length a byte over a hello's, and nothing more: heard {"message":"the hello is 1025 bytes: a hello holds at most 1024","type":"refused"}; InvalidData: the gateway refused the session: the hello is 1025 bytes: a hello holds at most 1024
             this version, with a body: heard {"message":"the hello has a 1-byte body: a hello has none","type":"refused"}; InvalidData: the gateway refused the session: the hello has a 1-byte body: a hello has none
             a reply, not a hello: heard {"message":"the session's first frame is no hello: missing field `version`: open the session with one","type":"refused"}; InvalidData: the gateway refused the session: the session's first frame is no hello: missing field `version`: open the session with one
             a frame whose message, `null`, is no object: heard {"message":"the session's first frame is no hello: invalid type: null, expected an object with a `version`: open the session with one","type":"refused"}; InvalidData: the gateway refused the session: the session's first frame is no hello: invalid type: null, expected an object with a `version`: open the session with one
@@ -1473,7 +1473,7 @@ fn hellos() {
     );
 }
 
-/// The hello that presents `grant`, if any.
+/// The hello that presents `grant`, if any, and names no GPU.
 fn hello(grant: Option<RegistrationGrant>) -> Hello {
-    Hello { grant }
+    Hello { grant, gpus: None }
 }

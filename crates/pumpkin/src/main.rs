@@ -1,11 +1,12 @@
 //! `pumpkin`, the operator's command line, which [`cli`] parses and describes, as
 //! `pumpkin --help` prints it. `run` builds a task's images on the machine's engine and starts
-//! its workflow's run with [`runtime`], on the Docker provider, in a driver process
-//! ([`driver`]), with the `sandboxd` that [`sandboxd`] finds, and [`config`] reads the machine's
-//! configuration. `check` checks a task's source, which [`star`] reads, and lints it, and `build`
-//! builds its images and prints its IR. `fmt` formats `.star` files, and `check` lints them, with
-//! the formatter beside `pumpkin` ([`style`]). What a command says of an ending or a refusal ends
-//! with the commands to run next, as [`next`] makes them.
+//! its workflow's run with [`runtime`], on the providers that [`config`], the machine's
+//! configuration, places its roles on, each connected as its kind says ([`Connected`]), in a
+//! driver process ([`driver`]), with the `sandboxd` that [`sandboxd`] finds. `check` checks a
+//! task's source, which [`star`] reads, and lints it, and `build` builds its images and prints its
+//! IR. `fmt` formats `.star` files, and `check` lints them, with the formatter beside `pumpkin`
+//! ([`style`]). What a command says of an ending or a refusal ends with the commands to run
+//! next, as [`next`] makes them.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -17,7 +18,7 @@ use std::process::{ExitCode, ExitStatus};
 use std::time::SystemTime;
 use std::{env, fmt, fs};
 
-use docker::Docker;
+use docker::{CpuList, Docker};
 use driver::{ARGV0, Driver, Handoff};
 use engine::{ContextName, Engine};
 use provider::{Provider, RunTag, SandboxId, Sweep};
@@ -26,7 +27,7 @@ use rustix::fs::Mode;
 use rustix::process::{Pid, Signal, umask};
 use sandboxd::Sandboxd;
 use schema::ir::Name;
-use schema::workflow::Workflow;
+use schema::workflow::{ByProvider, Placed, Workflow};
 use stdx::Context;
 
 mod cli;
@@ -245,50 +246,49 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         sandboxd,
         wait: _,
     } = run;
-    // The task, `sandboxd`, the configuration and its upstream's key are checked before the
-    // engine is reached, so a mistake in one needs no engine and makes no record. The roles are
-    // placed in the provider's classes before the record is begun. What only the provider
-    // refuses, such as a `sandboxd` it can't mount, is refused once the record exists.
+    // The task, `sandboxd`, the configuration and its upstream's key are checked before the engine
+    // is reached, so a mistake in one needs no engine and makes no record. The roles are placed
+    // in the classes that the providers offer once they are reached, before the record is begun,
+    // so a role that fits none is refused before anything is reserved. What only a provider refuses, such as a `sandboxd` it can't mount, is refused
+    // once the record exists.
     let (runs, _) = runs_dir(runs)?;
     let sandboxd = Sandboxd::find(sandboxd.map(PathBuf::from))?;
     let config = config_path(config)?;
-    // Held here once reached, as the provider connected to it outlives the thread that checks
-    // and builds the task.
+    // Held here once reached, as the providers connected to it outlive the thread that checks and
+    // builds the task.
     let mut engine = None;
     let prepared = star::checked(&entry, &args, |task| prepared(task, &config, &mut engine));
     let prepared =
         prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
     let Prepared {
         workflow,
-        docker,
+        providers,
         serving,
     } = prepared.map_err(|error| {
         say(error);
         format!("to run it again: {again}")
     })?;
-    let placed = workflow.place(&docker.ready().classes).map_err(|errors| {
-        let path = Path::new(entry.path()).display();
-        for error in errors.as_slice() {
-            say(format_args!("{path}: {error}"));
-        }
-        let has = format_args!("{path}: placing the workflow's roles in the engine's classes has");
-        say(closing_problems(has, errors.as_slice().len()));
-        format!("to run it again: {again}")
-    })?;
+    let (placed, placed_on) = place(
+        Path::new(entry.path()),
+        workflow,
+        &providers,
+        &config,
+        &again,
+    )?;
     // Before the record is begun, so that a signal that comes once it is begun stops the run,
     // which records it, rather than ending the driver and leaving the run lost.
     let caught = stdx::signal::catch(&[Signal::INT, Signal::TERM, Signal::HUP]);
     caught.context("setting the handlers of SIGINT, SIGTERM and SIGHUP failed")?;
+    let on = placed_on.map(Connected::provider);
     let kept = Recorded { args: &words };
-    let run = Run::prepare(&System, placed, Path::new(&runs), id, serving, kept)?;
+    let run = Run::prepare(&System, placed, on, Path::new(&runs), id, serving, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     // Said before `run` hears of it, so that whatever ends both later, the record is named.
     say(format_args!("run {id} records into {}", dir.display()));
     driver::locked(&id)?;
     // `execute` records why the run stopped in its `outcome.json`, which `run` prints if the run
     // didn't start; these lines, the driver's last, then close that ending.
-    let provider = (&PROVIDER, &docker as &dyn Provider);
-    let executed = run.execute(provider, sandboxd.path(), || driver::announce(&dir));
+    let executed = run.execute(sandboxd.path(), || driver::announce(&dir));
     if let Err(stopped) = executed {
         say(closing(&id, &stopped.to_string(), &dir));
         advise("run it again", &again);
@@ -324,19 +324,20 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, cli::Run), String> {
     }
 }
 
-/// What a run starts from: its task's workflow, built, and the provider, connected.
+/// What a run starts from: its task's workflow, built, and what it reads of the machine's
+/// configuration, its providers connected.
 struct Prepared<'e> {
     workflow: Workflow,
-    docker: Docker<'e>,
+    providers: config::Providers<Connected<'e>>,
     /// How the agent's model route is served, if it has one.
     serving: Option<route::Serving>,
 }
 
 /// What a run of `task`, checked, starts from, on the machine that the configuration at `config`
 /// names, each step refused before the next begins: the configuration read, and an upstream found
-/// to serve the agent's model route; the engine reached, and kept in `engine`; the provider
-/// connected to it, so that an engine that can't run sandboxes is refused before any image is
-/// built; then the task's images built on it ([`star::Task::build`]).
+/// to serve the agent's model route; the engine reached, and kept in `engine`; each provider
+/// connected to it ([`Connected::new`]), so that an engine that can't run sandboxes is refused
+/// before any image is built; then the task's images built on it ([`star::Task::build`]).
 ///
 /// # Errors
 ///
@@ -347,7 +348,8 @@ fn prepared<'e>(
     engine: &'e mut Option<Engine>,
 ) -> Result<Result<Prepared<'e>, lang::Problems>, String> {
     let config::Config {
-        docker: config::Docker { context },
+        docker: config::Docker { context, cpus },
+        providers,
         upstreams,
     } = config::read(config)?;
     let workflow = task.workflow();
@@ -356,10 +358,11 @@ fn prepared<'e>(
         None => None,
     };
     let engine = &*engine.insert(crate::engine(context)?);
-    let docker = Docker::connect(engine)?;
+    let providers =
+        providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
     Ok(task.build(engine).map(|workflow| Prepared {
         workflow,
-        docker,
+        providers,
         serving,
     }))
 }
@@ -911,7 +914,8 @@ fn config_path(given: Option<String>) -> Result<PathBuf, String> {
 /// The Docker engine that the configuration at `path` names ([`engine()`]).
 fn configured_engine(path: &Path) -> Result<Engine, String> {
     let config::Config {
-        docker: config::Docker { context },
+        docker: config::Docker { context, cpus: _ },
+        providers: _,
         upstreams: _,
     } = config::read(path)?;
     engine(context)
@@ -932,8 +936,71 @@ fn home(instead: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("HOME is unset or empty: set it, or {instead}"))
 }
 
-/// The name of the machine's one provider, its Docker engine, as a run's record names it.
-const PROVIDER: Name = Name::from_static("docker");
+/// A provider of the machine's configuration, connected as its kind says.
+enum Connected<'e> {
+    /// The machine's Docker engine, as a provider.
+    Docker(Docker<'e>),
+}
+
+impl<'e> Connected<'e> {
+    /// Provider `name`, of `kind`, connected, with `engine`, the machine's Docker engine, whose
+    /// sandboxes, if it is one, are given the CPUs of `cpus`.
+    ///
+    /// # Errors
+    ///
+    /// Fails, naming the provider, if the engine can't run sandboxes.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the one kind takes no settings, so there is nothing to consume"
+    )]
+    fn new(
+        name: &Name,
+        kind: config::Kind,
+        engine: &'e Engine,
+        cpus: Option<&CpuList>,
+    ) -> Result<Self, String> {
+        let connected = match kind {
+            config::Kind::Docker(config::Empty {}) => {
+                Docker::connect(engine, cpus).map(Self::Docker)
+            }
+        };
+        connected.context(format_args!("reaching provider `{name}` failed"))
+    }
+
+    fn provider(&self) -> &dyn Provider {
+        match self {
+            Self::Docker(docker) => docker,
+        }
+    }
+}
+
+/// `workflow`, of the task whose entry is `path`, placed in the classes that `providers`, read
+/// from the configuration at `config`, offer ([`Workflow::place`]), with each provider that it
+/// places a role on. Of one that can't be, says
+/// each problem on a line of its own, as cargo does, then how many, and fails with `again`, the
+/// command that runs it again.
+fn place<'p, 'e>(
+    path: &Path,
+    workflow: Workflow,
+    providers: &'p config::Providers<Connected<'e>>,
+    config: &Path,
+    again: &str,
+) -> Result<(Placed, ByProvider<&'p Connected<'e>>), String> {
+    let classes = |connected: &'p Connected<'e>| &connected.provider().ready().classes;
+    let placed = workflow.place(providers.by_name(), classes);
+    placed.map_err(|errors| {
+        let path = path.display();
+        for error in errors.as_slice() {
+            say(format_args!("{path}: {error}"));
+        }
+        let has = format_args!(
+            "{path}: placing the workflow's roles in the classes that {}'s providers offer has",
+            config.display()
+        );
+        say(closing_problems(has, errors.as_slice().len()));
+        format!("to run it again: {again}")
+    })
+}
 
 /// The line that closes a list of `count` problems, which says that `has` them, and how many.
 /// The command that runs again follows it.

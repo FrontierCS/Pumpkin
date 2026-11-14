@@ -9,7 +9,7 @@
 //! - `record.json`, written first: the version of the record's form ([`RECORD_VERSION`]), the
 //!   build that made it ([`BUILD`]) and the arguments of its `pumpkin run` ([`Record::args`]);
 //! - `ir.json`: the workflow's IR;
-//! - `provider.json`: what the run's provider declared, by its name ([`provided`]);
+//! - `provider.json`: the providers that the roles are placed on, and where each is ([`provided`]);
 //! - `log.jsonl`: the run log, which the `log` module lays out;
 //! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256;
 //! - `agent/` and `jobs/<n>/`, for the sandbox of the agent and of job `n`'s judge call, once
@@ -32,9 +32,9 @@ use std::time::{Duration, SystemTime};
 
 use decision::PayloadRef;
 use provider::{Meeting, Provider, RunTag, SandboxId, Sweep, UnixTime};
-use schema::ir::{Name, Sha256Digest};
+use schema::ir::{GpuModel, Name, Sha256Digest};
 use schema::sandbox::{command_stderr, log_dir, out_dir};
-use schema::workflow::Workflow;
+use schema::workflow::{ByProvider, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
@@ -1008,17 +1008,32 @@ fn utc_stamp(seconds: u64) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
-/// What `provider.json` holds of `provider`, the run's, named `name`: `{"providers": {p: r}}`,
-/// where `r` is what `p` declared ([`Ready`](provider::Ready)), with how its sandboxes meet the
-/// gateway, `"reach"`: `local` ([`Meeting`]).
-pub(super) fn provided(name: &Name, provider: &dyn Provider) -> Value {
-    let mut declared = json!(provider.ready());
-    declared["reach"] = match provider.meeting() {
-        Meeting::Local(_) => "local",
-    }
-    .into();
-    let declared = Map::from_iter([(name.to_string(), declared)]);
-    json!({ "providers": declared })
+/// What `provider.json` holds of `placed`, whose roles are placed on `providers`:
+/// `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c}}}`, where `r` is what `p`
+/// declared ([`Ready`](provider::Ready)), with how its sandboxes meet the gateway, `"reach"`:
+/// `local` ([`Meeting`]); and role `n` is placed on `p`, in class `c`.
+pub(super) fn provided(placed: &Placed, providers: &ByProvider<&dyn Provider>) -> Value {
+    let declared = (providers.iter())
+        .map(|(name, provider)| {
+            let mut declared = json!(provider.ready());
+            declared["reach"] = match provider.meeting() {
+                Meeting::Local(_) => "local",
+            }
+            .into();
+            (name.to_string(), declared)
+        })
+        .collect::<Map<_, _>>();
+    let workflow = placed.workflow();
+    let roles = workflow.roles().map(|(role, sandbox)| {
+        let Placement {
+            provider,
+            class,
+            declared: _,
+        } = placed.placement(role);
+        let at = json!({ "provider": provider, "class": class });
+        (sandbox.name.to_string(), at)
+    });
+    json!({ "providers": declared, "roles": roles.collect::<Map<_, _>>() })
 }
 
 /// What a run of `workflow` keeps in its record's `ir.json`, as [`Run::prepare`] writes it.
@@ -1064,7 +1079,8 @@ pub(super) fn write_console(host: &impl Host, dir: &Path, console: &str) -> Resu
 /// Writes `sandbox.json` in `dir`, a sandbox's directory in the record, made if need be, by
 /// [`replace`] on `host`: `{"provider": p, "id": i, "report": r}`, sandbox `i` that provider `p`
 /// created, and what it made beside it, its
-/// [`Created::report`](provider::Created::report); and, once
+/// [`Created::report`](provider::Created::report); with `"gpus": [m, ...]` once its session
+/// says the GPUs its `sandboxd` saw ([`Session::gpus`](gateway::Session::gpus)); and, once
 /// `deleted` is the outcome of its latest delete, `"delete": {"state": "deleted"}`, or
 /// `{"state": "failed", "reason": e}`.
 pub(super) fn write_sandbox(
@@ -1073,9 +1089,13 @@ pub(super) fn write_sandbox(
     provider: &Name,
     id: &SandboxId,
     report: &Value,
+    gpus: Option<&[GpuModel]>,
     deleted: Option<&Result<(), String>>,
 ) -> Result<(), String> {
     let mut sandbox = json!({ "provider": provider, "id": id.as_str(), "report": report });
+    if let Some(gpus) = gpus {
+        sandbox["gpus"] = json!(gpus);
+    }
     if let Some(deleted) = deleted {
         sandbox["delete"] = match deleted {
             Ok(()) => json!({ "state": "deleted" }),

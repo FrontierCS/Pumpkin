@@ -18,6 +18,7 @@
 )]
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::fs::Permissions;
 use std::io::Read;
@@ -25,7 +26,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, iter, thread};
 
 use docker::{Docker, Reached};
@@ -183,6 +184,8 @@ fn starlark(value: &Value) -> String {
 /// on it as it ran, and showed as [`report`] does, with what it found.
 enum Step {
     Run(Command),
+    /// A `pumpkin run` on the real engine, as [`with_room`] runs it.
+    OnEngine(Command),
     Ran(String),
 }
 
@@ -208,6 +211,10 @@ fn check(
     let ran: Vec<String> = (steps.into_iter())
         .map(|step| match step.into() {
             Step::Run(command) => ran(command, &scratch.0, rootful),
+            Step::OnEngine(mut command) => {
+                let invoked = invocation(&command);
+                report(invoked, &with_room(&mut command), &scratch.0, rootful)
+            }
             Step::Ran(text) => text,
         })
         .collect();
@@ -217,6 +224,24 @@ fn check(
         text = text.replace(value, name);
     }
     expect.assert_eq(&text);
+}
+
+/// What `command`, a `pumpkin run` on the real engine, printed once the engine had room for its
+/// run: one refused only for the cores that other runs hold, as other tests' runs on the engine
+/// may, is run again every second, for 10 minutes at most.
+fn with_room(command: &mut Command) -> Output {
+    let room = Instant::now() + Duration::from_mins(10);
+    loop {
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let crowded = output.status.code() == Some(1)
+            && stderr.contains("pumpkin: reserving on provider")
+            && stderr.contains("run it once");
+        if !crowded || Instant::now() >= room {
+            return output;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// What becomes of `command`, `pumpkin` in `dir`, as [`check`] shows it.
@@ -466,6 +491,36 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     ir
 }
 
+/// How many CPUs the machine has online, all of which the Docker provider gives sandboxes.
+fn machine_cpus() -> u64 {
+    cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online").unwrap()).len() as u64
+}
+
+/// How many cores the machine's online CPUs are on, each CPU's core by the CPUs it shares it
+/// with.
+fn machine_cores() -> u64 {
+    let online = cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online").unwrap());
+    let cores: BTreeSet<BTreeSet<u32>> = online.into_iter().map(siblings).collect();
+    cores.len() as u64
+}
+
+/// The CPUs that `text`, as the kernel writes a list of them, names.
+fn cpu_list(text: &str) -> BTreeSet<u32> {
+    let ranges = text.trim().split(',').filter(|range| !range.is_empty());
+    ranges
+        .flat_map(|range| {
+            let (first, last) = range.split_once('-').unwrap_or((range, range));
+            first.parse::<u32>().unwrap()..=last.parse().unwrap()
+        })
+        .collect()
+}
+
+/// The CPUs that share a core with `cpu`, `cpu` among them.
+fn siblings(cpu: u32) -> BTreeSet<u32> {
+    let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+    cpu_list(&fs::read_to_string(path).unwrap())
+}
+
 /// Sends the signal `name`, as `kill --signal` takes it, to `target`: a process ID, or a process
 /// group's, negated; whether there was one to signal.
 fn signal(name: &str, target: i64) -> bool {
@@ -480,16 +535,9 @@ fn docker_table(context: &str) -> String {
     format!("[docker]\ncontext = \"{context}\"\n")
 }
 
-/// The engine of the Docker context `context`.
-fn engine(context: &str) -> Engine {
-    let context = ContextName::try_from(context.to_owned()).unwrap();
-    Engine::connect(context).unwrap()
-}
-
-/// The containers of the Docker context `context`, as a reap reaches them.
-fn containers(context: &str) -> Reached {
-    Docker::reach(ContextName::try_from(context.to_owned()).unwrap()).unwrap()
-}
+/// The table of a configuration's one provider, `local`, of kind `docker`, in whose one class
+/// each role of [`workflow`]'s fits.
+const LOCAL: &str = "[providers.local.docker]\n";
 
 /// Makes `scratch`'s directory `dir`, and links `pumpkin` there; returns the link's path.
 fn install(scratch: &Scratch, dir: &str) -> PathBuf {
@@ -506,12 +554,29 @@ fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     dir.join("pumpkin")
 }
 
+/// The engine of the Docker context `context`.
+fn engine(context: &str) -> Engine {
+    let context = ContextName::try_from(context.to_owned()).unwrap();
+    Engine::connect(context).unwrap()
+}
+
+/// The containers of the Docker context `context`, as a reap reaches them.
+fn containers(context: &str) -> Reached {
+    Docker::reach(ContextName::try_from(context.to_owned()).unwrap()).unwrap()
+}
+
+/// A configuration of the context `context` alone, which places the fixture's roles as
+/// [`LOCAL`] does.
+fn machine(context: &str) -> String {
+    format!("{}\n{LOCAL}", docker_table(context))
+}
+
 /// What a recipe holds that the stand-in `docker` builds ([`StandIn`]).
 const BUILDS: &str = "# The stand-in builds this recipe.";
 
 /// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
-/// on a host of 4 CPUs and 8 GiB of memory.
-const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"PidsLimit":true,"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"NCPU":4,"MemTotal":8589934592}"#;
+/// on a host of 8 GiB of memory.
+const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"CPUSet":true,"PidsLimit":true,"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"MemTotal":8589934592}"#;
 
 /// A stand-in `docker` in a scratch directory, for the `pumpkin run`s that [`run`](Self::run)
 /// makes: an engine whose one image is that of the task `stand-in`, ID all zeros, which lacks the
@@ -524,7 +589,16 @@ struct StandIn<'a> {
 }
 
 impl<'a> StandIn<'a> {
+    /// The stand-in for an engine that [`INFO`] describes.
     fn new(scratch: &'a Scratch) -> Self {
+        Self::with(scratch, INFO)
+    }
+
+    /// The stand-in for an engine of which `docker info` prints `info`, with the scratch
+    /// directory's name as its ID ([`ledger`]).
+    fn with(scratch: &'a Scratch, info: &str) -> Self {
+        let id = scratch.0.file_name().unwrap().to_str().unwrap();
+        let info = info.replace(r#""MemTotal""#, &format!(r#""ID":"{id}","MemTotal""#));
         let dir = scratch.0.display();
         let digest = format!("sha256:{}", "0".repeat(64));
         let absent = format!("sha256:{}", "1".repeat(64));
@@ -550,7 +624,7 @@ if [ -e "{dir}/hold-$name" ]; then
 fi
 case $1 in
     context) echo unix:///stand-in.sock ;;
-    info) echo '{INFO}' ;;
+    info) echo '{info}' ;;
     # `image inspect --format <format> -- <image>`, which says it has no image that the engine
     # lacks, or for the tag `pumpkin/lacking:<digest>`, the image that the engine lacks; for the
     # tag `pumpkin/unbuilt:<digest>`, no image, which a build then fails to make.
@@ -581,7 +655,7 @@ esac
         let mode = Permissions::from_mode(0o755);
         fs::set_permissions(scratch.0.join("bin/docker"), mode).unwrap();
         scratch.write_sandboxd("sandboxd");
-        scratch.write("pumpkin.toml", &docker_table("default"));
+        scratch.write("pumpkin.toml", &machine("default"));
         scratch.write_task("stand-in", &workflow(&digest, &["true"]));
         scratch.write_task("lacking", &workflow(&absent, &["true"]));
         scratch.write_task("unbuilt", &workflow(&digest, &["true"]));
@@ -665,5 +739,12 @@ impl Drop for StandIn<'_> {
         for command in ["context", "image", "create"] {
             self.release(command);
         }
+        let _ = fs::remove_dir_all(ledger(self.scratch));
     }
+}
+
+/// The ledger of the CPUs that runs on the stand-in's engine, of `scratch`, hold: an engine of
+/// its own, so that the stand-in's runs never wait for others.
+fn ledger(scratch: &Scratch) -> PathBuf {
+    Path::new("/var/tmp/pumpkin-cpus").join(scratch.0.file_name().unwrap())
 }

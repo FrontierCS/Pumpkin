@@ -16,8 +16,9 @@ use serde_json::Value;
 use test_support::{docker_context, sandboxd};
 
 use super::{
-    Scratch, StandIn, Step, alive, build_first, check, containers, docker_table, ended, engine,
-    files, invocation, poll, ran, record, report, sandboxes, signal, through_shell, workflow,
+    INFO, Scratch, StandIn, Step, alive, build_first, check, containers, ended, engine, files,
+    invocation, machine, poll, ran, record, report, sandboxes, signal, through_shell, with_room,
+    workflow,
 };
 
 /// `pumpkin wait` for the run that `output`, `pumpkin run`'s in `scratch`, named, once its
@@ -112,6 +113,19 @@ fn unbuilt(name: &str) -> String {
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
+/// What becomes of a `pumpkin run` of the stand-in's `task` in a scratch directory of its own,
+/// `name`, against a stand-in engine of which `docker info` prints `info`.
+fn on_engine(name: &str, task: &str, info: &str) -> String {
+    let scratch = Scratch::new(name);
+    let stand_in = StandIn::with(&scratch, info);
+    let text = ran(
+        stand_in.run(&format!("{task}/task.star"), &[]),
+        &scratch.0,
+        false,
+    );
+    text.replace(&scratch.0.display().to_string(), "<scratch>")
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -123,6 +137,9 @@ fn does_not_start() {
     let mut steps = vec![Step::from(stand_in.run("lacking/task.star", &[]))];
     steps.push(Step::Ran(unlogged("unlogged")));
     steps.push(Step::Ran(unbuilt("unbuilt")));
+    // An engine that can't limit a container's swap, of a task whose image it would build.
+    let unlimited = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
+    steps.push(Step::Ran(on_engine("unlimited", "unbuilt", &unlimited)));
     for (at, whom, signal, released) in [
         ("context", Whom::Driver, "KILL", false),
         ("context", Whom::Driver, "TERM", false),
@@ -150,10 +167,10 @@ fn does_not_start() {
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
+            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build or load it there first, as the provider pulls none","state":"failed"}
             printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
@@ -174,6 +191,10 @@ fn does_not_start() {
             pumpkin: unbuilt/task.star: the task has 1 problem
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
             a record was made: false
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: reaching provider `local` failed: the Docker engine of context `default` can't enforce every limit a sandbox has: `docker info` reports SwapLimit false: use an engine that reports each true
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
@@ -572,7 +593,7 @@ fn lost_on_docker() {
     let engine = engine(&context);
     let containers = containers(&context);
     scratch.write_task("sleeps", &workflow("", &["sleep", "300"]));
-    scratch.write("pumpkin.toml", &docker_table(&context));
+    scratch.write("pumpkin.toml", &machine(&context));
     build_first(&scratch, "sleeps", "pumpkin.toml");
     let _cleanup = Cleanup {
         containers: &containers,
@@ -584,7 +605,7 @@ fn lost_on_docker() {
     run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
     run.env("TMPDIR", &temp);
     let invoked = invocation(&run);
-    let output = run.output().unwrap();
+    let output = with_room(&mut run);
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
     let (id, dir) = record(&stderr).unwrap();
     let tag = RunTag::try_from(id.to_owned()).unwrap();
@@ -648,7 +669,7 @@ fn lost_on_docker() {
             pumpkin: to stop it: pumpkin cancel --runs <scratch>/runs <id>
             outcome.json: none
             printed the id alone: true
-            the agent's sandbox, agent/sandbox.json: {"id":"<container>","provider":"docker","report":null}
+            the agent's sandbox, agent/sandbox.json: {"id":"<container>","provider":"local","report":null}
             its socket directories: ["agent"]
             its temporary directory holds: []
             $ pumpkin wait <id> --runs runs
@@ -659,7 +680,7 @@ fn lost_on_docker() {
             pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
             $ pumpkin cancel <id> --runs runs
             exit status: Some(0)
-            pumpkin: run <id> left 1 sandbox on provider `docker`, now removed: <the agent's container>
+            pumpkin: run <id> left 1 sandbox on provider `local`, now removed: <the agent's container>
             pumpkin: run <id> left its socket directory, now removed: <scratch>/runs/<id>/sockets
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
@@ -667,7 +688,7 @@ fn lost_on_docker() {
             printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
             $ pumpkin reap --runs runs
             exit status: Some(0)
-            pumpkin: run <id> left 1 sandbox on provider `docker`, now removed: <the unstarted container>
+            pumpkin: run <id> left 1 sandbox on provider `local`, now removed: <the unstarted container>
             printed:
               <id>
             containers left: 0"#]],
@@ -685,7 +706,7 @@ fn signaled_on_docker() {
     let deadline = ir["roles"][0]["runtime"]["agent"]["deadline_seconds"].as_u64();
     let deadline = Duration::from_secs(deadline.unwrap());
     scratch.write_task("sleeps", &ir);
-    scratch.write("pumpkin.toml", &docker_table(&context));
+    scratch.write("pumpkin.toml", &machine(&context));
     build_first(&scratch, "sleeps", "pumpkin.toml");
     let _cleanup = Cleanup {
         containers: &containers,
@@ -693,7 +714,7 @@ fn signaled_on_docker() {
     };
     let mut run = scratch.pumpkin(&["run", "sleeps/task.star", "--sandboxd", &sandboxd]);
     run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
-    let output = run.output().unwrap();
+    let output = with_room(&mut run);
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
     let (id, dir) = record(&stderr).unwrap();
     let record = scratch.0.join(dir);

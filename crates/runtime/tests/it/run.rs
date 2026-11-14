@@ -10,6 +10,8 @@
     reason = "a failed run shows where its record is"
 )]
 
+use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -20,7 +22,7 @@ use provider::{Provider, Ready};
 use route::{Key, Serving, Upstream, UpstreamUrl};
 use runtime::{Record, Recorded, Run, System, new_id};
 use schema::ir::{self, ModelName, Name};
-use schema::workflow::{Placed, Workflow};
+use schema::workflow::{ByProvider, Placed, Workflow};
 use serde_json::Value;
 use stdx::process::Environment;
 use tempfile::TempDir;
@@ -78,11 +80,13 @@ fn check(
             UNIX_EPOCH + from_epoch
         };
         let url = "http://127.0.0.1:9/responses";
+        let serving = served.map(|models| serving(&runs.dir, url, models));
+        let sim = Sim::new();
         let prepared = new_id(now).and_then(|id| {
-            let placed = placed(&ir, Sim::new().ready())?;
-            let serving = served.map(|models| serving(&runs.dir, url, models));
+            let placed = placed(&ir, sim.ready())?;
+            let on = providers_of(&placed, |_| &sim);
             let recorded = Recorded { args: &args };
-            Run::prepare(&System, placed, &dir, id, serving, recorded)
+            Run::prepare(&System, placed, on, &dir, id, serving, recorded)
         });
         let record = fs::read_dir(&dir)
             .ok()
@@ -129,13 +133,38 @@ fn check(
     expect.assert_eq(&lines.join("\n"));
 }
 
-/// The name of the one provider that a test's run is executed on.
+/// The name of the one provider that [`placed`] places a workflow's roles on.
 pub(crate) const PROVIDER: &str = "simulated";
 
-/// `ir`, parsed and placed in the classes that a provider that declares `ready` offers.
+/// `ir`, parsed and placed on one provider, [`PROVIDER`], that declares `ready` would
+/// ([`placed_on`]).
 pub(crate) fn placed(ir: &ir::Workflow, ready: &Ready) -> Result<Placed, String> {
+    placed_on(ir, &BTreeMap::from([(PROVIDER, ready)]))
+}
+
+/// `ir`, parsed and placed on `providers`, each by its name with what it declares, in the classes
+/// they offer, as a run places it.
+pub(crate) fn placed_on(
+    ir: &ir::Workflow,
+    providers: &BTreeMap<&str, &Ready>,
+) -> Result<Placed, String> {
+    let offered: BTreeMap<Name, &Ready> = (providers.iter())
+        .map(|(provider, ready)| (Name::try_from((*provider).to_owned()).unwrap(), *ready))
+        .collect();
     let workflow = Workflow::parse(ir).map_err(|errors| errors.to_string())?;
-    (workflow.place(&ready.classes)).map_err(|errors| errors.to_string())
+    let placed = workflow.place(&offered, |ready| &ready.classes);
+    let (placed, _) = placed.map_err(|errors| errors.to_string())?;
+    Ok(placed)
+}
+
+/// Each provider that `placed` places a role on, as `provider` names it, as a run is prepared on
+/// them.
+pub(crate) fn providers_of<'p>(
+    placed: &Placed,
+    provider: impl Fn(&Name) -> &'p dyn Provider,
+) -> ByProvider<&'p dyn Provider> {
+    let Ok(providers) = placed.by_provider(|name| Ok::<_, Infallible>(provider(name)));
+    providers
 }
 
 /// The upstream `stand-in` at `url`, whose key is in a file in `dir`, which serves each of
@@ -156,6 +185,14 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
     }
 }
 
+// A workflow is prepared, its record named by its run's id, from the UTC time it is prepared
+// at, and holding its IR; one that has a model route is prepared with an upstream that serves
+// every model the route allows, and else refused before anything starts, with its record
+// saying why. The times are a leap day's first second, a year's last, and the first of March
+// 2100, which follows the 28th of February in a year that isn't a leap year. A clock that
+// reads before 1970 is refused before anything is made, and so is a workflow whose roles need
+// more CPUs at once than the provider can hold for it, though each fits its class: the agent and
+// the train judge run at once, and the final judge, which needs as many as the agent, after.
 #[test]
 fn build() {
     let version = env!("CARGO_PKG_VERSION");
@@ -200,6 +237,10 @@ fn prepare() {
         .as_object_mut()
         .unwrap()
         .remove("egress");
+    let mut wide = no_route.clone();
+    for (role, cpu_millis) in [(0, 1_000_000), (1, 100_000), (2, 1_000_000)] {
+        wide["roles"][role]["needs"]["cpu_millis"] = cpu_millis.into();
+    }
     check(
         [
             // A leap day's first second, a year's last, and 2100's first of March, which follows
@@ -210,6 +251,7 @@ fn prepare() {
             (1_767_225_599, ir, Some(&["gpt-6-sol", "gpt-6-astra"][..])),
             (4_107_542_400, no_route.clone(), None),
             (-1, no_route, None),
+            (1_767_225_599, wide, None),
         ],
         &expect![[r#"
             prepared, named by its id: true
@@ -232,7 +274,8 @@ fn prepare() {
             21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
-            refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false"#]],
+            refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false
+            refused: reserving on provider `simulated`: the run needs 1100 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"#]],
     );
 }
 

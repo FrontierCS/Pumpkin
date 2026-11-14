@@ -7,14 +7,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::process::{Command, Output};
 
-use engine::{ContextName, Engine};
 use expect_test::expect;
 use schema::ir;
 use schema::workflow::Workflow;
 use test_support::{BUSYBOX, docker, docker_context};
 
 use super::check::{task, write_repository, write_variants};
-use super::{Scratch, Step, check, docker_table, invocation, ran, report};
+use super::{Scratch, Step, check, engine, invocation, machine, ran, report};
 
 #[test]
 #[expect(
@@ -198,8 +197,8 @@ fn builds_on_docker() {
     scratch.write("tasks/failing/agent/Dockerfile", &failing);
     scratch.write("tasks/failing/judge/Dockerfile", &failing);
     let context = docker_context();
-    scratch.write("pumpkin.toml", &docker_table(&context));
-    let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
+    scratch.write("pumpkin.toml", &machine(&context));
+    let engine = engine(&context);
     let rootful = !engine.report().security.rootless;
     let build = |entry: &str| {
         let mut command = scratch.pumpkin(&["build", entry, "--arg", "model=model-a"]);
@@ -347,6 +346,9 @@ fn builds_on_docker() {
                     "image": "<pumpkin/tasks/bench/judge>",
                     "name": "train_judge",
                     "needs": {
+                      "cpu_features": [
+                        "avx2"
+                      ],
                       "cpu_millis": 8000,
                       "memory_bytes": 2147483648
                     },
@@ -393,6 +395,9 @@ fn builds_on_docker() {
                     "image": "<pumpkin/tasks/bench/judge>",
                     "name": "final_judge",
                     "needs": {
+                      "cpu_features": [
+                        "avx2"
+                      ],
                       "cpu_millis": 8000,
                       "memory_bytes": 2147483648
                     },
@@ -485,8 +490,8 @@ fn variants_on_docker() {
     let _images = Labelled(label.clone());
     write_variants(&scratch, &label);
     let context = docker_context();
-    scratch.write("pumpkin.toml", &docker_table(&context));
-    let engine = Engine::connect(ContextName::try_from(context.clone()).unwrap()).unwrap();
+    scratch.write("pumpkin.toml", &machine(&context));
+    let engine = engine(&context);
     let rootful = !engine.report().security.rootless;
     let build = |args: &[&str]| {
         let mut command = scratch.pumpkin(&["build", "tasks/bench/task.star"]);

@@ -95,7 +95,7 @@ impl<'ir> Parser<'ir> {
                 name: name.clone(),
                 image: image.clone(),
                 user: *user,
-                needs: *needs,
+                needs: needs.clone(),
                 at: at.clone(),
                 model_route: model.clone(),
             });

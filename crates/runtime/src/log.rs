@@ -33,6 +33,7 @@ use decision::{
 use gateway::RefusedOp;
 use provider::UnixTime;
 use route::Answer;
+use schema::ir::{GpuModel, Name};
 use schema::workflow::{JudgeCall, Workflow};
 use serde_json::{Value, json};
 use stdx::Context;
@@ -170,6 +171,9 @@ impl<'h, H: Host> Log<'h, H> {
         match entry {
             Entry::Note(note) => self.note(&note),
             Entry::ModelAnswered(request, answer) => self.model_answered(request, &answer),
+            Entry::Gpus(sandbox, gpus) => {
+                self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
+            }
             Entry::Deleted(deleted) => {
                 let Deleted {
                     sandbox,
@@ -247,6 +251,11 @@ pub(super) enum Entry {
     /// How the route answered a model request of the agent's, by its number
     /// ([`Log::model_answered`]).
     ModelAnswered(u64, Answer),
+    /// The GPUs that a sandbox's `sandboxd` saw as it started, as its session says them:
+    /// `{"kind": "sandbox_gpus", "sandbox": n, "gpus": [m, ...]}`, where `n` is its name within the
+    /// run, and each `m` a GPU's model, as `nvidia-smi` names it. A sandbox whose `sandboxd` saw
+    /// none, or couldn't tell, has none.
+    Gpus(Name, Vec<GpuModel>),
     /// A sandbox's delete, which ended it: `{"kind": "sandbox_deleted", "sandbox": n, "provider":
     /// p, "id": i}`, where `n` is its name within the run, `agent` or `job-<n>`, or `null` for one
     /// that no start of the run recorded, which the run's end found left. Every sandbox's end is

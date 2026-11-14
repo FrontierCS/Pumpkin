@@ -429,10 +429,19 @@ fresh in every run, so that no two runs share them.
 
 The task is checked, and the configuration read, before the machine's Docker
 engine is reached, warning if that engine runs as root; the task's images are
-built there, and the run runs there. A driver process that `run` starts does all
-of that, and drives the run, and writes what it says after the start to
-driver.log in the record. Whatever ends `run` before the start ends the driver
-too; after it, the run goes on without `run`, and `pumpkin wait` follows it.
+built there; and then each provider that the configuration names is reached,
+before anything starts. The run places each role in the smallest class of
+sandbox that offers what the role needs, of every provider's, and refuses a
+role that fits none, saying why of each class, before anything is reserved.
+A driver process that `run` starts does all of that, and drives the run, and
+writes what it says after the start to driver.log in the record. Whatever ends
+`run` before the start ends the driver too; after it, the run goes on without
+`run`, and `pumpkin wait` follows it.
+
+On the Docker engine, each run holds whole cores of its own until it ends, which
+no other run's containers are given, each role as many as hold its CPU limit
+rounded up. A run whose roles need more cores at once than other runs leave is
+refused before its record is made: run it again once they have ended.
 
 The run outlives a logout unless its engine stops then, as rootless Docker does
 without `loginctl enable-linger`, or logind kills the session's processes
@@ -550,22 +559,37 @@ lists, it says, and notes there as gone.";
 
 /// `pumpkin help config`, the machine's configuration.
 const CONFIG: &str = "\
-pumpkin.toml, the machine's configuration, which every `pumpkin run` reads: the
-file that --config names, $HOME/.config/pumpkin/pumpkin.toml by default. It is
-TOML, with the tables below. Every key is required, but the [upstreams.<name>]
-tables, and any other key is refused.
+pumpkin.toml, the machine's configuration, which every `pumpkin run` and
+`pumpkin build` reads: the file that --config names,
+$HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
+Every key is required, but those of the [upstreams.<name>] tables, and any
+other key is refused.
 
 Example:
   [docker]
   context = \"default\"
+
+  [providers.local.docker]
 
   [upstreams.gateway]
   url = \"https://gateway.example/v1\"
   key_file = \"gateway-key\"
   models = [{ name = \"model-a\", upstream_name = \"provider/model-a\" }]
 
-[docker], the Docker engine that the machine's runs run on:
+[docker], the machine's Docker engine:
   context       The context that reaches it, as `docker context ls` lists it.
+  cpus          The CPUs that its sandboxes may be given, each run whole cores
+                of its own, as the kernel lists CPUs, such as \"1-7,9-15\";
+                absent, all that are online.
+
+[providers.<name>.<kind>], for each provider that the machine's runs may place
+roles on, as provider <name>, of kind <kind>, whose table holds that kind's own
+settings:
+  docker        Sandboxes on the engine of [docker]; it takes no settings. A
+                provider of this kind is the configuration's one provider. Its
+                one class, `container`, offers the CPUs that sandboxes may be
+                given, the machine's memory, the flags that /proc/cpuinfo lists
+                for every CPU, no CPU model and no GPU.
 
 [upstreams.<name>], for each upstream that a workflow's model route may reach:
   url           The base URL of its API: https, or http to a loopback IP

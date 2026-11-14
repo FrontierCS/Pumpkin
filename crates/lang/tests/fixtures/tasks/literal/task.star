@@ -15,6 +15,8 @@ workflow(
             "needs": {
                 "cpu_millis": 4 * 1000,
                 "memory_bytes": 16 * GiB,
+                "gpu": {"count": 1, "model": "NVIDIA H100 80GB HBM3"},
+                "cpu_features": ["avx2", "avx512f"],
             },
             "runtime": {"agent": {
                 # A tuple joined to another.

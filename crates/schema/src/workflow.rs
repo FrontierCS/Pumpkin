@@ -1,21 +1,21 @@
 //! A workflow parsed from its IR: references resolved to typed ids, every time given as a
 //! [`Duration`], and the rules that span its parts checked.
 //!
-//! A [`Placed`] workflow has each of its roles in the smallest class of sandbox that fits it. A
-//! [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`] by
+//! A [`Placed`] workflow has each of its roles on a provider, in the smallest class of sandbox
+//! offered that fits it. A [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`] by
 //! [`Workflow::place`], so code that acts on one need not check again what they established.
 //! Each kind of part has its own id type, so that, for example, the role a [`JudgeGrant`]
 //! judges with is known to be a [`Judge`]. Ids are only valid for the workflow that issued them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    Command, Dir, File, Image, JsonPointer, ModelRoute, Name, Resources, ResultSpec, User,
-    WorkflowName,
+    Command, CpuFlag, CpuModel, Dir, File, Gpu, Image, JsonPointer, ModelRoute, Name, Needs,
+    ResultSpec, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -114,13 +114,12 @@ impl Workflow {
     }
 }
 
-/// A parsed workflow whose every role is placed in the smallest class of sandbox that fits it
-/// ([`Workflow::place`]).
+/// A parsed workflow whose every role is placed on a provider, in a class of sandbox that the
+/// provider offers, and that the role fits ([`Workflow::place`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placed {
     workflow: Workflow,
-    /// Each role's class's [`startup_seconds`](Class::startup_seconds).
-    startups: ByRole<Duration>,
+    placements: ByRole<Placement>,
 }
 
 impl Placed {
@@ -128,22 +127,133 @@ impl Placed {
         &self.workflow
     }
 
-    /// The longest a start of one of `role`'s sandboxes takes, as its class declares.
-    pub fn startup(&self, role: RoleId) -> Duration {
-        *self.startups.get(role)
+    /// Where `role` is placed.
+    pub fn placement(&self, role: RoleId) -> &Placement {
+        self.placements.get(role)
     }
+
+    /// The longest a start of one of `role`'s sandboxes takes: its class's
+    /// [`startup_seconds`](Class::startup_seconds).
+    pub fn startup(&self, role: RoleId) -> Duration {
+        Duration::from_secs(self.placement(role).declared.startup_seconds.get())
+    }
+
+    /// What `f` makes of each provider that a role is placed on, by its name, in the order of
+    /// their names.
+    ///
+    /// # Errors
+    ///
+    /// Fails with `f`'s first error, calling `f` on no provider after it.
+    pub fn by_provider<T, E>(
+        &self,
+        mut f: impl FnMut(&Name) -> Result<T, E>,
+    ) -> Result<ByProvider<T>, E> {
+        let placements = self.placements.0.iter();
+        let providers: BTreeSet<&Name> = placements.map(|placement| &placement.provider).collect();
+        let made = (providers.into_iter()).map(|provider| Ok((provider.clone(), f(provider)?)));
+        Ok(ByProvider(made.collect::<Result<_, _>>()?))
+    }
+}
+
+/// Where a role is placed, or may be: in a class of sandbox that a provider declares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// The provider, by the name the run knows it by.
+    pub provider: Name,
+    /// The class, by the name the provider declares it by (`provider::Ready::classes`).
+    pub class: Name,
+    /// What the provider declares of the class.
+    pub declared: Class,
 }
 
 /// A class of sandbox that a provider creates, such as a size of machine, and what a run may
 /// rely on of its sandboxes, which a role is placed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Class {
-    /// The most a role whose sandboxes are of the class may ask for of each resource, so a role
-    /// fits the class if it asks for no more.
-    pub resources: Resources,
+    pub offers: Offers,
     /// The most seconds a sandbox's start takes, from the start of its create until its
     /// `sandboxd` has met the gateway and its session is set up.
     pub startup_seconds: NonZeroU64,
+    /// What a sandbox of the class costs an hour, as the operator's settings give it, if they do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_per_hour: Option<UsdPerHour>,
+}
+
+/// A price in US dollars an hour, to the millionth of a dollar, such as `0.3672`, from 0 to a
+/// million: what an operator says a sandbox costs, which a run's record keeps beside the time it
+/// ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct UsdPerHour {
+    micros: u64,
+}
+
+impl TryFrom<f64> for UsdPerHour {
+    type Error = String;
+
+    fn try_from(usd: f64) -> Result<Self, Self::Error> {
+        if !(0.0..=1e6).contains(&usd) {
+            return Err(format!(
+                "{usd} is not a price in dollars an hour: give one from 0 to 1000000, such as 0.3672"
+            ));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "from 0 to 10^12, as just checked"
+        )]
+        let micros = (usd * 1e6).round() as u64;
+        Ok(Self { micros })
+    }
+}
+
+impl From<UsdPerHour> for f64 {
+    fn from(price: UsdPerHour) -> Self {
+        // A million dollars in millionths is exact as a double.
+        #[expect(clippy::cast_precision_loss, reason = "at most 10^12, below 2^53")]
+        let micros = price.micros as Self;
+        micros / 1e6
+    }
+}
+
+/// What a class of sandbox offers the roles of its sandboxes, as its provider states it.
+///
+/// It is the most CPU and memory that a role may need, its GPUs, and its CPU's flags and model,
+/// which a role's [needs](crate::ir::Needs) are matched against
+/// ([`Workflow::place`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Offers {
+    /// In thousandths of a CPU.
+    pub cpu_millis: NonZeroU64,
+    pub memory_bytes: NonZeroU64,
+    /// None if its sandboxes have no GPU.
+    pub gpu: Option<Gpu>,
+    pub cpu_features: BTreeSet<CpuFlag>,
+    /// None if the provider states no model.
+    pub cpu_model: Option<CpuModel>,
+}
+
+/// A value for each provider that a [`Placed`] workflow places a role on: what its placing gave
+/// of each ([`Workflow::place`]), or what [`Placed::by_provider`] made of each.
+#[derive(Debug)]
+pub struct ByProvider<T>(BTreeMap<Name, T>);
+
+impl<T> ByProvider<T> {
+    /// The value for `provider`, a provider that the placed workflow places a role on.
+    pub fn get(&self, provider: &Name) -> &T {
+        &self.0[provider]
+    }
+
+    /// Each provider's value, by the provider's name, in the order of their names.
+    pub fn iter(&self) -> impl Iterator<Item = (&Name, &T)> {
+        self.0.iter()
+    }
+
+    /// What `f` makes of each provider's value, for the same providers.
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> ByProvider<U> {
+        let mapped = self.0.into_iter().map(|(name, value)| (name, f(value)));
+        ByProvider(mapped.collect())
+    }
 }
 
 /// A role of any kind, by its place among the IR's roles.
@@ -203,7 +313,7 @@ pub struct Sandbox {
     pub name: Name,
     pub image: Image,
     pub user: User,
-    pub needs: Resources,
+    pub needs: Needs,
     /// The role's place in the IR, where placing it reports what is wrong.
     pub(crate) at: JsonPointer,
     /// Only the agent's may be set.

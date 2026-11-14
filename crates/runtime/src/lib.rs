@@ -1,6 +1,6 @@
-//! Pumpkin's host side, the runtime: runs a workflow on a [`Provider`], as the [core](decision)
-//! decides, and keeps the run's record. An agent reaches its model through [`route`], which the
-//! runtime serves.
+//! Pumpkin's host side, the runtime: runs a workflow on the [`Provider`]s its roles are placed
+//! on, as the [core](decision) decides, and keeps the run's record. An agent reaches its model
+//! through [`route`], which the runtime serves.
 //!
 //! [`Run::prepare`] begins the record of a placed workflow, and [`Run::execute`] runs it to
 //! its outcome, or until a signal interrupts it ([`Stopped::Interrupted`]), one thread driving
@@ -24,11 +24,10 @@ use std::{fs, io, mem};
 
 use decision::{Action, Core, Event, JobId, OpId, Outcome, PayloadRef, Request, lasts};
 use gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp};
-use provider::{Provider, RunTag, UnixTime};
+use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
-use schema::ir::Name;
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
-use schema::workflow::{JudgeCall, Placed, Workflow};
+use schema::workflow::{ByProvider, JudgeCall, Placed, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
@@ -64,47 +63,61 @@ pub struct Recorded<'a> {
     pub args: &'a [String],
 }
 
-/// A run, prepared on its host, `H`: its workflow placed, and its record begun.
-#[derive(Debug)]
-pub struct Run<'h, H> {
-    host: &'h H,
+/// A run, prepared on its host, `H`: its workflow placed, on the providers its roles are placed
+/// on, and its record begun.
+pub struct Run<'r, H> {
+    host: &'r H,
     placed: Placed,
+    /// Each provider that a role is placed on, by its name.
+    providers: ByProvider<&'r dyn Provider>,
     /// The agent's model route, as the run serves it, if it has one.
     served: Option<Served>,
     id: RunTag,
     dir: PathBuf,
     /// Held until `outcome.json` is written: see [`Lock`].
     lock: Lock,
+    /// What each provider holds for the run, held until the run's end has deleted what each
+    /// lists of it.
+    reserved: ByProvider<Reservation>,
 }
 
-impl<'h, H: Host> Run<'h, H> {
+impl<'r, H: Host> Run<'r, H> {
     /// Makes the record of `placed`'s run in `runs`, made if need be, on `host`, named by `id`
-    /// ([`new_id`]), which then executes it; keeps what was `recorded`, and the IR in `ir.json`.
-    /// The agent's model route, if it has one, is served as `serving` says.
+    /// ([`new_id`]), once each of `providers`, those its roles are placed on, has reserved what
+    /// they need until the run's end ([`Provider::reserve`]); keeps what was `recorded`, and
+    /// serves the agent's route, if it has one, as `serving` says.
     ///
     /// # Errors
     ///
-    /// Fails, before any record is made, if the agent's route is not served; or if `runs` isn't
-    /// safe from other users, `id` is taken, or the record can't be written.
+    /// Fails, before any record is made, if a route has no serving or a provider can't reserve;
+    /// or if `runs` isn't safe from other users, `id` is taken, or the record can't be written.
     pub fn prepare(
-        host: &'h H,
+        host: &'r H,
         placed: Placed,
+        providers: ByProvider<&'r dyn Provider>,
         runs: &Path,
         id: RunTag,
         serving: Option<Serving>,
-        recorded: Recorded<'h>,
+        recorded: Recorded<'r>,
     ) -> Result<Self, String> {
         let Recorded { args } = recorded;
         let served = Served::new(placed.workflow(), serving)?;
+        let reserved = placed.by_provider(|name| {
+            let phases = sandbox::phases(&placed, name);
+            (providers.get(name).reserve(&id, &phases))
+                .context(format_args!("reserving on provider `{name}`"))
+        })?;
         let (dir, lock) = record::create(host, runs, id.as_str(), args)?;
         record::write_ir(host, &dir, placed.workflow())?;
         Ok(Self {
             host,
             placed,
+            providers,
             served,
             id,
             dir,
             lock,
+            reserved,
         })
     }
 
@@ -118,9 +131,9 @@ impl<'h, H: Host> Run<'h, H> {
         &self.dir
     }
 
-    /// Runs the workflow on `provider`, by its name, with the static `sandboxd` in each sandbox,
+    /// Runs the workflow on its roles' providers, with the static `sandboxd` in each sandbox,
     /// calling `started` once that is published. Records its end in `outcome.json`, and deletes
-    /// what the provider lists of it.
+    /// what each provider lists of it.
     ///
     /// # Errors
     ///
@@ -129,11 +142,10 @@ impl<'h, H: Host> Run<'h, H> {
     /// refused the route's key before a finalize, or failed the agent's last request as it exited.
     pub fn execute(
         self,
-        provider: (&Name, &dyn Provider),
         sandboxd: &Path,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
-        let outcome = self.run_on(provider, sandboxd, started);
+        let outcome = self.run_on(sandboxd, started);
         let recorded = match &outcome {
             Ok(outcome) => {
                 let mut recorded = log::outcome_json(outcome);
@@ -146,24 +158,25 @@ impl<'h, H: Host> Run<'h, H> {
             }
         };
         let written = record::write_json(self.host, &self.dir, "outcome.json", &recorded);
+        // Before the lock, which `wait` follows, so that a run that `wait` saw end holds nothing.
+        drop(self.reserved);
         drop(self.lock);
         failed_also(outcome, written)
     }
 
-    /// Records what `provider` declared and publishes what the run's sandboxes run, calls
-    /// `started` unless a signal has come first, then starts the run's clock on its host and
-    /// drives the run, keeping its log, deletes what the provider still lists of it, and syncs
-    /// the log.
+    /// Records what each provider declared, and where each role is placed, and publishes what
+    /// the run's sandboxes run, calls `started` unless a signal has come first, then starts the
+    /// run's clock on its host and drives the run, keeping its log, deletes what each provider
+    /// still lists of it, and syncs the log.
     fn run_on(
         &self,
-        (name, provider): (&Name, &dyn Provider),
         sandboxd: &Path,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
-        let declared = record::provided(name, provider);
-        record::write_json(host, &self.dir, "provider.json", &declared)?;
-        let published = Published::create((name, provider), &self.placed, sandboxd, &self.dir)?;
+        let provided = record::provided(&self.placed, &self.providers);
+        record::write_json(host, &self.dir, "provider.json", &provided)?;
+        let published = Published::create(&self.providers, &self.placed, sandboxd, &self.dir)?;
         // A run interrupted as it publishes never starts, so nothing tells of a start that the
         // signal then undoes.
         interruption::check()?;
@@ -985,8 +998,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         notes.iter().try_for_each(|note| self.log.note(note))
     }
 
-    /// Deletes every sandbox that the run's provider still lists of it, and notes each console the
-    /// sweep didn't keep.
+    /// Deletes every sandbox that each of the run's providers still lists of it, and notes each
+    /// console the sweep didn't keep.
     fn sweep(&mut self) -> Result<(), String> {
         let (unkept, swept) = self.sandboxes.sweep();
         let noted = unkept.iter().try_for_each(|unkept| self.log.note(unkept));

@@ -36,7 +36,7 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 pub use meeting::{Registration, Sockets};
-use schema::ir::{AbsolutePath, Mode, Name};
+use schema::ir::{AbsolutePath, GpuModel, Mode, Name};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::{self, Limits};
 use schema::sandbox::{
@@ -69,6 +69,8 @@ pub struct Session {
     shared: Arc<Shared>,
     /// The reader thread, `Some` until the drop joins it.
     reader: Option<JoinHandle<()>>,
+    /// The GPUs that the sandbox's hello names ([`Hello::gpus`](schema::sandbox::Hello::gpus)).
+    gpus: Option<Vec<GpuModel>>,
 }
 
 /// What a session's owner, its reader thread and the responses to its model requests share.
@@ -308,6 +310,7 @@ pub struct Process {
 impl Session {
     fn new(
         stream: Connection,
+        gpus: Option<Vec<GpuModel>>,
         limit: Option<OpPayloadLimit>,
         takes_models: bool,
         send: Box<dyn Fn(Arrival) + Send>,
@@ -341,7 +344,14 @@ impl Session {
             id,
             shared,
             reader: Some(reader),
+            gpus,
         })
+    }
+
+    /// The GPUs that the sandbox's `sandboxd` saw as it started, each by its model as
+    /// `nvidia-smi` names it, if it could tell ([`Hello::gpus`](schema::sandbox::Hello::gpus)).
+    pub fn gpus(&self) -> Option<&[GpuModel]> {
+        self.gpus.as_deref()
     }
 
     /// Puts [`pumpkin_subdirs()`] under [`pumpkin_dir()`], with [`dir_mode()`], which every

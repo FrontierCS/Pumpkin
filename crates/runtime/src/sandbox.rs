@@ -1,20 +1,22 @@
-//! The runtime's one start path, which every sandbox of a run starts on ([`Sandboxes::start`]),
-//! which ends a start once its sandbox has ended, as the run ends every start once a signal has
-//! come, and what each role's sandbox needs of it: its IR command launched, and what it wrote
-//! collected. Each sandbox that a start created is recorded with what its provider made of it,
-//! and each delete's outcome ([`record::write_sandbox`]); each delete keeps its console in the
-//! run's record first ([`record::write_console`]).
+//! The runtime's one start path, which every sandbox of a run starts on, on the provider its role
+//! is placed on ([`Sandboxes::start`]), which ends a start once its sandbox has ended, as the run
+//! ends every start once a signal has come, and what each role's sandbox needs of it: its IR
+//! command launched, and what it wrote collected. Each sandbox that a start created is recorded
+//! with what its provider made of it, the GPUs its `sandboxd` saw, and each delete's outcome
+//! ([`record::write_sandbox`]); each delete keeps its console in the run's record first
+//! ([`record::write_console`]).
 //!
 //! The provider's side of each step is [`Provider`]'s, and the session's [`Session`]'s.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::io;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
+use std::{io, iter};
 
 use decision::JobId;
 use gateway::{Arrival, Session, Sockets};
@@ -22,13 +24,13 @@ use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag,
     SandboxId, SandboxdRef, Sweep, UnixTime,
 };
-use schema::ir::{Command, Image, Name};
+use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, command_env, command_stderr,
     command_stdout, pumpkin_dir,
 };
-use schema::workflow::{ByRole, JudgeId, Placed, RoleId, Workflow};
+use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, Workflow};
 use serde_json::Value;
 use stdx::{Context, Deadline};
 
@@ -43,31 +45,54 @@ pub(super) const PUMPKIN: Limits = Limits {
     entries: ENTRIES,
 };
 
-/// `role` of `workflow`, as a provider sees it.
+/// The roles of `placed` that are placed on `provider`, as [`Provider::reserve`] takes them:
+/// in the work phase, the agent and the judge of each of its judge grants, each grant running one
+/// call at a time; then the score's judge, which starts only once they have gone.
+pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
+    let workflow = placed.workflow();
+    let scorer = workflow.score().slot.judge().role();
+    let judges = (workflow.judge_grants()).map(|(_, grant)| grant.judge().role());
+    let agent = iter::once(workflow.agent().role);
+    let work: Vec<RoleId> = agent.chain(judges).collect();
+    let last = vec![scorer];
+    let on = |roles: Vec<RoleId>| -> Vec<Role> {
+        (roles.into_iter())
+            .filter(|&role| placed.placement(role).provider == *provider)
+            .map(|role| provider_role(workflow, role))
+            .collect()
+    };
+    [on(work), on(last)]
+        .into_iter()
+        .filter(|phase| !phase.is_empty())
+        .collect()
+}
+
+/// `role` of `workflow`, as a provider sees it: one of its sandboxes runs at once.
 fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
     let sandbox = workflow.sandbox(role);
     Role {
         name: sandbox.name.clone(),
         user: sandbox.user,
-        resources: sandbox.needs,
+        resources: sandbox.needs.resources(),
+        instances: NonZeroU32::MIN,
     }
 }
 
-/// What the sandboxes of a run run, published on its provider, and where they meet the gateway:
-/// what the run makes of them before it starts ([`Published::create`]).
+/// What the sandboxes of a run run, published on the providers its roles are placed on, and where
+/// they meet the gateway: what the run makes of them before it starts ([`Published::create`]).
 pub(super) struct Published<'p> {
-    hosting: Hosting<'p>,
+    providers: ByProvider<Hosting<'p>>,
     /// Each role's image, as its provider published it.
     images: ByRole<ImageRef>,
     sockets: Sockets,
 }
 
-/// The sandboxes of one run of a workflow on its provider, once the run has started: what they
-/// run, published, and where they meet the gateway.
+/// The sandboxes of one run of a workflow on the providers its roles are placed on, once the run
+/// has started: what they run, published, and where they meet the gateway.
 pub(super) struct Sandboxes<'p, H: Host> {
     run: RunTag,
     placed: &'p Placed,
-    hosting: Hosting<'p>,
+    providers: ByProvider<Hosting<'p>>,
     /// Each role's image, as its provider published it.
     images: ByRole<ImageRef>,
     sockets: Sockets,
@@ -75,7 +100,8 @@ pub(super) struct Sandboxes<'p, H: Host> {
     record: &'p Path,
     /// The run's host, which syncs each sandbox and console kept.
     host: &'p H,
-    /// A sender into the loop's inbox, which takes the run log's record of each delete.
+    /// A sender into the loop's inbox, which takes the run log's record of the GPUs that each
+    /// sandbox's `sandboxd` saw, and of each delete.
     logged: Sender<Input>,
     /// Each sandbox a start created, which tells the sweep where the record keeps it. Shared by
     /// the threads that start and delete sandboxes: the loop's and each judge call's.
@@ -93,14 +119,16 @@ struct Made<'p> {
     which: Which,
     /// What the provider reported it made beside the sandbox ([`Created::report`]).
     report: Value,
+    /// The GPUs that its `sandboxd` saw as it started, once its session says them
+    /// ([`Session::gpus`]).
+    gpus: Option<Vec<GpuModel>>,
     /// Whether a read has kept its console, which the sweep then keeps no more.
     kept: bool,
 }
 
-/// The provider of the run, by its name, the `sandboxd` it published, which each of its creates
-/// names, and where its sandboxes meet the gateway.
+/// A provider that roles of the run are placed on, the `sandboxd` it published, which each of
+/// its creates names, and where its sandboxes meet the gateway.
 struct Hosting<'p> {
-    name: &'p Name,
     provider: &'p dyn Provider,
     sandboxd: SandboxdRef,
     meets: Meets<'p>,
@@ -178,19 +206,20 @@ impl Which {
 
 /// A sandbox that started, with its session, set up.
 pub(super) struct Started {
-    /// Which of the run's sandboxes it is.
+    /// Which of the run's sandboxes it is, on the provider of whose role it runs.
     which: Which,
     id: SandboxId,
     pub(super) session: Session,
 }
 
 impl<'p> Published<'p> {
-    /// Publishes what `placed`'s sandboxes run on `provider`, named `name`: `sandboxd`, a static
-    /// binary, then each image a role names, once; then makes the directory of the run's sockets
-    /// in `record`, the run's record ([`record::sockets`]), which must not exist yet. Stops as
-    /// interrupted before each publish once a signal has come.
+    /// Publishes what `placed`'s sandboxes run on each of `providers`, the providers its roles are
+    /// placed on: `sandboxd`, a static binary, then each image a role placed there names, once;
+    /// then makes the directory of the run's sockets in `record`, the run's record
+    /// ([`record::sockets`]), which must not exist yet. Stops as interrupted before each publish
+    /// once a signal has come.
     pub(super) fn create(
-        (name, provider): (&'p Name, &'p dyn Provider),
+        providers: &ByProvider<&'p dyn Provider>,
         placed: &Placed,
         sandboxd: &Path,
         record: &Path,
@@ -198,41 +227,45 @@ impl<'p> Published<'p> {
         let workflow = placed.workflow();
         // Each publish is a provider call that a stop doesn't cut short, and one may take
         // minutes, as a push does; so a signal is heeded before each, not after them all.
-        interruption::check()?;
-        let meets = match provider.meeting() {
-            Meeting::Local(creator) => Meets::Sockets(creator),
-        };
-        let sandboxd =
-            (provider.publish_sandboxd(sandboxd)).context("publishing `sandboxd` failed")?;
-        let hosting = Hosting {
-            name,
-            provider,
-            sandboxd,
-            meets,
-        };
-        let mut published = BTreeMap::<Image, ImageRef>::new();
-        let images =
-            workflow.by_role(
-                |(_, sandbox)| match published.entry(sandbox.image.clone()) {
-                    Entry::Occupied(entry) => Ok(entry.get().clone()),
-                    Entry::Vacant(entry) => {
-                        interruption::check()?;
-                        let image = provider.publish_image(entry.key());
-                        let image = image.context(format_args!(
-                            "publishing role `{}`'s image failed",
-                            sandbox.name
-                        ))?;
-                        Ok::<_, Stopped>(entry.insert(image).clone())
-                    }
-                },
-            )?;
+        let providers = placed.by_provider(|name| {
+            interruption::check()?;
+            let provider = *providers.get(name);
+            let meets = match provider.meeting() {
+                Meeting::Local(creator) => Meets::Sockets(creator),
+            };
+            let published = provider.publish_sandboxd(sandboxd);
+            let sandboxd = published.context(format_args!(
+                "publishing `sandboxd` on provider `{name}` failed"
+            ))?;
+            Ok::<_, Stopped>(Hosting {
+                provider,
+                sandboxd,
+                meets,
+            })
+        })?;
+        let mut published = BTreeMap::<(&Name, Image), ImageRef>::new();
+        let images = workflow.by_role(|(role, sandbox)| {
+            let on = &placed.placement(role).provider;
+            match published.entry((on, sandbox.image.clone())) {
+                Entry::Occupied(entry) => Ok(entry.get().clone()),
+                Entry::Vacant(entry) => {
+                    interruption::check()?;
+                    let image = providers.get(on).provider.publish_image(&entry.key().1);
+                    let image = image.context(format_args!(
+                        "publishing role `{}`'s image on provider `{on}` failed",
+                        sandbox.name
+                    ))?;
+                    Ok::<_, Stopped>(entry.insert(image).clone())
+                }
+            }
+        })?;
         // In the record, so that they go where it goes: `record::create` made it, and checked
         // the path to it, so that no other user may rename entries in it, or above it, as
         // `Sockets::create` needs.
         let sockets =
             Sockets::create(record::sockets(record)).map_err(|error| error.to_string())?;
         Ok(Self {
-            hosting,
+            providers,
             images,
             sockets,
         })
@@ -242,8 +275,9 @@ impl<'p> Published<'p> {
 impl<'p, H: Host> Sandboxes<'p, H> {
     /// The sandboxes of run `run`, of `placed`, which start from what was `published` for them,
     /// once the run has started on `host`: each start or delete keeps what it made in
-    /// `record`, the run's, synced on `host`, and sends `logged` the run log's record of each
-    /// delete ([`log::Entry::Deleted`]) but a started sandbox's ([`Sandboxes::delete`]).
+    /// `record`, the run's, synced on `host`, and sends `logged` the run log's record of the GPUs
+    /// each sandbox's `sandboxd` saw ([`log::Entry::Gpus`]) and of each delete
+    /// ([`log::Entry::Deleted`]) but a started sandbox's ([`Sandboxes::delete`]).
     pub(super) fn new(
         published: Published<'p>,
         run: RunTag,
@@ -253,7 +287,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         logged: Sender<Input>,
     ) -> Self {
         let Published {
-            hosting,
+            providers,
             images,
             sockets,
         } = published;
@@ -266,7 +300,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         Self {
             run,
             placed,
-            hosting,
+            providers,
             images,
             sockets,
             record,
@@ -301,24 +335,30 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let by_unix = (by.remaining()).map_or(now, |left| now.saturating_add(left));
         let role = which.role(self.workflow());
         let model = self.workflow().sandbox(role).model_route.is_some();
+        let placement = self.placed.placement(role);
+        let hosting = self.providers.get(&placement.provider);
         let create = Create {
             run: self.run.clone(),
             name,
             role: provider_role(self.workflow(), role),
+            // A run runs one sandbox of each role at a time.
+            instance: 0,
+            class: placement.class.clone(),
             image: self.images.get(role).clone(),
-            sandboxd: self.hosting.sandboxd.clone(),
+            sandboxd: hosting.sandboxd.clone(),
             ops: ops.is_some(),
             model,
             hard_end,
             by: by_unix.min(hard_end),
         };
         let (Created { id, report }, registration) =
-            self.hosting.meets.create(&self.sockets, &create)?;
+            hosting.meets.create(&self.sockets, &create)?;
         let made = Made {
-            on: self.hosting.name,
+            on: &placement.provider,
             id: id.clone(),
             which,
             report,
+            gpus: None,
             kept: false,
         };
         let recorded = self.write_sandbox(&made, None);
@@ -328,7 +368,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
         let looks = Looks::new();
         let stopped = || {
-            interruption::signal().is_some() || looks.ended(self.between_looks, || self.ended(&id))
+            interruption::signal().is_some()
+                || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
         };
         let accepted = registration.accept(by, ops, model, arrivals, wrap, stopped);
         let accepted = accepted.map_err(|error| match looks.found() {
@@ -341,17 +382,48 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             (false, _) => error.to_string(),
         });
         let session = accepted.and_then(|mut session| session.set_up(by).map(|()| session));
+        let session = session.and_then(|session| match session.gpus() {
+            Some(gpus) => self.saw(which, &id, gpus).map(|()| session),
+            None => Ok(session),
+        });
         match session {
             Ok(session) => Ok(Started { which, id, session }),
             Err(error) => Err(self.unstarted(which, &id, &error)),
         }
     }
 
-    /// Whether the provider's list of the run finds sandbox `id` ended: a list leaves it out only
+    /// Records that `which` sandbox, `id`, saw `gpus` as it started: in its `sandbox.json`, and in
+    /// the run log.
+    fn saw(&self, which: Which, id: &SandboxId, gpus: &[GpuModel]) -> Result<(), String> {
+        let on = self.on(which);
+        let mut created = stdx::unpoisoned(self.created.lock());
+        let made = (created.iter_mut()).filter(|made| made.on == on && made.id == *id);
+        let made: Vec<Made<'_>> = made
+            .map(|made| {
+                made.gpus = Some(gpus.to_vec());
+                made.clone()
+            })
+            .collect();
+        // Written once the lock is let go, so that no other thread waits on the record's syncs.
+        drop(created);
+        let saw = log::Entry::Gpus(which.name(), gpus.to_vec());
+        // The loop's inbox outlives every thread that starts a sandbox.
+        let _ = self.logged.send(Input::Logged(saw));
+        let failures: Vec<String> = (made.iter())
+            .filter_map(|made| self.write_sandbox(made, None).err())
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    /// Whether `provider`'s list of the run finds sandbox `id` ended: a list leaves it out only
     /// once it is deleted, or has ended and been freed ([`Sweep::list`]), so only a list that
     /// finds it running says it hasn't; or why the list failed.
-    fn ended(&self, id: &SandboxId) -> Result<bool, String> {
-        let listed = self.hosting.provider.list(&self.run)?;
+    fn ended(&self, provider: &dyn Provider, id: &SandboxId) -> Result<bool, String> {
+        let listed = provider.list(&self.run)?;
         Ok(!(listed.iter()).any(|listed| listed.id == *id && !listed.ended))
     }
 
@@ -359,7 +431,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     /// start: `error`, the end of its console, whether keeping its console failed, and whether
     /// deleting it failed, which this tries.
     fn unstarted(&self, which: Which, id: &SandboxId, error: &str) -> String {
-        let provider = self.hosting.provider;
+        let provider = self.provider(which);
         let mut parts = vec![format!("sandbox {}: {error}", id.as_str())];
         match provider.console(&self.run, id) {
             Ok(console) => {
@@ -377,7 +449,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
         let deleted = provider.delete(&self.run, std::slice::from_ref(id));
         let (logged, recorded) =
-            self.record_deletes(self.hosting.name, std::slice::from_ref(id), &deleted);
+            self.record_deletes(self.on(which), std::slice::from_ref(id), &deleted);
         self.send(logged);
         if let Err(error) = deleted {
             parts.push(format!("deleting it failed: {error}"));
@@ -390,6 +462,16 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         self.placed.workflow()
     }
 
+    /// The name of the provider that `which` sandbox's role is placed on.
+    fn on(&self, which: Which) -> &'p Name {
+        &self.placed.placement(which.role(self.workflow())).provider
+    }
+
+    /// The provider that `which` sandbox's role is placed on.
+    fn provider(&self, which: Which) -> &'p dyn Provider {
+        self.providers.get(self.on(which)).provider
+    }
+
     /// Keeps the console of a sandbox that started ([`keep_console`](Self::keep_console)),
     /// deletes the sandbox, then ends its session. Returns the run log's records of it, which the
     /// thread that deletes it logs in its turn: the delete, if it succeeded, then why its console
@@ -399,10 +481,11 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     pub(super) fn delete(&self, started: Started) -> (Vec<log::Entry>, Result<(), String>) {
         let Started { which, id, session } = started;
         let unkept = self.keep_console(which, &id).err();
-        let deleted = (self.hosting.provider).delete(&self.run, std::slice::from_ref(&id));
+        let provider = self.provider(which);
+        let deleted = provider.delete(&self.run, std::slice::from_ref(&id));
         drop(session);
         let (mut logged, recorded) =
-            self.record_deletes(self.hosting.name, std::slice::from_ref(&id), &deleted);
+            self.record_deletes(self.on(which), std::slice::from_ref(&id), &deleted);
         logged.extend(unkept.map(log::Entry::Note));
         let deleted = deleted.context("deleting the sandbox failed");
         (logged, super::failed_also(deleted, recorded))
@@ -420,10 +503,11 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             id,
             which,
             report,
+            gpus,
             kept: _,
         } = made;
         let dir = self.record.join(which.record_dir());
-        record::write_sandbox(self.host, &dir, on, id, report, deleted)
+        record::write_sandbox(self.host, &dir, on, id, report, gpus.as_deref(), deleted)
     }
 
     /// Records `deleted`, the outcome of a delete of sandboxes `ids` on provider `on`, for each
@@ -478,7 +562,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     ///
     /// Fails if the provider can't show the console, or the record can't be written.
     fn keep_console(&self, which: Which, id: &SandboxId) -> Result<(), String> {
-        let read = self.hosting.provider.console(&self.run, id);
+        let read = self.provider(which).console(&self.run, id);
         let unkept = format_args!("sandbox {}'s console wasn't kept", id.as_str());
         let console = read.context(unkept)?;
         self.write_console(which, id, &console).context(unkept)
@@ -494,36 +578,45 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         )?;
         // A later read could only replace what was kept with less: a sandbox being deleted, as an
         // EC2 instance being terminated, may show nothing.
+        let on = self.on(which);
         let mut created = stdx::unpoisoned(self.created.lock());
-        for made in (created.iter_mut()).filter(|made| made.id == *id) {
+        for made in (created.iter_mut()).filter(|made| made.on == on && made.id == *id) {
             made.kept = true;
         }
         Ok(())
     }
 
-    /// Deletes every sandbox of the run that its provider still lists ([`sweep`]), keeping first
-    /// the console of each that a start of the run created, unless an earlier read kept it
-    /// ([`keep_console`](Self::keep_console)). Returns why each console it was to keep wasn't, for
-    /// the run log, and why the provider's list or delete failed, if one did.
+    /// Deletes, on each of the run's providers, every sandbox of the run that it still lists
+    /// ([`sweep`]), keeping first the console of each that a start of the run created, unless an
+    /// earlier read kept it ([`keep_console`](Self::keep_console)). Returns why each console it
+    /// was to keep wasn't, for the run log, and why a provider's list or delete failed, if one
+    /// did.
     pub(super) fn sweep(&self) -> (Vec<String>, Result<(), String>) {
         let mut unkept = Vec::new();
-        let Hosting { name, provider, .. } = self.hosting;
-        let keep = |id: &SandboxId| {
-            let created = stdx::unpoisoned(self.created.lock());
-            let which = (created.iter().rev())
-                .find(|made| made.id == *id && !made.kept)
-                .map(|made| made.which);
-            drop(created);
-            if let Some(which) = which {
-                unkept.extend(self.keep_console(which, id).err());
-            }
+        let swept = (self.providers.iter()).map(|(name, hosting)| {
+            let keep = |id: &SandboxId| {
+                let created = stdx::unpoisoned(self.created.lock());
+                let which = (created.iter().rev())
+                    .find(|made| made.on == name && made.id == *id && !made.kept)
+                    .map(|made| made.which);
+                drop(created);
+                if let Some(which) = which {
+                    unkept.extend(self.keep_console(which, id).err());
+                }
+            };
+            let record = |ids: &[SandboxId], deleted: &Result<(), String>| {
+                let (logged, recorded) = self.record_deletes(name, ids, deleted);
+                self.send(logged);
+                recorded
+            };
+            sweep(name, hosting.provider, &self.run, keep, record).err()
+        });
+        let failures: Vec<String> = swept.flatten().collect();
+        let swept = if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
         };
-        let record = |ids: &[SandboxId], deleted: &Result<(), String>| {
-            let (logged, recorded) = self.record_deletes(name, ids, deleted);
-            self.send(logged);
-            recorded
-        };
-        let swept = sweep(name, provider, &self.run, keep, record).map(drop);
         (unkept, swept)
     }
 }

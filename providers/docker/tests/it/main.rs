@@ -11,8 +11,9 @@
     reason = "a failed test shows its containers' logs"
 )]
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,8 @@ use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
 use provider::{
-    Create, Created, Creator, Listed, Provider, Role, RunTag, SandboxId, Sweep, UnixTime,
+    Create, Created, Creator, Listed, Provider, Reservation, Role, RunTag, SandboxId, Sweep,
+    UnixTime,
 };
 use recipe::Given;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
@@ -44,12 +46,30 @@ use schema::sandbox::{
 use stdx::process::Environment;
 use stdx::{Context, Deadline};
 use tempfile::TempDir;
-use test_support::suite::{Locals, Subject};
+use test_support::suite::{Locals, Subject, reserve_with_room};
 use test_support::{BUSYBOX, docker, hung};
 
 /// The variable that makes this test binary, run again by [`hung_create`], make a create through
 /// the stand-in `docker`, and write what came of it to `created` in the directory it names.
 const STAND_IN: &str = "PUMPKIN_TEST_STAND_IN";
+
+/// The roles of the tests' runs, each its own phase, whose sandboxes a fixture's run holds one
+/// CPU for at a time.
+const ROLES: [&str; 13] = [
+    "confined",
+    "first",
+    "hung",
+    "judge",
+    "missing",
+    "model",
+    "not_utf8",
+    "ops",
+    "refused",
+    "stand-in",
+    "turns",
+    "unexecutable",
+    "unpulled",
+];
 
 /// The environment of one test: its run tags and a directory for sockets and collected files.
 /// Dropping it removes the containers of its runs, after showing their logs if the test failed.
@@ -60,6 +80,8 @@ struct Fixture {
     sockets: Sockets,
     run: RunTag,
     other_run: RunTag,
+    /// What the provider holds for `run`, whose sandboxes are of [`ROLES`].
+    _held: Reservation,
 }
 
 impl Fixture {
@@ -73,12 +95,16 @@ impl Fixture {
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
             .unwrap();
+        let run = tag("");
+        let phases: Vec<Vec<Role>> = ROLES.iter().map(|&name| vec![role(name)]).collect();
+        let held = reserve_with_room(provider(), &run, &phases);
         Self {
             sandboxd: test_support::sandboxd(),
             sockets: Sockets::create(dir.path().join("sockets")).unwrap(),
             dir,
-            run: tag(""),
+            run,
             other_run: tag("-other"),
+            _held: held,
         }
     }
 
@@ -169,6 +195,9 @@ impl Fixture {
             run: run.clone(),
             name,
             role,
+            instance: 0,
+            // The provider's one class.
+            class: provider().ready().classes.keys().next().unwrap().clone(),
             image,
             sandboxd,
             ops,
@@ -192,6 +221,7 @@ fn role(name: &str) -> Role {
             "memory_bytes": 256 << 20,
         }))
         .unwrap(),
+        instances: NonZeroU32::MIN,
     }
 }
 
@@ -250,7 +280,7 @@ fn reached() -> &'static Result<Engine, String> {
 /// The provider on the engine, or why either can't be reached.
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
-    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?))
+    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, None))
 }
 
 /// The engine the tests reach Docker through.
@@ -602,24 +632,178 @@ fn confinement() {
     );
 }
 
-// What the provider declares as ready: the engine's report, and its one class, which has what
-// the host has.
+// Each run's containers run on cores of its own: the roles of a run that run at once get whole
+// cores that no other's share, each instance of a role that runs several at once its own, and
+// another run's are apart from all of them; each container sees only its own CPUs. A run that
+// needs more CPUs than the others leave is refused, naming those that hold them, as is one that
+// needs more than the machine has.
+#[test]
+#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is what each share shows, and the snapshot"
+)]
+fn cpus() {
+    check(
+        "cpus",
+        |fixture| {
+            let sized = |name: &str, cpus: u64| Role {
+                resources: Resources {
+                    cpu_millis: NonZeroU64::new(cpus * 1000).unwrap(),
+                    ..role(name).resources
+                },
+                ..role(name)
+            };
+            let first = &fixture.other_run;
+            let runners = || Role {
+                instances: NonZeroU32::new(2).unwrap(),
+                ..sized("runner", 1)
+            };
+            let phases = [
+                vec![sized("agent", 2), sized("train", 1), runners()],
+                vec![sized("final", 2)],
+            ];
+            let reserved = reserve_with_room(provider(), first, &phases);
+            let start = |run: &RunTag, name: &str, role: Role, instance: u32| {
+                let made = fixture.publish(run, name, &fixture.sandboxd, &image(), false, false);
+                let (mut create, dial, registration) = made.unwrap();
+                (create.role, create.instance) = (role, instance);
+                Fixture::start_created(&create, dial, registration, None, false).unwrap()
+            };
+            let mut started = [
+                ("the agent", start(first, "agent", sized("agent", 2), 0)),
+                (
+                    "the train judge",
+                    start(first, "train", sized("train", 1), 0),
+                ),
+                ("a runner", start(first, "runner-0", runners(), 0)),
+                ("another runner", start(first, "runner-1", runners(), 1)),
+                (
+                    "another run's judge",
+                    start(&fixture.run, "judge", role("judge"), 0),
+                ),
+            ];
+            let mut lines = Vec::new();
+            let mut sets = Vec::new();
+            for (name, sandbox) in &mut started {
+                let (given, seen) = given_and_seen(fixture, sandbox);
+                let whole = given.iter().all(|&cpu| siblings(cpu).is_subset(&given));
+                lines.push(format!(
+                    "{name}: on whole cores: {whole}, as it sees them: {}",
+                    seen == given
+                ));
+                sets.push(given);
+            }
+            let apart =
+                (0..sets.len()).all(|a| (a + 1..sets.len()).all(|b| sets[a].is_disjoint(&sets[b])));
+            lines.push(format!("each apart from the others: {apart}"));
+            let online = fs::read_to_string("/sys/devices/system/cpu/online").unwrap();
+            let online = cpu_list(&online);
+            let count = online.len() as u64;
+            let cores = online
+                .into_iter()
+                .map(siblings)
+                .collect::<BTreeSet<_>>()
+                .len();
+            let threads = count / cores as u64;
+            let held = sets.iter().flatten().map(|&cpu| siblings(cpu));
+            let held = held.collect::<BTreeSet<_>>().len() as u64;
+            let wide = RunTag::try_from(format!("{}-wide", fixture.run.as_str())).unwrap();
+            // A core more than those runs leave.
+            let left = threads * (cores as u64 - held + 1);
+            let left = provider().reserve(&wide, &[vec![sized("wide", left)]]);
+            let refused = left.unwrap_err();
+            let named = [first, &fixture.run]
+                .iter()
+                .all(|run| refused.contains(run.as_str()));
+            lines.push(format!(
+                "one that needs more than are left: refused, naming them: {named}"
+            ));
+            let more = provider().reserve(&wide, &[vec![sized("wide", count + 1)]]);
+            let more = more.unwrap_err();
+            let more = more.replace(&(count + 1).to_string(), "<cpus + 1>");
+            let more = more.replace(&cores.to_string(), "<cores>");
+            lines.push(format!("one that needs more than the machine has: {more}"));
+            drop(reserved);
+            lines
+        },
+        &expect![[r#"
+            the agent: on whole cores: true, as it sees them: true
+            the train judge: on whole cores: true, as it sees them: true
+            a runner: on whole cores: true, as it sees them: true
+            another runner: on whole cores: true, as it sees them: true
+            another run's judge: on whole cores: true, as it sees them: true
+            each apart from the others: true
+            one that needs more than are left: refused, naming them: true
+            one that needs more than the machine has: the run's roles need more whole cores at once than the <cores> that this machine gives sandboxes, to hold their CPUs (`wide` <cpus + 1>): give them fewer CPUs"#]],
+    );
+}
+
+/// The CPUs that the engine gave `sandbox`'s container, and those its processes may run on, as
+/// they see them.
+fn given_and_seen(fixture: &Fixture, sandbox: &mut Started) -> (BTreeSet<u32>, BTreeSet<u32>) {
+    let inspect = [
+        "inspect",
+        "--format",
+        "{{.HostConfig.CpusetCpus}}",
+        sandbox.id(),
+    ];
+    let given = docker().args(inspect).output().unwrap();
+    let given = cpu_list(&String::from_utf8(given.stdout).unwrap());
+    sh(
+        sandbox,
+        1,
+        "grep Cpus_allowed_list /proc/self/status | cut -f 2",
+    );
+    let seen = collect(fixture, sandbox, "log");
+    fs::remove_dir_all(fixture.dir.path().join("collected-log")).unwrap();
+    let seen = seen.iter().find_map(|line| line.strip_prefix("1.stdout: "));
+    (given, cpu_list(seen.unwrap_or_default()))
+}
+
+/// The CPUs that share a core with `cpu`, `cpu` among them.
+fn siblings(cpu: u32) -> BTreeSet<u32> {
+    let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+    cpu_list(&fs::read_to_string(path).unwrap())
+}
+
+/// The CPUs that `text`, as the kernel writes a list of them, names.
+fn cpu_list(text: &str) -> BTreeSet<u32> {
+    let ranges = text.trim().split(',').filter(|range| !range.is_empty());
+    ranges
+        .flat_map(|range| {
+            let (first, last) = range.split_once('-').unwrap_or((range, range));
+            first.parse::<u32>().unwrap()..=last.parse().unwrap()
+        })
+        .collect()
+}
+
+// What the provider declares as ready: the engine's report, and its one class, which offers
+// what the host has.
 #[test]
 #[ignore = "needs Docker: run cargo xtask ci --docker"]
 fn ready() {
     let mut ready = serde_json::to_value(provider().ready()).unwrap();
     let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
     let reported = format!("{reported:?}");
-    // The host's, which every engine has its own of.
+    // The host's, which every engine has its own of: of its CPU's flags, whether they hold
+    // `sse2`, which every x86-64 CPU has.
     let classes = ready["classes"].as_object_mut().unwrap();
     for class in classes.values_mut() {
-        class["resources"] = "<the host's>".into();
+        let offers = &mut class["offers"];
+        offers["cpu_millis"] = "<the host's>".into();
+        offers["memory_bytes"] = "<the host's>".into();
+        let sse2 = offers["cpu_features"]
+            .as_array()
+            .unwrap()
+            .contains(&"sse2".into());
+        offers["cpu_features"] = format!("<the host's, with sse2: {sse2}>").into();
     }
     let ready = format!(
         "a report of {reported}, and the classes {}",
         ready["classes"]
     );
-    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and the classes {"container":{"resources":"<the host's>","startup_seconds":540}}"#]]
+    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "security"], and the classes {"container":{"offers":{"cpu_features":"<the host's, with sse2: true>","cpu_millis":"<the host's>","cpu_model":null,"gpu":null,"memory_bytes":"<the host's>"},"startup_seconds":540}}"#]]
     .assert_eq(&ready);
 }
 
@@ -631,6 +815,7 @@ fn volumes() {
     check(
         "volumes",
         |fixture| {
+            let _other = reserve_with_room(provider(), &fixture.other_run, &[vec![role("other")]]);
             let started = [("first", &fixture.run), ("other", &fixture.other_run)];
             let started = started.map(|(role, run)| (role, fixture.start(run, role)));
             let volumes = started.each_ref().map(|(_, sandbox)| volume(sandbox));
@@ -670,7 +855,7 @@ struct Platform;
 
 impl Subject for Platform {
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String> {
-        Ok(Box::new(Docker::connect(engine())?))
+        Ok(Box::new(Docker::connect(engine(), None)?))
     }
 
     fn locals(&self, dir: &Path) -> Locals {
@@ -695,6 +880,11 @@ impl Subject for Platform {
     fn held(&self, run: &RunTag) -> Vec<SandboxId> {
         let held = containers(run, "{{.ID}}").unwrap();
         held.into_iter().map(SandboxId::from).collect()
+    }
+
+    // The engine's ledger holds each run's cores.
+    fn reserves(&self) -> bool {
+        true
     }
 }
 

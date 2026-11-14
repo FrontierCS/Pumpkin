@@ -11,6 +11,7 @@
 //! names, images, paths, modes and limits. [`crate::workflow::Workflow::parse`] checks how the parts
 //! fit together, and the limits a protocol bounds.
 
+use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod values;
 
 pub use values::{
-    AbsolutePath, Argv, Env, EnvVar, Image, JsonPointer, Mode, ModelName, Models, Name, Returns,
-    RolePath, Sha256Digest, WorkflowName,
+    AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, Image, JsonPointer, Mode,
+    ModelName, Models, Name, Returns, RolePath, Sha256Digest, WorkflowName,
 };
 
 /// A workflow.
@@ -62,9 +63,9 @@ pub struct Role {
     /// The user the role's commands run as.
     pub user: User,
     /// What each of the role's sandboxes needs of the class of sandbox it is created in, which
-    /// placing the workflow finds among those that its provider offers
+    /// placing the workflow finds among those that providers offer
     /// ([`Workflow::place`](crate::workflow::Workflow::place)).
-    pub needs: Resources,
+    pub needs: Needs,
     pub runtime: Runtime,
     /// The role's routes out; absent, the role has none. Only the agent may have one.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
@@ -83,7 +84,45 @@ pub struct User {
     pub gid: NonZeroU32,
 }
 
-/// The resources of each instance of a role.
+/// What each instance of a role needs of its sandbox: its CPU and memory, and GPUs, a CPU's flags
+/// and a CPU's model, each of which, absent, it doesn't need.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Needs {
+    /// The CPU limit, in thousandths of a CPU.
+    pub cpu_millis: NonZeroU64,
+    /// The memory limit.
+    pub memory_bytes: NonZeroU64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<Gpu>,
+    /// The flags of the CPU that the role's commands rely on, such as `avx512f`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub cpu_features: BTreeSet<CpuFlag>,
+    /// The model of the CPU that the role's sandboxes run on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<CpuModel>,
+}
+
+impl Needs {
+    /// The limits that a provider gives each of the role's sandboxes.
+    pub fn resources(&self) -> Resources {
+        Resources {
+            cpu_millis: self.cpu_millis,
+            memory_bytes: self.memory_bytes,
+        }
+    }
+}
+
+/// GPUs of one model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gpu {
+    pub count: NonZeroU32,
+    pub model: GpuModel,
+}
+
+/// The CPU and memory limits of each sandbox of a role ([`Needs::resources`]), as a provider
+/// gives them, and as the agent's `ops` reply says them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {

@@ -6,6 +6,7 @@
 //! provider lists the run's sandboxes, whatever made them.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use schema::ir::{Name, Resources, User};
@@ -68,6 +69,13 @@ pub struct Create {
     /// key a provider may know it by on its platform, beside the id it gives it.
     pub name: Name,
     pub role: Role,
+    /// Which of its role's sandboxes at once it is, from 0, below the role's
+    /// [`instances`](Role::instances): no two of a run's sandboxes of one role that run at once
+    /// are the same instance, so a provider that shares a host gives each its own share.
+    pub instance: u32,
+    /// The class of sandbox to create, by its name among the provider's
+    /// ([`Ready::classes`]), which the role fits.
+    pub class: Name,
     pub image: ImageRef,
     pub sandboxd: SandboxdRef,
     /// Whether the role's commands make ops: if so, the sandbox has `sandboxctl` at
@@ -119,7 +127,10 @@ impl UnixTime {
 pub struct Role {
     pub name: Name,
     pub user: User,
+    /// Each of its sandboxes'.
     pub resources: Resources,
+    /// How many of its sandboxes a run runs at once.
+    pub instances: NonZeroU32,
 }
 
 /// What a provider's `publish_image` made of a role's image, for the role's creates to name: a

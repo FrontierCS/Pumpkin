@@ -45,8 +45,8 @@ macro_rules! checked_string {
 }
 
 checked_string!(
-    /// The name of a role, slot or grant, a class of sandbox, or a sandbox within its run: 1 to
-    /// 64 characters from a-z, 0-9, `_` and `-`, starting with a letter.
+    /// The name of a role, slot or grant, a provider, a class of sandbox, or a sandbox within its
+    /// run: 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter.
     Name,
     check_name
 );
@@ -424,6 +424,66 @@ fn check_model_name(name: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+checked_string!(
+    /// A CPU's flag, as `/proc/cpuinfo` names it, such as `avx512f`: lowercase ASCII letters,
+    /// digits and `_`, at least one.
+    CpuFlag,
+    check_cpu_flag
+);
+
+checked_string!(
+    /// A CPU's model, as `/proc/cpuinfo` names it in `model name`, such as `AMD EPYC 7R13
+    /// Processor`: not empty, and with no control character.
+    CpuModel,
+    check_cpu_model
+);
+
+checked_string!(
+    /// A GPU's model, as `nvidia-smi` names the device, such as `NVIDIA H100 80GB HBM3`: not
+    /// empty, and with no control character.
+    GpuModel,
+    check_gpu_model
+);
+
+fn check_cpu_flag(flag: &str) -> Result<(), String> {
+    let allowed = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_';
+    if !flag.is_empty() && flag.bytes().all(allowed) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` is not a CPU's flag: use one as `/proc/cpuinfo` names it, such as `avx512f`",
+            flag.escape_debug()
+        ))
+    }
+}
+
+fn check_cpu_model(model: &str) -> Result<(), String> {
+    if is_device_name(model) {
+        return Ok(());
+    }
+    Err(format!(
+        "`{}` is not a CPU's model: use one as `/proc/cpuinfo` names it, such as `AMD EPYC \
+             7R13 Processor`",
+        model.escape_debug()
+    ))
+}
+
+fn check_gpu_model(model: &str) -> Result<(), String> {
+    if is_device_name(model) {
+        return Ok(());
+    }
+    Err(format!(
+        "`{}` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 \
+             80GB HBM3`",
+        model.escape_debug()
+    ))
+}
+
+/// Whether `name`, a device's as its system names it, is not empty and has no control character.
+fn is_device_name(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(char::is_control)
 }
 
 /// Permission bits, from `0000` to `0777`: read, write and execute, for a file's owner, its

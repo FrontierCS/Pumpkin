@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::ir::values::RelativePath;
-use crate::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
+use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, Mode, Name};
 
 pub mod frame;
 pub mod op;
@@ -241,7 +241,11 @@ pub const PROTOCOL_VERSION: u32 = 0;
 
 /// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox));
 /// its body holds none.
-pub const MAX_HELLO_BYTES: usize = 255;
+// Room for the names of 8 GPUs, the most that any provider gives one sandbox, each of fewer than
+// the 96 bytes that `nvidia-smi` names a device in, quoted and followed by a comma, beside the rest
+// of the hello, which takes under 128.
+pub const MAX_HELLO_BYTES: usize = 1024;
+const _: () = assert!(8 * (96 + 3) + 128 <= MAX_HELLO_BYTES);
 
 /// How long either end gives the other to send its hello, or to answer it, from when it takes
 /// the connection: the gateway that a sandbox dials.
@@ -250,19 +254,24 @@ pub const MAX_HELLO_BYTES: usize = 255;
 // retransmission timeout, 1 s, and then at twice the wait before each time.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// What `sandboxd` sends first on every session, with an empty body: `{"version":v}`, with `v` its
-/// [`PROTOCOL_VERSION`], or `{"version":v,"grant":"…"}` where it presents a grant;
-/// [`frame::read_hello`] reads one.
+/// What `sandboxd` sends first on every session; [`frame::read_hello`] reads one.
+///
+/// Its body is empty, and its message `{"version":v}`, with `v` its [`PROTOCOL_VERSION`], and
+/// `"grant":"…"` where it presents a grant, and `"gpus":[…]` where it saw GPUs.
 ///
 /// Its `Deserialize` refuses a hello of another version for its version, whatever else it
-/// holds, then a field that this version's form lacks or a grant that isn't one, and a frame
-/// that gives no version.
+/// holds, then a field that this version's form lacks, a grant that isn't one or a GPU's model
+/// that isn't one, and a frame that gives no version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(into = "HelloJson", try_from = "Value")]
 pub struct Hello {
     /// The grant the sandbox presents where it dials an address that several sandboxes share;
     /// none on a socket of its own.
     pub grant: Option<RegistrationGrant>,
+    /// The GPUs that `sandboxd` saw as it started, each by its model as `nvidia-smi` names it;
+    /// none where it couldn't tell, as in a sandbox without a GPU, or where their names would make
+    /// the hello longer than [`MAX_HELLO_BYTES`].
+    pub gpus: Option<Vec<GpuModel>>,
 }
 
 /// The JSON form of a [`Hello`] at this version.
@@ -272,13 +281,16 @@ struct HelloJson {
     version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     grant: Option<RegistrationGrant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpus: Option<Vec<GpuModel>>,
 }
 
 impl From<Hello> for HelloJson {
-    fn from(Hello { grant }: Hello) -> Self {
+    fn from(Hello { grant, gpus }: Hello) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             grant,
+            gpus,
         }
     }
 }
@@ -304,10 +316,14 @@ impl TryFrom<Value> for Hello {
                  this gateway speaks, as a sandboxd built from the same Pumpkin does"
             ));
         }
-        let HelloJson { version: _, grant } = HelloJson::deserialize(json).map_err(|error| {
+        let HelloJson {
+            version: _,
+            grant,
+            gpus,
+        } = HelloJson::deserialize(json).map_err(|error| {
             format!("the hello isn't of sandbox protocol {PROTOCOL_VERSION}'s form: {error}")
         })?;
-        Ok(Self { grant })
+        Ok(Self { grant, gpus })
     }
 }
 

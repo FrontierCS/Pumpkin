@@ -9,6 +9,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::collections::BTreeMap;
 use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
@@ -21,12 +22,12 @@ use std::{fs, iter};
 use decision::lasts;
 use expect_test::{Expect, expect};
 use provider::{
-    Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, RunTag, SandboxId,
-    SandboxdRef, Sweep,
+    Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation, Role,
+    RunTag, SandboxId, SandboxdRef, Sweep,
 };
 use route::Serving;
 use runtime::{Ending, Host, Record, Recorded, Run, System, new_id};
-use schema::ir::{self, Image, ModelName, Name};
+use schema::ir::{self, Image, ModelName};
 use schema::workflow::Placed;
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -34,7 +35,7 @@ use test_support::http::{read_request, write_chunk};
 use test_support::{WORKFLOW, files, sandboxes, standard_outputs};
 
 use crate::host::{LateTake, SimHost, SlowSync};
-use crate::run::{PROVIDER, Runs, compact_outcome, placed, serving};
+use crate::run::{PROVIDER, Runs, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
     self, BRIEF, HUNG, Journal, LAST, LATER, LINGERING, LOST, MUTE, REFUSED_ONCE, SLOW, Sim,
     UNDELETABLE, UNLISTABLE, UNPUBLISHED, UNSHOWN, VANISHING,
@@ -110,6 +111,10 @@ impl Provider for Interrupting<'_> {
         self.sim.ready()
     }
 
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+        self.sim.reserve(run, phases)
+    }
+
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
         self.at(At::PublishImage);
         self.sim.publish_image(image)
@@ -146,12 +151,28 @@ where
     }
 }
 
-/// Executes `run` with `sandboxd` on `provider`, which interrupts it `at` a step, if given: what
-/// `execute` returns, and for an interrupted run, whether it started, whether it returned within
-/// [`WAITED`], and what it published.
+/// The one of `providers` that `name` names.
+fn named<'s, P>(providers: &'s [(&'static str, P)], name: &ir::Name) -> &'s P {
+    let found = (providers.iter()).find(|(named, _)| name.as_str() == *named);
+    &found.unwrap().1
+}
+
+/// Each of `providers`, by its name, [`Interrupting`] `at` a step.
+fn interrupting<'a>(
+    providers: &[(&'static str, &'a Sim)],
+    at: Option<At>,
+) -> Vec<(&'static str, Interrupting<'a>)> {
+    (providers.iter())
+        .map(|&(name, sim)| (name, Interrupting { sim, at }))
+        .collect()
+}
+
+/// Executes `run` with `sandboxd`, interrupted `at` a step, if given, by the [`Interrupting`]
+/// providers it was prepared on: what `execute` returns, and for an interrupted run, whether it
+/// started, whether it returned within [`WAITED`], and what it published.
 fn interrupted_at(
     run: Run<'_, impl Host>,
-    provider: &Interrupting<'_>,
+    providers: &[(&'static str, &Sim)],
     sandboxd: &str,
     at: Option<At>,
 ) -> Vec<String> {
@@ -162,8 +183,7 @@ fn interrupted_at(
         if at == Some(At::AgentStarted) {
             scope.spawn(|| interrupt_once_started(&record));
         }
-        let name = Name::try_from(PROVIDER.to_owned()).unwrap();
-        run.execute((&name, provider), Path::new(sandboxd), || {
+        run.execute(Path::new(sandboxd), || {
             ran = true;
             Ok(())
         })
@@ -176,7 +196,8 @@ fn interrupted_at(
         lines.push(format!("it started: {ran}"));
         let within = waited.remaining().is_some();
         lines.push(format!("it returned within {WAITED} s: {within}"));
-        lines.push(format!("it published: {:?}", provider.sim.published()));
+        let published = providers.iter().flat_map(|(_, sim)| sim.published());
+        lines.push(format!("it published: {:?}", published.collect::<Vec<_>>()));
     }
     lines
 }
@@ -219,27 +240,31 @@ fn shown(sim: &Sim) -> Vec<String> {
 }
 
 /// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one, on
-/// `host`, and executes it on `provider`, with `sandboxd`, its roles [placed](placed) there, and
-/// checks what it shows ([`executed`]) against `expect`.
+/// `host`, executes it on `providers`, where its roles are placed ([`placed_on`]), with
+/// `sandboxd`, and checks what becomes of it ([`executed`]): what `execute` returns, the record,
+/// its log ([`logged`]), when its last record came ([`when`]), what the sandboxes printed, what
+/// the platform shows ([`shown`]) and what the run's list finds once it has ended. It shows the
+/// socket directories, the stand-in's address, the record, as made and once made, and the runs
+/// directory as `<sockets>`, `<stand-in>`, `<partial>`, `<record>` and `<runs>`.
 fn check(
     host: &impl Shown,
     name: &str,
-    provider: &Sim,
+    providers: &[(&'static str, &Sim)],
     ir: &Value,
     sandboxd: &str,
     expect: &Expect,
 ) {
-    expect.assert_eq(&executed(host, name, provider, ir, sandboxd, None));
+    expect.assert_eq(&executed(host, name, providers, ir, sandboxd, None));
 }
 
 /// What [`check`] checks of `ir`'s run, as test `name`, on `host`, with `sandboxd`, on
-/// `provider`; for a run that a SIGTERM interrupts `at` a step, the provider is
-/// [`Interrupting`], and it shows too whether the run started, and whether it returned within
-/// [`WAITED`], and what it published.
+/// `providers`; for a run that a SIGTERM
+/// interrupts `at` a step, each provider is [`Interrupting`], and it shows too whether the run
+/// started, and whether it returned within [`WAITED`], and what it published.
 fn executed<H: Shown>(
     host: &H,
     name: &str,
-    provider: &Sim,
+    providers: &[(&'static str, &Sim)],
     ir: &Value,
     sandboxd: &str,
     at: Option<At>,
@@ -250,17 +275,21 @@ fn executed<H: Shown>(
     let stand_in = route.map(|_| StandIn::start());
     let serving =
         (route.zip(stand_in.as_ref())).map(|(route, stand_in)| stand_in.serving(&runs.dir, route));
-    let placed = placed(&ir, provider.ready()).unwrap();
+    let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
+    let ready: BTreeMap<&str, &Ready> = ready.collect();
+    let placed = placed_on(&ir, &ready).unwrap();
     let hard_end = lasts(&placed);
     let id = new_id(SystemTime::now()).unwrap();
+    let interrupting = interrupting(providers, at);
+    let on = providers_of(&placed, |name| named(&interrupting, name));
     let recorded = Recorded { args: &[] };
-    let run = Run::prepare(host, placed.clone(), &runs.dir, id, serving, recorded).unwrap();
+    let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, serving, recorded);
+    let run = run.unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
-    let interrupting = Interrupting { sim: provider, at };
     let sockets = record.join("sockets");
     let partial = record.with_file_name(format!(".{}.partial", run.id()));
     let before = unix_ns();
-    let mut lines = interrupted_at(run, &interrupting, sandboxd, at);
+    let mut lines = interrupted_at(run, providers, sandboxd, at);
     let started = before..=unix_ns();
     lines.push(format!("record: {}", files(&record).join(", ")));
     lines.extend(sandboxes(&record));
@@ -270,7 +299,7 @@ fn executed<H: Shown>(
         .collect();
     payloads.sort();
     lines.push(format!("payloads hold: {payloads:?}"));
-    lines.push(declared(&record, provider));
+    lines.extend(declared(&record, providers));
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     lines.push(format!("outcome.json: {}", compact_outcome(&outcome)));
     lines.push("log.jsonl:".to_owned());
@@ -286,7 +315,7 @@ fn executed<H: Shown>(
     }
     lines.extend(standard_outputs(&record));
     lines.push(format!("socket directories left: {}", sockets.exists()));
-    lines.extend(left(provider, &tag.unwrap()));
+    lines.extend(left(providers, &tag.unwrap()));
     let address = stand_in.as_ref().map(|stand_in| stand_in.address.clone());
     for hung_up in stand_in.into_iter().flat_map(StandIn::stop) {
         // A run whose stream stalled has started. The stand-in reads the clock after the
@@ -310,28 +339,58 @@ fn executed<H: Shown>(
     })
 }
 
-/// Whether `provider.json` in `record`, a run's, holds what `provider` declared, by its name, with
-/// how its sandboxes meet the gateway.
-fn declared(record: &Path, provider: &Sim) -> String {
+/// Whether `provider.json` in `record`, a run's, holds what each of `providers` declared, by its
+/// name, with how its sandboxes meet the gateway; and, of a run on more than one, where it places
+/// each role.
+fn declared(record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
     let recorded = fs::read_to_string(record.join("provider.json")).unwrap();
     let recorded: Value = serde_json::from_str(&recorded).unwrap();
-    let mut ready = json!(provider.ready());
-    ready["reach"] = match provider.meeting() {
+    let reach = |provider: &Sim| match provider.meeting() {
         Meeting::Local(_) => "local",
+    };
+    let expected = (providers.iter()).map(|(name, provider)| {
+        let mut ready = json!(provider.ready());
+        ready["reach"] = reach(provider).into();
+        ((*name).to_owned(), ready)
+    });
+    let declared = recorded["providers"] == Value::Object(expected.collect());
+    // A run on one provider shows what it shows of it by no name.
+    if providers.len() == 1 {
+        return vec![format!(
+            "provider.json is what the provider declared: {declared}"
+        )];
     }
-    .into();
-    let declared = recorded == json!({ "providers": { PROVIDER: ready } });
-    format!("provider.json is what the provider declared: {declared}")
+    vec![
+        format!("provider.json is what each provider declared: {declared}"),
+        format!("provider.json places the roles: {}", recorded["roles"]),
+    ]
 }
 
-/// What `provider` shows of run `tag` once it has ended: what its platform shows ([`shown`]), and
-/// what its list finds.
-fn left(provider: &Sim, tag: &RunTag) -> Vec<String> {
-    let listed = provider.list(tag).unwrap();
-    let listed = listed.into_iter().map(|Listed { id, ended: _ }| id);
-    let listed: Vec<String> = listed.map(|id| id.as_str().to_owned()).collect();
-    let mut lines = shown(provider);
-    lines.push(format!("listed once it ended: {listed:?}"));
+/// What each of `providers` shows of run `tag` once it has ended: what its platform shows
+/// ([`shown`]), and what its list finds; and, of a run on more than one, by each one's name, what
+/// it published, and the class of each create, too.
+fn left(providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
+    let listed = |provider: &Sim| {
+        let listed = provider.list(tag).unwrap();
+        let listed = listed.into_iter().map(|Listed { id, ended: _ }| id);
+        listed.map(|id| id.as_str().to_owned()).collect::<Vec<_>>()
+    };
+    if let [(_, provider)] = providers {
+        let mut lines = shown(provider);
+        lines.push(format!("listed once it ended: {:?}", listed(provider)));
+        return lines;
+    }
+    let mut lines = Vec::new();
+    for (name, provider) in providers {
+        lines.push(format!("{name} published: {:?}", provider.published()));
+        lines.extend(shown(provider).iter().map(|line| format!("{name}: {line}")));
+        let classes: Vec<String> = provider.classes().into_iter().map(String::from).collect();
+        lines.push(format!("{name}: the class at each create: {classes:?}"));
+        lines.push(format!(
+            "{name} listed once it ended: {:?}",
+            listed(provider)
+        ));
+    }
     lines
 }
 
@@ -643,7 +702,7 @@ fn deleted_by_the_sweep() {
     check(
         &System,
         "deleted-by-the-sweep",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         REFUSED_ONCE,
         &expect![[r#"
@@ -676,7 +735,7 @@ fn sweep_unrecorded() {
     check(
         &SimHost::new().failed_sync_of(".sandbox.json.partial", 2),
         "sweep-unrecorded",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         REFUSED_ONCE,
         &expect![[r#"
@@ -710,7 +769,7 @@ fn unshown() {
     check(
         &System,
         "unshown",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         UNDELETABLE,
         &expect![[r#"
@@ -745,7 +804,7 @@ fn unstarted_undeletable() {
     check(
         &System,
         "unstarted-undeletable",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         UNDELETABLE,
         &expect![[r#"
@@ -778,7 +837,7 @@ fn exits() {
     check(
         &System,
         "exits",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -810,7 +869,7 @@ fn crashes() {
     check(
         &System,
         "crashes",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -845,7 +904,7 @@ fn stalls() {
     check(
         &System,
         "stalls",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -883,7 +942,16 @@ fn unstarted() {
     let placed = placed(&parsed, Sim::new().ready()).unwrap();
     let startup = placed.startup(placed.workflow().agent().role);
     let begun = Instant::now();
-    let on = |name, sandboxd| executed(&System, name, &Sim::new(), &ir, sandboxd, None);
+    let on = |name, sandboxd| {
+        executed(
+            &System,
+            name,
+            &[(PROVIDER, &Sim::new())],
+            &ir,
+            sandboxd,
+            None,
+        )
+    };
     let (listed, left_out) = (on("unstarted", MUTE), on("unstarted-left-out", VANISHING));
     let took = begun.elapsed();
     assert!(
@@ -922,7 +990,15 @@ fn unstarted() {
 fn interrupted(name: &str, startup: u64, ir: &Value, sandboxd: &str, at: At, expect: &Expect) {
     let provider = Sim::with_startup(startup);
     let test = format!("interrupted-{name}");
-    expect.assert_eq(&executed(&System, &test, &provider, ir, sandboxd, Some(at)));
+    let providers = [(PROVIDER, &provider)];
+    expect.assert_eq(&executed(
+        &System,
+        &test,
+        &providers,
+        ir,
+        sandboxd,
+        Some(at),
+    ));
 }
 
 #[test]
@@ -1129,7 +1205,7 @@ fn unlistable() {
     check(
         &System,
         "unlistable",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         UNLISTABLE,
         &expect![[r#"
@@ -1160,7 +1236,7 @@ fn mismatched() {
     check(
         &System,
         "mismatched",
-        &provider,
+        &[(PROVIDER, &provider)],
         &workflow(&["exit", "0"]),
         LATER,
         &expect![[r#"
@@ -1187,7 +1263,7 @@ fn lost() {
     check(
         &System,
         "lost",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         LOST,
         &expect![[r#"
@@ -1213,7 +1289,7 @@ fn undeletable() {
     check(
         &System,
         "undeletable",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         UNDELETABLE,
         &expect![[r#"
@@ -1241,15 +1317,40 @@ fn unpublished() {
     check(
         &System,
         "unpublished",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &workflow(&["exit", "0"]),
         UNPUBLISHED,
         &expect![[r#"
-            failed: publishing `sandboxd` failed: /sim/unpublished can't be published by the simulated provider: name another path
+            failed: publishing `sandboxd` on provider `simulated` failed: /sim/unpublished can't be published by the simulated provider: name another path
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
             payloads hold: []
             provider.json is what the provider declared: true
-            outcome.json: {"reason":"publishing `sandboxd` failed: /sim/unpublished can't be published by the simulated provider: name another path","state":"failed"}
+            outcome.json: {"reason":"publishing `sandboxd` on provider `simulated` failed: /sim/unpublished can't be published by the simulated provider: name another path","state":"failed"}
+            log.jsonl:
+            socket directories left: false
+            their directory's mode at each create: []
+            listed once it ended: []"#]],
+    );
+}
+
+// A run whose judge's image the provider can't publish: the run fails before it starts, naming
+// the judge, and nothing is created.
+#[test]
+fn unpublished_image() {
+    let mut ir = workflow(&["exit", "0"]);
+    ir["roles"][1]["image"] = json!(sim::image(UNPUBLISHED).as_str());
+    check(
+        &System,
+        "unpublished-image",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            failed: publishing role `train_judge`'s image on provider `simulated` failed: sha256:2f73696d2f756e7075626c697368656400000000000000000000000000000000 can't be published by the simulated provider: name another image
+            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+            payloads hold: []
+            provider.json is what the provider declared: true
+            outcome.json: {"reason":"publishing role `train_judge`'s image on provider `simulated` failed: sha256:2f73696d2f756e7075626c697368656400000000000000000000000000000000 can't be published by the simulated provider: name another image","state":"failed"}
             log.jsonl:
             socket directories left: false
             their directory's mode at each create: []
@@ -1277,7 +1378,7 @@ fn ops() {
     check(
         &System,
         "ops",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ops_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
@@ -1332,7 +1433,7 @@ fn result_over_the_limit() {
     check(
         &System,
         "result-over-the-limit",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ops_workflow(&["ops", "finalize submit large"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -1373,7 +1474,7 @@ fn crashes_with_an_op_in_flight() {
     check(
         &System,
         "crashes-with-an-op",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1417,7 +1518,7 @@ fn judge_starts_past_the_deadline() {
     check(
         &System,
         "judge-starts-past-the-deadline",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1443,17 +1544,21 @@ fn judge_starts_past_the_deadline() {
     );
 }
 
+// A run whose train judge needs the CPU model [`BRIEF`], so is placed in that class, whose
+// sandboxes start in seconds, and whose `sandboxd` hangs without dialing: its start runs out at
+// its own class's startup, though the agent's class gives 30 s, so the agent, which awaits the
+// call's end, sees it errored, and exits long before the deadline.
 #[test]
 fn judge_placed_apart() {
     // The judge's start runs out at its own class's startup, though the agent's class gives
     // 30 s, so the agent sees the call errored long before the deadline.
     let mut ir = ops_workflow(&["ops", "judge train 6", "await 0 errored"], 30);
     ir["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
-    ir["roles"][1]["needs"] = json!(BRIEF);
+    ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
     check(
         &System,
         "judge-placed-apart",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1482,6 +1587,211 @@ fn judge_placed_apart() {
     );
 }
 
+/// `sim`, as provider `there` of a run on two, beside `here`: its classes offer less memory than
+/// the agent needs, and more than each judge does, so the agent is placed on `here`, and each
+/// judge that needs no more memory than the others on `there`.
+fn there(sim: Sim) -> Sim {
+    sim.named("there").offering_memory(16 << 30)
+}
+
+// A run on two simulated providers, the agent on `here` and the judges on [`there`], the train
+// judge, which needs the CPU model [`BRIEF`], in that class, whose agent and judges share
+// an image, which each provider publishes itself, and each refuses a reference that the other
+// published: the agent makes a judge call and a final submission, which the final judge scores,
+// each sandbox is created in its role's class, and each provider is left with none of the run's
+// sandboxes; the record says where each role is placed, and each provider's reach.
+#[test]
+fn spans_providers() {
+    let argv = [
+        "ops",
+        "judge train 6",
+        "await 0 completed",
+        "finalize submit 6",
+    ];
+    let mut ir = ops_workflow(&argv, 30);
+    ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
+    ir["roles"][0]["image"] = ir["roles"][1]["image"].clone();
+    let (here, there) = (Sim::new().named("here"), there(Sim::new()));
+    let providers = [("here", &here), ("there", &there)];
+    check(
+        &System,
+        "spans-providers",
+        &providers,
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score Some(Number(6))
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/log/collected, jobs/1/out/collected, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"here","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"there","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"there","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what each provider declared: true
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"brief","provider":"there"}}
+            outcome.json: {"score":6,"state":"finished","verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":6},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":7}
+            {"actions":[{"kind":"reply","op":2,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":14}
+            {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":15}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            here published: ["sandboxd /sim/sandboxd", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            here: their directory's mode at each create: ["700"]
+            here: the class at each create: ["sim"]
+            here listed once it ended: []
+            there published: ["sandboxd /sim/sandboxd", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there: their directory's mode at each create: ["700", "700"]
+            there: the class at each create: ["brief", "sim"]
+            there listed once it ended: []"#]],
+    );
+}
+
+// A run on two simulated providers, `here` and [`there`], whose agent's
+// sandbox, on `here`, can't be deleted, and whose train judge's create, on `there`, fails,
+// leaving a sandbox: `here`'s sweep fails, and `there`'s still deletes what it finds, so the run
+// fails, naming `here`.
+#[test]
+fn sweeps_each_provider() {
+    let mut ir = ops_workflow(&["ops", "judge train 6", "await 0 errored"], 30);
+    ir["roles"][0]["image"] = json!(sim::image(UNDELETABLE).as_str());
+    ir["roles"][1]["image"] = json!(sim::image(LOST).as_str());
+    let (here, there) = (Sim::new().named("here"), there(Sim::new()));
+    let providers = [("here", &here), ("there", &there)];
+    check(
+        &System,
+        "sweeps-each-provider",
+        &providers,
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"here","report":null}
+            payloads hold: ["xxxxxx"]
+            provider.json is what each provider declared: true
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"sim","provider":"there"}}
+            outcome.json: {"reason":"deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":3}
+            {"actions":[{"kind":"reply","op":1,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":5}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":null},"seq":7}
+            {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":8}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            here published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000"]
+            here: their directory's mode at each create: ["700"]
+            here: the class at each create: ["sim"]
+            here listed once it ended: ["sim-1"]
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6c6f73740000000000000000000000000000000000000000000000", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there: their directory's mode at each create: ["700"]
+            there: the class at each create: ["sim"]
+            there listed once it ended: []"#]],
+    );
+}
+
+// A run whose agent makes two judge calls, of judges placed on two providers, the second a
+// second after the first: the near judge's, on `here`, as it needs what the agent does, whose
+// `sandboxd` hangs without dialing; then the train judge's, on `there`, in class [`BRIEF`], whose
+// model it needs, whose `sandboxd` ends at once without dialing. The run's watcher lists each
+// provider where a start waits, and takes each list for that provider's starts alone: so the
+// train judge's start is found ended on its own provider while the near judge's start still
+// waits on `here`, and the near judge's start runs out at its class's startup. The agent, which
+// awaits both calls' ends, sees each errored.
+#[test]
+fn watches_each_provider() {
+    // The agent can't tell when a start is handed to the watcher, so a second's sleep orders the
+    // two: `here`'s start waits as `there`'s begins.
+    let argv = [
+        "ops",
+        "judge near 6",
+        "sleep 1",
+        "judge train 6",
+        "await 0 errored",
+        "await 1 errored",
+    ];
+    let mut ir = ops_workflow(&argv, 30);
+    ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
+    ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
+    let mut near = ir["roles"][1].clone();
+    near["name"] = json!("near_judge");
+    near["needs"] = ir["roles"][0]["needs"].clone();
+    near["image"] = json!(sim::image(HUNG).as_str());
+    ir["roles"].as_array_mut().unwrap().push(near);
+    let grants = &mut ir["roles"][0]["grants"];
+    let mut grant = grants[0].clone();
+    grant["judge"]["name"] = json!("near");
+    grant["judge"]["role"] = json!("near_judge");
+    grants.as_array_mut().unwrap().push(grant);
+    // A simulated sandbox that never dials waits on nothing but its start's deadline, so the near
+    // judge's start is kept waiting by its class's startup, 5 s: past the end of the train
+    // judge's start, a second later, at its class's 2 s. A watcher that listed `here` alone
+    // while its start waits would leave the train judge's start to run out at its startup.
+    let here = Sim::with_startup(5).named("here");
+    let there = there(Sim::new());
+    let providers = [("here", &here), ("there", &there)];
+    check(
+        &System,
+        "watches-each-provider",
+        &providers,
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            finished, with score None
+            record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/sandbox.json, jobs/1/console.txt, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"here","report":null}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-2","provider":"here","report":null}
+            job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"there","report":null}
+            job 1's console, jobs/1/console.txt: "sandboxd: a simulated one, which never dials\n"
+            payloads hold: ["xxxxxx"]
+            provider.json is what each provider declared: true
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"near_judge":{"class":"sim","provider":"here"},"train_judge":{"class":"brief","provider":"there"}}
+            outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"250000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"near","job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":0,"request":{"grant":"near","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"actions":[{"kind":"reply","op":1,"reply":{"job":1,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":1,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":4}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":5}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"here","sandbox":"job-0"},"seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_failed","reason":"the judge's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":7}
+            {"actions":[{"kind":"reply","op":2,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":2,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","op":3,"reply":{"failure":{"code":"judge_error","message":"the judge failed before giving a result"},"job":1,"kind":"status","remaining":{"calls":99,"seconds":null},"state":"errored"}}],"at_ns":"<ns>","event":{"kind":"op_arrived","op":3,"request":{"job":"1","kind":"status"}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent"},"seq":12}
+            its last record came before the agent's teardown was to end
+            socket directories left: false
+            here published: ["sandboxd /sim/sandboxd", "image example/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
+            here: their directory's mode at each create: ["700", "700"]
+            here: the class at each create: ["sim", "sim"]
+            here listed once it ended: []
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000", "image example/judge@sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there: their directory's mode at each create: ["700"]
+            there: the class at each create: ["brief"]
+            there listed once it ended: []"#]],
+    );
+}
+
 // A run whose train judge stalls its sandbox once its command has started, which the agent
 // awaits before it finalizes: the work phase ends at once, so the core stops the call, whose
 // sandbox's freeze runs out at the agent's teardown's end, which leaves the final judge its
@@ -1505,7 +1815,7 @@ fn judge_stalls() {
     check(
         &System,
         "judge-stalls",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1546,7 +1856,7 @@ fn abandoned() {
     check(
         &System,
         "abandoned",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1589,7 +1899,7 @@ fn deleted_while_torn_down() {
     check(
         &System,
         "deleted-while-torn-down",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1635,7 +1945,7 @@ fn reported_before_the_hard_end() {
     check(
         &System,
         "reported-before-the-hard-end",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1682,7 +1992,7 @@ fn reported_past_the_deadline() {
     check(
         &SimHost::new().late_take(late),
         "reported-past-the-deadline",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "judge train 6"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -1720,7 +2030,7 @@ fn reported_past_the_hard_end() {
     check(
         &SimHost::new().late_take(late),
         "reported-past-the-hard-end",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "judge train 6"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -1755,7 +2065,7 @@ fn torn_down_past_the_hard_end() {
     check(
         &System,
         "torn-down-past-the-hard-end",
-        &Sim::with_startup(SHORT_STARTUP),
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &short_workflow(&["ops", "finalize submit 6"], 2),
         LINGERING,
         &expect![[r#"
@@ -1801,7 +2111,7 @@ fn late_ops() {
     check(
         &System,
         "late-ops",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ops_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
@@ -1849,7 +2159,7 @@ fn taken_past_the_deadline() {
     check(
         &SimHost::new().late_take(late),
         "taken-past-the-deadline",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "judge train 6", "close"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -1894,7 +2204,7 @@ fn held_by_a_slow_sync() {
     check(
         &SimHost::new().slow_sync(slow),
         "held-by-a-slow-sync",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "ops", "close"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -1943,7 +2253,7 @@ fn started_late() {
     check(
         &SimHost::new().slow_sync(slow).late_take(late),
         "started-late",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "ops"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -1974,7 +2284,7 @@ fn started_late() {
     check(
         &SimHost::new().slow_sync(slow),
         "started-past-the-startup",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "ops"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -2002,7 +2312,7 @@ fn sync_fails() {
     check(
         &SimHost::new().failed_sync(2),
         "sync-fails",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ops_workflow(&["ops", "ops", "exit"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -2039,7 +2349,7 @@ fn refusal_held_by_a_slow_sync() {
     check(
         &SimHost::new().slow_sync(slow),
         "refusal-held-by-a-slow-sync",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &short_workflow(&["ops", "ops", "judge train 17", "exit"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -2079,7 +2389,7 @@ fn syncs() {
     check(
         &SimHost::new().journaled(&journal),
         "syncs",
-        &Sim::new().journaled(&journal),
+        &[(PROVIDER, &Sim::new().journaled(&journal))],
         &ops_workflow(&["ops", "ops", "judge train 17", "exit"], 30),
         SANDBOXD,
         &expect![[r#"
@@ -2156,7 +2466,7 @@ fn model_requests() {
     check(
         &System,
         "model-requests",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
         &expect![[r#"
@@ -2212,7 +2522,7 @@ fn model_upstream_refusals() {
     check(
         &System,
         "model-upstream-refusals",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
         &expect![[r#"
@@ -2270,7 +2580,7 @@ fn model_provider_down() {
     check(
         &System,
         "model-provider-down",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
         &expect![[r#"
@@ -2318,7 +2628,7 @@ fn model_barred_is_no_failure() {
     check(
         &System,
         "model-barred",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
         &expect![[r#"
@@ -2355,7 +2665,7 @@ fn model_provider_recovers() {
     check(
         &System,
         "model-provider-recovers",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(ops_workflow(&argv, 30)),
         SANDBOXD,
         &expect![[r#"
@@ -2398,7 +2708,7 @@ fn model_provider_down_at_the_deadline() {
     check(
         &System,
         "model-provider-down-at-the-deadline",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(short_workflow(&argv, 2)),
         SANDBOXD,
         &expect![[r#"
@@ -2443,7 +2753,7 @@ fn model_stream_cut() {
     check(
         &System,
         "model-stream-cut",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &routed(short_workflow(&argv, 2)),
         SANDBOXD,
         &expect![[r#"
@@ -2489,7 +2799,7 @@ fn model_grace_cut() {
     check(
         &System,
         "model-grace-cut",
-        &Sim::new(),
+        &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -2534,4 +2844,52 @@ fn unix_ns() -> u64 {
 /// A time or duration of the log's, a decimal string of nanoseconds, as a number.
 fn nanos(value: &Value) -> Option<u64> {
     value.as_str()?.parse().ok()
+}
+
+// A run holds what its provider reserved for it until its end, interrupted or not: while one run
+// holds all the provider's CPUs, another is refused before its record; once the first has
+// ended, as a signal ends it before it publishes, the other is prepared, and once that one has
+// finished, a third.
+#[test]
+fn holds_until_its_end() {
+    let runs = Runs::new("holds-until-its-end");
+    let sim = Sim::new().with_cpus(16);
+    let ir: ir::Workflow = serde_json::from_value(workflow(&["exit", "0"])).unwrap();
+    let prepare = |name: &str| {
+        let placed = placed(&ir, sim.ready()).unwrap();
+        let dir = runs.dir.join(name);
+        let on = providers_of(&placed, |_| &sim);
+        let recorded = Recorded { args: &[] };
+        let id = new_id(SystemTime::now()).unwrap();
+        Run::prepare(&System, placed, on, &dir, id, None, recorded)
+    };
+    let prepared = |run: &Result<Run<'_, System>, String>| match run {
+        Ok(_) => "prepared".to_owned(),
+        Err(error) => format!("refused: {error}"),
+    };
+    let execute = |run: Run<'_, System>| {
+        let executed = run.execute(Path::new(SANDBOXD), || Ok(()));
+        match executed {
+            Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
+            Err(stopped) => stopped.to_string(),
+        }
+    };
+    let first = prepare("first").unwrap();
+    let mut lines = vec![format!(
+        "a second, beside it: {}",
+        prepared(&prepare("second"))
+    )];
+    lines.push(format!("the first: {}", execute(first)));
+    let second = prepare("second");
+    lines.push(format!("then the second: {}", prepared(&second)));
+    // A signal interrupts every later run of the process.
+    interrupt();
+    lines.push(format!("the second: {}", execute(second.unwrap())));
+    lines.push(format!("then a third: {}", prepared(&prepare("third"))));
+    expect![[r#"
+        a second, beside it: refused: reserving on provider `simulated`: the run needs 16 simulated CPUs, and 16 of the 16 are held: run it once others end
+        the first: finished, with score None
+        then the second: prepared
+        the second: was interrupted by SIGTERM
+        then a third: prepared"#]].assert_eq(&lines.join("\n"));
 }
