@@ -342,9 +342,9 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
 }
 
 /// The files of `record`, a run's, each sandbox's `sandbox.json` and console it holds, its run
-/// log's note on the upstream that served its model route and its record of how each model
-/// request was answered, if it has a run log, what the agent's `out` held of a model's answer, if
-/// anything, what the driver wrote to `driver.log`, if anything, its `outcome.json`, and whether
+/// log's notes on the upstreams that served its model routes and its record of how each model
+/// request was answered, if it has a run log, what the agent's `out` and the first job's evidence
+/// held of a model's answer, if anything, what the driver wrote to `driver.log`, if anything, its `outcome.json`, and whether
 /// `stdout` is that.
 fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
@@ -356,19 +356,20 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     for line in log.lines() {
         let logged: Value = serde_json::from_str(line).unwrap();
         let note = logged["note"].as_str();
-        if let Some(note) = note.filter(|note| note.starts_with("the agent's model route goes to "))
-        {
+        if let Some(note) = note.filter(|note| note.contains("'s model route: ")) {
             lines.push(format!("the run log notes: {note}"));
         }
         if logged["event"]["kind"] == "model_answered" {
             lines.push(format!("the run log records: {}", logged["event"]));
         }
     }
-    if let Ok(answer) = fs::read_to_string(record.join("agent/out/answer")) {
-        lines.push(format!(
-            "the agent's answer: {}",
-            answer.replace('\n', "\\n")
-        ));
+    for (whose, path) in [
+        ("the agent's", "agent/out/answer"),
+        ("the final judge's", "jobs/0/out/evidence/answer"),
+    ] {
+        if let Ok(answer) = fs::read_to_string(record.join(path)) {
+            lines.push(format!("{whose} answer: {}", answer.replace('\n', "\\n")));
+        }
     }
     // A record whose `driver.log` was removed shows that in its files.
     let said = fs::read_to_string(record.join("driver.log")).unwrap_or_default();

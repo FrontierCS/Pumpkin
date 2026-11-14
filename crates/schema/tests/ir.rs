@@ -698,6 +698,9 @@ fn round_trip() {
     assert_eq!(name(workflow.agent().role), "agent");
     assert_eq!(workflow.submit_grant().name.as_str(), "submit");
     assert_eq!(name(workflow.score().slot.judge().role()), "final_judge");
+    let route = workflow.sandbox(workflow.agent().role).model_route.as_ref();
+    let apis: Vec<ir::Api> = route.unwrap().as_slice().iter().map(|e| e.api).collect();
+    assert_eq!(apis, [ir::Api::Responses], "the agent's route");
 }
 
 #[test]
@@ -705,6 +708,7 @@ fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
     let result = "/roles/1/runtime/judge/result";
+    let entry = &fixture()["roles"][0]["egress"]["model"][0];
     check(
         [
             fixture_with("/name", json!("example task")),
@@ -722,11 +726,13 @@ fn checked_values() {
                 &format!("{command}/env"),
                 json!(["MODE=train", "MODE=eval"]),
             ),
-            fixture_with(&format!("{agent}/egress/model/models"), json!([])),
+            fixture_with(&format!("{agent}/egress/model/0/models"), json!([])),
             fixture_with(
-                &format!("{agent}/egress/model/models"),
+                &format!("{agent}/egress/model/0/models"),
                 json!(["gpt-6-astra", "gpt-6-astra"]),
             ),
+            fixture_with(&format!("{agent}/egress/model"), json!([])),
+            fixture_with(&format!("{agent}/egress/model"), json!([entry, entry])),
             fixture_with(&format!("{result}/score"), json!("raw_score")),
             fixture_with(&format!("{result}/score"), json!("/raw~2score")),
             fixture_with(&format!("{result}/returns"), json!(["/metrics", ""])),
@@ -752,6 +758,8 @@ fn checked_values() {
             `MODE` is set more than once: set each name once
             no models: a model route allows at least one
             `gpt-6-astra` is listed more than once: list each model once
+            no APIs: a model route has an entry for one at least
+            the API `responses` has more than one entry: give each API one, which lists every model its requests may name
             `raw_score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
             `/raw~2score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
             the empty pointer names the whole result, with no key: point to a field
@@ -942,7 +950,7 @@ fn broken_leases() {
         ],
         &expect![[r#"
             parsed
-            /roles/3/egress/model: `gpu` is a runner, and only the agent has a model route: remove it
+            /roles/3/egress/model: `gpu` is a runner, and runners have no model route: remove it
             /roles/3/grants: `gpu` is a runner, and runners hold no grants: remove them
             /roles/0/grants/1/lease/role: `train_judge` is a judge: name a runner
             /roles/3: `gpu` is a runner that no lease grant names: name it from one
@@ -1044,7 +1052,6 @@ fn broken_roles() {
         [ir, none, unsubmitted, ungranted, untimed],
         &expect![[r#"
             /roles/1/grants/0/submit: `train_judge` is a judge, and judges hold only lease grants: remove it
-            /roles/2/egress/model: `final_judge` is a judge, and only the agent has a model route: remove it
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             /roles/0/grants/0/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
             /roles/0/grants/3/judge/role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant

@@ -19,10 +19,10 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use expect_test::{Expect, expect};
 use provider::{Provider, Ready};
-use route::{Key, Serving, Upstream, UpstreamUrl};
+use route::{Key, Serving, UpstreamUrl};
 use runtime::{Record, Recorded, Run, System, new_id};
-use schema::ir::{self, ModelName, Name};
-use schema::workflow::{ByProvider, Placed, Workflow};
+use schema::ir::{self, Api, ModelName, Name};
+use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use serde_json::Value;
 use stdx::process::Environment;
 use tempfile::TempDir;
@@ -80,13 +80,13 @@ fn check(
             UNIX_EPOCH + from_epoch
         };
         let url = "http://127.0.0.1:9/responses";
-        let serving = served.map(|models| serving(&runs.dir, url, models));
         let sim = Sim::new();
         let prepared = new_id(now).and_then(|id| {
             let placed = placed(&ir, sim.ready())?;
+            let servings = agent_servings(placed.workflow(), &runs.dir, url, served);
             let on = providers_of(&placed, |_| &sim);
             let recorded = Recorded { args: &args };
-            Run::prepare(&System, placed, on, &dir, id, serving, recorded)
+            Run::prepare(&System, placed, on, &dir, id, &servings, recorded)
         });
         let record = fs::read_dir(&dir)
             .ok()
@@ -167,20 +167,39 @@ pub(crate) fn providers_of<'p>(
     providers
 }
 
+/// How a run of `workflow` serves its agent's route alone, through the upstream that [`serving`]
+/// gives for `models`, if any are given.
+fn agent_servings(
+    workflow: &Workflow,
+    dir: &Path,
+    url: &str,
+    models: Option<&[&str]>,
+) -> ByRole<Vec<Serving>> {
+    let agent = workflow.agent().role;
+    let servings = workflow.by_role(|(role, _)| {
+        let served = models.filter(|_| role == agent).into_iter();
+        Ok::<_, Infallible>(served.map(|models| serving(dir, url, models)).collect())
+    });
+    let Ok(servings) = servings;
+    servings
+}
+
 /// The upstream `stand-in` at `url`, whose key is in a file in `dir`, which serves each of
-/// `models` under the name `vendor/<model>`.
+/// `models` under the name `vendor/<model>` through the Responses API.
 pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join("key"), "sk-test\n").unwrap();
     let url = UpstreamUrl::try_from(url.to_owned()).unwrap();
-    let upstream = Upstream::new(url, Key::read(&dir.join("key")).unwrap());
+    let key = Key::read(&dir.join("key")).unwrap();
     let model = |name: String| ModelName::try_from(name).unwrap();
     let models = models
         .iter()
         .map(|name| (model((*name).to_owned()), model(format!("vendor/{name}"))));
     Serving {
         name: Name::try_from("stand-in".to_owned()).unwrap(),
-        upstream,
+        api: Api::Responses,
+        url,
+        key,
         models: models.collect(),
     }
 }
@@ -260,7 +279,7 @@ fn prepare() {
             20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
-            refused: `agent` has a model route, but no upstream serves it: give one, or remove the role's `egress.model` to run without one; runs directory made: false
+            refused: `agent` has a model route, but no upstream serves its `responses` entry: give one, or remove the role's `egress.model` to run without one; runs directory made: false
             refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows; runs directory made: false
             prepared, named by its id: true
             driver.pid is locked: true

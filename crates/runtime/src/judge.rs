@@ -1,8 +1,9 @@
 //! Judge calls, each a child of the run ([`child`](super::child)): [`call`] puts the call's
 //! payload in its slot ([`slot_payload`](schema::sandbox::slot_payload)), runs the judge's
 //! command until it exits, its timeout passes or the core stops the call, relaying the ops of a
-//! judge that holds grants to the loop meanwhile, and [`outputs`] collects and parses the judge's
-//! result under its [`ResultSpec`](schema::ir::ResultSpec).
+//! judge that holds grants, and the model requests of one with a route, to the loop meanwhile,
+//! and [`outputs`] collects and parses the judge's result under its
+//! [`ResultSpec`](schema::ir::ResultSpec).
 
 use std::path::Path;
 use std::time::Duration;
@@ -115,8 +116,8 @@ fn start<H: Host>(
 
 /// Waits for the command of job `job` to exit, until `timeout`, a time since the run started, or
 /// for a stop, and reports its exit or its timeout; meanwhile relays each op its sandbox makes on
-/// `session` to the loop, and answers it with the reply the loop sends back. Fails with the reason
-/// the session ended, if it ended first.
+/// `session` to the loop, and answers it with the reply the loop sends back, and each model
+/// request, which the loop answers. Fails with the reason the session ended, if it ended first.
 fn wait<H: Host>(
     child: &mut Child<'_, H, OpReply>,
     job: JobId,
@@ -169,14 +170,10 @@ fn wait<H: Host>(
                 return Ok(Ended::Ran);
             }
             Some(Message::Session(Arrival::Ended { reason })) => return Err(reason),
-            // No type excludes a model request here, since one `Arrival` serves sessions with
-            // model requests and without.
-            Some(Message::Session(Arrival::ModelRequest(_))) => unreachable!(
-                "job {}'s session handed out a model request, though it was accepted without \
-                 model requests, so one breaks the protocol, which ends the session, and arrives \
-                 as its end",
-                job.0
-            ),
+            Some(Message::Session(Arrival::ModelRequest(incoming))) => {
+                let at = child.clock.now();
+                child.report(Report::Model { at, job, incoming });
+            }
         }
     }
 }

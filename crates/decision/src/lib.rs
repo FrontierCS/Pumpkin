@@ -544,14 +544,20 @@ impl<'w> Core<'w> {
         self.work_end_due().map_or(self.hard_end, |(end, _)| end)
     }
 
-    /// Whether the agent's model requests are allowed at `at`, a time since the run started:
-    /// until the work phase ends, the grace after a finalize included
-    /// ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)). Once
-    /// they aren't, the runtime refuses each that it takes, and ends those in flight.
-    pub fn model_requests_allowed(&self, at: Duration) -> bool {
-        // A harness asks its model once more after each command, the finalize's too, and
-        // fails its turn if refused; the locked selection keeps any answer off the score.
-        self.work_end_due().is_some_and(|(end, _)| at < end)
+    /// Whether `caller`'s model requests are allowed at `at`, a time since the run started: the
+    /// agent's until the work phase ends, the grace after a finalize included
+    /// ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)); a call's
+    /// from its command's start until the command exits, is stopped, or its timeout passes, in
+    /// whichever phase. Once they aren't, the runtime refuses each that it takes, and ends those
+    /// in flight.
+    pub fn model_requests_allowed(&self, caller: Caller, at: Duration) -> bool {
+        match caller {
+            // A harness asks its model once more after each command, the finalize's too, and
+            // fails its turn if refused; the locked selection keeps any answer off the score.
+            Caller::Agent => self.work_end_due().is_some_and(|(end, _)| at < end),
+            // A call's route is open while it may make ops, which its timeout bounds.
+            Caller::Job(_) => self.working(caller).is_ok_and(|working| at < working.end()),
+        }
     }
 
     /// Counts the deadline from now, the agent's start, by [`Event::AgentStarted`]'s rule.

@@ -756,7 +756,9 @@ fn agent(
     let made = |kind| Value { kind, span: at };
     let name = made(Kind::Str(Text::new(name, at, budget)?));
     let models = Nested::new(Vec::from([name]), at, budget)?;
-    let route = record([("models", made(Kind::List(models)))], call)?;
+    let api = made(Kind::Str(Text::new("responses", at, budget)?));
+    let entry = record([("api", api), ("models", made(Kind::List(models)))], call)?;
+    let route = made(Kind::List(Nested::new(Vec::from([entry]), at, budget)?));
     Ok([data(&runtime, call)?, record([("model", route)], call)?])
 }
 

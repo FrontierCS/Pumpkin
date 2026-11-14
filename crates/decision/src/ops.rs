@@ -73,7 +73,7 @@ impl Working {
         }
     }
 
-    fn end(self) -> Duration {
+    pub(super) fn end(self) -> Duration {
         match self {
             Self::Agent { deadline, .. } => deadline,
             Self::Job { end, .. } => end,
@@ -109,7 +109,7 @@ impl Core<'_> {
 
     /// `caller`, if it works: the agent in the work phase, a call while its command runs. Else
     /// why the run takes no more ops of `caller`'s.
-    fn working(&self, caller: Caller) -> Result<Working, String> {
+    pub(super) fn working(&self, caller: Caller) -> Result<Working, String> {
         let work_end = match (&self.phase, caller) {
             (Phase::Abandoned, _) => {
                 return Err("the run has passed its hard end: make no more ops".to_owned());

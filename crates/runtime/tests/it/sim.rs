@@ -1100,7 +1100,8 @@ enum Step {
     /// any such collect later.
     Release,
     /// A judge's result, `{"raw_score": n}`, where `n` is what the last command of a lease printed,
-    /// as the last `lease_status` reply gives it.
+    /// as the last `lease_status` reply gives it, or the body of the response to the last model
+    /// request, whichever came last.
     Result,
     /// The session's end, which its `sandboxd` makes as [`End`] says.
     End(End),
@@ -1158,7 +1159,8 @@ struct Caller {
     waits: Option<Wait>,
     /// What it has printed: each response to its model requests.
     stdout: String,
-    /// What the last command of a lease printed, as the last `lease_status` reply gives it.
+    /// What the last command of a lease printed, as the last `lease_status` reply gives it, or
+    /// the body of the response to the last model request, whichever came last.
     read: String,
     /// The result it wrote, if it wrote one.
     result: Option<Vec<u8>>,
@@ -1322,6 +1324,7 @@ impl Caller {
         }
         let request = self.model.map_or(0, |request| request + 1);
         (self.model, self.open) = (Some(request), true);
+        self.read.clear();
         // Each request repeats the conversation's first item, as a harness's requests do.
         let item = |text: &str| json!({ "type": "message", "role": "user", "content": text });
         let input = [item("You are a simulated agent."), item(text)];
@@ -1366,8 +1369,9 @@ impl Caller {
                 (request, None)
             }
             ToSandbox::ModelData { request } => {
-                let text = String::from_utf8_lossy(body).replace('\n', "\\n");
-                self.stdout.push_str(&text);
+                let text = String::from_utf8_lossy(body);
+                self.read.push_str(&text);
+                self.stdout.push_str(&text.replace('\n', "\\n"));
                 (request, Some(Wait::Part))
             }
             ToSandbox::ModelEnd { request, .. } => (request, Some(Wait::End)),
@@ -1454,8 +1458,8 @@ fn step(arg: &str) -> Step {
     // <lease> <from> <to>`; `model <model> <text>`, a model request that names `model`, with `text`
     // as its input, whose response's end the next step waits for, or `ask <model> <text>`, one
     // whose response's first part it waits for; `result`, a judge's result of what a lease's
-    // command printed ([`Step::Result`]); or `sleep <seconds>`, `exit`, `release`
-    // ([`Step::Release`]), or the session's end, `crash` or `close`.
+    // command printed, or a model answered ([`Step::Result`]); or `sleep <seconds>`, `exit`,
+    // `release` ([`Step::Release`]), or the session's end, `crash` or `close`.
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {

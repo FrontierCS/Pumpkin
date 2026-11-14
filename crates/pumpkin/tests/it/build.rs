@@ -268,11 +268,14 @@ fn builds_on_docker() {
                 "roles": [
                   {
                     "egress": {
-                      "model": {
-                        "models": [
-                          "model-a"
-                        ]
-                      }
+                      "model": [
+                        {
+                          "api": "responses",
+                          "models": [
+                            "model-a"
+                          ]
+                        }
+                      ]
                     },
                     "grants": [
                       {

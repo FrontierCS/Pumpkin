@@ -27,7 +27,7 @@ use rustix::fs::Mode;
 use rustix::process::{Pid, Signal, umask};
 use sandboxd::Sandboxd;
 use schema::ir::Name;
-use schema::workflow::{ByProvider, Placed, Workflow};
+use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use stdx::Context;
 
 mod cli;
@@ -263,7 +263,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let Prepared {
         workflow,
         providers,
-        serving,
+        servings,
     } = prepared.map_err(|error| {
         say(error);
         format!("to run it again: {again}")
@@ -281,7 +281,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     caught.context("setting the handlers of SIGINT, SIGTERM and SIGHUP failed")?;
     let on = placed_on.map(Connected::provider);
     let kept = Recorded { args: &words };
-    let run = Run::prepare(&System, placed, on, Path::new(&runs), id, serving, kept)?;
+    let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     // Said before `run` hears of it, so that whatever ends both later, the record is named.
     say(format_args!("run {id} records into {}", dir.display()));
@@ -329,13 +329,13 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, cli::Run), String> {
 struct Prepared<'e> {
     workflow: Workflow,
     providers: config::Providers<Connected<'e>>,
-    /// How the agent's model route is served, if it has one.
-    serving: Option<route::Serving>,
+    /// How each role's model route is served, an entry at a time.
+    servings: ByRole<Vec<route::Serving>>,
 }
 
 /// What a run of `task`, checked, starts from, on the machine that the configuration at `config`
 /// names, each step refused before the next begins: the configuration read, and an upstream found
-/// to serve the agent's model route; the engine reached, and kept in `engine`; each provider
+/// to serve each role's model route; the engine reached, and kept in `engine`; each provider
 /// connected to it ([`Connected::new`]), so that an engine that can't run sandboxes is refused
 /// before any image is built; then the task's images built on it ([`star::Task::build`]).
 ///
@@ -352,18 +352,19 @@ fn prepared<'e>(
         providers,
         upstreams,
     } = config::read(config)?;
-    let workflow = task.workflow();
-    let serving = match &workflow.sandbox(workflow.agent().role).model_route {
-        Some(route) => Some(upstreams.serving(&route.models).context(config.display())?),
-        None => None,
-    };
+    let servings = task
+        .workflow()
+        .by_role(|(_, sandbox)| match &sandbox.model_route {
+            Some(route) => upstreams.serving(route).context(config.display()),
+            None => Ok(Vec::new()),
+        })?;
     let engine = &*engine.insert(crate::engine(context)?);
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
     Ok(task.build(engine).map(|workflow| Prepared {
         workflow,
         providers,
-        serving,
+        servings,
     }))
 }
 

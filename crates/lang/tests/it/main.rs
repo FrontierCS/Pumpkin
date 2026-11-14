@@ -3004,11 +3004,14 @@ fn plans() {
               "roles": [
                 {
                   "egress": {
-                    "model": {
-                      "models": [
-                        "model-large"
-                      ]
-                    }
+                    "model": [
+                      {
+                        "api": "responses",
+                        "models": [
+                          "model-large"
+                        ]
+                      }
+                    ]
                   },
                   "grants": [
                     {

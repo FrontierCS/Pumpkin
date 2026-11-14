@@ -594,15 +594,15 @@ settings:
 [upstreams.<name>], for each upstream that a workflow's model route may reach:
   url           The base URL of its API: https, or http to a loopback IP
                 address, such as 127.0.0.1 but not localhost. The route reaches
-                /responses below it.
+                each API's endpoint below it: /responses, or /chat/completions.
   key_file      The file that holds its key, below this file's directory unless
                 absolute.
   models        The models it serves, each with the `name` that a route allows
                 and the `upstream_name` that the upstream takes for it. No model
                 is listed twice, under one upstream or two.
 
-A workflow's model route reaches the one upstream that serves every model it
-allows.
+Each entry of a workflow's model route reaches the one upstream that serves
+every model it allows.
 ";
 
 /// A usage error, as clap words it, and the command that prints the help of the command it was

@@ -1,112 +1,132 @@
-//! The agent's model route, as a run serves it ([`Served`]), by the rules of
-//! [`route`].
+//! The model routes that a run serves: each role's ([`routes`]), and each sandbox's of a role
+//! with one, as the run serves it ([`Served`]), by the rules of [`route`].
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Answer, Route, Serving, Upstream};
-use schema::ir::Name;
-use schema::workflow::Workflow;
+use schema::ir::{ApiRoute, Name};
+use schema::workflow::{ByRole, Sandbox, Workflow};
 use stdx::{Deadline, unpoisoned};
 
 use crate::Stopped;
 
-/// The agent's model route, as the run serves it: the route that closes its requests, and the
-/// upstream that they reach.
+/// A sandbox's model route, as the run serves it: for each entry, the route that closes its
+/// requests and the upstream that they reach, with the name that the deployment gives it.
 pub(super) struct Served {
-    route: Route,
-    upstream: Upstream,
-    /// The name that the deployment gives the upstream.
-    name: Name,
-    /// The run log's note on which upstream serves the route, by its name, and the name that it
-    /// takes for each model.
-    started: String,
-    /// How the model provider is failing the agent: the failure, if the last request answered
+    entries: Vec<(Route, Upstream)>,
+    names: Vec<Name>,
+    /// How the model provider is failing the sandbox: the failure, if the last request answered
     /// while the route was open got one, and no 2xx came after it.
     failing: Mutex<Option<Failing>>,
 }
 
-/// The model provider's failure of the agent's requests, as the last one answered shows.
+/// The model provider's failure of a sandbox's requests, as the last one answered shows.
 #[derive(Debug)]
 struct Failing {
     /// The number of the first request of the failure.
     since: u64,
-    /// The number of the last request answered, and how it failed.
-    last: (u64, String),
+    /// The number of the last request answered, the upstream that answered it, and how it
+    /// failed.
+    last: (u64, Name, String),
 }
 
 impl fmt::Debug for Served {
-    // The upstream shows nothing, as it holds the key.
+    // The upstreams show nothing, as they hold the keys.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (f.debug_struct("Served").field("route", &self.route)).finish_non_exhaustive()
+        (f.debug_struct("Served").field("names", &self.names)).finish_non_exhaustive()
     }
 }
 
-impl Served {
-    /// The agent's route in `workflow`, if it has one, served as `serving` says, which goes
-    /// unused for a workflow without one.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the workflow has a route but `serving` is `None`, or doesn't name a model that
-    /// the route allows.
-    pub(super) fn new(
-        workflow: &Workflow,
-        serving: Option<Serving>,
-    ) -> Result<Option<Self>, String> {
-        let agent = workflow.sandbox(workflow.agent().role);
-        let Some(route) = &agent.model_route else {
-            return Ok(None);
-        };
-        let Some(Serving {
-            name,
-            upstream,
-            models,
-        }) = serving
-        else {
+/// Each role's model route in `workflow`, as `servings` serve it: for each entry of the route,
+/// in its order, the serving of the entry's API, which takes the models that the entry allows
+/// alone; none for a role without a route.
+///
+/// # Errors
+///
+/// Fails if a role's route has an entry that no serving of its API serves, or that allows a
+/// model that its serving doesn't serve.
+pub(super) fn routes(
+    workflow: &Workflow,
+    servings: &ByRole<Vec<Serving>>,
+) -> Result<ByRole<Vec<Serving>>, String> {
+    workflow.by_role(|(role, sandbox)| route(sandbox, servings.get(role)))
+}
+
+/// `sandbox`'s role's model route, as [`routes`] gives it.
+fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String> {
+    let Some(route) = &sandbox.model_route else {
+        return Ok(Vec::new());
+    };
+    let role = &sandbox.name;
+    let served = |entry: &ApiRoute| {
+        let ApiRoute { api, models } = entry;
+        let Some(serving) = servings.iter().find(|serving| serving.api == *api) else {
             return Err(format!(
-                "`{}` has a model route, but no upstream serves it: give one, or remove the \
-                 role's `egress.model` to run without one",
-                agent.name
+                "`{role}` has a model route, but no upstream serves its `{api}` entry: give one, \
+                 or remove the role's `egress.model` to run without one"
             ));
         };
-        let mut names = BTreeMap::new();
-        for model in route.models.as_slice() {
-            let Some(upstream_name) = models.get(model) else {
+        let taken = models.as_slice().iter().map(|model| {
+            let Some(upstream_name) = serving.models.get(model) else {
                 return Err(format!(
-                    "`{}`'s model route allows `{model}`, which its upstream doesn't serve: give \
-                     an upstream that serves every model the route allows",
-                    agent.name
+                    "`{role}`'s model route allows `{model}`, which its upstream doesn't serve: \
+                     give an upstream that serves every model the route allows"
                 ));
             };
-            names.insert(model.clone(), upstream_name.clone());
-        }
-        let taken: Vec<String> = (names.iter())
-            .map(|(model, upstream_name)| format!("`{model}` as `{upstream_name}`"))
-            .collect();
-        let started = format!(
-            "the agent's model route goes to the upstream `{name}`, which takes {}",
-            taken.join(", ")
-        );
-        let route = Route::new(names);
-        Ok(Some(Self {
-            route,
-            upstream,
-            name,
-            started,
+            Ok((model.clone(), upstream_name.clone()))
+        });
+        Ok(Serving {
+            name: serving.name.clone(),
+            api: *api,
+            url: serving.url.clone(),
+            key: serving.key.clone(),
+            models: taken.collect::<Result<_, String>>()?,
+        })
+    };
+    route.as_slice().iter().map(served).collect()
+}
+
+/// The run log's note on which upstream serves each entry of the route of `sandbox`'s role,
+/// `servings`, by its name, and the name that it takes for each model, if it has one.
+pub(super) fn started(sandbox: &Sandbox, servings: &[Serving]) -> Option<String> {
+    let entries: Vec<String> = servings
+        .iter()
+        .map(|serving| {
+            let taken: Vec<String> = (serving.models.iter())
+                .map(|(model, upstream_name)| format!("`{model}` as `{upstream_name}`"))
+                .collect();
+            format!(
+                "`{}` to the upstream `{}`, which takes {}",
+                serving.api,
+                serving.name,
+                taken.join(", ")
+            )
+        })
+        .collect();
+    (!entries.is_empty())
+        .then(|| format!("`{}`'s model route: {}", sandbox.name, entries.join("; ")))
+}
+
+impl Served {
+    /// The route that `servings` serve, a role's as [`routes`] gives it, with upstreams of its
+    /// own, or `None` for a role without one.
+    pub(super) fn new(servings: &[Serving]) -> Option<Self> {
+        let entries = servings.iter().map(|serving| {
+            let route = Route::new(serving.api, serving.models.clone());
+            (route, Upstream::new(&serving.url, &serving.key))
+        });
+        let names = servings.iter().map(|serving| serving.name.clone());
+        (!servings.is_empty()).then(|| Self {
+            entries: entries.collect(),
+            names: names.collect(),
             failing: Mutex::new(None),
-        }))
+        })
     }
 
-    /// The run log's note on which upstream serves the route, as the run starts.
-    pub(super) fn started(&self) -> &str {
-        &self.started
-    }
-
-    /// Answers `incoming`, the agent's model request numbered `number`, as [`Upstream::serve`]
+    /// Answers `incoming`, the sandbox's model request numbered `number`, as [`route::serve`]
     /// does. It gives `note` a note on a request that it forwards, before it does, and tells
     /// `answered` how it answered the request, before the answer's end is written.
     pub(super) fn serve(
@@ -119,18 +139,19 @@ impl Served {
         answered: impl FnOnce(Answer),
     ) {
         let forwarding = || note(format!("model request {number} goes upstream"));
-        let answered = |answer| {
-            self.bear(number, &answer);
+        let answered = |entry: Option<usize>, answer| {
+            if let Some(entry) = entry {
+                self.bear(number, &self.names[entry], &answer);
+            }
             answered(answer);
         };
-        self.upstream
-            .serve(&self.route, incoming, allowed, by, forwarding, answered);
+        route::serve(&self.entries, incoming, allowed, by, forwarding, answered);
     }
 
-    /// Notes how the route answered request `number`, if the route is open, in what the
-    /// provider is failing the agent in.
-    fn bear(&self, number: u64, answer: &Answer) {
-        if self.upstream.was_shut_down() || matches!(answer, Answer::Barred { .. }) {
+    /// Notes how upstream `name` answered request `number`, if the route is open, in what the
+    /// provider is failing the sandbox in.
+    fn bear(&self, number: u64, name: &Name, answer: &Answer) {
+        if self.ended() || matches!(answer, Answer::Barred { .. }) {
             return;
         }
         let mut failing = unpoisoned(self.failing.lock());
@@ -139,40 +160,30 @@ impl Served {
                 let since = failing.as_ref().map_or(number, |failing| failing.since);
                 Some(Failing {
                     since,
-                    last: (number, how),
+                    last: (number, name.clone(), how),
                 })
             }
             None => None,
         };
     }
 
-    /// Whether the model provider has refused the route's key ([`Upstream::key_was_refused`]).
-    pub(super) fn key_was_refused(&self) -> bool {
-        self.upstream.key_was_refused()
+    /// The upstream that refused the route's key, if one has ([`Upstream::key_was_refused`]).
+    pub(super) fn key_refused_by(&self) -> Option<&Name> {
+        let refused = self
+            .entries
+            .iter()
+            .position(|(_, upstream)| upstream.key_was_refused());
+        refused.map(|entry| &self.names[entry])
     }
 
-    /// Checks that the model provider did not fail the agent in a run that ended with `outcome`:
-    /// unless `finalized_first`, that it never refused the route's key, and, if the agent's exit
-    /// ended the work phase with no submission finalized, that the agent's last request answered
-    /// while the route was open got no failure from it.
+    /// Checks that the sandbox's last request answered while the route was open got no failure
+    /// from the model provider, if the agent's exit ended the work phase of a run that ended with
+    /// `outcome` with no submission finalized.
     ///
     /// # Errors
     ///
-    /// Fails, naming the upstream or the fault, if the provider failed the agent so.
-    pub(super) fn upstream_held(
-        &self,
-        finalized_first: bool,
-        outcome: &Result<Outcome, Stopped>,
-    ) -> Result<(), String> {
-        // A finalize locks the selection, and so the score, which a refusal heard after it can't
-        // change.
-        if self.upstream.key_was_refused() && !finalized_first {
-            return Err(format!(
-                "the upstream `{}` refused its key, with a 401, which ended the agent's model \
-                 route: give it a key that it takes, and run again",
-                self.name
-            ));
-        }
+    /// Fails, naming the upstream and the failure, if it did.
+    pub(super) fn failed_last(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
         // An agent that ran to the deadline, or finalized, is scored as usual: Harbor scores an
         // agent that timed out in its provider's backoff, and Inspect's `time_limit` is wall
         // clock, while none of the harnesses studied voids such a run.
@@ -181,18 +192,30 @@ impl Served {
         let Some(Failing { since, last }) = failed else {
             return Ok(());
         };
-        let (number, how) = last;
+        let (number, name, how) = last;
         Err(format!(
-            "the upstream `{}` failed the agent's last model request, {number} ({how}; failing \
-             since request {since}), and the agent exited: a deployment fault, not the agent's \
-             result; run it again",
-            self.name
+            "the upstream `{name}` failed the agent's last model request, {number} ({how}; \
+             failing since request {since}), and the agent exited: a deployment fault, not the \
+             agent's result; run it again"
         ))
     }
 
-    /// Ends the route's every exchange in flight and every later one ([`Upstream::shutdown`]).
+    /// Ends the route's every exchange in flight and every later one ([`Upstream::shutdown`]),
+    /// unless it has ended.
     pub(super) fn end(&self) {
-        self.upstream.shutdown();
+        if self.ended() {
+            return;
+        }
+        for (_, upstream) in &self.entries {
+            upstream.shutdown();
+        }
+    }
+
+    /// Whether [`Served::end`] has ended the route.
+    fn ended(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|(_, upstream)| upstream.was_shut_down())
     }
 }
 
