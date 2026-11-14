@@ -11,8 +11,11 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+aws = { path = "../aws" }
 docker = { path = "../../providers/docker" }
+ec2 = { path = "../../providers/ec2" }
 engine = { path = "../engine" }
+gateway = { path = "../gateway" }
 lang = { path = "../lang" }
 provider = { path = "../provider" }
 recipe = { path = "../recipe" }

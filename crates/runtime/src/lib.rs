@@ -26,7 +26,7 @@ use std::{fs, io, mem};
 use decision::{
     Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, PayloadRef, Request, lasts,
 };
-use gateway::{Arrival, IncomingModelRequest, IncomingOp, Op, RefusedOp, Trees};
+use gateway::{Arrival, GrantListener, IncomingModelRequest, IncomingOp, Op, RefusedOp, Trees};
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
@@ -137,8 +137,9 @@ impl<'r, H: Host> Run<'r, H> {
     }
 
     /// Runs the workflow on its roles' providers, with the static `sandboxd` in each sandbox,
-    /// calling `started` once that is published. Records its end in `outcome.json`, and deletes
-    /// what each provider lists of it.
+    /// calling `started` once that is published; a private provider's sandboxes meet the gateway
+    /// at `private`. Records its end in `outcome.json`, and deletes what each provider lists of
+    /// it.
     ///
     /// # Errors
     ///
@@ -147,9 +148,10 @@ impl<'r, H: Host> Run<'r, H> {
     pub fn execute(
         self,
         sandboxd: &Path,
+        private: Option<&GrantListener>,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
-        let outcome = self.run_on(sandboxd, started);
+        let outcome = self.run_on(sandboxd, private, started);
         let recorded = match &outcome {
             Ok(outcome) => {
                 let mut recorded = log::outcome_json(outcome);
@@ -175,12 +177,14 @@ impl<'r, H: Host> Run<'r, H> {
     fn run_on(
         &self,
         sandboxd: &Path,
+        private: Option<&GrantListener>,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
         let provided = record::provided(&self.placed, &self.providers);
         record::write_json(host, &self.dir, "provider.json", &provided)?;
-        let published = Published::create(&self.providers, &self.placed, sandboxd, &self.dir)?;
+        let published =
+            Published::create(&self.providers, &self.placed, sandboxd, private, &self.dir)?;
         // A run interrupted as it publishes never starts, so nothing tells of a start that the
         // signal then undoes.
         interruption::check()?;

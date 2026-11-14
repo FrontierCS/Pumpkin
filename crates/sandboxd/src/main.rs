@@ -2,8 +2,9 @@
 //! `sandboxctl`, the shim through which callers in the sandbox make ops ([`ctl`]). [`flags`]
 //! holds `sandboxd`'s grammar, as `sandboxd --help` prints it.
 //!
-//! It meets the gateway, at a Unix socket of the sandbox's own, opens the session
-//! ([`schema::sandbox`]) with its hello, and serves it until the gateway closes it:
+//! It meets the gateway, at a Unix socket of the sandbox's own or at a TCP address, opens the
+//! session ([`schema::sandbox`]) with its hello, presenting the grant in [`SANDBOXD_GRANT`] over
+//! TCP, and serves it until the gateway closes it:
 //! it puts and collects trees, starts commands and reports their exits, and freezes the sandbox.
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
@@ -20,11 +21,17 @@
 //! non-dumpable first, so that the role's code can't reach it through `/proc`
 //! ([`sys::make_non_dumpable`] says why).
 
+use std::env;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::{self, Write};
-use std::path::Path;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
+
+use schema::sandbox::{RegistrationGrant, SANDBOXD_GRANT};
+use stdx::Context;
 
 use crate::session::Gateway;
 
@@ -49,7 +56,7 @@ mod flags {
         reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
     )]
 
-    use std::path::PathBuf;
+    use super::Address;
 
     xflags::xflags! {
         src "./src/main.rs"
@@ -57,8 +64,11 @@ mod flags {
         /// Serves a sandbox's session as its supervisor, until the gateway ends it. Exits with
         /// 0 then, and with 1 on any error, bad arguments included.
         cmd sandboxd {
-            /// The gateway's Unix socket, over which the session runs.
-            required gateway: PathBuf
+            /// The gateway's address, over which the session runs: the absolute path of the
+            /// sandbox's own Unix socket, or a TCP address, such as `192.0.2.1:7433`. Over TCP,
+            /// sandboxd presents the registration grant that the environment's SANDBOXD_GRANT
+            /// holds, which it keeps from the commands it starts.
+            required gateway: Address
             /// Serves ops, which callers in the sandbox make through `sandboxctl`, at
             /// /pumpkin/sandboxctl/socket. sandboxd makes its directory, which must not exist
             /// yet, closed to all but its own user. Without it, nothing in the sandbox can make
@@ -75,7 +85,7 @@ mod flags {
     // Run `env UPDATE_XFLAGS=1 cargo build` to regenerate.
     #[derive(Debug)]
     pub struct Sandboxd {
-        pub gateway: PathBuf,
+        pub gateway: Address,
 
         pub ops: bool,
         pub model: bool,
@@ -133,13 +143,56 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
-    match session::serve(&Gateway::Socket(gateway), ops, model) {
+    let gateway = match gateway {
+        Address::Socket(socket) => Ok(Gateway::Socket(socket)),
+        Address::Tcp(address) => grant().map(|grant| Gateway::Tcp(address, grant)),
+    };
+    match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sandboxd: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Where the command line says the gateway is: at the absolute path of a Unix socket of the
+/// sandbox's own, or at a TCP address.
+#[derive(Debug)]
+enum Address {
+    Socket(PathBuf),
+    Tcp(SocketAddr),
+}
+
+impl FromStr for Address {
+    type Err = String;
+
+    fn from_str(address: &str) -> Result<Self, Self::Err> {
+        // An absolute path begins with `/`, and a TCP address never does.
+        if address.starts_with('/') {
+            return Ok(Self::Socket(PathBuf::from(address)));
+        }
+        address.parse().map(Self::Tcp).map_err(|_| {
+            format!(
+                "`{address}` is neither a Unix socket's absolute path nor a TCP address: give \
+                 one, such as `/run/gateway.sock` or `192.0.2.1:7433`"
+            )
+        })
+    }
+}
+
+/// The registration grant in [`SANDBOXD_GRANT`].
+fn grant() -> Result<RegistrationGrant, String> {
+    let Some(grant) = env::var_os(SANDBOXD_GRANT) else {
+        return Err(format!(
+            "{SANDBOXD_GRANT} is not set: set it to the registration grant issued for the \
+             sandbox, which a sandboxd that meets its gateway over TCP presents"
+        ));
+    };
+    // A value that isn't UTF-8 isn't hexadecimal digits either, so it is refused as any other
+    // value that isn't a grant's digits.
+    let digits = grant.into_string().unwrap_or_default();
+    RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
 }
 
 /// Writes `line` to `stream`, standard output or standard error, and ignores a failed write:

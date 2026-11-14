@@ -1,7 +1,7 @@
 //! The gateway's end of the sessions that sandboxes open, by [the protocol](schema::sandbox).
 //!
-//! A sandbox meets the gateway where its [`Registration`] says ([`Sockets`]), which accepts the
-//! [`Session`] the sandbox opens with its hello.
+//! A sandbox meets the gateway where its [`Registration`] says ([`Sockets`], [`GrantListener`]),
+//! which accepts the [`Session`] the sandbox opens with its hello.
 //!
 //! A sandbox, however buggy, can't harm the host through its session: a message that fails to
 //! parse or comes out of turn, more replies than a waiting request takes, or a malformed tree
@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Read, Write};
-use std::net::Shutdown;
+use std::net::{Shutdown, TcpStream};
 use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -36,7 +36,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
-pub use meeting::{Registration, Sockets};
+pub use meeting::{GatewayAddress, GrantListener, Registration, Sockets};
 use schema::ir::{AbsolutePath, Argv, GpuModel, Mode, Name};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::{self, Limits, Modes};
@@ -1208,10 +1208,11 @@ impl Write for Until<'_> {
     }
 }
 
-/// A session's connection: to a socket of the sandbox's own.
+/// A session's connection: to a socket of the sandbox's own, or over TCP, each behaving alike.
 #[derive(Debug)]
 enum Connection {
     Unix(UnixStream),
+    Tcp(TcpStream),
 }
 
 impl Connection {
@@ -1219,28 +1220,32 @@ impl Connection {
     fn shutdown(&self) -> io::Result<()> {
         match self {
             Self::Unix(stream) => stream.shutdown(Shutdown::Both),
+            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
         }
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         match self {
             Self::Unix(stream) => stream.set_nonblocking(nonblocking),
+            Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
         }
     }
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             Self::Unix(stream) => stream.set_write_timeout(timeout),
+            Self::Tcp(stream) => stream.set_write_timeout(timeout),
         }
     }
 }
 
-// Through a shared reference, as `UnixStream` reads and writes, since the session's
+// Through a shared reference, as `UnixStream` and `TcpStream` read and write, since the session's
 // reader thread reads beside the owner that writes and may end the session.
 impl Read for &Connection {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Connection::Unix(stream) => (&mut &*stream).read(buf),
+            Connection::Tcp(stream) => (&mut &*stream).read(buf),
         }
     }
 }
@@ -1249,12 +1254,14 @@ impl Write for &Connection {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Connection::Unix(stream) => (&mut &*stream).write(buf),
+            Connection::Tcp(stream) => (&mut &*stream).write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Connection::Unix(stream) => (&mut &*stream).flush(),
+            Connection::Tcp(stream) => (&mut &*stream).flush(),
         }
     }
 }

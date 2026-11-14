@@ -14,6 +14,7 @@ test = false
 proc-macro2 = { version = "1.0.107", default-features = false, features = ["span-locations"] }
 serde_json.workspace = true
 sha2.workspace = true
+stdx = { path = "../crates/stdx" }
 xflags.workspace = true
 xshell = "0.2.7"
 

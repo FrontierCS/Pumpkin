@@ -2,10 +2,10 @@
 //! provider passes ([`suite`](test_support::suite)).
 //!
 //! Each sandbox is a thread of this process, running a fake `sandboxd` that dials its create's
-//! dial, a socket's, at once; says hello and answers the session's requests,
-//! running each command by its program, which may make ops or judge a payload ([`Sim`]). What it
-//! does that a run acts on may go to a [`Journal`], in order with what other parts of a test's
-//! simulated world tell it.
+//! dial at once, a socket's, or a TCP address's for a provider made [private](Sim::private);
+//! says hello and answers the session's requests, running each command by its program, which may
+//! make ops or judge a payload ([`Sim`]). What it does that a run acts on may go to a
+//! [`Journal`], in order with what other parts of a test's simulated world tell it.
 
 #![expect(
     clippy::unwrap_used,
@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::Shutdown;
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -35,8 +35,8 @@ use schema::sandbox::op::{
 };
 use schema::sandbox::{
     Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RESULT_MAX_BYTES,
-    RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, frame, log_dir,
-    out_dir, pumpkin_dir,
+    RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, TcpDial, ToSandbox, dir_mode,
+    file_mode, frame, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Offers};
 use serde_json::{Value, json};
@@ -166,11 +166,20 @@ pub(crate) struct Sim {
     /// The name of its platform, which each reference it publishes begins with, then `:`.
     platform: &'static str,
     ready: Ready,
+    /// How its sandboxes meet the gateway.
+    reach: Reach,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock,
     // which each instance that `Subject::connect` makes shares, as a platform's instances share
     // its sandboxes.
     state: Arc<Mutex<State>>,
     journal: Option<Journal>,
+}
+
+/// How a [`Sim`]'s sandboxes meet the gateway, as a provider's [`Meeting`] says.
+#[derive(Clone, Copy)]
+enum Reach {
+    Local,
+    Private,
 }
 
 /// What the parts of a test's simulated world saw, in the order they told it, each from the
@@ -313,6 +322,7 @@ impl Sim {
         Self {
             platform: "sim",
             ready: ready(NonZeroU64::new(seconds).unwrap()),
+            reach: Reach::Local,
             state: Arc::new(Mutex::new(State {
                 next: 1,
                 sandboxes: BTreeMap::new(),
@@ -377,6 +387,16 @@ impl Sim {
     #[must_use]
     pub(crate) fn named(self, platform: &'static str) -> Self {
         Self { platform, ..self }
+    }
+
+    /// This provider, whose sandboxes dial the gateway at a TCP address, presenting their grants,
+    /// as a [private](Meeting::Private) one's do, in place of a socket.
+    #[must_use]
+    pub(crate) fn private(self) -> Self {
+        Self {
+            reach: Reach::Private,
+            ..self
+        }
     }
 
     /// This provider, which shares out `cpus` CPUs between the reservations of runs, each
@@ -628,7 +648,10 @@ impl Provider for Sim {
     }
 
     fn meeting(&self) -> Meeting<'_> {
-        Meeting::Local(self)
+        match self.reach {
+            Reach::Local => Meeting::Local(self),
+            Reach::Private => Meeting::Private(self),
+        }
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -639,15 +662,22 @@ impl Provider for Sim {
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
         let gateway = Gateway::Socket(dial.dir.join(SOCKET_NAME));
-        self.made(create, gateway)
+        self.made(create, (gateway, None))
+    }
+}
+
+impl Creator<TcpDial> for Sim {
+    fn create(&self, create: &Create, dial: TcpDial) -> Result<Created, String> {
+        let TcpDial { gateway, grant } = dial;
+        self.made(create, (Gateway::Tcp(gateway), Some(grant)))
     }
 }
 
 impl Sim {
-    /// Creates the sandbox that `create` describes, which meets the gateway at `gateway`.
+    /// Creates the sandbox that `create` describes, which meets the gateway as `met` says.
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more;
     // and the name needs no use, as each sandbox is created once.
-    fn made(&self, create: &Create, gateway: Gateway) -> Result<Created, String> {
+    fn made(&self, create: &Create, met: Met) -> Result<Created, String> {
         let by = Deadline::at_unix(create.by.since_epoch());
         if by.remaining().is_none() {
             let passed =
@@ -657,6 +687,7 @@ impl Sim {
         self.holds(create)?;
         let path = self.own("the `sandboxd`", create.sandboxd.as_str())?;
         let digest = self.own("the image", create.image.as_str())?;
+        let (gateway, presented) = met;
         let Faults {
             made,
             dialing,
@@ -670,7 +701,7 @@ impl Sim {
         let hello = if dialing == Dialing::Later {
             json!({ "version": PROTOCOL_VERSION + 1 })
         } else {
-            json!({ "version": PROTOCOL_VERSION })
+            json!({ "version": PROTOCOL_VERSION, "grant": presented })
         };
         let mode = gateway.mode();
         let shared = Arc::new(Mutex::new(Status::new(self.journal.clone())));
@@ -747,7 +778,12 @@ impl Sim {
 enum Gateway {
     /// At the socket of this path, of its own.
     Socket(PathBuf),
+    /// At this TCP address, which other sandboxes dial too.
+    Tcp(SocketAddr),
 }
+
+/// Where a simulated sandbox meets the gateway, and the grant its hello presents there.
+type Met = (Gateway, Option<RegistrationGrant>);
 
 impl Gateway {
     /// The permission bits of the directory that holds a socket's directory.
@@ -757,6 +793,7 @@ impl Gateway {
                 let parent = fs::metadata(socket.parent()?.parent()?).unwrap();
                 Some(parent.permissions().mode() & 0o777)
             }
+            Self::Tcp(_) => None,
         }
     }
 }
@@ -764,6 +801,7 @@ impl Gateway {
 /// A simulated sandbox's connection to the gateway.
 enum Connection {
     Unix(UnixStream),
+    Tcp(TcpStream),
 }
 
 impl Connection {
@@ -771,18 +809,21 @@ impl Connection {
     fn dial(gateway: &Gateway) -> io::Result<Self> {
         match gateway {
             Gateway::Socket(socket) => UnixStream::connect(socket).map(Self::Unix),
+            Gateway::Tcp(address) => TcpStream::connect(address).map(Self::Tcp),
         }
     }
 
     fn try_clone(&self) -> io::Result<Self> {
         match self {
             Self::Unix(stream) => stream.try_clone().map(Self::Unix),
+            Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
         }
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         match self {
             Self::Unix(stream) => stream.shutdown(how),
+            Self::Tcp(stream) => stream.shutdown(how),
         }
     }
 }
@@ -791,6 +832,7 @@ impl Read for Connection {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Unix(stream) => stream.read(buf),
+            Self::Tcp(stream) => stream.read(buf),
         }
     }
 }
@@ -799,12 +841,14 @@ impl Write for Connection {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Unix(stream) => stream.write(buf),
+            Self::Tcp(stream) => stream.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Unix(stream) => stream.flush(),
+            Self::Tcp(stream) => stream.flush(),
         }
     }
 }
@@ -828,6 +872,7 @@ impl Subject for Sim {
                 report: self.ready.report.clone(),
                 classes: self.ready.classes.clone(),
             },
+            reach: self.reach,
             state: Arc::clone(&self.state),
             journal: self.journal.clone(),
         }))
@@ -1056,6 +1101,7 @@ fn dial(gateway: &Gateway, hello: &Value, model: bool, shared: &Mutex<Status>) {
         Err(error) => {
             let at = match gateway {
                 Gateway::Socket(socket) => socket.display().to_string(),
+                Gateway::Tcp(address) => address.to_string(),
             };
             let failed = format!("sandboxd: connecting to the gateway at {at} failed: {error}");
             status.console.push_str(&failed);

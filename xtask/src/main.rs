@@ -8,13 +8,13 @@
     reason = "a command line reports on its standard output and error"
 )]
 
-use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::{env, iter};
 
 use xshell::{Cmd, Shell};
 
@@ -26,7 +26,7 @@ mod tools;
 /// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The target the static `sandboxd` is built for.
+/// The target the static `sandboxd` and `ec2-boot` are built for.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
 const RUSTFMT_TOOLCHAIN: &str = "nightly-2026-11-07";
@@ -65,11 +65,12 @@ mod flags {
                 optional --docker
             }
 
-            /// Builds the static sandboxd that every sandbox runs, and prints its path.
+            /// Builds the static sandboxd that every sandbox runs, and beside it the static
+            /// ec2-boot that the EC2 provider's image of it holds too, and prints sandboxd's path.
             cmd sandboxd {}
 
-            /// Builds `pumpkin` and the static sandboxd, and installs them side by side in
-            /// `<root>/bin`, with the pinned buildifier, which `pumpkin fmt` and `pumpkin check`
+            /// Builds `pumpkin`, the static sandboxd and ec2-boot, and installs them side by side
+            /// in `<root>/bin`, with the pinned buildifier, which `pumpkin fmt` and `pumpkin check`
             /// run, where `pumpkin` finds that sandboxd by default; prints each path.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
@@ -213,12 +214,10 @@ fn try_main() -> Result<()> {
 }
 
 /// Builds the cargo commands xtask runs, at the workspace's root, without the variables that
-/// `cargo run` sets for xtask's own package: `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and
-/// `CARGO_PKG_*`. Some build scripts, such as ring's, rerun when one of them changes, so each
-/// switch between `cargo xtask` and a direct `cargo` command would rebuild such a crate and every
-/// crate that depends on it. The others stay, such as `CARGO` and rustup's, which name the
-/// toolchain a child cargo is to use. xshell's `Shell` can set a variable for all its commands
-/// but not remove one, so each command removes them.
+/// `cargo run` sets for xtask's own package ([`stdx::process::cargo_package_vars`]). The others
+/// stay, such as `CARGO` and rustup's, which name the toolchain a child cargo is to use. xshell's
+/// `Shell` can set a variable for all its commands but not remove one, so each command removes
+/// them.
 struct Cargo {
     sh: Shell,
     /// The names of the package variables in xtask's environment.
@@ -229,15 +228,7 @@ impl Cargo {
     fn new() -> Result<Self> {
         let sh = Shell::new()?;
         sh.change_dir(root());
-        let package_vars = env::vars_os()
-            .map(|(key, _)| key)
-            .filter(|key| {
-                key.to_str().is_some_and(|key| {
-                    key.starts_with("CARGO_PKG_")
-                        || matches!(key, "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH")
-                })
-            })
-            .collect();
+        let package_vars = stdx::process::cargo_package_vars();
         Ok(Self { sh, package_vars })
     }
 
@@ -270,9 +261,14 @@ fn root() -> &'static Path {
 }
 
 /// `tests`, a command that runs tests, with the environment that `ci` and `mutants` give every
-/// test: `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which pumpkin's tests
-/// put beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check` find it.
+/// test: `PATH` with `xtask/poison` first, whose `aws` fails, so that none reaches AWS, then
+/// xtask's own; and `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which
+/// pumpkin's tests put beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check`
+/// find it.
 fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let poisoned = iter::once(root().join("xtask/poison")).chain(env::split_paths(&path));
+    let tests = tests.env("PATH", env::join_paths(poisoned)?);
     Ok(tests.env("PUMPKIN_BUILDIFIER", star::buildifier(cargo)?))
 }
 
@@ -430,8 +426,10 @@ fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
     }
 }
 
-/// Builds the static `sandboxd` that every sandbox runs, and returns its path.
+/// Builds the static `sandboxd` that every sandbox runs, and the static `ec2-boot`, which cargo
+/// puts beside it, where the EC2 provider finds it, and returns `sandboxd`'s path.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
+    release(cargo, "ec2-boot", &["--target", MUSL])?;
     release(cargo, "sandboxd", &["--target", MUSL])
 }
 
@@ -476,19 +474,21 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin` and the static `sandboxd`, and installs them, with the pinned buildifier
-/// ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there: `root` made
-/// absolute, or this checkout's `.pumpkin`. Prints each one's path, and says if `<root>/bin` is
-/// not on `PATH`.
+/// Builds `pumpkin`, the static `sandboxd` and `ec2-boot`, and installs them, with the pinned
+/// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
+/// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and says if
+/// `<root>/bin` is not on `PATH`.
 fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
     let bin = std::path::absolute(&bin)
         .map_err(|error| format!("making {} absolute failed: {error}", bin.display()))?;
+    let sandboxd = sandboxd(cargo)?;
     let built = [
         ("pumpkin", release(cargo, "pumpkin", &[])?),
         ("buildifier", star::buildifier(cargo)?),
-        ("sandboxd", sandboxd(cargo)?),
+        ("ec2-boot", sandboxd.with_file_name("ec2-boot")),
+        ("sandboxd", sandboxd),
     ];
     fs::create_dir_all(&bin)
         .map_err(|error| format!("making {} failed: {error}", bin.display()))?;

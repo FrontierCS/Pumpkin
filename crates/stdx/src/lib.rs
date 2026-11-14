@@ -5,6 +5,7 @@ use std::panic;
 use std::sync::LockResult;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod net;
 pub mod process;
 pub mod signal;
 

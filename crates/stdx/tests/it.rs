@@ -3,13 +3,14 @@
 //! one with that process alone holding its output; and one whose deadline has passed before it
 //! starts; and `process::fed` one that reads its input, and one that exits without reading it.
 //! This process adopts the processes a script starts once the script's own process has ended, so
-//! a test learns how each ended.
+//! a test learns how each ended. `net::set_options` is read back from a connection's socket.
 
 #![expect(
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
@@ -17,6 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
+use rustix::net::sockopt;
 use rustix::process::{Pid, Signal, WaitOptions};
 use stdx::Deadline;
 use stdx::process::Environment;
@@ -209,4 +211,21 @@ fn caught() {
         after SIGTERM: Some("Signal::TERM")
         SIGKILL: Invalid argument (os error 22)"#]]
     .assert_eq(&shown.join("\n"));
+}
+
+#[test]
+fn tcp_options() {
+    // What the gateway and `sandboxd` each set at their end of a session over TCP.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    stdx::net::set_options(&stream).unwrap();
+    let read = [
+        format!("nodelay {}", sockopt::tcp_nodelay(&stream).unwrap()),
+        format!("keepalive {}", sockopt::socket_keepalive(&stream).unwrap()),
+        format!("idle {:?}", sockopt::tcp_keepidle(&stream).unwrap()),
+        format!("interval {:?}", sockopt::tcp_keepintvl(&stream).unwrap()),
+        format!("probes {}", sockopt::tcp_keepcnt(&stream).unwrap()),
+    ];
+    expect!["nodelay true, keepalive true, idle 15s, interval 15s, probes 9"]
+        .assert_eq(&read.join(", "));
 }

@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 /// What is wrong with a file that isn't a 64-bit ELF file, or one too short for its header.
 const NOT_ELF: &str = "isn't a 64-bit ELF executable";
 
-/// A `sandboxd` that a sandbox can run: a regular file that every user may execute, a 64-bit
-/// ELF executable linked statically, with no interpreter.
+/// A `sandboxd` that a sandbox can run, by its absolute path, which a provider can hand on from
+/// any directory: a regular file that every user may execute, a 64-bit ELF executable linked
+/// statically, with no interpreter.
 pub(crate) struct Sandboxd(PathBuf);
 
 impl Sandboxd {
@@ -18,14 +19,21 @@ impl Sandboxd {
     ///
     /// # Errors
     ///
-    /// Fails if that `pumpkin` can't be found, or if the file isn't a `sandboxd` that a sandbox
-    /// can run.
+    /// Fails if that `pumpkin` can't be found, if the file isn't a `sandboxd` that a sandbox can
+    /// run, or if `named` is relative and the current directory can't be read.
     pub(crate) fn find(named: Option<PathBuf>) -> Result<Self, String> {
         if let Some(path) = named {
             let replace = "name a static one, which `cargo xtask sandboxd` builds";
             let checked = check(&path, replace);
             checked.map_err(|wrong| format!("the sandboxd {} {wrong}", path.display()))?;
-            return Ok(Self(path));
+            let absolute = std::path::absolute(&path).map_err(|error| {
+                format!(
+                    "the sandboxd {} can't be made absolute ({error}): name it by its absolute \
+                     path",
+                    path.display()
+                )
+            })?;
+            return Ok(Self(absolute));
         }
         let pumpkin = crate::workspace::exe("name a static sandboxd with `--sandboxd`")?;
         let path = pumpkin.with_file_name("sandboxd");

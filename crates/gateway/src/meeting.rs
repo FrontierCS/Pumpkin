@@ -1,32 +1,47 @@
 //! Where a sandbox meets the gateway, and the hello that opens its session there.
 //!
 //! A sandbox meets the gateway where its [`Registration`] says: at a socket of its own, which
-//! only it can reach, in its run's [`Sockets`]. The registration accepts the [`Session`] the
-//! sandbox opens with its hello.
+//! only it can reach, in its run's [`Sockets`], or at its run's TCP address, a
+//! [`GrantListener`], where the grant its hello presents tells it apart. Either way, the
+//! registration accepts the [`Session`] the sandbox opens with its hello.
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{fmt, thread};
 
 use schema::ir::{GpuModel, Name};
-use schema::sandbox::{Hello, HelloReply, OpPayloadLimit, SOCKET_NAME, SocketDial, frame};
+use schema::sandbox::{
+    Hello, HelloReply, OpPayloadLimit, REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME,
+    SocketDial, TcpDial, frame,
+};
 use stdx::Deadline;
 
-use crate::{Arrival, Connection, Session, Until, context, passed};
+use crate::{Arrival, Connection, Session, Until, context, lock, passed};
 
 /// The directory that names each file this process holds open by its descriptor's number,
 /// through which a path resolves as through the file, a directory included.
 const OPEN_FILES: &str = "/proc/self/fd";
 
-/// How long a wait sleeps between its looks: a registration's accept for its sandbox, and a
-/// hello's read for its bytes.
+/// The kernel's random source, which the driver's host, a full one, has.
+const RANDOM: &str = "/dev/urandom";
+
+/// How long a wait sleeps between its looks: a registration's accept for its sandbox, a hello's
+/// read for its bytes, and a [`GrantListener`] for a connection, or its own drop.
 const POLL: Duration = Duration::from_millis(10);
+
+/// The most connections whose hellos a [`GrantListener`] reads at once.
+// Each of a run's sandboxes dials once, and says hello as it connects, so a run needs far fewer.
+const MAX_HELLOS: usize = 100;
 
 /// The directory of a run's sockets, which only this user may enter, where each sandbox gets a
 /// socket of its own, which only that sandbox can reach. Dropping it removes the directory and
@@ -94,6 +109,72 @@ impl Drop for Sockets {
     }
 }
 
+/// The TCP address of a run's [`GrantListener`], which it binds and its sandboxes dial.
+///
+/// It is any address but an unspecified one, such as `0.0.0.0`, or `[::ffff:0.0.0.0]`, its
+/// IPv4-mapped form, which a listener binds but no sandbox can dial. A deployment names the port
+/// that its network admits sandboxes on, such as its security group's, or port 0, for one that the
+/// kernel picks from its ephemeral range as the listener binds, which the listener's dials then
+/// name: so tests on the loopback, and a deployment whose network admits that range.
+#[derive(Debug)]
+pub struct GatewayAddress(SocketAddr);
+
+impl TryFrom<SocketAddr> for GatewayAddress {
+    type Error = String;
+
+    fn try_from(address: SocketAddr) -> Result<Self, Self::Error> {
+        if address.ip().to_canonical().is_unspecified() {
+            return Err(format!(
+                "the gateway's address {address} is unspecified, which no sandbox can dial: name \
+                 the address its sandboxes dial"
+            ));
+        }
+        Ok(Self(address))
+    }
+}
+
+/// One TCP address that every sandbox of a run dials, where the grant each one's hello presents
+/// tells them apart.
+///
+/// [`issue`](Self::issue) issues a [`RegistrationGrant`] for a sandbox, whose [`Registration`]
+/// accepts its session. The listener refuses a hello of this version that presents no grant, one
+/// it doesn't await, or one presented already, saying which. Dropping it stops it taking
+/// connections.
+// Until a peer's hello presents a grant it awaits, the peer costs little: the listener reads at
+// most a hello's bytes from it, within its hello timeout of taking its connection, then closes the
+// connection untold; and it reads at most `MAX_HELLOS` hellos at once, closing a connection beyond
+// them as it takes it, unread and untold.
+#[derive(Debug)]
+pub struct GrantListener {
+    /// The address that the listener is bound to, which its sandboxes dial.
+    gateway: SocketAddr,
+    // Shared with the thread that takes connections, the threads that read their hellos, and the
+    // registrations, which wait for the connections that present their grants.
+    grants: Arc<Mutex<Grants>>,
+    /// The thread that takes connections, `Some` until the drop joins it.
+    listening: Option<JoinHandle<()>>,
+}
+
+/// What a [`GrantListener`] awaits and reads.
+#[derive(Debug, Default)]
+struct Grants {
+    /// The grants whose registrations last, by the number each took at its issue.
+    awaited: BTreeMap<u64, Awaited>,
+    /// The number the next grant takes.
+    next: u64,
+    /// How many connections' hellos are being read.
+    hellos: usize,
+    /// Whether the listener has dropped, which ends its taking connections.
+    closed: bool,
+}
+
+/// A grant whose registration lasts, and the connection that presented it, once one has.
+#[derive(Debug)]
+struct Awaited {
+    grant: RegistrationGrant,
+    presented: Option<Met>,
+}
+
 /// A sandbox's connection, once its hello has been read, and the GPUs that the hello names.
 #[derive(Debug)]
 struct Met {
@@ -101,10 +182,203 @@ struct Met {
     gpus: Option<Vec<GpuModel>>,
 }
 
+impl GrantListener {
+    /// Listens at `address`, taking connections on a thread of its own until it drops, and gives
+    /// each `hello_timeout` from when it takes it to say its hello
+    /// ([`HELLO_TIMEOUT`](schema::sandbox::HELLO_TIMEOUT) is the protocol's).
+    ///
+    /// # Errors
+    ///
+    /// Fails if `address` can't be bound, or the listener can't be made not to block, or if the
+    /// thread doesn't start.
+    pub fn bind(address: &GatewayAddress, hello_timeout: Duration) -> io::Result<Self> {
+        let GatewayAddress(address) = *address;
+        let listener = TcpListener::bind(address).map_err(|error| {
+            context(
+                format_args!("the grant listener can't bind {address}"),
+                &error,
+            )
+        })?;
+        // As bound, with the port the kernel picked for port 0.
+        let gateway = listener
+            .local_addr()
+            .map_err(|error| context("the grant listener's address can't be read", &error))?;
+        // Polled, so that the thread notices the listener's drop.
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| context("the grant listener can't be made non-blocking", &error))?;
+        let grants = Arc::new(Mutex::new(Grants::default()));
+        let shared = Arc::clone(&grants);
+        let listening = thread::Builder::new()
+            .name("grants".to_owned())
+            .spawn(move || listen(&listener, &shared, hello_timeout))
+            .map_err(|error| context("the grant listener's thread didn't start", &error))?;
+        Ok(Self {
+            gateway,
+            grants,
+            listening: Some(listening),
+        })
+    }
+
+    /// Issues a sandbox a grant, of random bytes from the kernel, as the [`TcpDial`] its
+    /// sandbox dials, and the registration that accepts the session the grant opens, as long as
+    /// the registration lasts.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the kernel's random source can't be read.
+    pub fn issue(&self) -> io::Result<(TcpDial, Registration)> {
+        let grant = random_grant()?;
+        let mut grants = lock(&self.grants);
+        let number = grants.next;
+        grants.next += 1;
+        let awaited = Awaited {
+            grant: grant.clone(),
+            presented: None,
+        };
+        grants.awaited.insert(number, awaited);
+        let granted = Granted {
+            grants: Arc::clone(&self.grants),
+            number,
+        };
+        let meeting = Meeting::Grant(granted);
+        let dial = TcpDial {
+            gateway: self.gateway,
+            grant,
+        };
+        Ok((dial, Registration { meeting }))
+    }
+}
+
+impl Drop for GrantListener {
+    fn drop(&mut self) {
+        lock(&self.grants).closed = true;
+        if let Some(listening) = self.listening.take()
+            && listening.join().is_err()
+        {
+            unreachable!(
+                "the grant listener's thread panicked, though a panic aborts the process \
+                 (`stdx::abort_on_panic`), so the thread never ends in one"
+            )
+        }
+    }
+}
+
+/// Takes connections on `listener` until its [`GrantListener`] drops, reading each one's hello,
+/// within `hello_timeout`, on a thread of its own, so that a silent peer holds up no other, unless
+/// [`MAX_HELLOS`] are being read already: it then closes the connection, unread and untold, as the
+/// peer may dial again.
+fn listen(listener: &TcpListener, grants: &Arc<Mutex<Grants>>, hello_timeout: Duration) {
+    while !lock(grants).closed {
+        match listener.accept() {
+            Ok((stream, _)) => admit(grants, stream, Deadline::after(hello_timeout)),
+            // None waits, or one was reset before it was taken, or the process has no file
+            // descriptor to spare: each passes, and the kernel keeps the rest waiting.
+            Err(_) => thread::sleep(POLL),
+        }
+    }
+}
+
+/// Reads the hello of `stream` by `by` on a thread of its own, unless [`MAX_HELLOS`] are being
+/// read already or the thread doesn't start: the connection then closes, unread.
+fn admit(grants: &Arc<Mutex<Grants>>, stream: TcpStream, by: Deadline) {
+    let mut locked = lock(grants);
+    if locked.hellos >= MAX_HELLOS {
+        return;
+    }
+    locked.hellos += 1;
+    drop(locked);
+    let reader = Arc::clone(grants);
+    let spawned = thread::Builder::new()
+        .name("hello".to_owned())
+        .spawn(move || register(&reader, stream, by));
+    // A thread that doesn't start drops its closure, which closes the connection.
+    if spawned.is_err() {
+        lock(grants).hellos -= 1;
+    }
+}
+
+/// Reads the hello of `stream` by `by`, and hands its connection to the registration of the grant
+/// it presents, if that grant opens a session: any other peer is turned away. Frees the hello's
+/// place as it returns.
+fn register(grants: &Mutex<Grants>, stream: TcpStream, by: Deadline) {
+    let set = stdx::net::set_options(&stream)
+        .map_err(|error| context("the connection's TCP options can't be set", &error));
+    let connection = Connection::Tcp(stream);
+    // Only its own deadline ends the read: no accept waits on it until it presents a grant.
+    let unopened = match set.and_then(|()| read_hello(&connection, by, &|| false)) {
+        Ok(Hello { grant, gpus }) => present(grants, grant, Met { connection, gpus }).err(),
+        Err(error) => Some((connection, error)),
+    };
+    // No accept waits on a connection that opens no session, so its error goes no further.
+    if let Some((connection, error)) = unopened {
+        refuse(&connection, by, error);
+    }
+    // Freed last, so that the threads reading hellos, or refusing them, stay within bounds.
+    lock(grants).hellos -= 1;
+}
+
+/// Hands `met`, whose hello presents `grant`, to the registration that awaits that grant, or
+/// gives back its connection with its refusal ([`refuse`]). A grant is found and taken under one
+/// lock, so no two connections take one.
+fn present(
+    grants: &Mutex<Grants>,
+    grant: Option<RegistrationGrant>,
+    met: Met,
+) -> Result<(), (Connection, io::Error)> {
+    let refused = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+    let Some(grant) = grant else {
+        let message = "the hello presents no registration grant: expected the one the gateway \
+                       issued for the sandbox, at an address that several sandboxes share";
+        return Err((met.connection, refused(message)));
+    };
+    let mut locked = lock(grants);
+    // By the grants' `==`, which takes as long whichever bytes differ, as they hold no order
+    // that a map could look one up by.
+    let awaited = (locked.awaited.values_mut()).find(|awaited| awaited.grant == grant);
+    let message = match awaited {
+        Some(Awaited {
+            grant: _,
+            presented: presented @ None,
+        }) => {
+            *presented = Some(met);
+            return Ok(());
+        }
+        Some(Awaited {
+            grant: _,
+            presented: Some(_),
+        }) => {
+            "the registration grant was presented already, on another connection: expected it \
+             once, as a grant opens one session"
+        }
+        None => {
+            "the registration grant opens no session: expected one the gateway issued for a \
+             sandbox whose start waits, presented once"
+        }
+    };
+    Err((met.connection, refused(message)))
+}
+
+/// A grant of random bytes from the kernel.
+fn random_grant() -> io::Result<RegistrationGrant> {
+    let mut bytes = [0; REGISTRATION_GRANT_BYTES];
+    File::open(RANDOM)
+        .and_then(|mut random| random.read_exact(&mut bytes))
+        .map_err(|error| {
+            let what = format_args!(
+                "the kernel's random source {RANDOM} can't be read: expected it to give a \
+                 registration grant's bytes"
+            );
+            context(what, &error)
+        })?;
+    Ok(RegistrationGrant::from(bytes))
+}
+
 /// Where one sandbox meets the gateway, and the accept of the session it opens there.
 ///
-/// [`Sockets::issue`] issues it. The sandbox meets the gateway as it connects to its socket.
-/// Dropping the registration ends the meeting: it removes the socket.
+/// [`Sockets::issue`] and [`GrantListener::issue`] issue it. The sandbox meets the gateway as it
+/// connects to its socket, or as its hello presents its grant. Dropping the registration ends the
+/// meeting: it removes the socket, or ends the grant, closing any connection that presented it.
 #[derive(Debug)]
 pub struct Registration {
     meeting: Meeting,
@@ -114,6 +388,7 @@ pub struct Registration {
 #[derive(Debug)]
 enum Meeting {
     Socket(Listener),
+    Grant(Granted),
 }
 
 impl Registration {
@@ -137,6 +412,7 @@ impl Registration {
     ) -> io::Result<Session> {
         let Met { connection, gpus } = match self.meeting {
             Meeting::Socket(listener) => listener.connected(by, &stopped)?,
+            Meeting::Grant(granted) => granted.presented(by, &stopped)?,
         };
         welcome(&connection, by)?;
         // Unbounded, so the reader never waits on its owner; the protocol bounds what each
@@ -256,6 +532,59 @@ impl Drop for Listener {
     }
 }
 
+/// A [`GrantListener`]'s registration of one grant: the grant it awaits under its number.
+#[derive(Debug)]
+struct Granted {
+    grants: Arc<Mutex<Grants>>,
+    number: u64,
+}
+
+impl Granted {
+    /// Waits until `by`, or until `stopped` returns true, for a connection that presents the
+    /// grant, and takes it, which ends the grant.
+    fn presented(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
+        loop {
+            let awaited = "a sandbox presented the registration grant";
+            unstopped(
+                stopped,
+                awaited,
+                "the sandbox it was issued for to present it",
+            )?;
+            let mut grants = lock(&self.grants);
+            let Some(awaited) = grants.awaited.get_mut(&self.number) else {
+                unreachable!(
+                    "a registration's grant is not awaited while it waits, though a grant is \
+                     awaited from its issue until its registration takes the connection that \
+                     presented it, here, which then returns, or drops; and the registration's \
+                     accept takes it by value"
+                )
+            };
+            if let Some(met) = awaited.presented.take() {
+                grants.awaited.remove(&self.number);
+                return Ok(met);
+            }
+            drop(grants);
+            if by.remaining().is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no sandbox presented the registration grant by the deadline: expected the \
+                     sandbox it was issued for to present it while the deadline lasts",
+                ));
+            }
+            // Nothing tells the wait of a presentation, or of a stop, so it looks again.
+            thread::sleep(POLL);
+        }
+    }
+}
+
+impl Drop for Granted {
+    fn drop(&mut self) {
+        // The grant ends here, unless a connection presented it and was taken, closing the
+        // connection that presented it, if any.
+        lock(&self.grants).awaited.remove(&self.number);
+    }
+}
+
 /// Reads the sandbox's first frame on `connection`, waiting for it until `by`, or until `stopped`
 /// returns true: its [`Hello`], or the error that says why the session can't open, of kind
 /// `InvalidData` for a first frame the gateway refuses ([`refuse`]), and `Other` for the stop. A
@@ -310,7 +639,7 @@ fn read_hello(
 }
 
 /// Returns the error of a session that doesn't open on `connection`, for `error`, which
-/// [`read_hello`] gave, telling the sandbox why while `by` lasts if the gateway
+/// [`read_hello`] or [`present`] gave, telling the sandbox why while `by` lasts if the gateway
 /// refuses its first frame. The connection closes all the same.
 fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error {
     if error.kind() != io::ErrorKind::InvalidData {

@@ -5,6 +5,7 @@
 //! session reads on meanwhile; any other request is served before the next frame is read.
 
 use std::io::{self, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,8 +14,8 @@ use std::{fmt, thread};
 
 use schema::ir::GpuModel;
 use schema::sandbox::{
-    FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant, ToSandbox,
-    frame,
+    FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant,
+    SANDBOXD_GRANT, ToSandbox, frame,
 };
 use stdx::process::Environment;
 use stdx::{Context, Deadline, unpoisoned};
@@ -28,12 +29,15 @@ use crate::ops::Ops;
 pub(crate) enum Gateway {
     /// At a Unix socket of the sandbox's own, which identifies the sandbox.
     Socket(PathBuf),
+    /// At a TCP address, where the hello presents the grant that identifies the sandbox.
+    Tcp(SocketAddr, RegistrationGrant),
 }
 
 impl fmt::Display for Gateway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Socket(socket) => socket.display().fmt(f),
+            Self::Tcp(address, _) => address.fmt(f),
         }
     }
 }
@@ -82,10 +86,13 @@ pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Re
 }
 
 /// The sandbox's GPUs, each by its model, as `nvidia-smi` names them within [`GPUS_TIMEOUT`],
-/// which it runs as it would a command; none where it isn't on `PATH`, fails, or names none.
+/// which it runs as it would a command, without [`SANDBOXD_GRANT`]; none where it isn't on
+/// `PATH`, fails, or names none.
 fn gpus() -> Option<Vec<GpuModel>> {
     let mut nvidia_smi = stdx::process::command("nvidia-smi", Environment::Inherited);
-    nvidia_smi.args(["--query-gpu=name", "--format=csv,noheader"]);
+    nvidia_smi
+        .args(["--query-gpu=name", "--format=csv,noheader"])
+        .env_remove(SANDBOXD_GRANT);
     let output = stdx::process::output(&mut nvidia_smi, Deadline::after(GPUS_TIMEOUT));
     let output = output.ok()?.filter(|output| output.status.success())?;
     let names = String::from_utf8(output.stdout).ok()?;
@@ -120,6 +127,18 @@ fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Write
             let stream = UnixStream::connect(socket).context(connecting)?;
             open(&mut &stream, &hello(None, gpus)).context(opening)?;
             halves(stream, UnixStream::try_clone)
+        }
+        Gateway::Tcp(address, grant) => {
+            // One dial, as at a socket: the gateway listens before the sandbox starts, so a retry
+            // would meet no gateway that this dial missed, and the kernel's own retries of the
+            // handshake ride out lost packets. An exit then ends the sandbox's start before the
+            // start's deadline, with the reason, which the sandbox's console keeps.
+            let stream = TcpStream::connect(address).context(connecting)?;
+            stdx::net::set_options(&stream)
+                .context("setting the options of the connection to the gateway failed")?;
+            let hello = hello(Some(grant.clone()), gpus);
+            open(&mut &stream, &hello).context(opening)?;
+            halves(stream, TcpStream::try_clone)
         }
     }
 }

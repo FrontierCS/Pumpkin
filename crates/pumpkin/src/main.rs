@@ -22,13 +22,16 @@ use std::{env, fmt, fs};
 
 use docker::{CpuList, Docker};
 use driver::{ARGV0, Driver, Handoff};
+use ec2::Ec2;
 use engine::{ContextName, Engine};
-use provider::{Provider, RunTag, SandboxId, Sweep};
+use gateway::GrantListener;
+use provider::{Meeting, Provider, RunTag, SandboxId, Sweep};
 use runtime::{BUILD, Ending, Reaped, Record, Recorded, Run, System};
 use rustix::fs::Mode;
 use rustix::process::{Pid, Signal, umask};
 use sandboxd::Sandboxd;
 use schema::ir::Name;
+use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use stdx::Context;
 use workspace::Workspace;
@@ -235,8 +238,8 @@ fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
 /// The driver: runs the run that `args`, `run`'s process ID, the id that `run` minted, then the
 /// arguments of `pumpkin run` without `--wait`, ask for. Asks to end with `run` until the start
 /// ([`driver::die_with_run`]), names its process [`ARGV0`], checks the task, reaches the engine
-/// and the providers and builds the task's images ([`prepared`]), places the roles, has signals
-/// interrupt the run (`stdx::signal::catch`),
+/// and the providers and builds the task's images ([`prepared`]), places the roles, listens where
+/// private sandboxes dial ([`listen`]), has signals interrupt the run (`stdx::signal::catch`),
 /// makes the record and tells `run` its id, starts the run and tells `run` so, then drives it to
 /// its end.
 /// Fails, before the start, if `run` has ended or anything above fails or is refused.
@@ -255,7 +258,8 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     // The task, `sandboxd`, the configuration and its upstream's key are checked before the engine
     // is reached, so a mistake in one needs no engine and makes no record. The roles are placed
     // in the classes that the providers offer once they are reached, before the record is begun,
-    // so a role that fits none is refused before anything is reserved. What only a provider refuses, such as a `sandboxd` it can't mount, is refused
+    // and before the grant listener is bound, so a role that fits none is refused before anything
+    // is reserved. What only a provider refuses, such as a `sandboxd` it can't mount, is refused
     // once the record exists.
     let (runs, _) = runs_dir(runs)?;
     let sandboxd = Sandboxd::find(sandboxd.map(PathBuf::from))?;
@@ -269,6 +273,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let Prepared {
         workflow,
         providers,
+        gateway,
         servings,
     } = prepared.map_err(|error| {
         say(error);
@@ -281,20 +286,35 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         &config,
         &again,
     )?;
+    let private = listen(&placed_on, &gateway, &config)?;
     // Before the record is begun, so that a signal that comes once it is begun stops the run,
     // which records it, rather than ending the driver and leaving the run lost.
     let caught = stdx::signal::catch(&[Signal::INT, Signal::TERM, Signal::HUP]);
     caught.context("setting the handlers of SIGINT, SIGTERM and SIGHUP failed")?;
+    let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
+    let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
     let on = placed_on.map(Connected::provider);
     let kept = Recorded { args: &words };
     let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     // Said before `run` hears of it, so that whatever ends both later, the record is named.
     say(format_args!("run {id} records into {}", dir.display()));
+    // A push of an image may take minutes, which the run's start waits for.
+    if !names.is_empty() {
+        let providers = if names.len() == 1 {
+            "provider"
+        } else {
+            "providers"
+        };
+        say(format_args!(
+            "publishing run {id}'s images on {providers} {}: it starts once they are there",
+            names.join(", ")
+        ));
+    }
     driver::locked(&id)?;
     // `execute` records why the run stopped in its `outcome.json`, which `run` prints if the run
     // didn't start; these lines, the driver's last, then close that ending.
-    let executed = run.execute(sandboxd.path(), || driver::announce(&dir));
+    let executed = run.execute(sandboxd.path(), private.as_ref(), || driver::announce(&dir));
     if let Err(stopped) = executed {
         say(closing(&id, &stopped.to_string(), &dir));
         advise("run it again", &again);
@@ -335,6 +355,7 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, cli::Run), String> {
 struct Prepared<'e> {
     workflow: Workflow,
     providers: config::Providers<Connected<'e>>,
+    gateway: config::Gateway,
     /// How each role's model route is served, an entry at a time.
     servings: ByRole<Vec<route::Serving>>,
 }
@@ -356,6 +377,7 @@ fn prepared<'e>(
     let config::Config {
         docker: config::Docker { context, cpus },
         providers,
+        gateway,
         upstreams,
     } = config::read(config)?;
     let servings = task
@@ -370,6 +392,7 @@ fn prepared<'e>(
     Ok(task.build(engine).map(|workflow| Prepared {
         workflow,
         providers,
+        gateway,
         servings,
     }))
 }
@@ -537,48 +560,115 @@ fn reap(flags: cli::Reap) -> Result<ExitCode, String> {
 
 /// The providers that a reap has reached, or failed to reach, so that each is reached once,
 /// however many of its runs it reaps: a Docker engine by the context that a run's report of it
-/// names.
+/// names, and any other provider by the configuration that names it, by its path, and its name
+/// there, each configuration read once.
 struct Reaching {
     reached: BTreeMap<Reachable, Result<Box<dyn Sweep>, String>>,
+    configurations: BTreeMap<PathBuf, Result<config::Providers<config::Kind>, String>>,
 }
 
-/// How a reap reaches a provider of a run's: by a Docker context's name.
+/// How a reap reaches a provider of a run's: by a Docker context's name, or by the path of the
+/// configuration that ran the run, and the provider's name there.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Reachable {
     Engine(String),
+    Configured(PathBuf, Name),
 }
 
 impl Reaching {
     fn new() -> Self {
         Self {
             reached: BTreeMap::new(),
+            configurations: BTreeMap::new(),
         }
     }
 
     /// How provider `name` of the run of `record`, which reported `report` of itself, is
-    /// reached, once it has been tried: by the engine of the Docker context that its report
-    /// names, as `Docker::reach` reaches it. Fails, in the outer error, if the record is wrong,
-    /// as when its report names no context.
+    /// reached, once it has been tried: a provider whose report names a Docker context by the
+    /// engine of that context, as `Docker::reach` reaches it; any other by its table in the
+    /// configuration that ran the run ([`run_config`]), of kind `ec2`. Fails, saying
+    /// why, if it can't be named so, as when that configuration can't be read, or names no such
+    /// provider; or, in the outer error, if the record is wrong, as when its report names no
+    /// context but the configuration names the provider of kind `docker`.
     fn reach(
         &mut self,
         record: &Record,
         name: &Name,
         report: &serde_json::Value,
     ) -> Result<Result<Reachable, String>, String> {
-        let Some(context) = report["context"].as_str() else {
-            return Err(format!(
-                "{}/provider.json names no Docker context of provider `{name}`: expected the \
-                 report of a provider of kind `docker`",
-                record.dir().display()
-            ));
-        };
-        let reachable = Reachable::Engine(context.to_owned());
-        if !self.reached.contains_key(&reachable) {
-            let context = ContextName::try_from(context.to_owned())?;
-            let reached = Docker::reach(context).map(|reached| Box::new(reached) as _);
-            self.reached.insert(reachable.clone(), reached);
+        if let Some(context) = report["context"].as_str() {
+            let reachable = Reachable::Engine(context.to_owned());
+            if !self.reached.contains_key(&reachable) {
+                let context = ContextName::try_from(context.to_owned())?;
+                let reached = Docker::reach(context).map(|reached| Box::new(reached) as _);
+                self.reached.insert(reachable.clone(), reached);
+            }
+            return Ok(Ok(reachable));
         }
+        let path = match run_config(record) {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(error)),
+        };
+        let reachable = Reachable::Configured(path.clone(), name.clone());
+        if self.reached.contains_key(&reachable) {
+            return Ok(Ok(reachable));
+        }
+        let read = (self.configurations.entry(path.clone())).or_insert_with(|| {
+            let text = fs::read_to_string(&path).map_err(|error| {
+                format!(
+                    "the configuration that ran it, {}, can't be read ({error}): put it back \
+                     there, as it was when the run ran",
+                    path.display()
+                )
+            })?;
+            let parsed = config::parse(&path, &text).map_err(|error| {
+                format!("{error}: put the configuration back there as it was when the run ran")
+            });
+            parsed.map(|config| config.providers)
+        });
+        let providers = match read {
+            Ok(providers) => providers,
+            Err(error) => return Ok(Err(error.clone())),
+        };
+        let reached: Result<Box<dyn Sweep>, String> = match providers.get(name) {
+            None => {
+                return Ok(Err(format!(
+                    "the configuration that ran it, {}, names no provider `{name}`: put its \
+                     `[providers.{name}]` table back there, as it was when the run ran",
+                    path.display()
+                )));
+            }
+            Some(config::Kind::Docker(config::Empty {})) => {
+                return Err(format!(
+                    "{}/provider.json names no Docker context of provider `{name}`, which the \
+                     configuration that ran it, {}, names of kind `docker`: expected the report \
+                     of a provider of kind `docker`",
+                    record.dir().display(),
+                    path.display()
+                ));
+            }
+            Some(config::Kind::Ec2(settings)) => {
+                Ec2::reach(settings).map(|reached| Box::new(reached) as _)
+            }
+        };
+        self.reached.insert(reachable.clone(), reached);
         Ok(Ok(reachable))
+    }
+}
+
+/// The configuration that the run of `record` read: the one that its `--config` named, as its
+/// record keeps the arguments that started it ([`Record::args`]), or the default one.
+fn run_config(record: &Record) -> Result<PathBuf, String> {
+    let flags = record.args();
+    let at = flags.iter().position(|flag| flag == "--config");
+    match at.and_then(|at| flags.get(at + 1)) {
+        Some(config) => Ok(PathBuf::from(config)),
+        // `default_config` fails only for want of `HOME`, and its fix, `--config`, is `run`'s.
+        None => default_config().map_err(|_| {
+            "its record names no `--config`, so it ran on the default configuration, which HOME \
+             places, but HOME is unset or empty: set it as it was when the run ran"
+                .to_owned()
+        }),
     }
 }
 
@@ -930,6 +1020,7 @@ fn configured_engine(path: &Path) -> Result<Engine, String> {
     let config::Config {
         docker: config::Docker { context, cpus: _ },
         providers: _,
+        gateway: _,
         upstreams: _,
     } = config::read(path)?;
     engine(context)
@@ -951,9 +1042,15 @@ fn home(instead: &str) -> Result<PathBuf, String> {
 }
 
 /// A provider of the machine's configuration, connected as its kind says.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a run makes one for each provider it names, once, so a box would save it nothing"
+)]
 enum Connected<'e> {
     /// The machine's Docker engine, as a provider.
     Docker(Docker<'e>),
+    /// An EC2 envelope, which pushes what its sandboxes pull from the machine's Docker engine.
+    Ec2(Ec2<'e>),
 }
 
 impl<'e> Connected<'e> {
@@ -962,11 +1059,8 @@ impl<'e> Connected<'e> {
     ///
     /// # Errors
     ///
-    /// Fails, naming the provider, if the engine can't run sandboxes.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the one kind takes no settings, so there is nothing to consume"
-    )]
+    /// Fails, naming the provider, if the engine can't run sandboxes, an EC2 envelope can't be
+    /// reached, or if `engine` can't push what its sandboxes pull.
     fn new(
         name: &Name,
         kind: config::Kind,
@@ -977,6 +1071,9 @@ impl<'e> Connected<'e> {
             config::Kind::Docker(config::Empty {}) => {
                 Docker::connect(engine, cpus).map(Self::Docker)
             }
+            config::Kind::Ec2(settings) => Workspace::find()
+                .and_then(|workspace| Ec2::connect(&settings, engine.pusher()?, &workspace.ec2()))
+                .map(Self::Ec2),
         };
         connected.context(format_args!("reaching provider `{name}` failed"))
     }
@@ -984,6 +1081,16 @@ impl<'e> Connected<'e> {
     fn provider(&self) -> &dyn Provider {
         match self {
             Self::Docker(docker) => docker,
+            Self::Ec2(ec2) => ec2,
+        }
+    }
+
+    /// Whether publishing what its sandboxes run pushes it from the machine's engine, which may
+    /// take minutes: the engine's own sandboxes run what it has.
+    fn pushes(&self) -> bool {
+        match self {
+            Self::Docker(_) => false,
+            Self::Ec2(_) => true,
         }
     }
 }
@@ -1014,6 +1121,49 @@ fn place<'p, 'e>(
         say(closing_problems(has, errors.as_slice().len()));
         format!("to run it again: {again}")
     })
+}
+
+/// The grant listener that the sandboxes of the private providers of `placed_on`, those that a
+/// run places roles on, dial, bound at the `private` address of `gateway`, read from the
+/// configuration at `config`; or `None`, binding nothing, if none is private.
+///
+/// # Errors
+///
+/// Fails, naming each private provider that roles are placed on, if `gateway` names no `private`
+/// address; or if it can't be bound, as one not of this machine's, or where another run listens.
+fn listen(
+    placed_on: &ByProvider<&Connected<'_>>,
+    gateway: &config::Gateway,
+    config: &Path,
+) -> Result<Option<GrantListener>, String> {
+    let mut private = Vec::new();
+    for (name, connected) in placed_on.iter() {
+        match connected.provider().meeting() {
+            Meeting::Local(_) => {}
+            Meeting::Private(_) => private.push(format!("`{name}`")),
+        }
+    }
+    if private.is_empty() {
+        return Ok(None);
+    }
+    let Some(address) = &gateway.private else {
+        let s = if private.len() == 1 { "" } else { "s" };
+        return Err(format!(
+            "{}: roles are placed on provider{s} {}, whose sandboxes dial the gateway on a private \
+             network, but `[gateway]` names no `private` address: name the address of this \
+             machine's that they dial",
+            config.display(),
+            private.join(", ")
+        ));
+    };
+    let bound = GrantListener::bind(address, HELLO_TIMEOUT).map_err(|error| {
+        format!(
+            "{}: {error}: name in `[gateway] private` an address of this machine's where no other \
+             run listens",
+            config.display()
+        )
+    })?;
+    Ok(Some(bound))
 }
 
 /// The line that closes a list of `count` problems, which says that `has` them, and how many.

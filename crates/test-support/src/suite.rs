@@ -523,6 +523,10 @@ impl<'a> Suite<'a> {
                 let (dial, registration) = self.sockets.issue(&socket).unwrap();
                 Ok((creator.create(&create, dial)?.id, registration))
             }
+            Meeting::Private(_) => panic!(
+                "the suite meets no sandbox that dials a private address: run it on a provider \
+                 whose sandboxes dial a socket"
+            ),
         }
     }
 

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{io, iter};
 
 use decision::{Event, JobId, LeaseId};
-use gateway::{Arrival, Session, Sockets};
+use gateway::{Arrival, GrantListener, Session, Sockets};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag,
     SandboxId, SandboxdRef, Sweep, UnixTime,
@@ -27,8 +27,8 @@ use provider::{
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, command_env, command_stderr,
-    command_stdout, pumpkin_dir,
+    Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial, command_env,
+    command_stderr, command_stdout, pumpkin_dir,
 };
 use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, RunnerId, Workflow};
 use serde_json::Value;
@@ -148,6 +148,8 @@ struct Hosting<'p> {
 enum Meets<'p> {
     /// At a socket of each one's own, among the run's [`Sockets`].
     Sockets(&'p dyn Creator<SocketDial>),
+    /// At the address of the run's grant listener.
+    Grants(&'p dyn Creator<TcpDial>, &'p GrantListener),
 }
 
 impl Meets<'_> {
@@ -163,6 +165,10 @@ impl Meets<'_> {
         match self {
             Self::Sockets(creator) => {
                 let (dial, registration) = sockets.issue(&create.name).map_err(issued)?;
+                Ok((creator.create(create, dial)?, registration))
+            }
+            Self::Grants(creator, listener) => {
+                let (dial, registration) = listener.issue().map_err(issued)?;
                 Ok((creator.create(create, dial)?, registration))
             }
         }
@@ -257,12 +263,14 @@ impl<'p> Published<'p> {
     /// Publishes what `placed`'s sandboxes run on each of `providers`, the providers its roles are
     /// placed on: `sandboxd`, a static binary, then each image a role placed there names, once;
     /// then makes the directory of the run's sockets in `record`, the run's record
-    /// ([`record::sockets`]), which must not exist yet. Stops as interrupted before each publish
-    /// once a signal has come.
+    /// ([`record::sockets`]), which must not exist yet. The sandboxes of a private provider meet
+    /// the gateway at `private` instead. Stops as interrupted before each publish once a signal
+    /// has come.
     pub(super) fn create(
         providers: &ByProvider<&'p dyn Provider>,
         placed: &Placed,
         sandboxd: &Path,
+        private: Option<&'p GrantListener>,
         record: &Path,
     ) -> Result<Self, Stopped> {
         let workflow = placed.workflow();
@@ -271,8 +279,14 @@ impl<'p> Published<'p> {
         let providers = placed.by_provider(|name| {
             interruption::check()?;
             let provider = *providers.get(name);
-            let meets = match provider.meeting() {
-                Meeting::Local(creator) => Meets::Sockets(creator),
+            let meets = match (provider.meeting(), private) {
+                (Meeting::Local(creator), _) => Meets::Sockets(creator),
+                (Meeting::Private(creator), Some(listener)) => Meets::Grants(creator, listener),
+                (Meeting::Private(_), None) => unreachable!(
+                    "provider `{name}` is private, and the run has no grant listener, though \
+                     `Run::execute`'s caller binds one for every run that places a role on a \
+                     private provider, as its doc requires"
+                ),
             };
             let published = provider.publish_sandboxd(sandboxd);
             let sandboxd = published.context(format_args!(

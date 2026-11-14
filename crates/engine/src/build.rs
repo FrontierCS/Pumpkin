@@ -101,10 +101,10 @@ const FORM: &str = "pumpkin-build/4";
 // with zstd several times faster than with gzip, its default, and engines unpack it faster too.
 // `force-compression` gives the base's layers zstd too, so that every layer of an image unpacks as
 // fast, wherever it runs: Docker pulls one from its 23.0, which a provider that pulls images onto a
-// Docker of its own requires. So a base's layers are no longer its registry's: the engine
-// compresses them again, once per base until its build cache is pruned, and their digests follow
-// the version of its zstd encoder. The image exporter, given no name, keeps the image in the engine
-// untagged, as `docker build` does without `--output`.
+// Docker of its own requires, as the EC2 provider's boot does. So a base's layers are no longer its
+// registry's: the engine compresses them again, once per base until its build cache is pruned, and
+// their digests follow the version of its zstd encoder. The image exporter, given no name, keeps
+// the image in the engine untagged, as `docker build` does without `--output`.
 const OPTIONS: [&str; 2] = [
     "--provenance=false",
     "--output=type=image,compression=zstd,oci-mediatypes=true,force-compression=true",
@@ -403,6 +403,18 @@ impl Building {
             tag: tag.clone(),
         })
     }
+}
+
+/// What `run` returns, given a directory of its own in `dir`, the engine's, made with bits 0700
+/// for one `task`, such as `build`, and removed once `run` returns ([`make_scratch`]).
+pub(crate) fn in_scratch<T>(
+    dir: &Path,
+    task: &str,
+    run: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let scratch = make_scratch(dir, task)?;
+    let done = run(scratch.path());
+    removed(scratch, task, done)
 }
 
 /// A directory of its own in `dir` for one `task`, made with bits 0700, making `dir` if it is

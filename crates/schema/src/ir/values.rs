@@ -59,8 +59,10 @@ checked_string!(
 );
 
 checked_string!(
-    /// A digest-pinned image: `<repository>@sha256:<hex>`, or a local image ID,
-    /// `sha256:<hex>`.
+    /// An image, by the digest of its manifest: `sha256:` and 64 lowercase hexadecimal digits.
+    ///
+    /// A manifest names one platform's configuration and layers, so the digest names the same
+    /// bytes wherever they are kept, and nothing of where to fetch them.
     Image,
     check_image
 );
@@ -194,22 +196,13 @@ fn check_workflow_name(name: &str) -> Result<(), String> {
 }
 
 fn check_image(image: &str) -> Result<(), String> {
-    let pinned = match image.split_once('@') {
-        Some((repository, digest)) => {
-            !repository.is_empty()
-                && !repository.contains(|char: char| char.is_whitespace() || char == '\0')
-                && check_sha256_digest(digest).is_ok()
-        }
-        None => check_sha256_digest(image).is_ok(),
-    };
-    if pinned {
-        Ok(())
-    } else {
-        Err(format!(
-            "`{}` is not a pinned image: use `<repository>@sha256:<hex>` or `sha256:<hex>`",
+    check_sha256_digest(image).map_err(|_| {
+        format!(
+            "`{}` is not an image's manifest digest: name the image by that digest alone, \
+             `sha256:` and 64 lowercase hexadecimal digits",
             image.escape_debug()
-        ))
-    }
+        )
+    })
 }
 
 fn check_sha256_digest(digest: &str) -> Result<(), String> {
@@ -226,6 +219,13 @@ fn check_sha256_digest(digest: &str) -> Result<(), String> {
             "`{}` is not a digest: use `sha256:` and 64 lowercase hexadecimal digits",
             digest.escape_debug()
         ))
+    }
+}
+
+impl Image {
+    /// Its digest's 64 hexadecimal digits, without `sha256:`.
+    pub fn hex(&self) -> &str {
+        &self.0["sha256:".len()..]
     }
 }
 
