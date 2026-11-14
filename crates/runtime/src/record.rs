@@ -572,7 +572,7 @@ impl<'h, H: Host> Payloads<'h, H> {
         match fs::symlink_metadata(&path) {
             Ok(_) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                replace(self.host, &self.dir, hex(&payload.digest), bytes)
+                replace(self.host, &self.dir, payload.digest.hex(), bytes)
             }
             Err(error) => Err(error).context(path.display()),
         }
@@ -580,13 +580,8 @@ impl<'h, H: Host> Payloads<'h, H> {
 
     /// Where the payload whose digest is `digest` is stored.
     pub(super) fn path(&self, digest: &Sha256Digest) -> PathBuf {
-        self.dir.join(hex(digest))
+        self.dir.join(digest.hex())
     }
-}
-
-/// `digest`'s hexadecimal digits, which name its payload's file.
-fn hex(digest: &Sha256Digest) -> &str {
-    digest.as_str().trim_start_matches("sha256:")
 }
 
 /// What `dir`, where a sandbox's [`out_dir()`] and [`log_dir()`] were collected, holds of each,

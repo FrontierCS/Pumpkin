@@ -229,6 +229,13 @@ fn check_sha256_digest(digest: &str) -> Result<(), String> {
     }
 }
 
+impl Sha256Digest {
+    /// Its 64 hexadecimal digits, without `sha256:`.
+    pub fn hex(&self) -> &str {
+        &self.0["sha256:".len()..]
+    }
+}
+
 impl From<[u8; 32]> for Sha256Digest {
     /// The digest of SHA-256's 32 bytes, `bytes`: `sha256:` and each byte as two lowercase
     /// hexadecimal digits.
