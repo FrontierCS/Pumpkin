@@ -178,6 +178,8 @@ esac
     );
     let failed = json!({ "state": "failed", "reason": "r" });
     let path = write_on(&scratch, UNFIT, "default", Some(failed), &docker);
+    let sandbox = json!({ "provider": "local", "id": container, "report": {} });
+    scratch.write(&format!("runs/{UNFIT}/agent/sandbox.json"), &sandbox);
     let mut reap = scratch.pumpkin(&["reap", "--runs", "runs"]);
     reap.env("PATH", &path);
     let reaped = ran(reap, &scratch.0, false);
@@ -200,6 +202,69 @@ esac
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
             rm --force --volumes cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
         "#]],
+    );
+}
+
+/// A lost run whose sandboxes, the agent's and a lease's, ended by themselves.
+const ENDED: &str = "20261108-121200-0a00000d";
+
+// A sandbox that its provider lists no more may have left what only its delete removes.
+#[test]
+fn reaps_ended() {
+    let scratch = Scratch::new("reaps_ended");
+    let calls = scratch.0.join("calls");
+    let docker = format!(
+        r#"#!/bin/sh
+# `--context=<name>` comes first.
+shift
+echo "$*" >> "{}"
+case $1 in
+    context) echo unix:///stand-in.sock ;;
+    info) echo '{INFO}' ;;
+    container) ;;
+    *) echo "the stand-in has no such command" >&2; exit 1 ;;
+esac
+"#,
+        calls.display()
+    );
+    let path = write_on(&scratch, ENDED, "default", None, &docker);
+    for (dir, id) in [("agent", "a"), ("leases/0", "b")] {
+        let sandbox = json!({ "provider": "local", "id": id.repeat(64), "report": {} });
+        scratch.write(&format!("runs/{ENDED}/{dir}/sandbox.json"), &sandbox);
+    }
+    let mut steps = Vec::new();
+    for _ in 0..2 {
+        let mut reap = scratch.pumpkin(&["reap", "--runs", "runs"]);
+        reap.env("PATH", &path);
+        steps.push(ran(reap, &scratch.0, false));
+        let called = fs::read_to_string(&calls).unwrap();
+        fs::remove_file(&calls).unwrap();
+        steps.push(format!("docker was called with:\n{}", called.trim_end()));
+    }
+    check(
+        &scratch,
+        steps.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
+            exit status: Some(0)
+            pumpkin: run 20261108-121200-0a00000d's sandbox aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa on provider `local` had ended, as it isn't listed there now: what it left there is now removed
+            pumpkin: run 20261108-121200-0a00000d's sandbox bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb on provider `local` had ended, as it isn't listed there now: what it left there is now removed
+            pumpkin: run 20261108-121200-0a00000d was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            printed:
+              20261108-121200-0a00000d
+            docker was called with:
+            context inspect --format {{.Endpoints.docker.Host}} -- default
+            info --format {{json .}}
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --filter id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
+            exit status: Some(0)
+            docker was called with:
+            context inspect --format {{.Endpoints.docker.Host}} -- default
+            info --format {{json .}}
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d"#]],
     );
 }
 

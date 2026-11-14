@@ -306,8 +306,8 @@ arguments that started it (`Record::args`), and each model request it kept
   is locked (`Lock`), and the lock is held until the run's last write, so a record is ended, live
   or lost, by `outcome.json` and then the lock, and a record without `driver.pid` is not one.
   Only the lock's holder writes the record, and once it has let go only `Record::reap` does,
-  which records a lost run as failed, and appends each sandbox it removed, or found gone, to
-  `reaps.jsonl`, so that a reap is auditable from the record.
+  which records a lost run as failed, and appends each sandbox it deleted to `reaps.jsonl`, so
+  that a reap is auditable from the record.
 - **Architecture Invariant:** a run takes its workflow placed (`Placed`), and makes from it the
   providers it runs on (`ByProvider`), one for each provider that it places a role on, so each
   role's sandboxes are created on its provider, in the class of sandbox it is placed in, which it

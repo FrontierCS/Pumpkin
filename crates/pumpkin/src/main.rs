@@ -943,38 +943,22 @@ fn reaped(
         }
     }
     let reached = providers.len() == reports.len();
-    reap_rest(record, &providers, runs).map(|left| Swept { left, reached })
+    reap_rest(record, &providers).map(|left| Swept { left, reached })
 }
 
 /// Reaps the run of `record` on `providers`, each by its name ([`Record::reap`]), and says what
-/// was left, and each sandbox that its record holds undeleted but its provider no longer lists,
-/// with the command that reaps `runs` again; returns whether anything was left.
-fn reap_rest(
-    record: &Record,
-    providers: &[(&Name, &dyn Sweep)],
-    runs: Option<&str>,
-) -> Result<bool, String> {
+/// was left, now removed; returns whether anything was left.
+fn reap_rest(record: &Record, providers: &[(&Name, &dyn Sweep)]) -> Result<bool, String> {
     let id = record.id();
     let failed = |error| format!("run {id} can't be reaped: {error}");
     let reap = record.reap(providers);
     let Reaped {
         sandboxes,
-        gone,
+        ended,
         sockets,
         lost,
     } = reap.map_err(failed)?;
-    for (name, sandbox) in &gone {
-        say(format_args!(
-            "run {id}'s sandbox {} on provider `{name}`, which its record holds undeleted, isn't \
-             listed there now: it has ended since, or the provider is reached elsewhere than the \
-             run reached it, as when the configuration that ran the run, or the Docker context, \
-             has moved to another region, profile or engine since; if so, put it back as it was \
-             when the run ran, and reap again: {}",
-            sandbox.as_str(),
-            next::reap(runs)
-        ));
-    }
-    let mut left = sockets.is_some() || lost;
+    let mut left = sockets.is_some() || lost || !ended.is_empty();
     for (name, ids) in &sandboxes {
         if ids.is_empty() {
             continue;
@@ -985,6 +969,13 @@ fn reap_rest(
         say(format_args!(
             "run {id} left {sandboxes} on provider `{name}`, now removed: {}",
             ids.join(", ")
+        ));
+    }
+    for (name, sandbox) in &ended {
+        say(format_args!(
+            "run {id}'s sandbox {} on provider `{name}` had ended, as it isn't listed there now: \
+             what it left there is now removed",
+            sandbox.as_str()
         ));
     }
     if let Some(sockets) = &sockets {

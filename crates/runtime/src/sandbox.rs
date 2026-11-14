@@ -672,7 +672,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 self.send(logged);
                 recorded
             };
-            sweep(name, hosting.provider, &self.run, keep, record).err()
+            sweep(name, hosting.provider, &self.run, &[], keep, record).err()
         });
         let failures: Vec<String> = swept.flatten().collect();
         let swept = if failures.is_empty() {
@@ -695,12 +695,14 @@ pub(super) struct Deleted {
 }
 
 /// Deletes every sandbox of run `run` that `provider`, the provider named `name`, still lists,
-/// calling `before` with each first, and `after` with them all and the delete's outcome, and
-/// returns their ids, or why the list, the delete or `after` failed.
+/// and each of `also`, listed or not, calling `before` with each listed first, and `after` with
+/// all it deletes and the delete's outcome, and returns the listed ones' ids, or why the list, the
+/// delete or `after` failed.
 pub(super) fn sweep(
     name: &Name,
     provider: &dyn Sweep,
     run: &RunTag,
+    also: &[SandboxId],
     mut before: impl FnMut(&SandboxId),
     after: impl FnOnce(&[SandboxId], &Result<(), String>) -> Result<(), String>,
 ) -> Result<Vec<SandboxId>, String> {
@@ -713,9 +715,11 @@ pub(super) fn sweep(
     for id in &ids {
         before(id);
     }
-    if !ids.is_empty() {
-        let deleted = provider.delete(run, &ids);
-        let recorded = after(&ids, &deleted);
+    let unlisted = also.iter().filter(|id| !ids.contains(id)).cloned();
+    let deleting: Vec<SandboxId> = ids.iter().cloned().chain(unlisted).collect();
+    if !deleting.is_empty() {
+        let deleted = provider.delete(run, &deleting);
+        let recorded = after(&deleting, &deleted);
         let deleted = deleted.context(format_args!(
             "deleting the sandboxes the run left on provider `{name}` failed"
         ));

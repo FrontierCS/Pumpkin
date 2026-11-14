@@ -987,7 +987,7 @@ fn boot() {
         &expect![[r#"
             $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/root-run pumpkin controller boot
             exit status: Some(0)
-            pumpkin: run <local>'s sandbox sandbox-<local> on provider `local`, which its record holds undeleted, isn't listed there now: it has ended since, or the provider is reached elsewhere than the run reached it, as when the configuration that ran the run, or the Docker context, has moved to another region, profile or engine since; if so, put it back as it was when the run ran, and reap again: pumpkin reap
+            pumpkin: run <local>'s sandbox sandbox-<local> on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             pumpkin: run <local> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
             pumpkin: run <lost> was lost, as its driver ended without an outcome.json: it is now recorded as failed
