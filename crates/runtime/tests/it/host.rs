@@ -1,7 +1,7 @@
-//! A simulated host ([`SimHost`]), whose clock moves only as its script says, so that a test
+//! A simulated host, [`SimHost`], whose clock moves only as its script says, so that a test
 //! decides when the run's loop takes an input, how long a sync of its record lasts, whether it
-//! fails, and what time the run reads then, with no real waiting; and which tells a
-//! [`Journal`] each sync, in order with what the simulated provider tells it.
+//! fails, and what time the run reads then, with no real waiting. It tells a [`Journal`] each
+//! sync, in order with what the simulated provider tells it.
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -16,40 +16,29 @@ use runtime::{Clock, Durable, Host, Inbox};
 
 use crate::sim::Journal;
 
-/// The longest a simulated host waits in real time for an input: one that its clock alone would
-/// bring never comes, so a wait this long is the test's bug.
+// The longest a simulated host waits in real time for an input: one that its clock alone would
+// bring never comes, so a wait this long is the test's bug.
 const WATCHDOG: Duration = Duration::from_secs(60);
 
-/// What a wait past [`WATCHDOG`] expected of the test, but for a slow sync's.
 const SCRIPTED: &str = "the test to make every input the run waits on come, as its clock moves \
                         only by script";
 
-/// A host whose clock reads 0 from the run's start until its script moves it: its late take
-/// ([`LateTake`]), or its slow sync ([`SlowSync`]). A wait takes an input as soon as one comes
-/// while its time is to come, and what the inbox holds, without waiting, once its time has
-/// passed, as the clock never moves by itself, but for the takes that the late take says wait. A
-/// sync makes nothing last, and succeeds unless the script fails it ([`SimHost::failed_sync`]).
+/// A host whose clock reads 0 from the run's start and never moves by itself: a [`LateTake`] or a
+/// [`SlowSync`] moves it. A wait for a time to come takes an input as soon as one comes; once the
+/// time has passed it takes what the inbox holds, without waiting, but for the takes that the late
+/// take says wait. A wait for an input that never comes fails after `WATCHDOG`. A sync makes
+/// nothing last, and succeeds unless the script fails it.
 pub(crate) struct SimHost {
-    /// Shared, as the clock's clones read it on the run's threads, a judge call's, a model
-    /// request's or a session's reader too, and its inboxes take the late take from it on theirs,
-    /// which then moves the clock.
     state: Arc<Mutex<State>>,
-    /// Where each sync goes, if anywhere.
     journal: Option<Journal>,
 }
 
 struct State {
     now: Duration,
-    /// The late take, until it comes.
     late: Option<LateTake>,
-    /// The slow sync, until it comes.
     slow: Option<SlowSync>,
-    /// The record whose sync fails, until it does.
     failed: Option<u64>,
-    /// The name of the file of which a sync fails, and how many of its syncs come first, until
-    /// it does.
     failed_file: Option<(&'static str, u32)>,
-    /// The inbox the clock made first, the loop's, as a run makes it as it starts its clock.
     first: Option<Arc<dyn Fill>>,
 }
 
@@ -72,11 +61,13 @@ pub(crate) struct SlowSync {
     pub(crate) at: Duration,
 }
 
-/// What a sync makes last: the run log's record of a `seq`, with the records before it; or a file
-/// whose path ends with the first, as it holds the second, such as a sandbox's `sandbox.json` once
-/// it records the delete, which the run log may not sync before the next act.
+/// What a sync makes last.
 pub(crate) enum Synced {
+    /// The run log's record of that `seq`, with the records before it.
     Seq(u64),
+    /// A file whose path ends with the first, as it holds the second, such as a sandbox's
+    /// `sandbox.json` once it records the delete, which the run log may not sync before the next
+    /// act.
     Holding(&'static str, &'static str),
 }
 
@@ -106,22 +97,18 @@ impl SimHost {
         self
     }
 
-    /// The host, whose first sync of the run log that makes `record` last fails.
+    /// Fails the first sync of the run log that holds its record numbered `record`.
     pub(crate) fn failed_sync(self, record: u64) -> Self {
         stdx::unpoisoned(self.state.lock()).failed = Some(record);
         self
     }
 
-    /// The host, whose sync of a file named `name`, after `before` syncs of files of that name,
-    /// fails.
+    /// Fails the sync of a file named `name`, after `before` syncs of it that succeed.
     pub(crate) fn failed_sync_of(self, name: &'static str, before: u32) -> Self {
         stdx::unpoisoned(self.state.lock()).failed_file = Some((name, before));
         self
     }
 
-    /// The host, which tells `journal` each sync as it ends: `fdatasync <path>` or `fsync
-    /// <path>`, as [`Durable`] says, followed for the run log by the `seq` of its last record,
-    /// and by how the script held or failed it.
     pub(crate) fn journaled(mut self, journal: &Journal) -> Self {
         self.journal = Some(journal.clone());
         self
@@ -196,7 +183,6 @@ impl Host for SimHost {
     }
 }
 
-/// The `seq` of the last record of the run log at `path`, if it is the log and has one.
 fn last_record(path: &Path) -> io::Result<Option<u64>> {
     if path.file_name() != Some("log.jsonl".as_ref()) {
         return Ok(None);
@@ -210,7 +196,6 @@ fn last_record(path: &Path) -> io::Result<Option<u64>> {
 #[derive(Clone)]
 pub(crate) struct SimClock {
     state: Arc<Mutex<State>>,
-    /// When the run started, by the machine's clock, which its record holds.
     unix: SystemTime,
 }
 
@@ -246,24 +231,18 @@ impl Clock for SimClock {
 
 pub(crate) struct SimInbox<T> {
     clock: SimClock,
-    /// Shared with the host, which fills the loop's as a slow sync holds the loop.
     queue: Arc<Mutex<Queue<T>>>,
     // Kept, so that the inbox never disconnects, whoever else holds a sender.
     sender: Sender<T>,
-    /// How many more takes wait for an input, whatever the time, as the late take says.
     then: usize,
 }
 
-/// What an inbox holds: what was received of its channel ahead of its takes, then the channel.
 struct Queue<T> {
     receiver: Receiver<T>,
-    /// What a late take or a slow sync received, which the takes after it return first.
     behind: VecDeque<T>,
 }
 
 trait Fill: Send + Sync {
-    /// Waits until the queue holds `queued` inputs received ahead of its takes, panicking past
-    /// [`WATCHDOG`] with what the wait `expected` of the test.
     fn fill(&self, queued: usize, expected: &str);
 }
 
@@ -292,8 +271,6 @@ impl<T: Send> Inbox<T> for SimInbox<T> {
 }
 
 impl<T: Send> SimInbox<T> {
-    /// The next input taken: what the late take or a slow sync received ahead of it first, then
-    /// what the channel holds, once it comes if `waits` or the late take says this take waits.
     fn next(&mut self, waits: bool) -> Option<T> {
         let waits = waits || self.then > 0;
         self.then = self.then.saturating_sub(1);
@@ -311,8 +288,6 @@ impl<T: Send> SimInbox<T> {
         Some(self.late(input))
     }
 
-    /// `input`, taken: if this is the late take, once the inputs behind it have come, and with
-    /// the clock moved to its time.
     fn late(&mut self, input: T) -> T {
         let late = stdx::unpoisoned(self.clock.state.lock()).late.take();
         let Some(LateTake { behind, at, then }) = late else {
@@ -327,8 +302,6 @@ impl<T: Send> SimInbox<T> {
 }
 
 impl<T> Queue<T> {
-    /// The next input the channel holds, once it comes, panicking past [`WATCHDOG`] with what
-    /// the wait `expected` of the test.
     fn received(&self, expected: &str) -> T {
         match self.receiver.recv_timeout(WATCHDOG) {
             Ok(input) => input,

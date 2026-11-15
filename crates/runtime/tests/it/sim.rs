@@ -1,13 +1,20 @@
-//! A simulated provider, [`Sim`], which stands in for a platform, and passes the suite every
-//! provider passes ([`suite`](test_support::suite)).
+//! The simulated provider, `Sim`, which passes the suite that every provider passes
+//! ([`suite`](test_support::suite)). Each sandbox is a thread of the test process.
 //!
-//! Each sandbox is a thread of this process, running a fake `sandboxd` that dials its create's
-//! dial at once, a socket's, or a TCP address's for a provider made [private](Sim::private),
-//! or, for one made [listening](Sim::listening), waits for the gateway to dial it, behind the
-//! stand-in TLS edge ([`edge`](test_support::edge)); says hello and answers the session's requests,
-//! running each command by its program, which may make ops or judge a payload ([`Sim`]). What it
-//! does that a run acts on may go to a [`Journal`], in order with what other parts of a test's
-//! simulated world tell it.
+//! A sandbox says hello to the gateway as `sandboxd` does, dialing it at once, or for a provider
+//! made [listening](Sim::listening) waiting for its dial behind the stand-in TLS edge, and keeps
+//! its files in memory. The program of a command that a run starts in it scripts the command:
+//! - `exit <code>`; `stall` (the sandbox stops answering); `crash` (its connection ends);
+//! - `print <words>` and `fill <n> <words>` (`n` `x`es first) leave their text as the command's
+//!   stdout, and `list <dir>` leaves a listing of what was put under `dir`;
+//! - `judge <path>` scores the payload put at `path` by its length, except `slow` (it never ends),
+//!   `stall` and `large` (a result over its limit); with no payload it exits 1;
+//! - `ops <step>...` plays its steps (`step`) in turn, one op at a time, and exits 0 after the
+//!   last; any other program runs until it is killed.
+//!
+//! A test chooses a fault by naming a sentinel, such as `HUNG`, as the sandboxd's path or, through
+//! [`image`], as the image. What a run acts on may go to a [`Journal`], in order with what other
+//! parts of the test's simulated world tell it.
 
 #![expect(
     clippy::unwrap_used,
@@ -45,38 +52,26 @@ use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use test_support::suite::{Locals, Subject};
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that never dials: a create that names
-/// it, as published, makes a sandbox whose `sandboxd` prints so, and ends.
+/// A sandbox that never dials, and ends at once.
 pub(crate) const MUTE: &str = "/sim/mute";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that never dials, as [`MUTE`]'s, but
-/// hangs, as one stuck as it starts, rather than end, until its sandbox is deleted.
+/// A sandbox that never dials, and lasts until it is deleted.
 pub(crate) const HUNG: &str = "/sim/hung";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that never dials, as [`MUTE`]'s.
-///
-/// The provider frees its sandbox once its `sandboxd` has ended, so the run's list leaves it out,
-/// as [`Sweep::list`] lets such a provider.
+/// A sandbox that never dials, and that its provider's list leaves out once it has ended.
 pub(crate) const VANISHING: &str = "/sim/vanishing";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that hangs without dialing, as
-/// [`HUNG`]'s, and whose sandbox fails the run's list until it is deleted, as a provider's API
-/// may fail.
+/// A sandbox that never dials, and whose provider's list fails while it exists.
 pub(crate) const UNLISTABLE: &str = "/sim/unlistable";
 
-/// The path of a `sandboxd` whose create fails, leaving behind a sandbox, as [`MUTE`]'s, that
-/// the run's list still finds.
+/// A create that fails without naming the sandbox it made, which never dials.
 pub(crate) const LOST: &str = "/sim/lost";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that dials, but says hello in the sandbox
-/// protocol's next version, as a `sandboxd` built from a later Pumpkin would.
+/// A sandbox whose hello names a protocol version later than the gateway's.
 pub(crate) const LATER: &str = "/sim/later";
 
-/// An [`image`]'s name whose create returns `SLOW_CREATE` after it starts the sandbox,
-/// whose `sandboxd` has dialed by then.
-///
-/// A create whose deadline comes first gives up then, and fails, leaving the sandbox for the
-/// run's list to find ([`Creator::create`](provider::Creator::create)), which, where it listens,
+/// A create that takes two seconds of real time, or until its deadline if that comes first, in
+/// which case it fails, leaving the sandbox for the run's list to find, which, where it listens,
 /// ends itself as no gateway claims it.
 pub(crate) const SLOW: &str = "/sim/slow";
 
@@ -84,74 +79,51 @@ pub(crate) const SLOW: &str = "/sim/slow";
 // takes to dial, and far shorter than the startup of the providers whose tests use it.
 const SLOW_CREATE: Duration = Duration::from_secs(2);
 
-/// The name of the simulated provider's second class, whose sandboxes take at most
-/// `BRIEF_STARTUP` seconds to start, and the CPU model it states, so that it is offered only to
-/// roles that need that model.
+/// The class with a CPU model and a short startup.
 pub(crate) const BRIEF: &str = "brief";
 
-/// How long a start in class `brief` takes at most, in seconds.
 // Far longer than a simulated sandbox takes to start, so that a busy machine makes a start that
 // succeeds wait longer, never fail.
 const BRIEF_STARTUP: u64 = 2;
 
-/// How long a command that awaits a job's state waits between the `status` ops it makes, and a
-/// sandbox that listens between its looks for the gateway's connection, or its deletion.
 const AWAIT_POLL: Duration = Duration::from_millis(10);
 
-/// What every tree the simulated `sandboxd` collects holds: a file of this name, which holds the
-/// same.
+// The file that each collected directory holds, unless a put wrote one of its name.
 const COLLECTED: &str = "collected";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that the simulated provider refuses to
-/// publish.
+/// A `sandboxd` or an image that publishing fails on.
 pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, that dials, but whose sandbox the
-/// simulated provider refuses to delete.
+/// A sandbox that every delete of fails.
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
-/// The path of a `sandboxd`, or an [`image`]'s name, whose first delete fails, as one of
-/// [`UNDELETABLE`]'s does.
-///
-/// The next deletes it, as a provider's API may fail a call once.
+/// A sandbox whose first delete fails, and the next deletes it, as a provider's API may fail a
+/// call once.
 pub(crate) const REFUSED_ONCE: &str = "/sim/refused-once";
 
-/// An [`image`]'s name whose sandbox's delete waits `DAWDLE` before it deletes it.
+/// A sandbox whose delete takes a second of real time.
 pub(crate) const DAWDLING: &str = "/sim/dawdling";
 
-/// An [`image`]'s name whose sandbox's delete waits until each other sandbox of its run is
-/// deleted, and no other delete is under way, as a platform may finish a delete that began later
-/// first, and only then deletes it.
+/// A sandbox whose delete waits until each other sandbox of its run is deleted, and no other
+/// delete is under way, as a platform may finish a delete that began later first.
 pub(crate) const LAST: &str = "/sim/last";
 
-/// The longest a delete of a [`LAST`] sandbox waits: one that waits this long waits on a sandbox
-/// that nothing deletes, the test's bug.
+// How long a delete of a `LAST` sandbox waits before the test fails instead of hanging.
 const LAST_WAITS: Duration = Duration::from_secs(60);
 
 // Far longer than a run takes to collect what a judge call's sandbox holds and delete it, and far
 // shorter than the bounds of the runs whose tests use it.
 const DAWDLE: Duration = Duration::from_secs(1);
 
-/// How long a sandbox's fake `sandboxd` takes to end once its sandbox is deleted.
 // A platform's sandbox ends some time after it is told to, so a delete that doesn't wait for its
 // end returns while it runs, which the suite then sees (`Subject::held`): far longer than the
 // suite takes to look after a delete returns, and far shorter than any test's bounds.
 const ENDING: Duration = Duration::from_millis(100);
 
-/// A provider whose sandboxes are threads, each running a fake `sandboxd`.
-///
-/// A create whose deadline has passed as it begins fails, making nothing. A sandbox's `sandboxd`
-/// says this version's hello, unless its create names a fault, such as [`MUTE`] or [`LATER`], and
-/// stops reading once [stalled](Subject::stall); the sandbox is listed as ended once it exits
-/// ([`VANISHING`] and [`UNLISTABLE`] aside). It keeps the files put, collects a tree of one file,
-/// `COLLECTED`, from any directory, with what its commands wrote there (`collect`), and runs each
-/// command by its program (`Served::start`). Each fault, such as [`UNPUBLISHED`], says in its doc
-/// what it does.
+/// A simulated provider, whose clones from [`Subject::connect`] share its sandboxes.
 pub(crate) struct Sim {
-    /// The name of its platform, which each reference it publishes begins with, then `:`.
     platform: &'static str,
     ready: Ready,
-    /// How its sandboxes meet the gateway.
     reach: Reach,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock,
     // which each instance that `Subject::connect` makes shares, as a platform's instances share
@@ -160,7 +132,6 @@ pub(crate) struct Sim {
     journal: Option<Journal>,
 }
 
-/// How a [`Sim`]'s sandboxes meet the gateway, as a provider's [`Meeting`] says.
 #[derive(Clone, Copy)]
 enum Reach {
     Local,
@@ -168,9 +139,9 @@ enum Reach {
     Listen,
 }
 
-/// What the parts of a test's simulated world saw, in the order they told it, each from the
-/// thread it saw it on, as it saw it.
 #[derive(Clone, Default)]
+/// What the simulated provider and host tell, in the order it happened, so that a test reads how
+/// their events interleaved.
 pub(crate) struct Journal {
     // Shared, as each part tells it from its own thread, and the test reads it.
     entries: Arc<Mutex<Vec<String>>>,
@@ -181,41 +152,26 @@ impl Journal {
         stdx::unpoisoned(self.entries.lock()).push(entry);
     }
 
-    /// What it holds, in the order it was told.
     pub(crate) fn entries(&self) -> Vec<String> {
         stdx::unpoisoned(self.entries.lock()).clone()
     }
 }
 
 struct State {
-    /// The number in the next sandbox's id.
     next: u64,
-    /// The sandboxes made and not yet deleted, by id.
     sandboxes: BTreeMap<String, Sandbox>,
-    /// The sandboxes deleted, which the platform holds until their threads have ended.
     deleted: Vec<Deleted>,
-    /// How many deletes are under way.
     deleting: usize,
-    /// The permission bits of the directory that held each create's socket directory, in the
-    /// order of the creates that dialed a socket.
     modes: Vec<u32>,
-    /// Whether each create asked for the model endpoint, in the order of the creates.
     models: Vec<bool>,
-    /// The class of each create, in the order of the creates.
     classes: Vec<Name>,
-    /// What each publish that succeeded published, `sandboxd` or an image, in the order of the
-    /// publishes.
     published: Vec<String>,
-    /// The CPUs it shares out between runs' reservations.
     cpus: u64,
-    /// Each reservation made, live until its holder drops it.
     reserved: Vec<Reserved>,
 }
 
-/// A run's reservation of CPUs, which counts while its holder keeps it.
 struct Reserved {
     run: RunTag,
-    /// The roles it holds CPUs for, each with how many of its sandboxes run at once.
     roles: Vec<(Name, NonZeroU32)>,
     cpus: u64,
     live: Weak<()>,
@@ -223,11 +179,8 @@ struct Reserved {
 
 struct Sandbox {
     run: RunTag,
-    /// How many deletes it refuses yet, `u32::MAX` for every one.
     refusals: u32,
-    /// How long its delete waits.
     linger: Duration,
-    /// [`LAST`]'s.
     last: bool,
     listing: Listing,
     // Shared with the sandbox's thread, which prints to its console and hands over its
@@ -241,45 +194,33 @@ impl Sandbox {
         self.run.as_str() == run.as_str()
     }
 
-    /// Whether its fake `sandboxd` has exited: its thread has returned, but not for a stall,
-    /// which stands for a `sandboxd` that is stuck, as a paused container's is.
     fn ended(&self) -> bool {
         self.thread.is_finished() && !status(&self.shared).stalled
     }
 }
 
-/// What [`Subject::held`] keeps of a deleted sandbox.
 struct Deleted {
     id: String,
     run: RunTag,
-    /// Its status, which its thread keeps until it ends.
     shared: Weak<Mutex<Status>>,
 }
 
-/// How the run's list shows a sandbox.
 enum Listing {
-    /// As it is, ended or not.
     Shown,
-    /// Left out once it has ended, as [`VANISHING`]'s.
     LeftOutOnceEnded,
-    /// Not at all: the list fails while it lasts, as [`UNLISTABLE`]'s.
     Failing,
 }
 
-/// What a sandbox's thread and the [`Sim`] share.
 #[derive(Default)]
 struct Status {
     console: String,
-    /// The thread's connection once dialed, by which a delete ends the session.
     connection: Option<Connection>,
     stalled: bool,
     deleted: bool,
-    /// Where its session's reads go, if the provider has a journal.
     journal: Option<Journal>,
 }
 
 impl Status {
-    /// The status of a sandbox as it starts, whose session's reads go to `journal`, if any.
     fn new(journal: Option<Journal>) -> Self {
         Self {
             journal,
@@ -289,19 +230,12 @@ impl Status {
 }
 
 impl Sim {
-    /// A simulated provider whose startup is 30 s.
     pub(crate) fn new() -> Self {
         // Far longer than a thread takes to start and dial, so that a busy machine makes a start
         // wait longer, never fail.
         Self::with_startup(30)
     }
 
-    /// A simulated provider, of platform `sim`, that declares two classes, which offer far more
-    /// CPU and memory than any role needs: `sim`, whose startup is `seconds`, and [`BRIEF`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `seconds` is 0.
     pub(crate) fn with_startup(seconds: u64) -> Self {
         Self {
             platform: "sim",
@@ -323,7 +257,6 @@ impl Sim {
         }
     }
 
-    /// This provider, whose class `sim` costs `usd_per_hour` an hour.
     pub(crate) fn priced(mut self, usd_per_hour: f64) -> Self {
         let sim = Name::try_from("sim".to_owned()).unwrap();
         let class = self.ready.classes.get_mut(&sim).unwrap();
@@ -331,10 +264,6 @@ impl Sim {
         self
     }
 
-    /// This provider, which tells `journal` each create once it has made its sandbox, as
-    /// `created <id>`, each sandbox a delete deletes, as `deleted <id>`, and each reply to an op
-    /// that a sandbox's session reads, as it reads it, as `a session read op <n>'s reply: <kind>`,
-    /// where `n` numbers the session's ops from 0, as the run log does.
     #[must_use]
     pub(crate) fn journaled(mut self, journal: &Journal) -> Self {
         self.journal = Some(journal.clone());
@@ -345,7 +274,6 @@ impl Sim {
         self.journal.as_ref()
     }
 
-    /// Fails unless `create`'s run holds CPUs for its role's instance.
     fn holds(&self, create: &Create) -> Result<(), String> {
         let reserved = (self.state().reserved.iter()).any(|reserved| {
             reserved.live.strong_count() > 0
@@ -372,16 +300,13 @@ impl Sim {
         }
     }
 
-    /// This provider, of the platform named `platform` in place of `sim`: each reference it
-    /// publishes names its platform, and its create refuses one that names another, as a
-    /// platform's references mean nothing to another's.
     #[must_use]
+    /// Names the platform, which prefixes the references that it publishes and the only ones it
+    /// takes.
     pub(crate) fn named(self, platform: &'static str) -> Self {
         Self { platform, ..self }
     }
 
-    /// This provider, whose sandboxes dial the gateway at a TCP address, presenting their grants,
-    /// as a [private](Meeting::Private) one's do, in place of a socket.
     #[must_use]
     pub(crate) fn private(self) -> Self {
         Self {
@@ -390,20 +315,13 @@ impl Sim {
         }
     }
 
-    /// This provider, which shares out `cpus` CPUs between the reservations of runs, each
-    /// instance of a role counting its CPU limit rounded up to whole CPUs, and refuses a
-    /// reservation that doesn't fit beside the others held.
     #[must_use]
+    /// Sets the simulated CPUs that reservations share, 1024 at first.
     pub(crate) fn with_cpus(self, cpus: u64) -> Self {
         self.state().cpus = cpus;
         self
     }
 
-    /// This provider, whose classes offer `memory_bytes` of memory each.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `memory_bytes` is 0.
     #[must_use]
     pub(crate) fn offering_memory(mut self, memory_bytes: u64) -> Self {
         for class in self.ready.classes.values_mut() {
@@ -412,9 +330,6 @@ impl Sim {
         self
     }
 
-    /// This provider, whose sandboxes listen on the loopback, behind the stand-in TLS edge, and
-    /// take the session of the gateway that dials them and presents their grants, as one of
-    /// a [listening](Meeting::Listen) one's do, its create giving the endpoint.
     #[must_use]
     pub(crate) fn listening(self) -> Self {
         Self {
@@ -423,6 +338,7 @@ impl Sim {
         }
     }
 
+    /// The mode of the sockets directory at each create that met by a socket.
     pub(crate) fn modes(&self) -> Vec<u32> {
         self.state().modes.clone()
     }
@@ -435,8 +351,6 @@ impl Sim {
         self.state().classes.clone()
     }
 
-    /// What each publish that succeeded published, in the order of the publishes: `sandboxd`, as
-    /// `sandboxd <path>`, or an image, as `image <digest>`.
     pub(crate) fn published(&self) -> Vec<String> {
         self.state().published.clone()
     }
@@ -445,8 +359,6 @@ impl Sim {
         stdx::unpoisoned(self.state.lock())
     }
 
-    /// What `reference`, the create's `what`, names on the platform: the rest of it, past the
-    /// platform's name; or why it names nothing there.
     fn own<'r>(&self, what: &str, reference: &'r str) -> Result<&'r str, String> {
         let rest = (reference.strip_prefix(self.platform)).and_then(|rest| rest.strip_prefix(':'));
         rest.ok_or_else(|| {
@@ -459,8 +371,6 @@ impl Sim {
     }
 }
 
-/// What a simulated provider declares whose class `sim` has a startup of `startup_seconds`:
-/// that class and [`BRIEF`], which states its model.
 fn ready(startup_seconds: NonZeroU64) -> Ready {
     let class = |name: &str, startup_seconds, cpu_model| {
         let offers = Offers {
@@ -591,6 +501,7 @@ impl Provider for Sim {
                 })
                 .sum()
         };
+        // A phase starts only once the one before has ended, so the run holds the most of any.
         let needed = phases.iter().map(needs).max().unwrap_or(0);
         let mut roles: Vec<(Name, NonZeroU32)> = phases
             .iter()
@@ -685,9 +596,8 @@ impl Creator<Listening, (Created, Endpoint)> for Sim {
 }
 
 impl Sim {
-    /// Creates the sandbox that `create` describes, which meets the gateway as `met` says.
-    // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more;
-    // and the name needs no use, as each sandbox is created once.
+    // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
+    // the name needs no use, as each sandbox is created once.
     fn made(&self, create: &Create, met: Met) -> Result<Created, String> {
         let by = Deadline::at_unix(create.by.since_epoch());
         if by.remaining().is_none() {
@@ -775,20 +685,12 @@ impl Sim {
     }
 }
 
-/// Where a simulated sandbox meets the gateway.
 enum Gateway {
-    /// At the socket of this path, of its own.
     Socket(PathBuf),
-    /// At this TCP address, which other sandboxes dial too.
     Tcp(SocketAddr),
-    /// Where this listener listens, on the loopback, which the gateway dials until the deadline,
-    /// the create's, past which its `sandboxd` gives up, as `sandboxd --by` does, but with no
-    /// slack, as its clock is the host's.
     Listen(TcpListener, Deadline),
 }
 
-/// Where a simulated sandbox meets the gateway, the grant its hello presents there, and the one
-/// the gateway's answer is to present.
 type Met = (
     Gateway,
     Option<RegistrationGrant>,
@@ -796,7 +698,6 @@ type Met = (
 );
 
 impl Gateway {
-    /// The permission bits of the directory that holds a socket's directory.
     fn mode(&self) -> Option<u32> {
         match self {
             Self::Socket(socket) => {
@@ -815,8 +716,6 @@ enum Connection {
 }
 
 impl Connection {
-    /// Dials `gateway`, or takes the connection that dials it, over the stand-in edge's TLS, once
-    /// one does, unless the sandbox is deleted first.
     fn dial(gateway: &Gateway, shared: &Mutex<Status>) -> io::Result<Self> {
         match gateway {
             Gateway::Socket(socket) => UnixStream::connect(socket).map(Self::Unix),
@@ -895,11 +794,7 @@ impl Write for Connection {
     }
 }
 
-/// The image named `name`, such as a fault's, whose digest is `name`'s bytes, then zeros.
-///
-/// # Panics
-///
-/// Panics if `name` is over 32 bytes.
+/// An image whose digest is `name`'s bytes, which the provider reads as a sentinel.
 pub(crate) fn image(name: &str) -> Image {
     let mut bytes = [0; 32];
     bytes[..name.len()].copy_from_slice(name.as_bytes());
@@ -938,8 +833,8 @@ impl Subject for Sim {
 
     fn held(&self, run: &RunTag) -> Vec<SandboxId> {
         let state = self.state();
-        // An ended sandbox that its list leaves out stands for one the platform has freed,
-        // though the provider keeps it until it is deleted, to end its thread.
+        // An ended sandbox that its list leaves out stands for one the platform has freed, though
+        // the provider keeps it until it is deleted, to end its thread.
         let freed = |sandbox: &Sandbox| {
             matches!(sandbox.listing, Listing::LeftOutOnceEnded) && sandbox.ended()
         };
@@ -966,44 +861,31 @@ fn status(shared: &Mutex<Status>) -> MutexGuard<'_, Status> {
     stdx::unpoisoned(shared.lock())
 }
 
-/// The faults a create simulates, each of the paths and image names above that it names.
 struct Faults {
     made: Made,
     dialing: Dialing,
     listing: Listing,
-    /// How many deletes it refuses, `u32::MAX` for every one, as [`UNDELETABLE`]'s, or one, as
-    /// [`REFUSED_ONCE`]'s.
     refusals: u32,
-    /// How long its delete waits: [`DAWDLING`]'s.
     linger: Duration,
-    /// [`LAST`]'s.
     last: bool,
 }
 
 #[derive(PartialEq, Eq)]
 enum Made {
-    /// It returns the sandbox.
     Named,
-    /// It fails, leaving the sandbox, as [`LOST`]'s.
     Lost,
-    /// It returns after [`SLOW_CREATE`], as [`SLOW`]'s.
     Slow,
 }
 
 #[derive(PartialEq, Eq)]
 enum Dialing {
-    /// It dials and says hello.
     Hello,
-    /// It dials and says hello in the next version, as [`LATER`]'s.
     Later,
-    /// It never dials, and ends.
     Mute,
-    /// It never dials, and hangs, as [`HUNG`]'s and [`UNLISTABLE`]'s.
     Hung,
 }
 
 impl Dialing {
-    /// Whether the `sandboxd` never dials, and whether it hangs.
     fn silent(&self) -> (bool, bool) {
         match self {
             Self::Hello | Self::Later => (false, false),
@@ -1014,7 +896,6 @@ impl Dialing {
 }
 
 impl Faults {
-    /// The faults of a create that `names` each fault it simulates.
     fn of(names: impl Fn(&str) -> bool) -> Self {
         let (lost, unlistable, vanishing) = (names(LOST), names(UNLISTABLE), names(VANISHING));
         let listing = if unlistable {
@@ -1060,8 +941,6 @@ impl Faults {
     }
 }
 
-/// Tells a deleted sandbox's thread to end, closing its connection if it has one, and waits
-/// until it has, after its delete's wait.
 fn stop(sandbox: Sandbox) {
     let Sandbox {
         run: _,
@@ -1076,7 +955,6 @@ fn stop(sandbox: Sandbox) {
     let mut status = status(&shared);
     status.deleted = true;
     if let Some(connection) = status.connection.take() {
-        // A connection the gateway closed already is fine.
         let _ = connection.shutdown(Shutdown::Both);
     }
     drop(status);
@@ -1086,13 +964,8 @@ fn stop(sandbox: Sandbox) {
     thread.join().unwrap();
 }
 
-/// What the console of a sandbox whose `sandboxd` never dials shows.
 const NEVER_DIALS: &str = "sandboxd: a simulated one, which never dials\n";
 
-/// A sandbox's fake `sandboxd`, whose console its create has written: if `mute`, it waits until
-/// the sandbox is deleted if `hung`, and else ends; or else it [dials](dial), saying `hello`,
-/// and awaiting the grant given, if any, in the answer. Once its sandbox is deleted, it takes
-/// [`ENDING`] to end.
 fn sandboxd(
     gateway: &Gateway,
     mute: bool,
@@ -1114,9 +987,6 @@ fn sandboxd(
     }
 }
 
-/// Dials `gateway`, or takes its connection, opens the session with `hello`, its answer
-/// presenting the grant awaited, if any, and serves it until the session ends, the sandbox is
-/// deleted, or it is stalled, with the model endpoint if `model`.
 fn dial(
     gateway: &Gateway,
     (hello, awaited): (&Value, Option<RegistrationGrant>),
@@ -1150,8 +1020,6 @@ fn dial(
     }
 }
 
-/// Opens the session on `connection` with `hello`: whether the gateway accepted it, presenting
-/// `awaited`.
 fn open(connection: &mut Connection, hello: &Value, awaited: Option<&RegistrationGrant>) -> bool {
     let sent = frame::write(connection, hello, &[]);
     let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
@@ -1161,20 +1029,16 @@ fn open(connection: &mut Connection, hello: &Value, awaited: Option<&Registratio
     matches!(answer, Ok(Some((HelloReply::Accepted { grant }, _))) if grant.as_ref() == awaited)
 }
 
-/// A step of a command that makes ops.
 enum Step {
-    /// An op, with its payload, and, if bounded, the fewest seconds by which its reply must
-    /// leave less time than the last `ops` reply did.
+    /// An op, whose payload follows it, and which `less` bounds the remaining seconds of.
     Op {
         call: OpCall,
         payload: Vec<u8>,
         less: Option<u64>,
     },
-    /// `call`, a `status` or a `lease_status`, made until its reply gives `state`.
+    /// A `status` or a `lease_status` made until its reply gives `state`.
     Await { call: OpCall, state: String },
-    /// A model request that names `model`, through Chat Completions if `chat` and else the
-    /// Responses API, whose input is what it `said`, whose body holds `fields` too, and what of
-    /// its response the next step waits for.
+    /// A model request, whose response's part or end the next step waits for.
     Model {
         model: String,
         chat: bool,
@@ -1182,84 +1046,54 @@ enum Step {
         fields: Map<String, Value>,
         wait: Wait,
     },
-    /// A wait, in seconds, before the next step.
+    /// A wait of that many seconds.
     Sleep(u64),
-    /// The command's exit with 0, after which the sandbox takes the steps that follow, as a
-    /// process the command left would.
+    /// The command's exit with 0.
     Exit,
-    /// The answer to the collect of a `held` directory, which waits for it ([`collect`]), and to
-    /// any such collect later.
+    /// The answer to the collects of a `held` directory.
     Release,
-    /// A judge's result, `{"raw_score": n}`, where `n` is what the last command of a lease printed,
-    /// as the last `lease_status` reply gives it, or the body of the response to the last model
-    /// request, whichever came last.
+    /// A judge's result of the last number read.
     Result,
-    /// The session's end, which its `sandboxd` makes as [`End`] says.
+    /// The session's end.
     End(End),
 }
 
-/// How a fake `sandboxd` ends its session.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
-    /// Right after an op, by reading nothing more as the op goes out, so that the op's reply
-    /// ends it, as it can't be written; otherwise by closing the connection.
     Crash,
-    /// By closing the connection, right after an op too, so that the end reaches the gateway
-    /// behind the op, whatever its owner does: a reply then races the gateway's reader to the
-    /// close, unless the run's loop takes the op only once the end has reached it.
     Close,
 }
 
-/// What of a model response a command waits for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait {
-    /// The first part of its body.
     Part,
     End,
 }
 
-/// A command that makes ops.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each is a fact of the fake command's own, which its steps set apart"
 )]
 struct Caller {
-    /// The command's stream, on which it exits.
     stream: u32,
     steps: VecDeque<Step>,
     op: u32,
-    /// The bound on the reply to the op in flight, as [`Step::Op`] gives it.
     less: Option<u64>,
-    /// The seconds the last `ops` reply left, once one has come.
     left: Option<u64>,
-    /// The `status` or `lease_status` the op in flight asks, and the state it awaits, if it awaits
-    /// one.
     awaiting: Option<(OpCall, String)>,
     exited: bool,
     endpoint: bool,
-    /// The number of the last model request, once one has been made: the one in flight, as it
-    /// makes one at a time.
     model: Option<u32>,
-    /// Whether the response to the last model request has yet to end.
     open: bool,
-    /// What of that response the next step waits for, if it waits for it.
     waits: Option<Wait>,
-    /// What it has printed: each response to its model requests.
     stdout: String,
-    /// What the last command of a lease printed, as the last `lease_status` reply gives it, or
-    /// the body of the response to the last model request, whichever came last.
     read: String,
     result: Option<Vec<u8>>,
-    /// How its `sandboxd` ends the session, once a step has asked it to.
     end: Option<End>,
-    /// Whether a step has released the collects of `held` directories, the one waiting and any
-    /// later.
     released: bool,
 }
 
 impl Caller {
-    /// A command on `stream` that takes `steps`, in a sandbox that serves the model endpoint if
-    /// `endpoint`, before it has taken any.
     fn new(stream: u32, steps: VecDeque<Step>, endpoint: bool) -> Self {
         Self {
             stream,
@@ -1281,10 +1115,6 @@ impl Caller {
         }
     }
 
-    /// Takes the reply to the op in flight, `reply`: if it is an `ops` that breaks the op's
-    /// bound, or that follows no `ops` reply, the command exits with 1 at once, taking no more
-    /// steps; if it gives another state than the one awaited, it asks again after
-    /// [`AWAIT_POLL`]; else it goes on ([`Caller::next`]).
     fn answered(&mut self, reply: &OpReply, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
         if let OpReply::LeaseStatus(LeaseStatusReply {
             last: Some(Last::Command(command)),
@@ -1316,9 +1146,6 @@ impl Caller {
         self.next(replies)
     }
 
-    /// Takes the steps up to the next op, and makes it, or exits with 0 once there are none,
-    /// unless it has exited, in `replies`. Returns whether the session is to end: once the op
-    /// before an end is sent, before its answer.
     fn next(&mut self, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
         loop {
             let (call, payload, less) = match self.steps.pop_front() {
@@ -1382,8 +1209,6 @@ impl Caller {
         }
     }
 
-    /// Makes an op of `call`, with `payload`, whose reply is bounded by `less`, as [`Step::Op`]
-    /// gives it, in `replies`.
     fn make(
         &mut self,
         call: OpCall,
@@ -1399,11 +1224,6 @@ impl Caller {
         }
     }
 
-    /// Makes a model request that names `model`, through Chat Completions if `chat`, in
-    /// `replies`, whose input is the first of what it `said`, then an item for each of the rest
-    /// whose content is a list that holds it, unless `fields` sets it, and whose body holds
-    /// `fields` too; and returns whether it did: without the model endpoint, the command prints
-    /// that the connection was refused, and exits with 1, taking no more steps.
     fn request(
         &mut self,
         (model, chat): (&str, bool),
@@ -1456,11 +1276,6 @@ impl Caller {
         true
     }
 
-    /// Takes `response`, a frame of the response to a model request, with its `body`: prints
-    /// its head on a line of its own, and its body after it, each line break shown as `\n`, and
-    /// once what the next step waits for of it has come, takes the steps that follow
-    /// ([`Caller::next`]), returning what that does. Returns `None` for a frame that answers no
-    /// model request in flight.
     fn heard(
         &mut self,
         response: ToSandbox,
@@ -1496,7 +1311,6 @@ impl Caller {
         Some(self.next(replies))
     }
 
-    /// Prints `text` on a line of its own.
     // Each line ends as the next begins, so that what it printed of a response is the same
     // whether the response's end comes before its output is collected or after.
     fn print(&mut self, text: &str) {
@@ -1506,7 +1320,6 @@ impl Caller {
         self.stdout.push_str(text);
     }
 
-    /// Exits with `code`, in `replies`, unless it has exited.
     fn exit(&mut self, code: i32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
         if self.exited {
             return;
@@ -1517,8 +1330,6 @@ impl Caller {
     }
 }
 
-/// Whether `reply` gives `state`, a state's name, or `transfer <end>` for a lease's status whose
-/// last is a transfer that ended so, `moved` or `failed`.
 fn reached(reply: &OpReply, state: &str) -> bool {
     let Some(end) = state.strip_prefix("transfer ") else {
         return state_name(reply) == state;
@@ -1535,8 +1346,6 @@ fn reached(reply: &OpReply, state: &str) -> bool {
     json!(ended).as_object().unwrap().contains_key(end)
 }
 
-/// The state a status or a lease's status gives, as `sandboxctl` prints it, or `""` for any
-/// other reply.
 fn state_name(reply: &OpReply) -> String {
     match reply {
         OpReply::Status(StatusReply { state, .. }) => match state {
@@ -1553,24 +1362,32 @@ fn state_name(reply: &OpReply) -> String {
     }
 }
 
-/// The step that `arg` gives, in the form the comment below lays out.
+// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `judge
+// <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
+// submission, where a payload that is a number is that many bytes of `x`, and any other is its
+// own bytes; `lease_open <grant> [<seconds>]`, `lease_run <lease> <seconds>|- <argv>...`, without
+// a timeout for `-`, `lease_status <lease>` or `lease_close <lease>`; `lease_put <lease> <tree>
+// <to> [replace]` or `lease_get <lease> <from> <to>`. An op is made once the one before it is
+// answered. `ops at least <seconds> less` exits 1 unless the reply's remaining seconds fell by
+// `seconds` since an earlier ops reply.
+//
+// `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
+// <lease> <state>` likewise with `lease_status <lease>`; `await_transfer <lease> moved|failed`
+// until its last transfer ended so.
+//
+// `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
+// input, then each `part`, and the next step waits for its response's end; the body holds too the
+// fields of each part that is a JSON object, in place of an input, or of the conversation if they
+// hold its field. `chat` is alike through Chat Completions; `ask <model> <text>` is one whose
+// response's first part the next step waits for.
+//
+// `result` writes a judge's result of what a lease's command printed, or a model answered;
+// `sleep <seconds>`; `exit` exits the command with 0, and the steps after it still play, as a
+// process the command left would; `release` lets a collect of a directory named `held` go, and
+// any later one. `crash` and `close` end the session: after an op, `crash` reads nothing more as
+// the op goes out, so that its reply, which can't be written, ends the session, and `close`
+// closes the connection, so that the end reaches the gateway behind the op.
 fn step(arg: &str) -> Step {
-    // A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `judge
-    // <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
-    // submission, where a payload that is a number is that many bytes of `x`, and any other is its
-    // own bytes; `lease_open <grant> [<seconds>]`, `lease_run <lease> <seconds>|- <argv>...`,
-    // without a timeout for `-`, `lease_status <lease>` or `lease_close <lease>`; `await <job>
-    // <state>`, which makes `status <job>` until its reply's state is `state`, or `await_lease
-    // <lease> <state>`, `lease_status <lease>` likewise, or `await_transfer <lease> moved|failed`,
-    // until its last transfer ended so; `lease_put <lease> <tree> <to> [replace]` or `lease_get
-    // <lease> <from> <to>`; `model <model> <text> [<part>...]`, a model request that names `model`,
-    // with `text` as its input, then each `part`, whose response's end the next step waits for,
-    // and whose body holds too the fields of each part that is a JSON object, in place of an
-    // input, or of the conversation if they hold its field; `chat <model> <text> [<part>...]`,
-    // alike through Chat Completions; or `ask <model> <text>`, one whose response's first part it
-    // waits for; `result`, a judge's result of what a lease's command printed, or a model
-    // answered ([`Step::Result`]); or `sleep <seconds>`, `exit`, `release` ([`Step::Release`]),
-    // or the session's end, `crash` or `close`.
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {
@@ -1633,8 +1450,6 @@ fn step(arg: &str) -> Step {
     }
 }
 
-/// The model request of kind `kind` that names `model` and of which `words` say the rest
-/// ([`step`]).
 fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
     let (fields, said): (Vec<&str>, Vec<&str>) =
         (words.iter()).partition(|word| word.starts_with('{'));
@@ -1651,7 +1466,6 @@ fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
     }
 }
 
-/// The lease op that `words`, a step's, make ([`step`]).
 fn lease_call(words: &[&str]) -> OpCall {
     let lease = || words[1].parse().unwrap();
     match words {
@@ -1690,24 +1504,16 @@ fn lease_call(words: &[&str]) -> OpCall {
     }
 }
 
-/// The directories and files put in a sandbox, by path.
 #[derive(Default)]
 struct Files {
     by_path: BTreeMap<String, Vec<u8>>,
     dirs: BTreeSet<String>,
-    /// The mode of each directory and file put, by path; one made only as a tree's root has
-    /// [`dir_mode`]'s.
     modes: BTreeMap<String, Mode>,
-    /// The directory of the tree being put, if one is, unless putting it failed.
     dir: Option<AbsolutePath>,
-    /// The path of the file being put, if one is.
     file: Option<String>,
 }
 
 impl Files {
-    /// Begins the tree put in `dir` on `stream`, made as `root` says, which fails, in `replies`,
-    /// if it is made new in a directory that holds what was put before, as `sandboxd` fails it,
-    /// and which first removes what was put there before to replace it.
     fn begin(
         &mut self,
         stream: u32,
@@ -1764,19 +1570,16 @@ impl Files {
         file.unwrap().extend_from_slice(body);
     }
 
-    /// Ends the tree put on `stream`, answering it in `replies` unless it failed.
     fn end(&mut self, stream: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
         if self.dir.take().is_some() {
             replies.push((FromSandbox::Done { stream }, Vec::new()));
         }
     }
 
-    /// The mode of the directory or file at `path`, or, unless one was put there, `made`.
     fn mode(&self, path: &str, made: Mode) -> Mode {
         self.modes.get(path).copied().unwrap_or(made)
     }
 
-    /// The files put below `dir`, by their paths below it.
     fn below<'f>(&'f self, dir: &str) -> impl Iterator<Item = (&'f str, &'f [u8])> {
         let inside = format!("{dir}/");
         let files = self.by_path.iter();
@@ -1784,12 +1587,6 @@ impl Files {
     }
 }
 
-/// What a `judge` command, whose exit comes on `stream`, does with `payload`, the file put at
-/// the path its argument gives, if there is one: for `slow`, it runs until the sandbox is
-/// frozen; for `stall`, it stalls the sandbox; for any other, it writes the result
-/// `{"raw_score": n}`, where `n` is the payload's size, which it returns,
-/// and exits with 0, the result padded with spaces to a byte over [`RESULT_MAX_BYTES`] for
-/// `large`. Without a payload, it exits with 1.
 fn judge(
     payload: Option<&Vec<u8>>,
     stream: u32,
@@ -1822,18 +1619,13 @@ fn judge(
     }
 }
 
-/// Collects `dir` on `stream`, in `replies`: [`COLLECTED`], unless a file put there is named so,
-/// from `out` the judge's `result`
-/// too, if it wrote one, and from `log` what the command that makes ops printed, if anything;
-/// each file in `dir` that a `print` wrote ([`Served::start`]); and each directory and file put
-/// below `dir`. The collect of a directory named `held` waits for a step to release it
-/// ([`Step::Release`]).
 fn collect(
     stream: u32,
     dir: &AbsolutePath,
     served: &mut Served,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
 ) {
+    // A collect of a directory named `held` waits for the `release` step.
     if dir.as_str().ends_with("/held") && !served.caller.as_ref().is_some_and(|c| c.released) {
         served.held = Some((stream, dir.clone()));
         return;
@@ -1848,7 +1640,6 @@ fn collect(
         }
     }
     let served = &*served;
-    // A tree put there, as one collected elsewhere first, may hold its own.
     let put = served
         .files
         .below(dir.as_str())
@@ -1886,10 +1677,6 @@ fn collect(
     replies.push((FromSandbox::End { stream }, Vec::new()));
 }
 
-/// What a fake `sandboxd`'s session holds of the commands it started: the one that makes ops, if
-/// one has started, the files put, a judge's result, if one wrote it, what each `print` wrote, by
-/// the path of its standard output, and the commands that run until the sandbox is frozen, or a
-/// kill ends them, by stream.
 #[derive(Default)]
 struct Served {
     caller: Option<Caller>,
@@ -1897,14 +1684,10 @@ struct Served {
     result: Option<Vec<u8>>,
     printed: BTreeMap<String, String>,
     running: BTreeSet<u32>,
-    /// The collect of a `held` directory, by its stream, until a step releases it.
     held: Option<(u32, AbsolutePath)>,
 }
 
 impl Served {
-    /// Starts `launch` on `stream`, in a sandbox that serves the model endpoint if `model`,
-    /// answering in `replies`, and returns whether its `sandboxd` is to end the session, as its
-    /// program says (the comment below).
     fn start(
         &mut self,
         stream: u32,
@@ -1913,18 +1696,6 @@ impl Served {
         replies: &mut Vec<(FromSandbox, Vec<u8>)>,
         shared: &Mutex<Status>,
     ) -> bool {
-        // By its program: `exit` exits at once with the status its argument gives; `stall` starts,
-        // then stalls the sandbox; `crash` starts, then its `sandboxd` ends the session; `ops`
-        // takes the steps its arguments give (`step`), making each op, or model request, once the
-        // one before it is answered, then exits with 0, once the response to its last model request
-        // has ended, unless it has, or its `sandboxd` ends the session as a step asks, and prints
-        // each response to its model requests, which it makes only with the model endpoint, and
-        // whose end a freeze waits for; `judge` judges the payload put at the path its argument
-        // gives (`judge`); `print` writes its arguments to its standard output, `fill <n> <text>`
-        // that many `x`s and then the text, and `list` each directory and file put below the
-        // directory its argument gives, by path, with its mode, and each file's contents, and each
-        // exits with 0; any other runs until the sandbox is frozen, or a
-        // kill ends it, as signal 9 does.
         replies.push((FromSandbox::Done { stream }, Vec::new()));
         match launch.argv.program() {
             "exit" => {
@@ -1983,8 +1754,6 @@ impl Served {
         false
     }
 
-    /// Kills the command on stream `command`, if it runs, as signal 9 does, and answers the kill
-    /// on `stream`, in `replies`.
     fn kill(&mut self, stream: u32, command: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
         if self.running.remove(&command) {
             let status = ExitStatus::Signal(9);
@@ -1998,8 +1767,6 @@ impl Served {
     }
 }
 
-/// Answers the session's requests on `connection` until the session ends, or, once stalled,
-/// reads nothing more, serving the model endpoint if `model`.
 fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let mut served = Served::default();
@@ -2078,9 +1845,6 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
     }
 }
 
-/// Sends `replies` on `connection`, in order, then ends the session if `crashed`, as
-/// [`End::Close`] says if `close`, and else as [`End::Crash`] does. Returns whether the session
-/// goes on.
 fn send(
     connection: &mut Connection,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,

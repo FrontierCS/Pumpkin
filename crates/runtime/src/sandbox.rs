@@ -1,8 +1,9 @@
-//! The runtime's one start path, which every sandbox of a run starts on, on the provider its role
-//! is placed on, and what each role's sandbox needs of it: its IR command launched, and what it
-//! wrote collected. A start ends once its sandbox has ended, as the run ends every start once a
-//! signal has come. Each sandbox that a start created is recorded with the GPUs its `sandboxd`
-//! saw, and each delete's outcome.
+//! The one path every sandbox of a run starts on, and where each is recorded and deleted.
+//!
+//! [`Published`] holds what a run puts on its providers before the first start. [`Sandboxes`]
+//! starts sandboxes from it and remembers each one it created, so that a delete is recorded
+//! against the sandbox's own record, and [`sweep`] deletes whatever a provider still lists of
+//! the run.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -32,20 +33,19 @@ use stdx::{Context, Deadline};
 
 use super::{Host, Input, Stopped, interruption, log, record};
 
-/// The most entries a collected tree may hold.
+/// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
 
-/// What a sandbox's `/pumpkin` holds at most: anything collected from below it fits.
+// What a sandbox's `/pumpkin` holds at most: anything collected from below it fits.
 const PUMPKIN: Limits = Limits {
     bytes: PUMPKIN_BYTES,
     entries: ENTRIES,
 };
 
-/// The roles of `placed` that are placed on `provider`, as [`Provider::reserve`] takes them:
-/// in the work phase, the agent, the judge of each of its judge grants, each grant running one
-/// call at a time, and the runner of each lease grant those hold, as many as the grant's leases
-/// open at once; then the score's judge, with the runners it leases, which start only once they
-/// have gone.
+/// The roles that `provider` hosts, in the phases that [`Provider::reserve`] takes: the work
+/// phase's roles (the agent, the judge of each judge grant, and the runner of each lease grant
+/// that the others hold), then the scorer's (the scorer and the runners it holds). The second
+/// starts only once the first has ended. A phase with no role on `provider` is left out.
 pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
     let workflow = placed.workflow();
     let scorer = workflow.score().slot.judge().role();
@@ -70,8 +70,8 @@ pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
         .collect()
 }
 
-/// `role` of `workflow`, as a provider sees it: as many of its sandboxes run at once as the lease
-/// grant that names it opens leases at once, if it is a runner, and else one.
+// A runner's sandboxes run at once as many as its grant opens leases at once, and any other
+// role's, one.
 fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
     let sandbox = workflow.sandbox(role);
     let leased = (workflow.lease_grants()).find(|(_, grant)| grant.runner.role() == role);
@@ -83,36 +83,27 @@ fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
     }
 }
 
-/// What the sandboxes of a run run, published on the providers its roles are placed on, and where
-/// they meet the gateway: what the run makes of them before it starts ([`Published::create`]).
+/// What a run puts on each provider before any sandbox starts, and the directory of its sockets.
 pub(super) struct Published<'p> {
     providers: ByProvider<Hosting<'p>>,
-    /// Each role's image, as its provider published it.
     images: ByRole<ImageRef>,
     sockets: Sockets,
 }
 
-/// The sandboxes of one run of a workflow on the providers its roles are placed on, once the run
-/// has started: what they run, published, and where they meet the gateway.
+/// Starts, records and deletes the sandboxes of one run.
 pub(super) struct Sandboxes<'p, H: Host> {
     run: RunTag,
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
-    /// Each role's image, as its provider published it.
     images: ByRole<ImageRef>,
     sockets: Sockets,
-    /// The run's record, which keeps each sandbox that a start created.
     record: &'p Path,
-    /// The run's host, which syncs what the record keeps of each sandbox.
     host: &'p H,
-    /// A sender into the loop's inbox, which takes the run log's record of the GPUs that each
-    /// sandbox's `sandboxd` saw, and of each delete.
     logged: Sender<Input>,
-    /// Each sandbox a start created, which tells the sweep where the record keeps it. Shared by
-    /// the threads that start and delete sandboxes: the loop's and each judge call's.
+    // Every sandbox created, which tells a delete where the record keeps it. Shared by the
+    // threads that start and delete sandboxes: the loop's and each child's.
     created: Mutex<Vec<Made<'p>>>,
-    /// How long a start waits between its lists of its sandbox's provider: a fortieth of the
-    /// quickest startup of the run's roles, at most 15 s.
+    // How long a start waits between its lists of its sandbox's provider.
     between_looks: Duration,
 }
 
@@ -121,34 +112,26 @@ struct Made<'p> {
     on: &'p Name,
     id: SandboxId,
     which: Which,
-    /// The GPUs that its `sandboxd` saw as it started, once its session says them
-    /// ([`Session::gpus`]).
     gpus: Option<Vec<GpuModel>>,
 }
 
-/// A provider that roles of the run are placed on, the `sandboxd` it published, which each of
-/// its creates names, and where its sandboxes meet the gateway.
 struct Hosting<'p> {
     provider: &'p dyn Provider,
     sandboxd: SandboxdRef,
     meets: Meets<'p>,
 }
 
-/// Where a provider's sandboxes meet the gateway, as its [`Meeting`] says, with its create.
+/// How a provider's sandboxes and the gateway meet ([`Meeting`]), with what the run supplies for
+/// it.
 #[derive(Clone, Copy)]
 enum Meets<'p> {
-    /// At a socket of each one's own, among the run's [`Sockets`].
     Sockets(&'p dyn Creator<SocketDial>),
-    /// At the address of the run's grant listener.
     Grants(&'p dyn Creator<TcpDial>, &'p GrantListener),
-    /// At the endpoint each one's create gives, which the run's dialer dials.
     Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
 }
 
 impl Meets<'_> {
-    /// Creates the sandbox that `create` describes where it meets the gateway, issued among
-    /// `sockets` if at a socket, and returns what the create made and the registration that
-    /// accepts the sandbox's session.
+    /// Issues what the new sandbox dials, creates it, and returns the registration of its session.
     fn create(
         self,
         sockets: &Sockets,
@@ -173,15 +156,11 @@ impl Meets<'_> {
     }
 }
 
-/// One of a run's sandboxes, by which its start names it as no other sandbox of the run, and
-/// finds its role.
+/// Whose sandbox: the agent's, a judge call's, or an instance of a lease's runner.
 #[derive(Clone, Copy)]
 pub(super) enum Which {
-    /// The agent's, `agent`, which a run starts once.
     Agent,
-    /// Judge call `job`'s, `job-<number>`, of judge `judge`.
     Job(JobId, JudgeId),
-    /// Lease `lease`'s, `lease-<number>`, of runner `runner`, as the given instance of its role.
     Lease(LeaseId, RunnerId, u32),
 }
 
@@ -194,7 +173,6 @@ impl Which {
         }
     }
 
-    /// Which instance of its role it is ([`Create::instance`]): a lease's, or else the only one.
     fn instance(self) -> u32 {
         match self {
             Self::Agent | Self::Job(..) => 0,
@@ -210,7 +188,6 @@ impl Which {
         }
     }
 
-    /// Its directory in the run's record, which the record's layout names (`record`).
     pub(super) fn record_dir(self) -> String {
         match self {
             Self::Agent => "agent".to_owned(),
@@ -219,7 +196,6 @@ impl Which {
         }
     }
 
-    /// What it is, as messages about it name it, such as `the judge's` sandbox.
     pub(super) fn noun(self) -> &'static str {
         match self {
             Self::Agent => "the agent's",
@@ -228,7 +204,8 @@ impl Which {
         }
     }
 
-    /// The sandbox's name within its run, which its socket directory has too.
+    /// The sandbox's name, which no other sandbox of its run has: `agent`, `job-<n>` or
+    /// `lease-<n>`.
     pub(super) fn name(self) -> Name {
         let name = match self {
             Self::Agent => SandboxName::Agent,
@@ -248,9 +225,8 @@ impl Which {
     }
 }
 
-/// A sandbox's name within its run, as [`Which::name`] gives it and the run log reads it back:
-/// the agent's, job `n`'s or lease `n`'s, `agent`, `job-<n>` or `lease-<n>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A sandbox's name within its run, as [`Which::name`] makes it.
 pub(super) enum SandboxName {
     Agent,
     Job(u64),
@@ -286,7 +262,7 @@ impl<'de> Deserialize<'de> for SandboxName {
     }
 }
 
-/// A sandbox that started, with its session, set up.
+/// A sandbox whose session is up, to be deleted through [`Sandboxes::delete`].
 pub(super) struct Started {
     which: Which,
     id: SandboxId,
@@ -294,12 +270,13 @@ pub(super) struct Started {
 }
 
 impl<'p> Published<'p> {
-    /// Publishes what `placed`'s sandboxes run on each of `providers`, the providers its roles are
-    /// placed on: `sandboxd`, a static binary, then each image a role placed there names, once;
-    /// then makes the directory of the run's sockets in `record`, the run's record
-    /// ([`record::sockets`]), which must not exist yet. The sandboxes of a private provider meet
-    /// the gateway at `private` instead, and those of one whose sandboxes listen, through `dialer`.
-    /// Stops as interrupted before each publish once a signal has come.
+    /// Publishes `sandboxd` on each provider that hosts a role, and each role's image there, once
+    /// however many roles name it, then makes the run's sockets directory in `record`, which
+    /// must not exist yet. A provider that is private meets the gateway at `private`, which then
+    /// must be some; one whose sandboxes listen, through `dialer`.
+    ///
+    /// Stops as interrupted before each publish once a signal has come, as a publish may take
+    /// minutes.
     pub(super) fn create(
         providers: &ByProvider<&'p dyn Provider>,
         placed: &Placed,
@@ -309,9 +286,9 @@ impl<'p> Published<'p> {
         record: &Path,
     ) -> Result<Self, Stopped> {
         let workflow = placed.workflow();
-        // Each publish is a provider call that a stop doesn't cut short, and one may take
-        // minutes, as a push does; so a signal is heeded before each, not after them all.
         let providers = placed.by_provider(|name| {
+            // Each publish is a provider call that a stop doesn't cut short, and one may take
+            // minutes, as a push does; so a signal is heeded before each, not after them all.
             interruption::check()?;
             let provider = *providers.get(name);
             let meets = match (provider.meeting(), private) {
@@ -350,8 +327,8 @@ impl<'p> Published<'p> {
                 }
             }
         })?;
-        // In the record, so that they go where it goes: `record::create` made it, and checked
-        // the path to it, so that no other user may rename entries in it, or above it, as
+        // In the record, so that they go where it goes: `record::create` made it, and checked the
+        // path to it, so that no other user may rename entries in it, or above it, as
         // `Sockets::create` needs.
         let sockets =
             Sockets::create(record::sockets(record)).map_err(|error| error.to_string())?;
@@ -364,11 +341,6 @@ impl<'p> Published<'p> {
 }
 
 impl<'p, H: Host> Sandboxes<'p, H> {
-    /// The sandboxes of run `run`, of `placed`, which start from what was `published` for them,
-    /// once the run has started on `host`: each start or delete keeps what it made in
-    /// `record`, the run's, synced on `host`, and sends `logged` the run log's record of the GPUs
-    /// each sandbox's `sandboxd` saw ([`log::Entry::Gpus`]) and of each delete
-    /// ([`log::Entry::Deleted`]) but a started sandbox's ([`Sandboxes::delete`]).
     pub(super) fn new(
         published: Published<'p>,
         run: RunTag,
@@ -382,8 +354,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             images,
             sockets,
         } = published;
-        // A start ends within a fortieth of its role's startup, or 15 s, and a list's time, of
-        // its sandbox's end; so the looks follow the run's quickest startup.
+        // A start ends within a fortieth of its role's startup, or 15 s, and a list's time, of its
+        // sandbox's end; so the looks follow the run's quickest startup.
         let between_looks = (placed.workflow().roles())
             .fold(Duration::from_secs(15), |between, (role, _)| {
                 between.min(placed.startup(role) / 40)
@@ -402,14 +374,13 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Starts `which` sandbox, its create given the run's `hard_end` ([`Create::hard_end`]), and
-    /// accepts its session, set up, by `by`, its arrivals sent on `arrivals` as `wrap` makes them
-    /// ([`Registration::accept`]); it makes ops of at most `ops`, and serves its role's model
-    /// route, if it has one. A sandbox not started by then, found ended before it connects
-    /// ([`Sandboxes::ended`]), or whose run a signal interrupts first, is deleted, its console
-    /// quoted in the error, with why the last list or the delete failed.
+    /// Creates the sandbox of `which`, waits until `by` for its session, and sets it up. The
+    /// session sends what it receives, wrapped by `wrap`, to `arrivals`. `ops` is the largest op
+    /// payload the session takes, or none for a session that takes no ops; `hard_end` bounds how
+    /// long the sandbox may live should the run's driver die.
     ///
-    /// [`Registration::accept`]: gateway::Registration::accept
+    /// A sandbox that was created but didn't start is deleted before this fails, and the error
+    /// adds the end of its console, if the provider could read it.
     pub(super) fn start<T: Send + 'static>(
         &self,
         which: Which,
@@ -420,9 +391,9 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, String> {
         let name = which.name();
+        let now = UnixTime::of(SystemTime::now())?;
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
         // end, as the run is abandoned then.
-        let now = UnixTime::of(SystemTime::now())?;
         let by_unix = (by.remaining()).map_or(now, |left| now.saturating_add(left));
         let role = which.role(self.workflow());
         let model = self.workflow().sandbox(role).model_route.is_some();
@@ -449,11 +420,14 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             gpus: None,
         };
         let recorded = self.write_sandbox(&made, None);
+        // Listed before the write's failure is looked at, as `unstarted` finds it there.
         stdx::unpoisoned(self.created.lock()).push(made);
         if let Err(error) = recorded {
             return Err(self.unstarted(which, &id, &error));
         }
         let looks = Looks::new();
+        // The wait ends at once for a signal, and for a sandbox that its provider lists as
+        // ended, which will never connect.
         let stopped = || {
             interruption::signal().is_some()
                 || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
@@ -479,8 +453,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Records that `which` sandbox, `id`, saw `gpus` as it started: in its `sandbox.json`, and in
-    /// the run log.
     fn saw(&self, which: Which, id: &SandboxId, gpus: &[GpuModel]) -> Result<(), String> {
         let on = self.on(which);
         let mut created = stdx::unpoisoned(self.created.lock());
@@ -506,16 +478,15 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Whether `provider`'s list of the run finds sandbox `id` ended: a list leaves it out only
-    /// once it is deleted, or has ended and been freed ([`Sweep::list`]), so only a list that
-    /// finds it running says it hasn't; or why the list failed.
+    // A list leaves a sandbox out only once it is deleted, or has ended and been freed
+    // (`Sweep::list`), so only a list that finds it running says it hasn't ended.
     fn ended(&self, provider: &dyn Provider, id: &SandboxId) -> Result<bool, String> {
         let listed = provider.list(&self.run)?;
         Ok(!(listed.iter()).any(|listed| listed.id == *id && !listed.ended))
     }
 
-    /// Why sandbox `id`, `which` of the run, whose session wasn't set up for `error`, didn't
-    /// start: `error`, the end of its console, and whether deleting it failed, which this tries.
+    // Deletes a sandbox that didn't start. The message is `error` with the sandbox's console and
+    // the failure of the delete or of its record, if any.
     fn unstarted(&self, which: Which, id: &SandboxId, error: &str) -> String {
         let provider = self.provider(which);
         let mut parts = vec![format!("sandbox {}: {error}", id.as_str())];
@@ -551,10 +522,10 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         self.providers.get(self.on(which)).provider
     }
 
-    /// Deletes a sandbox that started, then ends its session. Returns the run log's record of the
-    /// delete, if it succeeded, which the thread that deletes it logs in its turn, and whether the
-    /// delete failed. So the agent's teardown, which the loop performs, is logged as the loop
-    /// performs it, before what the run's children report meanwhile.
+    /// Deletes the sandbox and drops its session. Returns the log entries of the delete, for the
+    /// caller to log in its turn, so that the agent's teardown, which the loop performs, is logged
+    /// as the loop performs it, before what the run's children report meanwhile; and its failure,
+    /// if it or the record of it failed.
     pub(super) fn delete(&self, started: Started) -> (Vec<log::Entry>, Result<(), String>) {
         let Started { which, id, session } = started;
         let provider = self.provider(which);
@@ -566,8 +537,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         (logged, super::failed_also(deleted, recorded))
     }
 
-    /// Records in the run's record the sandbox that `made` names, as [`record::write_sandbox`]
-    /// does, with `deleted`, the outcome of its latest delete, if it has had one.
     fn write_sandbox(
         &self,
         made: &Made<'_>,
@@ -583,9 +552,9 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         record::write_sandbox(self.host, &dir, on, id, gpus.as_deref(), deleted)
     }
 
-    /// Records `deleted`, the outcome of a delete of sandboxes `ids` on provider `on`, for each
-    /// of them that a start of the run created. Returns, if it succeeded, the run log's record of
-    /// each one's delete, and whether recording failed.
+    // Writes `deleted` into the record of each of `ids` that this run created. Returns the log
+    // entries of the delete, none if it failed, one per id, named by its sandbox if this run
+    // created it, and the failure of the writes, if any.
     fn record_deletes(
         &self,
         on: &Name,
@@ -627,8 +596,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Deletes, on each of the run's providers, every sandbox of the run that it still lists
-    /// ([`sweep`]). Returns why a provider's list or delete failed, if one did.
+    /// Deletes what each provider still lists of the run, so that a run ends with none of its
+    /// sandboxes left, and records each delete.
     pub(super) fn sweep(&self) -> Result<(), String> {
         let swept = (self.providers.iter()).map(|(name, hosting)| {
             let record = |ids: &[SandboxId], deleted: &Result<(), String>| {
@@ -647,18 +616,16 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     }
 }
 
-/// A sandbox of the run that a delete ended, as the run log records it
-/// ([`log::Entry::Deleted`]).
 pub(super) struct Deleted {
-    /// Its name within the run ([`Which::name`]), if a start of the run created it.
     pub(super) sandbox: Option<Name>,
     pub(super) provider: Name,
     pub(super) id: SandboxId,
 }
 
-/// Deletes every sandbox of run `run` that `provider`, the provider named `name`, still lists,
-/// and each of `also`, listed or not, calling `after` with all it deletes and the delete's
-/// outcome, and returns the listed ones' ids, or why the list, the delete or `after` failed.
+/// Deletes the sandboxes of `run` that `provider` lists, and those of `also` that it doesn't,
+/// then calls `after` with the ids deleted and the result of the delete, to record it, whichever
+/// it was. Returns the listed ids, or why the list, the delete or `after` failed. Nothing is
+/// deleted, nor `after` called, if there are none.
 pub(super) fn sweep(
     name: &Name,
     provider: &dyn Sweep,
@@ -685,13 +652,11 @@ pub(super) fn sweep(
     Ok(ids)
 }
 
-/// A start's looks for its sandbox's end, made from within its accept's wait, each once the time
-/// between looks has passed since the last.
+/// Looks at whether a sandbox has ended, at most once per `between`, and keeps the failure of
+/// the last look if no look has succeeded since.
 struct Looks {
     last: Cell<Instant>,
-    /// Whether a look found the sandbox ended.
     ended: Cell<bool>,
-    /// Why the last look's list failed, if it did.
     failed: RefCell<Option<String>>,
 }
 
@@ -704,9 +669,8 @@ impl Looks {
         }
     }
 
-    /// Whether a look found the sandbox ended, looking with `look` if `between` has passed since
-    /// the last look. The first comes `between` after the create returned, so every list speaks
-    /// for the sandbox it made.
+    // The first look comes `between` after the create returned, so every list speaks for the
+    // sandbox it made.
     fn ended(&self, between: Duration, look: impl FnOnce() -> Result<bool, String>) -> bool {
         if !self.ended.get() && self.last.get().elapsed() >= between {
             match look() {
@@ -723,14 +687,13 @@ impl Looks {
         self.ended.get()
     }
 
-    /// Whether a look found the sandbox ended, and why the last list failed, if it did.
     fn found(self) -> (bool, Option<String>) {
         (self.ended.get(), self.failed.into_inner())
     }
 }
 
-/// How to start `command` in a sandbox: as the IR says, in [`command_env()`]'s environment, with
-/// an empty standard input, and its output at [`command_stdout()`] and [`command_stderr()`].
+/// How a sandbox runs `command`: with no standard input, and its output written into the
+/// sandbox's `.pumpkin` directory.
 pub(super) fn launch(command: &Command) -> Launch {
     let Command { argv, env, cwd } = command;
     Launch {
@@ -743,9 +706,9 @@ pub(super) fn launch(command: &Command) -> Launch {
     }
 }
 
-/// Collects the sandbox's `dir`, below [`pumpkin_dir()`], into the same path below `record`, a
-/// new directory there, within [`PUMPKIN`], by `by`. After a failure, it holds what arrived
-/// before it.
+/// Collects `dir` of the sandbox's `.pumpkin` directory into the same path under `record`, a new
+/// directory there, within the `PUMPKIN` limits, by `by`. After a failure it holds what arrived
+/// before.
 pub(super) fn collect(
     session: &mut Session,
     dir: &RelativePath,
