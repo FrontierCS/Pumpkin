@@ -406,6 +406,11 @@ impl Closed<'_> {
         &self.headers
     }
 
+    /// The model that the request named, as the route allows it.
+    pub(crate) fn model(&self) -> &ModelName {
+        &self.model.0
+    }
+
     /// The request's body, as [`Route::close`] parsed it.
     pub(crate) fn body(&self) -> &[u8] {
         &self.body

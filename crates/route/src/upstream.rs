@@ -74,16 +74,19 @@ pub struct Upstream {
 /// did ([`Usage`]), and the failure that it stated, if it did ([`Failure`]).
 #[derive(Debug)]
 pub enum Answer {
-    /// With the upstream's response, whole, which had `status`.
+    /// With the upstream's response, whole, which had `status`, from `model`, as the route
+    /// allows it.
     Forwarded {
+        model: ModelName,
         status: u16,
         request_id: Option<String>,
         usage: Option<Usage>,
         failed: Option<Failure>,
     },
-    /// With the upstream's response, which had `status`, cut short: it broke off, was given up
-    /// on, or the session stopped taking it.
+    /// With the upstream's response, which had `status`, from `model`, as the route allows it,
+    /// cut short: it broke off, was given up on, or the session stopped taking it.
     Cut {
+        model: ModelName,
         status: u16,
         request_id: Option<String>,
         usage: Option<Usage>,
@@ -272,10 +275,8 @@ impl Upstream {
         client.keep.request(closed.body(), Some(closed.apart()));
         let call = self.agent.post(self.url(closed)).config();
         let call = call.timeout_global(bound(client.by)).build();
-        let call = closed
-            .headers()
-            .iter()
-            .fold(call, |call, (name, value)| call.header(name, value));
+        let call =
+            (closed.headers().iter()).fold(call, |call, (name, value)| call.header(name, value));
         let (name, key) = &self.authorization;
         let call = call.header(name, key);
         forwarding();
@@ -303,6 +304,7 @@ impl Upstream {
             Ok(client) => client,
             Err(error) => {
                 answered(Answer::Cut {
+                    model: closed.model().clone(),
                     status,
                     request_id,
                     usage: None,
@@ -316,14 +318,17 @@ impl Upstream {
         let mut body = response.into_body().into_reader();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
         let (usage, failed) = scan.finish();
+        let model = closed.model().clone();
         answered(match relayed {
             Relayed::Whole => Answer::Forwarded {
+                model,
                 status,
                 request_id,
                 usage,
                 failed,
             },
             Relayed::BrokeOff | Relayed::Unsent(_) => Answer::Cut {
+                model,
                 status,
                 request_id,
                 usage,

@@ -147,15 +147,15 @@ impl<'h, H: Host> Log<'h, H> {
         self.sync()
     }
 
-    /// Appends how `caller`'s route answered its request `request`, observed at its end:
-    /// `{"kind": "model_answered", "caller": c, "request": n, "upstream_status": u, "answer": a,
-    /// "kept": k}`; `"upstream"` and `"api"` as [`ModelAnswer`] says; `"request_id"` if the
-    /// upstream named one; `"usage"` if reported ([`Usage`]); `"failed": {"code": c}` if it
-    /// stated a failure, without `"code"` if it gave none ([`route::Failure`]); and if a response
-    /// came, `"first_byte_ns"` and `"first_token_ns"` as [`ModelAnswer`] says, where it has them.
-    /// `u` is the upstream's status, or `null` if no response came, `a` the [`Answer`]'s kind, with
-    /// a refusal's or a bar's status and message, but never a body, and `k` where the record keeps
-    /// the exchange ([`Exchange::kept`](super::Exchange::kept)).
+    /// Appends how `caller`'s route answered its request `request`, observed at its end: `{"kind":
+    /// "model_answered", "caller": c, "request": n, "upstream_status": u, "answer": a, "kept": k}`;
+    /// `"upstream"` and `"api"` as [`ModelAnswer`] says, `"model"` as [`Answer`] does;
+    /// `"request_id"` if the upstream named one; `"usage"` if reported ([`Usage`]); `"failed":
+    /// {"code": c}` if it stated a failure, without `"code"` if it gave none ([`route::Failure`]);
+    /// and if a response came, `"first_byte_ns"` and `"first_token_ns"` as [`ModelAnswer`] says,
+    /// where it has them. `u` is the upstream's status, or `null` if no response came, `a` the
+    /// [`Answer`]'s kind, with a refusal's or a bar's status and message, but never a body, and `k`
+    /// where the record keeps the exchange ([`Exchange::kept`](super::Exchange::kept)).
     #[expect(
         clippy::too_many_lines,
         reason = "one place for each field of the record"
@@ -173,24 +173,28 @@ impl<'h, H: Host> Log<'h, H> {
             ended,
         } = answered;
         let answer = &answer;
-        let (upstream_status, request_id, (usage, failed), answer) = match answer {
+        let (model, upstream_status, request_id, (usage, failed), answer) = match answer {
             Answer::Forwarded {
+                model,
                 status,
                 request_id,
                 usage,
                 failed,
             } => (
+                Some(model),
                 Some(*status),
                 request_id,
                 (usage, failed),
                 json!({ "kind": "forwarded" }),
             ),
             Answer::Cut {
+                model,
                 status,
                 request_id,
                 usage,
                 failed,
             } => (
+                Some(model),
                 Some(*status),
                 request_id,
                 (usage, failed),
@@ -198,7 +202,7 @@ impl<'h, H: Host> Log<'h, H> {
             ),
             Answer::Barred { status, message } => {
                 let barred = json!({ "kind": "barred", "status": status, "message": message });
-                (None, &None, (&None, &None), barred)
+                (None, None, &None, (&None, &None), barred)
             }
             Answer::Refused {
                 upstream_status,
@@ -207,7 +211,7 @@ impl<'h, H: Host> Log<'h, H> {
                 message,
             } => {
                 let refused = json!({ "kind": "refused", "status": status, "message": message });
-                (*upstream_status, request_id, (&None, &None), refused)
+                (None, *upstream_status, request_id, (&None, &None), refused)
             }
         };
         let mut event = json!({
@@ -220,6 +224,9 @@ impl<'h, H: Host> Log<'h, H> {
         if let Some((upstream, api)) = taken {
             event["upstream"] = json!(upstream);
             event["api"] = json!(api);
+        }
+        if let Some(model) = model {
+            event["model"] = json!(model);
         }
         // Where no response came, the bytes kept are the route's refusal's.
         if upstream_status.is_some()
@@ -257,7 +264,7 @@ impl<'h, H: Host> Log<'h, H> {
                 });
                 self.observed(started, event, &[])
             }
-            Entry::ModelAnswered(request, answered) => self.model_answered(request, answered),
+            Entry::ModelAnswered(request, answered) => self.model_answered(request, *answered),
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
@@ -350,7 +357,7 @@ pub(super) enum Entry {
     ModelRequestStarted((Caller, u64), Duration),
     /// How a route answered a model request of the caller's, by its number
     /// ([`Log::model_answered`]).
-    ModelAnswered((Caller, u64), ModelAnswer),
+    ModelAnswered((Caller, u64), Box<ModelAnswer>),
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as its session says them:
     /// `{"kind": "sandbox_gpus", "sandbox": n, "gpus": [m, ...]}`, where `n` is its name within the
     /// run, and each `m` a GPU's model, as `nvidia-smi` names it. A sandbox whose `sandboxd` saw
