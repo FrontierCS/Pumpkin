@@ -10,6 +10,7 @@
 mod claude_code;
 mod codex;
 mod docker;
+mod zcode;
 
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
@@ -51,7 +52,11 @@ fn bundled() {
             harness/codex/LICENSE
             harness/codex/catalog.star
             harness/codex/codex.star
-            harness/codex/layer/Dockerfile"#]],
+            harness/codex/layer/Dockerfile
+            harness/node/layer/Dockerfile
+            harness/node/node.star
+            harness/zcode/layer/Dockerfile
+            harness/zcode/zcode.star"#]],
     );
 }
 
@@ -207,8 +212,8 @@ fn route(agent: &ir::Role) -> String {
     format!("route: {}\n", route.join(", "))
 }
 
-/// The header lists of `agent`'s route entries, and the layer `images` end with: what builds it
-/// and its recipe's lines, as [`shown`] has them.
+/// The header lists of `agent`'s route entries, and the library's `images`, all but the first,
+/// the task's: what builds each and its recipe's lines, as [`shown`] has them.
 fn layer(agent: &ir::Role, images: Vec<Shown>) -> String {
     let mut shown = String::new();
     for entry in agent.egress.model.as_ref().unwrap().as_slice() {
@@ -226,10 +231,11 @@ fn layer(agent: &ir::Role, images: Vec<Shown>) -> String {
             names(&entry.response_headers)
         );
     }
-    let [_, (layer, recipe)] = <[_; 2]>::try_from(images).unwrap();
-    let _ = writeln!(shown, "image: {layer}");
-    for line in recipe {
-        let _ = writeln!(shown, "  {line}");
+    for (image, recipe) in images.into_iter().skip(1) {
+        let _ = writeln!(shown, "image: {image}");
+        for line in recipe {
+            let _ = writeln!(shown, "  {line}");
+        }
     }
     shown
 }

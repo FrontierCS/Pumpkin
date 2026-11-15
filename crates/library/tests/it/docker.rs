@@ -31,15 +31,15 @@ impl Drop for Tagged {
     }
 }
 
-/// Builds `dockerfile` into an image tagged `tag`, given `base`, an image reference, as the
-/// named context `base`.
-fn build(dockerfile: &str, base: &str, tag: &str) -> Tagged {
-    test_support::build(dockerfile, &[("base", base)], tag);
+/// Builds `dockerfile` into an image tagged `tag`, given `contexts`, each a named context's name
+/// and an image reference.
+fn build(dockerfile: &str, contexts: &[(&str, &str)], tag: &str) -> Tagged {
+    test_support::build(dockerfile, contexts, tag);
     Tagged(tag.to_owned())
 }
 
-/// The diff ID of the last layer of the image tagged `image`.
-fn last_layer(image: &Tagged) -> String {
+/// The diff IDs of the layers of the image tagged `image`.
+fn layers(image: &Tagged) -> Vec<String> {
     let inspect = [
         "image",
         "inspect",
@@ -49,26 +49,42 @@ fn last_layer(image: &Tagged) -> String {
     ];
     let output = docker().args(inspect).output().unwrap();
     assert!(output.status.success(), "{output:?}");
-    let layers: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-    layers.last().unwrap().clone()
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// Builds the library's `recipe` onto `BUSYBOX`, runs `script` in a container of the image, and
-/// compares with `expect` what it prints, and whether the recipe adds the same layer onto
+/// Builds the library's `recipe` onto `BUSYBOX`, given each of `named`, a named context's name
+/// and the library's recipe of its image, runs `script` in a container of the image, and
+/// compares with `expect` what it prints, and whether the recipe adds the same layers onto
 /// another base.
-fn check(recipe: &str, script: &str, expect: &Expect) {
+fn check(recipe: &str, named: &[(&str, &str)], script: &str, expect: &Expect) {
     let recipe = file(recipe);
     let tag = |name: &str| format!("pumpkin-tests/library-{}:{name}", std::process::id());
-    let image = build(&recipe, BUSYBOX, &tag("layer"));
+    let named: Vec<(&str, Tagged)> = (named.iter())
+        .map(|(name, recipe)| (*name, build(&file(recipe), &[], &tag(name))))
+        .collect();
+    // The build of `recipe` onto `base`, an image's tag, tagged `name`.
+    let layered = |base: &str, name: &str| {
+        let mut contexts = vec![("base", base)];
+        contexts.extend(named.iter().map(|(name, image)| (*name, image.0.as_str())));
+        build(&recipe, &contexts, &tag(name))
+    };
+    let image = layered(BUSYBOX, "layer");
     // With no network, which a harness's files need none of.
     let run = ["run", "--rm", "--network=none", "--label", LABEL];
     let mut docker = docker();
     let output = docker.args(run).arg(&image.0).args(["sh", "-c", script]);
     let output = output.output().unwrap();
     assert!(output.status.success(), "{output:?}");
-    let other = build("FROM base\nRUN mkdir /other\n", BUSYBOX, &tag("other"));
-    let on_other = build(&recipe, &other.0, &tag("layer-on-other"));
-    let same = if last_layer(&image) == last_layer(&on_other) {
+    let other = build(
+        "FROM base\nRUN mkdir /other\n",
+        &[("base", BUSYBOX)],
+        &tag("other"),
+    );
+    let on_other = layered(&other.0, "layer-on-other");
+    // `other` is `BUSYBOX` and one layer more: the layers the recipe adds are those past each
+    // base's.
+    let busybox_count = layers(&other).len() - 1;
+    let same = if layers(&image)[busybox_count..] == layers(&on_other)[busybox_count + 1..] {
         "the same"
     } else {
         "another"
@@ -85,6 +101,7 @@ fn codex_layer() {
                   && ./bin/codex --version";
     check(
         "harness/codex/layer/Dockerfile",
+        &[],
         script,
         &expect![[r#"
             dr-xr-xr-x 0:0 .
@@ -113,6 +130,7 @@ fn claude_code_layer() {
                   && (exec -a ugrep /harness/claude-code-2.1.296/claude --version)";
     check(
         "harness/claude_code/layer/Dockerfile",
+        &[],
         script,
         &expect![[r#"
             dr-xr-xr-x 0:0 .
@@ -150,6 +168,57 @@ fn claude_code_layer() {
             License: BSD-3-Clause; ugrep user manual: <https://ugrep.com>
             Written by Robert van Engelen and others: <https://github.com/Genivia/ugrep>
             Ugrep utilizes the RE/flex regex library: <https://github.com/Genivia/RE-flex>
+            the layer on another base: the same"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn zcode_layer() {
+    // The libraries the loader finds for `node`, without their tabs and their addresses, which
+    // differ from run to run; `node` started as itself, and starting itself again as a child, as
+    // a harness's worker starts; and ZCode run as the library's `argv` runs it.
+    let script = "cd /harness && find . | sort | xargs stat -c '%A %u:%g %n' \
+                  && ./node-24.14.0/lib/ld-linux-x86-64.so.2 --list ./node-24.14.0/node \
+                  | tr -d '\t' | sed 's/ (0x[0-9a-f]*)//' \
+                  && /harness/node-24.14.0/node --version \
+                  && /harness/node-24.14.0/node -e 'process.stdout.write(require(\"node:child_process\")\
+                  .execFileSync(process.execPath, [\"-p\", \"`${process.execPath} ${process.version}`\"]))' \
+                  && /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --version";
+    check(
+        "harness/zcode/layer/Dockerfile",
+        &[("node", "harness/node/layer/Dockerfile")],
+        script,
+        &expect![[r#"
+            dr-xr-xr-x 0:0 .
+            dr-xr-xr-x 0:0 ./node-24.14.0
+            -r--r--r-- 0:0 ./node-24.14.0/LICENSE
+            dr-xr-xr-x 0:0 ./node-24.14.0/lib
+            -r-xr-xr-x 0:0 ./node-24.14.0/lib/ld-linux-x86-64.so.2
+            -r--r--r-- 0:0 ./node-24.14.0/lib/libc.so.6
+            -r--r--r-- 0:0 ./node-24.14.0/lib/libdl.so.2
+            -r--r--r-- 0:0 ./node-24.14.0/lib/libgcc_s.so.1
+            -r--r--r-- 0:0 ./node-24.14.0/lib/libm.so.6
+            -r--r--r-- 0:0 ./node-24.14.0/lib/libpthread.so.0
+            -r--r--r-- 0:0 ./node-24.14.0/lib/libstdc++.so.6
+            -r-xr-xr-x 0:0 ./node-24.14.0/node
+            dr-xr-xr-x 0:0 ./zcode-0.16.9
+            -r--r--r-- 0:0 ./zcode-0.16.9/LICENSE
+            -r--r--r-- 0:0 ./zcode-0.16.9/THIRD-PARTY-NOTICES.md
+            dr-xr-xr-x 0:0 ./zcode-0.16.9/provider
+            -r--r--r-- 0:0 ./zcode-0.16.9/provider/zcode-builtin.json
+            -r-xr-xr-x 0:0 ./zcode-0.16.9/zcode.cjs
+            linux-vdso.so.1
+            libdl.so.2 => /harness/node-24.14.0/lib/libdl.so.2
+            libstdc++.so.6 => /harness/node-24.14.0/lib/libstdc++.so.6
+            libm.so.6 => /harness/node-24.14.0/lib/libm.so.6
+            libgcc_s.so.1 => /harness/node-24.14.0/lib/libgcc_s.so.1
+            libpthread.so.0 => /harness/node-24.14.0/lib/libpthread.so.0
+            libc.so.6 => /harness/node-24.14.0/lib/libc.so.6
+            /harness/node-24.14.0/lib/ld-linux-x86-64.so.2 => ./node-24.14.0/lib/ld-linux-x86-64.so.2
+            v24.14.0
+            /harness/node-24.14.0/node v24.14.0
+            0.16.9
             the layer on another base: the same"#]],
     );
 }
