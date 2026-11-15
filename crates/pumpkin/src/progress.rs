@@ -74,12 +74,23 @@ impl Listed {
         if let Some(unread) = self::unread(&unread) {
             crate::say(format_args!("run {}: {unread}", record.id()));
         }
-        Ok(Self::Run(Box::new(Run {
-            task: record.task()?,
+        Ok(Self::of(record, record.task()?, ending, progress))
+    }
+
+    /// The run of `record`, of `task`, which ended as `ending` says, or is live, whose log says
+    /// `progress`.
+    pub(crate) fn of(
+        record: &Record,
+        task: Option<String>,
+        ending: Option<Ending>,
+        progress: Option<Progress>,
+    ) -> Self {
+        Self::Run(Box::new(Run {
+            task,
             ending,
             progress,
             asked: runtime::minted(record.id()),
-        })))
+        }))
     }
 
     /// Whether the run is live, or its job builds it.
@@ -99,7 +110,7 @@ impl Listed {
         }
     }
 
-    fn state(&self) -> State {
+    pub(crate) fn state(&self) -> State {
         match self {
             Self::Waiting { .. } => State::Waiting,
             Self::Building { .. } => State::Building,
@@ -119,7 +130,7 @@ impl Listed {
 
 /// A run's state, as `ls` names it, in the order in which its totals list them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum State {
+pub(crate) enum State {
     Waiting,
     Building,
     Running,
@@ -131,7 +142,8 @@ enum State {
 }
 
 impl State {
-    fn name(self) -> &'static str {
+    /// How `ls` names it.
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Waiting => "waiting",
             Self::Building => "building",
@@ -282,8 +294,35 @@ fn cost(progress: &Progress) -> Option<(f64, bool)> {
 
 /// The line of `ls` of `listed`, run `id`, at `now`.
 fn line(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
-    let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| {
-        format!("{id} {state:<11} {time:>7}  {bound:<9} {usd:>7}  {rest}")
+    let Columns {
+        state,
+        time,
+        bound,
+        usd,
+        rest,
+    } = columns(id, listed, now, runs);
+    format!("{id} {state:<11} {time:>7}  {bound:<9} {usd:>7}  {rest}")
+}
+
+/// The columns of `ls`'s line of a run, after its id: its state or phase, how long it has been in
+/// it or ran, its bound or score, its cost, and the rest: its task, and what it does.
+pub(crate) struct Columns {
+    pub(crate) state: String,
+    pub(crate) time: String,
+    pub(crate) bound: String,
+    pub(crate) usd: String,
+    pub(crate) rest: String,
+}
+
+/// The columns of `ls`'s line of `listed`, run `id`, at `now`; `runs` is its runs directory, as
+/// commands name it.
+pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Columns {
+    let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| Columns {
+        state: state.to_owned(),
+        time: time.to_owned(),
+        bound: bound.to_owned(),
+        usd: usd.to_owned(),
+        rest: rest.to_owned(),
     };
     let state = listed.state().name();
     let since = |asked: &Option<Duration>| {
@@ -305,10 +344,7 @@ fn line(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String 
     let task = run.task.as_deref().unwrap_or("-");
     let usd = match run.progress.as_ref().map(cost) {
         None | Some(None) => "-".to_owned(),
-        Some(Some((usd, unpriced))) => {
-            let more = if unpriced { "+" } else { "" };
-            format!("${usd:.2}{more}")
-        }
+        Some(Some((usd, unpriced))) => self::usd(usd, unpriced),
     };
     let Some(ending) = &run.ending else {
         let Some(progress) = &run.progress else {
@@ -325,17 +361,34 @@ fn line(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String 
         let (name, time, bound, doing) = shown(phase(progress, at), at, &cancel);
         return column(&name, &time, &bound, &usd, &format!("{task}: {doing}"));
     };
-    let score = match ending {
+    let ran =
+        (run.progress.as_ref()).map(|progress| column_span(progress.end.unwrap_or(progress.last)));
+    column(
+        state,
+        ran.as_deref().unwrap_or("-"),
+        &score(ending),
+        &usd,
+        task,
+    )
+}
+
+/// The score column of a run that ended as `ending` says: its score, or `-`.
+fn score(ending: &Ending) -> String {
+    match ending {
         Ending::Scored { score, after: _ } => shown_score(score),
         Ending::Unscored(_)
         | Ending::NoResult { .. }
         | Ending::Failed(_)
         | Ending::Interrupted(_)
         | Ending::Lost => "-".to_owned(),
-    };
-    let ran =
-        (run.progress.as_ref()).map(|progress| column_span(progress.end.unwrap_or(progress.last)));
-    column(state, ran.as_deref().unwrap_or("-"), &score, &usd, task)
+    }
+}
+
+/// The cost column of a run whose sandboxes cost `usd`, in dollars, and more if some were
+/// `unpriced`, as `$1.20+`.
+pub(crate) fn usd(usd: f64, unpriced: bool) -> String {
+    let more = if unpriced { "+" } else { "" };
+    format!("${usd:.2}{more}")
 }
 
 /// The lines of `ls` under the line of `listed`, run `id`, at `now`, each ending in a newline:
@@ -572,7 +625,7 @@ fn call_bound(call: &CallSpan) -> Option<Duration> {
 
 /// When the sandbox of `lease`, of the run whose log says `progress`, comes among the run's: under
 /// the judge call that holds it, if one does, by when the core began each.
-fn sorted(progress: &Progress, lease: &LeaseSpan) -> (Duration, Duration) {
+pub(crate) fn sorted(progress: &Progress, lease: &LeaseSpan) -> (Duration, Duration) {
     let asked = lease.sandbox.asked;
     let call = (progress.calls.iter()).find(|call| Some(call.job) == lease.holder);
     (call.map_or(asked, |call| call.sandbox.asked), asked)
@@ -596,7 +649,7 @@ fn place(place: Option<&Place>) -> String {
 }
 
 /// Where `sandbox` is ([`place`]), with its GPUs once it has started ([`gpus`]).
-fn placed(sandbox: &Sandbox) -> String {
+pub(crate) fn placed(sandbox: &Sandbox) -> String {
     format!("{}{}", place(sandbox.place.as_ref()), gpus(sandbox))
 }
 
@@ -666,7 +719,7 @@ pub(crate) fn span(span: Duration) -> String {
 
 /// `span` as a column of spans shows it, each with two units past a minute, as `3m00s` beside
 /// `2m41s`, so that they line up.
-fn column_span(span: Duration) -> String {
+pub(crate) fn column_span(span: Duration) -> String {
     let seconds = span.as_secs();
     let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
     match (hours, minutes, seconds) {
@@ -686,10 +739,15 @@ fn column_span(span: Duration) -> String {
 /// place's sandboxes, how long they lasted, and how many were deleted; and the parts of its log
 /// that can't be read ([`unread`]), alone of a run whose log records no start; `None` if none.
 pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
-    let Readout { progress, unread } = record.progress()?;
-    let unread = self::unread(&unread);
+    Ok(summary_of(record, &record.progress()?))
+}
+
+/// The summary of the run of `record`, as [`summary`] says it, of what its log says, `readout`.
+pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
+    let Readout { progress, unread } = readout;
+    let unread = self::unread(unread);
     let Some(progress) = progress else {
-        return Ok(unread.map(|unread| format!("run {}: {unread}\n", record.id())));
+        return unread.map(|unread| format!("run {}: {unread}\n", record.id()));
     };
     let ran = span(progress.end.unwrap_or(progress.last));
     let mut summary = match runtime::minted(record.id()) {
@@ -700,6 +758,49 @@ pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
         ),
         None => format!("run {} ran {ran}:\n", record.id()),
     };
+    let _ = writeln!(
+        summary,
+        "  {:>7} {}",
+        clock(Duration::ZERO),
+        agent_line(progress)
+    );
+    let now = progress.end.unwrap_or(progress.last);
+    let calls = (progress.calls.iter()).map(|call| {
+        let asked = call.sandbox.asked;
+        let mut line = called(call, record.dir());
+        // Its own model requests, under it, as its leases are.
+        if call.model.requests > 0 {
+            let _ = write!(line, "\n{:>9}   model: {}", "", model(&call.model));
+        }
+        ((asked, asked), line)
+    });
+    let leases = (progress.leases.iter()).map(|lease| {
+        let step = if lease.holder.is_some() { "  " } else { "" };
+        (
+            sorted(progress, lease),
+            format!("{step}{}", leased(lease, now)),
+        )
+    });
+    let mut children: Vec<((Duration, Duration), String)> = calls.chain(leases).collect();
+    // By time, stably, so that a call and a lease begun at once keep the core's order.
+    children.sort_by_key(|(begun, _)| *begun);
+    for ((_, asked), line) in children {
+        let _ = writeln!(summary, "  {:>7} {line}", clock(asked));
+    }
+    // A run whose roles have no route made no model request.
+    if progress.agent.routed || progress.model.requests > 0 {
+        let _ = writeln!(summary, "  model: {}", model(&progress.model));
+    }
+    let _ = writeln!(summary, "  sandboxes: {}", sandboxes(progress));
+    if let Some(unread) = unread {
+        let _ = writeln!(summary, "  {unread}");
+    }
+    Some(summary)
+}
+
+/// The agent's line of a summary: where it ran, when it started and how it ended, and when the
+/// work phase ended.
+pub(crate) fn agent_line(progress: &Progress) -> String {
     let agent = &progress.agent;
     let mut line = format!("agent on {}", placed(&agent.sandbox));
     if let Some(started) = agent.sandbox.started {
@@ -718,39 +819,7 @@ pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
     if let Some(work_end) = progress.work_end {
         let _ = write!(line, "; the work phase ended at {}", clock(work_end));
     }
-    let _ = writeln!(summary, "  {:>7} {line}", clock(Duration::ZERO));
-    let now = progress.end.unwrap_or(progress.last);
-    let calls = (progress.calls.iter()).map(|call| {
-        let asked = call.sandbox.asked;
-        let mut line = called(call, record);
-        // Its own model requests, under it, as its leases are.
-        if call.model.requests > 0 {
-            let _ = write!(line, "\n{:>9}   model: {}", "", model(&call.model));
-        }
-        ((asked, asked), line)
-    });
-    let leases = (progress.leases.iter()).map(|lease| {
-        let step = if lease.holder.is_some() { "  " } else { "" };
-        (
-            sorted(&progress, lease),
-            format!("{step}{}", leased(lease, now)),
-        )
-    });
-    let mut children: Vec<((Duration, Duration), String)> = calls.chain(leases).collect();
-    // By time, stably, so that a call and a lease begun at once keep the core's order.
-    children.sort_by_key(|(begun, _)| *begun);
-    for ((_, asked), line) in children {
-        let _ = writeln!(summary, "  {:>7} {line}", clock(asked));
-    }
-    // A run whose roles have no route made no model request.
-    if progress.agent.routed || progress.model.requests > 0 {
-        let _ = writeln!(summary, "  model: {}", model(&progress.model));
-    }
-    let _ = writeln!(summary, "  sandboxes: {}", sandboxes(&progress));
-    if let Some(unread) = unread {
-        let _ = writeln!(summary, "  {unread}");
-    }
-    Ok(Some(summary))
+    line
 }
 
 /// A judge call's name: its judge, by the grant that the agent called it under, or the final
@@ -762,7 +831,7 @@ fn judge(call: &CallSpan) -> String {
 
 /// A judge call's line of a summary: which ([`judge`]), how long its sandbox took to start once
 /// asked for, as `wait` says its start, and then ran, or that it never started, and how it ended.
-fn called(call: &CallSpan, record: &Record) -> String {
+pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
     let Some(at) = call.sandbox.gone else {
         return format!(
             "{} on {}, which never ended",
@@ -815,7 +884,7 @@ fn called(call: &CallSpan, record: &Record) -> String {
         }
     }
     let below = |path: &std::path::Path| {
-        let path = path.strip_prefix(record.dir()).unwrap_or(path);
+        let path = path.strip_prefix(dir).unwrap_or(path);
         path.display().to_string()
     };
     let mut kept = Vec::new();
@@ -833,7 +902,7 @@ fn called(call: &CallSpan, record: &Record) -> String {
 
 /// A lease's line of a summary, at `now`, since the run started: which, how long its runner
 /// lived and was charged for, and how much of that busy, its commands, and how it ended.
-fn leased(lease: &LeaseSpan, now: Duration) -> String {
+pub(crate) fn leased(lease: &LeaseSpan, now: Duration) -> String {
     let on = format!("{} on {}", lease_name(lease), placed(&lease.sandbox));
     let Some(gone) = lease.sandbox.gone else {
         return format!("{on}, which never ended");
@@ -1014,7 +1083,7 @@ fn timed(model: &runtime::ModelUse) -> String {
 }
 
 /// The median of `spans`, the mean of the middle two of an even count; `None` of none.
-fn median(spans: &[Duration]) -> Option<Duration> {
+pub(crate) fn median(spans: &[Duration]) -> Option<Duration> {
     if spans.is_empty() {
         return None;
     }

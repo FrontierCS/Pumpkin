@@ -42,6 +42,7 @@ mod progress;
 mod sandboxd;
 mod star;
 mod style;
+mod view;
 mod workspace;
 
 /// The most bytes of a final judge's standard error that a run's ending shows ([`end`]): one
@@ -81,6 +82,7 @@ fn main() -> ExitCode {
         Ok(cli::Command::Fmt(flags)) => style::fmt(flags),
         Ok(cli::Command::Build(flags)) => build(flags, Reader::Operator),
         Ok(cli::Command::Lock(flags)) => lock::lock(flags),
+        Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::Follow(id)) => job::follow(&id),

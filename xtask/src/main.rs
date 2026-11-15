@@ -24,6 +24,7 @@ use xshell::{Cmd, Shell};
 mod diff;
 mod figure;
 mod live;
+mod page;
 mod settings;
 mod star;
 mod tidy;
@@ -127,7 +128,8 @@ mod flags {
             }
 
             /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
-            /// pinned version.
+            /// pinned version, and fetches each that its project releases as a file, such as
+            /// TypeScript's compiler, into the target directory.
             cmd install-tools {}
         }
     }
@@ -347,6 +349,7 @@ fn ci(cargo: &Cargo) -> Result<()> {
     clippy.args(["--", "--deny", "warnings"]).run()?;
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
+    page::check(cargo)?;
     let buildifier = star::buildifier(cargo)?;
     let pumpkin = tests_pumpkin(cargo)?;
     star::place(&buildifier, &pumpkin)?;

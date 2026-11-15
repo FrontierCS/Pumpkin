@@ -62,6 +62,7 @@ fn usage() {
         pumpkin(&["wait", "-h"]),
         pumpkin(&["ls", "--help"]),
         pumpkin(&["cancel", "--help"]),
+        pumpkin(&["view", "--help"]),
         pumpkin(&["reap", "--help"]),
         pumpkin(&["help", "--help"]),
         pumpkin(&["help", "config"]),
@@ -125,6 +126,7 @@ fn usage() {
                 wait    Wait until a run has ended, and print its outcome
                 ls      List the runs and their states
                 cancel  Stop a run, and remove what it left
+                view    Serve the runs' records to this machine's browser
                 lock    Write a recipe's fetch stage, which pins what a step fetches
                 help    Print the help of a command or a topic
 
@@ -394,6 +396,51 @@ fn usage() {
               of a run that is yet to start on the controller, and cancels one that has
               started there, sending this machine's Modal configuration file for the reap,
               then copies its record here, as `pumpkin wait` does.
+            $ pumpkin view --help
+            exit status: Some(0)
+            printed:
+              Serve the runs in --runs to a browser on this machine, until it is stopped, and
+              print the address to open: a page that lists the runs as `ls` does, newest
+              first, and shows a run's summary, its sandboxes' lanes, who talks to whom, and
+              its log, which it follows while the run is live.
+
+              Usage: pumpkin view [OPTIONS]
+
+              Options:
+                    --runs <dir>
+                        The directory of the runs to serve.
+                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+
+                    --port <port>
+                        The port to serve at, on 127.0.0.1.
+                        Default: one that is free, which `view` says
+
+                -h, --help
+                        Print this help.
+
+              Examples:
+                pumpkin view
+                pumpkin view --runs runs --port 8080
+
+              Exit status:
+                1  The port can't be bound, or another error.
+                2  A usage error.
+              `view` serves until a signal stops it, as Ctrl-C's SIGINT or SIGTERM does, so it
+              doesn't exit 0.
+
+              `view` prints on the standard error the address to open, such as
+              `http://127.0.0.1:41873/?t=0123...`. It listens on 127.0.0.1 alone, so no other
+              machine reaches it, and answers a request only if it names this machine as its
+              host, and, for the runs' data, carries the token after `?t=`, which the page
+              sends: another user of this machine can't read the runs, nor can a page of
+              another site that the browser has open. It reads the records as `ls` and `wait`
+              do, and asks nothing of a provider.
+
+              The page's cancel of a run runs `pumpkin cancel --runs <dir> <run>`, and shows
+              what that says. Nothing else the page does changes a run.
+
+              With [controller] in the configuration, `view` serves the runs in --runs, by
+              default the copies in the default runs directory, not the controller's.
             $ pumpkin reap --help
             exit status: Some(0)
             printed:
@@ -668,6 +715,7 @@ fn usage() {
               wait    Wait until a run has ended, and print its outcome
               ls      List the runs and their states
               cancel  Stop a run, and remove what it left
+              view    Serve the runs' records to this machine's browser
               lock    Write a recipe's fetch stage, which pins what a step fetches
               help    Print the help of a command or a topic
 
@@ -774,13 +822,13 @@ fn usage() {
             pumpkin: to read how to use it: pumpkin help run
             $ pumpkin help bogus
             exit status: Some(2)
-            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
+            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help
             $ pumpkin help controller
             exit status: Some(2)
-            error: there is no help for `controller`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
+            error: there is no help for `controller`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help"#]],
