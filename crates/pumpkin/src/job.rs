@@ -1,27 +1,30 @@
 //! The controller's own side of the controller target, as `pumpkin controller --help` says: the
 //! job that the client starts in a unit of its own, and the controller's boot.
 //!
-//! What they read and write lies below the controller user's home: the trees the client sent,
-//! `trees/<repo>/<id>/`; each run's job in `jobs/<id>/`, and each build's in `builds/<id>/`,
-//! with its configuration, `pumpkin.toml`, which holds no secret, and its unit's standard error
-//! and output, `log` and `out`; the one workspace, `.pumpkin/` ([`crate::workspace`]), that
-//! every tree's `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs'
-//! records in its runs directory ([`runs`]) and the build slots ([`Workspace::slots`]); and
-//! `current-pumpkin`, the `pumpkin` that the last job ran. What the client sent with a job
-//! ([`SENT_CONFIG`], [`SENT_MODAL`] and the upstreams' key files) is in the job's directory
-//! below `$XDG_RUNTIME_DIR/pumpkin/` ([`jobs`]), a tmpfs that the job's unit removes as it
-//! ends, so a job that still runs is one whose directory is there, as is what images the job
-//! holds ([`HELD`]), so what a job holds goes with it, however it ends.
+//! What they read and write lies below the controller user's home: the store of the files that
+//! clients sent ([`STORE`]), each named by its SHA-256, as [`crate::manifest`] lays it out; each
+//! job's tree, `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`,
+//! and each build's in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no
+//! secret, and its unit's standard error and output, `log` and `out`; the one workspace,
+//! `.pumpkin/` ([`crate::workspace`]), that every tree's `.pumpkin` links to, where each job's
+//! Pumpkin is built, which keeps the runs' records in its runs directory ([`runs`]) and the build
+//! slots ([`Workspace::slots`]); and `current-pumpkin`, the `pumpkin` that the last job ran. What
+//! the client sent with a job ([`SENT_CONFIG`], [`SENT_MODAL`] and the upstreams' key files) is in
+//! the job's directory below `$XDG_RUNTIME_DIR/pumpkin/` ([`jobs`]), a tmpfs that the job's unit
+//! removes as it ends, so a job that still runs is one whose directory is there, as is what images
+//! the job holds ([`HELD`]), so what a job holds goes with it, however it ends.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
-use std::os::unix::fs::{OpenOptionsExt as _, symlink};
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, thread};
 
 use aws::{Bound, Cli};
@@ -29,12 +32,13 @@ use engine::Engine;
 use engine::prune::{Disk, HIGH_PERCENT, Held, REFUSED_PERCENT};
 use provider::RunTag;
 use runtime::Record;
-use schema::ir::Image;
+use schema::ir::{Image, Sha256Digest};
 use serde::Deserialize;
 use stdx::Context as _;
 use stdx::process::Environment;
 
 use crate::controller::bounded;
+use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, say, star};
 
@@ -46,6 +50,13 @@ pub(crate) const BUILDS: &str = "builds";
 
 /// The directory of the trees that the client sent, below the home.
 pub(crate) const TREES: &str = "trees";
+
+/// The directory of the files that clients sent, each named by its SHA-256, below the home.
+pub(crate) const STORE: &str = "store";
+
+/// The files of a job's tree that its start links there, as its unit runs them, rather than the
+/// job: the consumer entry, which builds the job's `pumpkin`, and what it reads of which.
+pub(crate) const STARTED: [&str; 2] = ["pumpkin", ".pumpkinversion"];
 
 /// The link to the `pumpkin` that the last job ran, below the home, which the controller's boot
 /// runs.
@@ -87,9 +98,16 @@ const BUILDING: &str = "building";
 pub(crate) const WAITING: &str = "waiting";
 
 /// How long a job's tree is kept after its start.
-// A run's record names its entry in its tree, to run it again, and a tree is mostly links to
-// the files of the one before it that are unchanged.
+// A run's record names its entry in its tree, to run it again, and a tree is links into the
+// store, so it holds no bytes of its own.
 const KEPT: Duration = Duration::from_hours(14 * 24);
+
+/// How long the store keeps a manifest, and so what no tree links of the files it names, and a
+/// piece, or a file of a start's, in its `incoming/`.
+// A day: long enough that a send cut off, or a start that failed, carries on the next day from
+// what had arrived; short enough that what no tree links, as of an edit made and undone, is gone
+// soon. A tree, which a run's record names, keeps its files for `KEPT` by its links.
+const STORE_KEPT: Duration = Duration::from_hours(24);
 
 /// A path on the controller's one volume, which holds the engine's images and build cache, the
 /// trees and the records, as `deploy/aws` makes it.
@@ -105,18 +123,21 @@ const IMDS: &str = "http://169.254.169.254/latest";
 /// instance's own.
 const IMDS_SECONDS: u64 = 10;
 
-/// Runs the job that `job` asks for: points [`CURRENT`] at this `pumpkin`, writes the job's
-/// configuration ([`assemble`]), prunes, builds its task's images ([`build_first`]), then runs
-/// its command with it, a run to its end, which finds each image by its tag; returns the exit
-/// status of its command.
+/// Runs the job that `job` asks for: makes its tree in the working directory ([`materialize`]),
+/// points [`CURRENT`] at this `pumpkin`, writes the job's configuration ([`assemble`]), prunes,
+/// builds its task's images ([`build_first`]), then runs its command with it, a run to its end,
+/// which finds each image by its tag; returns the exit status of its command.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
         region,
         parameter,
+        tree,
         command,
     } = job;
     let home = crate::home("run the job as the controller's user")?;
+    let working = std::env::current_dir().context("finding the job's working directory failed")?;
+    materialize(&home, &id, &tree, &working)?;
     let jobs = jobs()?;
     let sent = jobs.join(id.as_str());
     point_current(&home, &id)?;
@@ -169,6 +190,83 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
         )?,
     };
     Ok(exit)
+}
+
+/// Makes the tree named `tree` in `dir`, job `id`'s tree below `home`, of links into the store
+/// there, as its manifest names each file, but those that the start linked ([`STARTED`]): a file
+/// to its blob, one that its owner may execute to the blob's copy at 0555, made if need be, and a
+/// symbolic link to its blob's text.
+///
+/// # Errors
+///
+/// Fails before it writes anything if `dir` isn't `trees/<repo>/<id>` below `home`, as a job run
+/// by hand elsewhere would write the task's files there.
+// Links, not copies, so that a tree costs no bytes, and in Rust, as a shell's `ln` for each of a
+// tree's thousands of files would take seconds.
+fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Result<(), String> {
+    let store = home.join(STORE);
+    let path = store.join(MANIFESTS).join(tree.hex());
+    let manifest = fs::read(&path).context(path.display())?;
+    let manifest = Manifest::parse(&manifest).context(path.display())?;
+    let made =
+        |entry: &&Entry| entry.kind != Kind::Bundle && !STARTED.contains(&entry.path.as_str());
+    let trees = home.join(TREES);
+    let above = dir.parent().and_then(Path::parent).map(fs::canonicalize);
+    let own = dir.file_name() == Some(OsStr::new(id.as_str()))
+        && matches!((fs::canonicalize(&trees), above), (Ok(trees), Some(Ok(above))) if trees == above);
+    if !own && manifest.entries().iter().any(|entry| made(&entry)) {
+        return Err(format!(
+            "the job's working directory, {}, isn't its tree, {}/<repository>/{id}, which its \
+             start makes: run the job there, as its unit does",
+            dir.display(),
+            trees.display(),
+            id = id.as_str()
+        ));
+    }
+    for entry in manifest.entries().iter().filter(made) {
+        let Entry {
+            kind,
+            digest,
+            size_bytes: _,
+            path,
+        } = entry;
+        let to = dir.join(path);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).context(parent.display())?;
+        }
+        let blob = store.join(digest.hex());
+        let linked = match kind {
+            Kind::File => fs::hard_link(&blob, &to),
+            Kind::Executable => fs::hard_link(executable(&store, digest)?, &to),
+            Kind::Link => {
+                let target = fs::read(&blob).context(blob.display())?;
+                symlink(OsStr::from_bytes(&target), &to)
+            }
+            Kind::Bundle => unreachable!("the bundle is passed over just above"),
+        };
+        linked.context(to.display())?;
+    }
+    Ok(())
+}
+
+/// The copy at 0555 of the blob `digest` in `store`, `<sha256>.x`, made aside and moved in if
+/// it isn't there, as another job may make it at once.
+fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
+    let copy = store.join(format!("{}.x", digest.hex()));
+    if copy.try_exists().context(copy.display())? {
+        return Ok(copy);
+    }
+    let incoming = store.join(INCOMING);
+    let aside = tempfile::Builder::new()
+        .prefix("executable.")
+        .tempfile_in(&incoming);
+    let aside = aside.context(incoming.display())?;
+    let blob = store.join(digest.hex());
+    fs::copy(&blob, aside.path()).context(blob.display())?;
+    let made = fs::set_permissions(aside.path(), fs::Permissions::from_mode(0o555));
+    made.context(aside.path().display())?;
+    aside.persist(&copy).context(copy.display())?;
+    Ok(copy)
 }
 
 /// The controller's boot: reaps what each run that has ended or is lost, but one that ended
@@ -479,7 +577,7 @@ fn ids(dir: &Path) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
     for entry in entries {
         let name = entry.context(dir.display())?.file_name();
-        // A tree's directory holds the shared `.pumpkin` and the `latest` link beside them.
+        // A repository's directory of trees may hold other names beside its trees' ids.
         if let Some(name) = name
             .to_str()
             .filter(|name| name.starts_with(|c: char| c.is_ascii_digit()))
@@ -492,10 +590,10 @@ fn ids(dir: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Prunes what the jobs keep on the controller's volume: removes each tree in `home` older than
-/// [`KEPT`], and the directory of each run's job as old whose run has no record, which `ls`
-/// lists until then; then, once the volume is [full](Disk::full), the images and the build cache
-/// of the engine of the configuration at `config` ([`collect`]), sparing what the jobs in `jobs`
-/// hold.
+/// [`KEPT`], then what of its store no tree links nor needs ([`collect_store`]), and the directory
+/// of each run's job as old whose run has no record, which `ls` lists until then; then, once the
+/// volume is [full](Disk::full), the images and the build cache of the engine of the configuration
+/// at `config` ([`collect`]), sparing what the jobs in `jobs` hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
@@ -506,6 +604,7 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
             fs::remove_dir_all(&tree).context(tree.display())?;
         }
     }
+    collect_store(&home.join(STORE))?;
     let runs = PathBuf::from(crate::default_runs()?);
     for id in ids(&home.join(JOBS))?.into_iter().filter(old) {
         // A run's record names its job's configuration, to run it again.
@@ -520,6 +619,104 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
         return Ok(());
     }
     collect(home, &engine(config)?, jobs)
+}
+
+/// Removes, of `store`, under its lock, each manifest older than [`STORE_KEPT`], each file of its
+/// `incoming/` older than that, then each blob that no tree links and no manifest left names,
+/// unless a manifest left is of a form this Pumpkin can't read, which it says.
+// By reference, as Nix collects its store from its roots, of which a fresh manifest is one, as
+// Nix's temporary roots are of a build under way:
+// https://github.com/NixOS/nix/blob/d1ecb78bf7a1c5604726bd72651bd2169c14163d/src/libstore/store-api.cc#L1028
+fn collect_store(store: &Path) -> Result<(), String> {
+    let now = SystemTime::now();
+    let old = |path: &Path, metadata: &fs::Metadata| {
+        let modified = metadata.modified().context(path.display())?;
+        Ok::<_, String>(now.duration_since(modified).unwrap_or_default() > STORE_KEPT)
+    };
+    let path = store.join(manifest::LOCK);
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path);
+    let lock = match lock {
+        Ok(lock) => lock,
+        // No store yet, as no client has sent this controller anything.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context(path.display()),
+    };
+    lock.lock().context(path.display())?;
+    let mut named = BTreeSet::new();
+    let mut unread = None;
+    for (path, metadata) in files(&store.join(MANIFESTS))? {
+        if old(&path, &metadata)? {
+            removed(&path)?;
+            continue;
+        }
+        match Manifest::parse(&fs::read(&path).context(path.display())?) {
+            Ok(manifest) => {
+                named.extend(manifest.entries().iter().map(|entry| entry.digest.clone()));
+            }
+            Err(error) => unread = Some(format!("{}: {error}", path.display())),
+        }
+    }
+    for (path, metadata) in files(&store.join(INCOMING))? {
+        if old(&path, &metadata)? {
+            removed(&path)?;
+        }
+    }
+    // Of another Pumpkin's, which may name any blob.
+    if let Some(unread) = unread {
+        say(format_args!(
+            "{unread}; so the prune keeps every blob of the store, which it may name"
+        ));
+        return Ok(());
+    }
+    for (path, metadata) in files(store)? {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        // A blob, or its copy at 0555; not the store's lock.
+        let Some(digest) = manifest::digest(name.strip_suffix(".x").unwrap_or(name)) else {
+            continue;
+        };
+        if metadata.nlink() == 1 && !named.contains(&digest) {
+            removed(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// The regular files in `dir`, with their metadata; none if `dir` isn't there.
+fn files(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", dir.display())),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry.context(dir.display())?.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            // Moved since it was listed, as a start moves a copy to run out of `incoming/`.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context(path.display()),
+        };
+        if metadata.is_file() {
+            files.push((path, metadata));
+        }
+    }
+    Ok(files)
+}
+
+/// Removes the file `path`, unless it is gone, as a start may move it at once.
+fn removed(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error).context(path.display()),
+        _ => Ok(()),
+    }
 }
 
 /// The Docker engine that the configuration at `config` names, as a job reaches it, for its

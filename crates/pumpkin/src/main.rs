@@ -36,6 +36,7 @@ mod controller;
 mod driver;
 mod job;
 mod lock;
+mod manifest;
 mod next;
 mod progress;
 mod sandboxd;

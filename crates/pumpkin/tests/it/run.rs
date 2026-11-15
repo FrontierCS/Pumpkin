@@ -342,8 +342,7 @@ fn usage() {
               build slot, else as `building`, or as `unstarted` once it has ended without one,
               beside the copies in the default runs directory; and says first how long the
               controller has been up, its jobs, how full its disk is, and whether its boot
-              failed, and last how many tasks this workspace is still sending it, if any: a
-              run's job starts once its task is sent.
+              failed.
             $ pumpkin cancel --help
             exit status: Some(0)
             printed:
@@ -622,7 +621,7 @@ fn usage() {
               Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
               and Modal's configuration file, into a directory of its own in the
               controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
-              Session Manager plugin, and `ssh`, `rsync` 3.2.3 or later, `tar`, `ssh-keygen`
+              Session Manager plugin, and `ssh`, `rsync`, `tar`, `ssh-keygen`
               and `git`, from PATH; the controller's settings are the module's, but for
               [controller.modal]. This machine's key to it, which the first command makes
               and enrols through EC2 Instance Connect, and the host key it pins, are in
