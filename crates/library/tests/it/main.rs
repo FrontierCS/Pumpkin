@@ -10,6 +10,7 @@
 mod claude_code;
 mod codex;
 mod docker;
+mod pi;
 mod qwen_code;
 mod zcode;
 
@@ -56,6 +57,10 @@ fn bundled() {
             harness/codex/layer/Dockerfile
             harness/node/layer/Dockerfile
             harness/node/node.star
+            harness/pi/layer/Dockerfile
+            harness/pi/layer/package-lock.json
+            harness/pi/layer/package.json
+            harness/pi/pi.star
             harness/qwen_code/layer/Dockerfile
             harness/qwen_code/qwen_code.star
             harness/zcode/layer/Dockerfile

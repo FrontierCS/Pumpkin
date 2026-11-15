@@ -9,6 +9,8 @@
     reason = "a test that can't remove its image says so"
 )]
 
+use std::path::Path;
+
 use expect_test::{Expect, expect};
 use test_support::{BUSYBOX, docker};
 
@@ -31,10 +33,10 @@ impl Drop for Tagged {
     }
 }
 
-/// Builds `dockerfile` into an image tagged `tag`, given `contexts`, each a named context's name
-/// and an image reference.
-fn build(dockerfile: &str, contexts: &[(&str, &str)], tag: &str) -> Tagged {
-    test_support::build(dockerfile, contexts, tag);
+/// Builds `dockerfile` into an image tagged `tag`, in `context`, a directory, or in none, given
+/// `contexts`, each a named context's name and an image reference.
+fn build(dockerfile: &str, context: Option<&Path>, contexts: &[(&str, &str)], tag: &str) -> Tagged {
+    test_support::build(dockerfile, context, contexts, tag);
     Tagged(tag.to_owned())
 }
 
@@ -57,16 +59,21 @@ fn layers(image: &Tagged) -> Vec<String> {
 /// compares with `expect` what it prints, and whether the recipe adds the same layers onto
 /// another base.
 fn check(recipe: &str, named: &[(&str, &str)], script: &str, expect: &Expect) {
-    let recipe = file(recipe);
     let tag = |name: &str| format!("pumpkin-tests/library-{}:{name}", std::process::id());
+    // Each recipe in its directory of the library, as `image()` builds it.
+    let built = |recipe: &str, contexts: &[(&str, &str)], name: &str| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+        let context = root.join(Path::new(recipe).parent().unwrap());
+        build(&file(recipe), Some(&context), contexts, &tag(name))
+    };
     let named: Vec<(&str, Tagged)> = (named.iter())
-        .map(|(name, recipe)| (*name, build(&file(recipe), &[], &tag(name))))
+        .map(|(name, recipe)| (*name, built(recipe, &[], name)))
         .collect();
     // The build of `recipe` onto `base`, an image's tag, tagged `name`.
     let layered = |base: &str, name: &str| {
         let mut contexts = vec![("base", base)];
         contexts.extend(named.iter().map(|(name, image)| (*name, image.0.as_str())));
-        build(&recipe, &contexts, &tag(name))
+        built(recipe, &contexts, name)
     };
     let image = layered(BUSYBOX, "layer");
     // With no network, which a harness's files need none of.
@@ -77,6 +84,7 @@ fn check(recipe: &str, named: &[(&str, &str)], script: &str, expect: &Expect) {
     assert!(output.status.success(), "{output:?}");
     let other = build(
         "FROM base\nRUN mkdir /other\n",
+        None,
         &[("base", BUSYBOX)],
         &tag("other"),
     );
@@ -172,23 +180,27 @@ fn claude_code_layer() {
     );
 }
 
+/// A script that prints, in `/harness`, the libraries the loader finds for `node`, without their
+/// tabs and their addresses, which differ from run to run; `node` started as itself; and `node`
+/// starting itself again as a child, as a harness's worker starts.
+const NODE_RUNS: &str = "./node-24.14.0/lib/ld-linux-x86-64.so.2 --list ./node-24.14.0/node \
+                         | tr -d '\t' | sed 's/ (0x[0-9a-f]*)//' \
+                         && /harness/node-24.14.0/node --version \
+                         && /harness/node-24.14.0/node -e 'process.stdout.write(require(\"node:child_process\")\
+                         .execFileSync(process.execPath, [\"-p\", \"`${process.execPath} ${process.version}`\"]))'";
+
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn zcode_layer() {
-    // The libraries the loader finds for `node`, without their tabs and their addresses, which
-    // differ from run to run; `node` started as itself, and starting itself again as a child, as
-    // a harness's worker starts; and ZCode run as the library's `argv` runs it.
-    let script = "cd /harness && find . | sort | xargs stat -c '%A %u:%g %n' \
-                  && ./node-24.14.0/lib/ld-linux-x86-64.so.2 --list ./node-24.14.0/node \
-                  | tr -d '\t' | sed 's/ (0x[0-9a-f]*)//' \
-                  && /harness/node-24.14.0/node --version \
-                  && /harness/node-24.14.0/node -e 'process.stdout.write(require(\"node:child_process\")\
-                  .execFileSync(process.execPath, [\"-p\", \"`${process.execPath} ${process.version}`\"]))' \
-                  && /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --version";
+    // What `NODE_RUNS` prints, and ZCode run as the library's `argv` runs it.
+    let script = format!(
+        "cd /harness && find . | sort | xargs stat -c '%A %u:%g %n' && {NODE_RUNS} \
+         && /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --version"
+    );
     check(
         "harness/zcode/layer/Dockerfile",
         &[("node", "harness/node/layer/Dockerfile")],
-        script,
+        &script,
         &expect![[r#"
             dr-xr-xr-x 0:0 .
             dr-xr-xr-x 0:0 ./node-24.14.0
@@ -250,6 +262,50 @@ fn qwen_code_layer() {
             /harness/node-24.14.0/node v24.14.0
             0.25.0
             ripgrep 15.0.0 (rev 3a612f88b8)
+            the layer on another base: the same"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn pi_layer() {
+    // Pi's directory and the packages', each file's mode and owner counted, for they are many;
+    // what `NODE_RUNS` prints; and Pi run as the library's `argv` runs it.
+    let script = format!(
+        "cd /harness && find . -maxdepth 2 | sort | xargs stat -c '%A %u:%g %n' \
+         && find pi-1.2.0 | xargs stat -c '%A %u:%g' | sort | uniq -c && {NODE_RUNS} \
+         && /harness/node-24.14.0/node \
+         /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --version"
+    );
+    check(
+        "harness/pi/layer/Dockerfile",
+        &[("node", "harness/node/layer/Dockerfile")],
+        &script,
+        &expect![[r#"
+            dr-xr-xr-x 0:0 .
+            dr-xr-xr-x 0:0 ./node-24.14.0
+            -r--r--r-- 0:0 ./node-24.14.0/LICENSE
+            dr-xr-xr-x 0:0 ./node-24.14.0/lib
+            -r-xr-xr-x 0:0 ./node-24.14.0/node
+            dr-xr-xr-x 0:0 ./pi-1.2.0
+            dr-xr-xr-x 0:0 ./pi-1.2.0/node_modules
+            -r--r--r-- 0:0 ./pi-1.2.0/package-lock.json
+            -r--r--r-- 0:0 ./pi-1.2.0/package.json
+              15009 -r--r--r-- 0:0
+                 23 -r-xr-xr-x 0:0
+               1431 dr-xr-xr-x 0:0
+                  8 lrwxrwxrwx 0:0
+            linux-vdso.so.1
+            libdl.so.2 => /harness/node-24.14.0/lib/libdl.so.2
+            libstdc++.so.6 => /harness/node-24.14.0/lib/libstdc++.so.6
+            libm.so.6 => /harness/node-24.14.0/lib/libm.so.6
+            libgcc_s.so.1 => /harness/node-24.14.0/lib/libgcc_s.so.1
+            libpthread.so.0 => /harness/node-24.14.0/lib/libpthread.so.0
+            libc.so.6 => /harness/node-24.14.0/lib/libc.so.6
+            /harness/node-24.14.0/lib/ld-linux-x86-64.so.2 => ./node-24.14.0/lib/ld-linux-x86-64.so.2
+            v24.14.0
+            /harness/node-24.14.0/node v24.14.0
+            1.2.0
             the layer on another base: the same"#]],
     );
 }

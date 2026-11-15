@@ -10,8 +10,9 @@ use schema::ir;
 use super::{check, evaluated, layer, route, show};
 
 /// A task's entry that gives `zcode()` each of its arguments from an `--arg` of its name, and
-/// builds its agent on the image of `//images/Dockerfile`, which the judge runs on too.
-const ENTRY: &str = r#"
+/// builds its agent on the image of `//images/Dockerfile`, which the judge runs on too; with
+/// `zcode` replaced by its name, the same of another harness's function of the same arguments.
+pub(super) const ENTRY: &str = r#"
 load("@pumpkin//harness/zcode/zcode.star", "zcode")
 
 MODEL = arg("model", str)
@@ -78,7 +79,7 @@ const NAMES: [&str; 8] = [
 ];
 
 /// The arguments of `case`, by their names, as `ENTRY` takes them.
-fn args(case: &[&str; 8]) -> Args {
+pub(super) fn args(case: &[&str; 8]) -> Args {
     let given: Vec<String> = (NAMES.iter().zip(case))
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
@@ -86,7 +87,7 @@ fn args(case: &[&str; 8]) -> Args {
 }
 
 /// A prompt of the task repository's form, shortened.
-const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
+pub(super) const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
 
 When the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.
 ";
