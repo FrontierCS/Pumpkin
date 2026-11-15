@@ -8,6 +8,9 @@
 //! the named context `base`. The function takes that image by position and, by keyword, at least
 //! `model`, `effort`, `workspace`, `prompt`, `deadline_seconds` and `finalize_grace_seconds`, and
 //! gives a dict of an agent role's `image`, `runtime` and `egress`.
+//!
+//! `harness/node/` holds no harness: its `node()` gives the image of the Node.js that harnesses
+//! written in JavaScript run on, which their recipes take as a named context.
 
 // The files are a table, as Buck2 bundles a test cell
 // (https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_external_cells_bundled/src/lib.rs#L42-L77),
@@ -24,11 +27,15 @@ macro_rules! files {
 
 /// Each file of the library, by its path below the library's root, such as
 /// `harness/codex/codex.star`, sorted by the paths' bytes.
-pub const FILES: [(&str, &[u8]); 6] = files![
+pub const FILES: [(&str, &[u8]); 10] = files![
     "harness/claude_code/claude_code.star",
     "harness/claude_code/layer/Dockerfile",
     "harness/codex/LICENSE",
     "harness/codex/catalog.star",
     "harness/codex/codex.star",
     "harness/codex/layer/Dockerfile",
+    "harness/node/layer/Dockerfile",
+    "harness/node/node.star",
+    "harness/zcode/layer/Dockerfile",
+    "harness/zcode/zcode.star",
 ];
