@@ -58,7 +58,7 @@ mod flags {
             }
 
             /// Runs the checks every change must pass, in order, and stops at the first that
-            /// fails. They reach no Docker engine, network or cloud, and wait on no real clock.
+            /// fails. They reach no Docker engine, network or cloud.
             cmd ci {}
 
             /// Runs the checks that reach a real environment, which `ci` leaves out: `docker`, the

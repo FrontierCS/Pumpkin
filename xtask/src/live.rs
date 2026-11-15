@@ -49,6 +49,8 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         "run",
         "--workspace",
         "--locked",
+        "--profile",
+        "live",
         "--run-ignored",
         "only",
     ]);

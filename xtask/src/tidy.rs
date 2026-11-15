@@ -1,5 +1,6 @@
-//! The checks of the repository's Rust files and its `ARCHITECTURE.md` that `cargo xtask ci`
-//! runs, each for a rule of `docs/dev/writing.md` or `docs/dev/style.md`.
+//! The checks of the repository's Rust files, its `ARCHITECTURE.md` and the files under its
+//! `tests/` directories that `cargo xtask ci` runs, each for a rule of `docs/dev/writing.md`,
+//! `docs/dev/style.md` or `docs/dev/testing.md`.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -31,8 +32,8 @@ const TEST_COMMENT_CAP: usize = 2;
 /// The most columns a line that holds a comment may span, rustfmt's `max_width` for code.
 const WIDTH: usize = 100;
 
-/// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, and its
-/// `ARCHITECTURE.md` pass the checks.
+/// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
+/// `ARCHITECTURE.md` and the files under its `tests/` directories pass the checks.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     let mut problems = Vec::new();
     for path in files(sh, "rs")? {
@@ -86,6 +87,7 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
         problems.extend(found.into_iter().map(|(_, problem)| problem));
     }
     problems.extend(architecture(sh)?);
+    problems.extend(test_data(&listed(sh)?));
     if problems.is_empty() {
         Ok(())
     } else {
@@ -96,13 +98,42 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
 /// The repository's files that end in `.<extension>`, tracked or not yet, but not ignored, and
 /// not a tracked one deleted from the working tree, which has nothing left to check.
 pub(crate) fn files(sh: &Shell, extension: &str) -> Result<Vec<String>> {
+    let mut files = listed(sh)?;
+    files.retain(|path| Path::new(path).extension() == Some(extension.as_ref()));
+    Ok(files)
+}
+
+/// The repository's files, tracked or not yet, but not ignored, and not a tracked one deleted
+/// from the working tree.
+fn listed(sh: &Shell) -> Result<Vec<String>> {
     // Every file, filtered here: a pathspec's meaning changes with Git's variables, such as
     // `GIT_LITERAL_PATHSPECS`, and `-z` keeps unusual names as they are rather than quoted.
     let files = cmd!(sh, "git ls-files -z --cached --others --exclude-standard").read()?;
-    let kept = |path: &&str| {
-        Path::new(path).extension() == Some(extension.as_ref()) && sh.path_exists(path)
-    };
+    let kept = |path: &&str| !path.is_empty() && sh.path_exists(path);
     Ok(files.split('\0').filter(kept).map(str::to_owned).collect())
+}
+
+/// Each of `paths` that isn't Rust and lies under a `tests/` directory, as a problem, but for the
+/// inputs written in the language under test: `crates/lang`'s vendored conformance suites, whole,
+/// and its `.star` fixtures.
+fn test_data(paths: &[String]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for path in paths {
+        let file = Path::new(path);
+        let under_tests = file.parent().is_some_and(|parent| {
+            (parent.components()).any(|component| component.as_os_str() == "tests")
+        });
+        let extension = file.extension().and_then(|extension| extension.to_str());
+        let input = path.starts_with("crates/lang/tests/conformance/")
+            || (path.starts_with("crates/lang/tests/fixtures/") && extension == Some("star"));
+        if under_tests && extension != Some("rs") && !input {
+            problems.push(format!(
+                "{path}: a file that isn't Rust, under a `tests/` directory: make what the test \
+                 reads in the test, with Pumpkin's own writer where Pumpkin reads it"
+            ));
+        }
+    }
+    problems
 }
 
 /// Each Markdown link in `ARCHITECTURE.md`, if the repository has one, to anything but a web page,

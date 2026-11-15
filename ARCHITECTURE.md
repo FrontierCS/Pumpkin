@@ -595,8 +595,8 @@ out.
 
 [`docs/dev/testing.md`](docs/dev/testing.md) holds the rules. `cargo xtask ci` is pure: its tests
 reach no Docker engine,
-network or cloud, and wait on no real clock, so the core, the gateway, the route and the runtime
-are tested with Pumpkin's own processes, loopback sockets and a simulated host and provider.
+network or cloud, so the core, the gateway, the route and the runtime are tested with Pumpkin's
+own processes, loopback sockets and a simulated host and provider.
 `cargo xtask live` runs the checks that reach a real environment. `docker` runs the tests that
 need a Docker engine or the static `sandboxd`, which `ci` ignores. `ec2` and `modal`, which cost
 money, run `examples/smoke` through the controller that the contributor's configuration names,
