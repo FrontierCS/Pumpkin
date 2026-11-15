@@ -91,7 +91,7 @@ fn file(path: &str) -> String {
 
 /// The workflow that `entry` gives, given `args`, its images standing as IDs of their number,
 /// with what each image's build is, as `shown` has it; or the problems of its evaluation.
-fn evaluated(entry: &str, args: &Args) -> Result<(Workflow, Vec<Shown>), String> {
+fn evaluated(entry: &str, args: &Args) -> Result<(Workflow, Vec<String>), String> {
     let mut loader = Bundled(entry);
     let label = Label::parse("//task.star").unwrap();
     // As `pumpkin` evaluates, on a stack of the size `lang` asks.
@@ -106,9 +106,9 @@ fn evaluated(entry: &str, args: &Args) -> Result<(Workflow, Vec<Shown>), String>
             let built = plan.build(NonZeroUsize::MIN, |ready| {
                 (ready.into_iter())
                     .map(|(index, declared)| {
-                        images.push(shown(&declared));
                         let number = index + 1;
-                        let image = ir::Image::try_from(format!("sha256:{number:064x}")).unwrap();
+                        images.push(shown(number, &declared));
+                        let image = image(number);
                         (index, Ok(Built { number, image }))
                     })
                     .collect()
@@ -118,6 +118,11 @@ fn evaluated(entry: &str, args: &Args) -> Result<(Workflow, Vec<Shown>), String>
         });
         evaluation.unwrap().join().unwrap()
     })
+}
+
+/// The ID that stands for the image of `number`.
+fn image(number: usize) -> ir::Image {
+    ir::Image::try_from(format!("sha256:{number:064x}")).unwrap()
 }
 
 /// The problems `recipe::check` finds in a library's recipe, given `contexts`; a task's passes.
@@ -137,31 +142,34 @@ fn checked_recipe(declared: &Recipe, contexts: &[&str]) -> Vec<String> {
     Vec::from_iter(recipe::check(&path, file(&path).as_bytes(), &given).err())
 }
 
-/// What an image's build is, as [`shown`] has it.
-type Shown = (String, Vec<String>);
-
-/// What `declared` builds, as a line, and its recipe's lines but its comments and blank ones,
-/// each image by its number.
-fn shown(declared: &Declared<'_, Built>) -> Shown {
+/// What `declared`, the image of `number`, builds, as a line: its recipe and context, each
+/// directory it mounts, its stage and build arguments, each named context by its image's number,
+/// and its repository.
+fn shown(number: usize, declared: &Declared<'_, Built>) -> String {
     let Declared { recipe, contexts } = declared;
-    let text = match recipe.context.root() {
-        Root::Task => String::new(),
-        Root::Library => file(&format!("{}/{}", recipe.context.path(), recipe.recipe)),
-    };
-    let lines = (text.lines())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned);
-    let contexts: Vec<String> = (contexts.iter())
-        .map(|(name, built)| format!(", image {} as {name}", built.number))
-        .collect();
-    let line = format!(
-        "{}'s {}{}, in {}",
-        recipe.context,
-        recipe.recipe,
-        contexts.concat(),
-        recipe.repository
-    );
-    (line, lines.collect())
+    let Recipe {
+        context,
+        recipe,
+        mounts,
+        target,
+        args,
+        repository,
+    } = recipe;
+    let mut shown = format!("image {number}: {context}'s {recipe}");
+    for (path, label) in mounts {
+        let _ = write!(shown, ", {label} at {path}");
+    }
+    if let Some(target) = target {
+        let _ = write!(shown, ", stage {target}");
+    }
+    for (name, value) in args {
+        let _ = write!(shown, ", {name}={value}");
+    }
+    for (name, built) in contexts {
+        let _ = write!(shown, ", image {} as {name}", built.number);
+    }
+    let _ = write!(shown, ", in {repository}");
+    shown
 }
 
 /// `runtime` but its standard input and its times, a line for each part, each word of the command
@@ -220,9 +228,9 @@ fn route(agent: &ir::Role) -> String {
     format!("route: {}\n", route.join(", "))
 }
 
-/// The header lists of `agent`'s route entries, and the library's `images`, all but the first,
-/// the task's: what builds each and its recipe's lines, as [`shown`] has them.
-fn layer(agent: &ir::Role, images: Vec<Shown>) -> String {
+/// The header lists of `agent`'s route entries; what builds each of `images`, as [`shown`] has
+/// it; and the number of the image `agent` runs on.
+fn layer(agent: &ir::Role, images: &[String]) -> String {
     let mut shown = String::new();
     for entry in agent.egress.model.as_ref().unwrap().as_slice() {
         let names = |names: &[ir::HeaderName]| {
@@ -239,12 +247,11 @@ fn layer(agent: &ir::Role, images: Vec<Shown>) -> String {
             names(&entry.response_headers)
         );
     }
-    for (image, recipe) in images.into_iter().skip(1) {
-        let _ = writeln!(shown, "image: {image}");
-        for line in recipe {
-            let _ = writeln!(shown, "  {line}");
-        }
+    for line in images {
+        let _ = writeln!(shown, "{line}");
     }
+    let number = (1..=images.len()).find(|number| image(*number) == agent.image);
+    let _ = writeln!(shown, "the agent's image: image {}", number.unwrap());
     shown
 }
 

@@ -159,7 +159,7 @@ fn roles() {
         }));
         shown.push_str(&route(agent));
         if index == 0 {
-            shown.push_str(&layer(agent, images));
+            shown.push_str(&layer(agent, &images));
         }
     }
     check(
@@ -180,19 +180,10 @@ fn roles() {
             route: chat glm-5.3
             request headers: user-agent
             response headers: none
-            image: @pumpkin//harness/node/layer's Dockerfile, in pumpkin-library/harness/node/layer
-              FROM node@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
-              ADD --checksum=sha256:38861b171079e440b25ac86483284f690d0ee7921dba98b0c8fe04a9b0a11667 https://github.com/NixOS/patchelf/releases/download/0.19.3/patchelf-0.19.3-x86_64.tar.gz /patchelf.tgz
-              RUN mkdir /patchelf && tar --extract --gzip --file /patchelf.tgz --directory /patchelf ./bin/patchelf && mkdir --parents /out/harness/node-24.14.0/lib && cp /usr/local/bin/node /usr/local/LICENSE /out/harness/node-24.14.0/ && /patchelf/bin/patchelf --set-interpreter /harness/node-24.14.0/lib/ld-linux-x86-64.so.2 --set-rpath /harness/node-24.14.0/lib /out/harness/node-24.14.0/node && rm --recursive /patchelf /patchelf.tgz && cd /lib/x86_64-linux-gnu && cp --dereference ld-linux-x86-64.so.2 libc.so.6 libdl.so.2 libgcc_s.so.1 libm.so.6 libpthread.so.0 libstdc++.so.6 /out/harness/node-24.14.0/lib/ && cd /out/harness/node-24.14.0 && chmod 0444 LICENSE lib/libc.so.6 lib/libdl.so.2 lib/libgcc_s.so.1 lib/libm.so.6 lib/libpthread.so.0 lib/libstdc++.so.6 && chmod 0555 /out/harness . lib node lib/ld-linux-x86-64.so.2
-            image: @pumpkin//harness/zcode/layer's Dockerfile, image 1 as base, image 2 as node, in pumpkin-library/harness/zcode/layer
-              FROM node AS zcode-0.16.9
-              ADD https://github.com/zai-org/ZCode.git#29628c9acdb81b703bbd4080c207a0e7ce5e276e /source
-              ADD --checksum=sha256:7a7bcf13d7f6ceb3946c03978373d99be9fde1cafc3000bdfed4c4f791167610 https://registry.npmjs.org/pnpm/-/pnpm-10.33.2.tgz /pnpm.tgz
-              RUN npm install --global --offline /pnpm.tgz && cd /source && pnpm install --frozen-lockfile --ignore-scripts --filter @zcode/cli... && pnpm --filter @zcode/cli... run build
-              RUN mkdir --parents /layer/harness/zcode-0.16.9 && cd /source && cp LICENSE apps/zcode-cli/packages/cli/dist/zcode.cjs apps/zcode-cli/packages/cli/dist/THIRD-PARTY-NOTICES.md /layer/harness/zcode-0.16.9/ && cp --recursive apps/zcode-cli/packages/cli/dist/provider /layer/harness/zcode-0.16.9/ && chmod --recursive a=rX /layer/harness
-              FROM base
-              COPY --link --from=node --chown=0:0 /out/ /
-              COPY --link --from=zcode-0.16.9 --chown=0:0 /layer/ /
+            image 1: //images's Dockerfile, in pumpkin/images
+            image 2: @pumpkin//harness/node/layer's Dockerfile, in pumpkin-library/harness/node/layer
+            image 3: @pumpkin//harness/zcode/layer's Dockerfile, image 1 as base, image 2 as node, in pumpkin-library/harness/zcode/layer
+            the agent's image: image 3
             vendor/"quoted"\model high /srv/my "work" dir 1 1:
             argv: /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --mode yolo --cwd "/srv/my \"work\" dir" --disallowed-tools WebSearch,WebFetch "--prompt=-leading dash\nsecond line, \"quoted\"\n"
             env: "HOME=/srv/my \"work\" dir/.zcode-home" "TMPDIR=/srv/my \"work\" dir/.zcode-home/tmp" "ZCODE_DATA_BASE_DIR=/srv/my \"work\" dir/.zcode-home" "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE=/srv/my \"work\" dir/.zcode-home/provider_config.json" ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/harness/zcode-0.16.9/provider/zcode-builtin.json
