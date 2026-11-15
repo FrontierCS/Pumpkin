@@ -222,7 +222,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .tabs .callers { margin-left: auto; display: flex; gap: var(--s3); align-items: baseline; padding-bottom: var(--s1); }
 .tabs .callers a.on { font-weight: 600; text-decoration: underline; }
 .tabs.small { margin: 0 0 var(--s2); }
-.tabs.small button { height: var(--field); }
+.tabs.small button { height: var(--field); padding: 0 var(--s1); }
 .toolbar .folds { display: flex; gap: var(--s1); align-items: center; }
 .toolbar button.on { color: var(--accent); border-color: var(--accent); background: var(--select); }
 .toolbar .status { margin-left: auto; }
@@ -234,6 +234,33 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms; }
 .grip:hover::after, .grip:focus-visible::after { background: var(--accent); }
 .grip:focus-visible { outline: none; }
+
+/* A trace's tab: the Steps tab's toolbar and split, or the Statistics or Log tab, below the tabs. */
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
+.pane[hidden] { display: none; }
+
+/* The Statistics tab: the caller's totals, then a row a step or a thread, numbers right-aligned in
+   columns, the head sorting by one; the model time over a bar of its share of the longest. */
+.stats, .tlog { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
+.stats .table { flex: 1; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-panel); }
+.stats .list { border-top: 1px solid var(--rule); }
+.srow { display: flex; gap: var(--s3); align-items: center; font-family: var(--mono); font-size: var(--fs-mono); }
+.srow > * { flex: none; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow > .key { width: 7ch; text-align: left; color: var(--text); font-weight: 600; }
+.srow > .n { width: 7ch; } .srow > .pct { width: 6ch; } .srow > .time { width: 7ch; }
+.srow > .tok { width: 9ch; } .srow > .rate { width: 8ch; }
+.srow > .word { width: 9ch; text-align: left; }
+.srow.failed > :last-child { color: var(--fail); }
+.srow > .share { background: linear-gradient(to right, color-mix(in srgb, var(--model) 30%, transparent) calc(var(--share, 0) * 100%), transparent 0); }
+.shead { flex: none; height: var(--row); padding: 0 var(--s2); }
+.shead button { border: none; background: none; padding: 0; height: auto; color: var(--dim); font: inherit; }
+.shead button.share { background: none; }
+.shead button.on { color: var(--text); font-weight: 600; }
+
+/* The Log tab: the caller's records at left, the one selected at right. */
+.log-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 34%); gap: var(--s3); }
+.tlog .list { border: 1px solid var(--line); border-top: 1px solid var(--rule); border-radius: 0 0 var(--r-panel) var(--r-panel); }
+.tlog .row.of-step .kind { text-decoration: underline dotted; }
 
 /* The ledger: every row one line, numbers in columns, kinds as mono words in their ink. */
 .lrow { font-family: var(--mono); font-size: var(--fs-mono); gap: var(--s2); }
@@ -299,6 +326,14 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .inspector summary { cursor: pointer; color: var(--model-ink); font-family: var(--mono); font-size: var(--fs-mono); }
 .inspector .why { color: var(--dim); font-family: var(--sans); font-size: var(--fs); }
 .inspector h3 .mark { margin: 0; align-self: center; }
+/* A step's Diff tab: each part's hunks, a line removed or added on a tint of its mark. */
+.inspector h4 { margin: var(--s3) 0 var(--s1); font-size: var(--fs); font-weight: 600; color: var(--text); }
+.inspector h4:first-child { margin-top: 0; }
+.inspector pre.hunk { margin: 0 0 var(--s2); padding: 0; border-top: none; font-size: var(--fs-mono); }
+.hunk span { display: block; }
+.hunk .at { color: var(--dim); }
+.hunk .add { background: color-mix(in srgb, var(--ok-bar) 18%, transparent); }
+.hunk .del { background: color-mix(in srgb, var(--fail-bar) 18%, transparent); }
 mark { background: var(--mark); color: inherit; border-radius: 2px; }
 
 @media (max-width: 1200px) {

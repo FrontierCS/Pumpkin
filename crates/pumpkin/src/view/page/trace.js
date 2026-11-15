@@ -2,6 +2,8 @@
 // ([`timeline.js`]) above a ledger at left and an inspector at right, with what is shown and
 // selected in the address (`#/run/<id>/trace?caller=agent&fold=steps&sel=12/out/1&q=…`), so
 // that a link shows the same.
+// Its Statistics and Log tabs are [`stats.js`]'s and [`log.js`]'s, `view=stats` and `view=log` in
+// the address.
 //
 // The steps are read whole, as columns, in one reply; the entries of the steps in view are read
 // in windows once the ledger's scroll pauses on them, a window that scrolls away before it comes
@@ -13,7 +15,9 @@
 import { POLL_MS, Refused, byId, fill, follow, get, h, keepSetting, plural, route, sentence, setKeys, setQuery, setting, show, tone, typing } from "./h.js";
 import { forgetExchanges, inspect } from "./inspector.js";
 import { drawRow, keyOf, layout, matches, stepFolded, threadFolded } from "./ledger.js";
+import { logView } from "./log.js";
 import { RowList } from "./rows.js";
+import { statsView } from "./stats.js";
 import { IN_FLIGHT, Steps } from "./steps.js";
 import { Timeline } from "./timeline.js";
 
@@ -46,6 +50,13 @@ const KEPT_WINDOWS = 48;
 // The inspector's width, its bounds and its default, in px, which is less in a narrow window.
 const INSPECTOR_PX = { min: 320, max: 720, default: 440, share: 0.34 };
 const inspectorDefault = () => Math.min(INSPECTOR_PX.default, Math.round(innerWidth * INSPECTOR_PX.share));
+
+/** @typedef {"trace" | "stats" | "log"} View */
+/** @returns {View} */
+function viewOf() {
+  const view = route().query.get("view");
+  return view === "stats" || view === "log" ? view : "trace";
+}
 
 // The trace's shape as the address says it.
 /** @returns {Shape} */
@@ -118,7 +129,10 @@ export async function traceView(id) {
   const title = h("h2", { class: "title" }, caller.replace("-", " "));
   const within = h("p", { class: "within" });
   const callers = h("span", { class: "callers" });
-  const tabs = h("div", { class: "tabs" }, h("button", { class: "on", role: "tab", "aria-selected": "true" }, "Steps"), callers);
+  const tabButton = (/** @type {View} */ view, /** @type {string} */ name) => h("button", { role: "tab", onclick: () => showView(view) }, name);
+  /** @type {Record<View, HTMLElement>} */
+  const tabButtons = { trace: tabButton("trace", "Steps"), stats: tabButton("stats", "Statistics"), log: tabButton("log", "Log") };
+  const tabs = h("div", { class: "tabs", role: "tablist" }, Object.values(tabButtons), callers);
   const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Search the trace  ( / )", title: "Search every entry's text (/ to type, Enter and Shift-Enter for the next and previous match, Esc to leave)", value: query.get("q") || "" }));
   const found = h("span", { class: "counted" });
   const prev = h("button", { title: "The previous match (Shift-Enter)", onclick: () => goHit(-1) }, "↑");
@@ -159,7 +173,27 @@ export async function traceView(id) {
     return kept;
   };
   widen(width);
-  show(title, within, tabs, toolbar, startedOver, timeline.node, split);
+  const pane = h("div", { class: "pane" }, toolbar, startedOver, timeline.node, split);
+  // The Statistics and Log tabs, each made when first shown.
+  /** @type {Partial<Record<View, { node: HTMLElement, show: () => void, key: (event: KeyboardEvent) => void }>>} */
+  const others = {};
+  const panes = h("div", { class: "pane" });
+  show(title, within, tabs, pane, panes);
+  const showView = (/** @type {View} */ view) => {
+    setQuery({ view: view === "trace" ? null : view });
+    for (const [name, button] of Object.entries(tabButtons)) {
+      button.classList.toggle("on", name === view);
+      button.setAttribute("aria-selected", String(name === view));
+    }
+    pane.hidden = view !== "trace";
+    panes.hidden = view === "trace";
+    if (view === "trace") return list.paint(true);
+    const go = (/** @type {string} */ key) => (showView("trace"), select(key, true));
+    const started = () => state.run?.times?.started_unix ?? null;
+    const other = (others[view] ??= view === "stats" ? statsView({ api, go }) : logView({ base, caller, started, go }));
+    fill(panes, other.node);
+    other.show();
+  };
 
   // ---- the inspector's width: dragged, stepped by arrows, reset by a double-click
 
@@ -574,6 +608,8 @@ export async function traceView(id) {
     }
   };
   setKeys((event) => {
+    const view = viewOf();
+    if (view !== "trace") return void (typing() || others[view]?.key(event));
     if (typing() || !state.steps) return;
     if (event.key === "/") {
       event.preventDefault();
@@ -668,6 +704,7 @@ export async function traceView(id) {
     if (!reply.live) return await ended(), null;
     return POLL_MS;
   };
+  showView(viewOf());
   follow(async (current) => {
     try {
       return await read(current);
