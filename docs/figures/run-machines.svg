@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 616" width="880" height="616" role="img" aria-labelledby="title desc">
+<title id="title">The programs and machines of a run</title>
+<desc id="desc">The operator's pumpkin starts the driver, one process for each run, on the operator's machine or, over ssh through SSM, on the controller. In the driver, the runtime, the decision core, the gateway, the model route and the providers work together; the providers create the sandboxes of the agent, a judge or a runner, each of which has one session with the gateway, and the route sends the requests it admits to the model provider.</desc>
+<style>
+:root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
+text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;fill:var(--ink)}
+.code{font:600 13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.name{font-size:13px;font-weight:600}
+.note{font-size:11.5px;fill:var(--mute)}
+.zone-label{font-size:10px;font-weight:700;letter-spacing:.8px;fill:var(--mute)}
+.mid{text-anchor:middle}
+.bg{fill:var(--bg)}
+.box{fill:var(--card);stroke:var(--line);stroke-width:1.25}
+.hot{fill:var(--hot-bg);stroke:var(--hot);stroke-width:1.5}
+.zone{fill:none;stroke:var(--line);stroke-width:1.25;stroke-dasharray:6 4}
+.arrow{fill:none;stroke:var(--line);stroke-width:1.5}
+.head{fill:var(--line)}
+</style>
+<defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker>
+<marker id="tail" viewBox="0 0 8 8" refX="0" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M8 0L0 4L8 8z"/></marker></defs>
+<rect class="bg" width="880" height="616"/>
+
+<rect class="zone" x="16" y="16" width="596" height="80" rx="12"/>
+<text class="zone-label" x="32" y="38">THE OPERATOR'S MACHINE</text>
+<rect class="box" x="232" y="30" width="160" height="52" rx="8"/>
+<text class="code mid" x="312" y="52">pumpkin</text><text class="note mid" x="312" y="70">the command line</text>
+<path class="arrow" d="M312 82V199" marker-end="url(#head)"/>
+<text class="note" x="322" y="119"><tspan class="code">pumpkin run</tspan> starts the driver on this machine, or on</text>
+<text class="note" x="322" y="135">the controller, which it reaches over ssh through SSM</text>
+
+<rect class="zone" x="16" y="150" width="596" height="366" rx="12"/>
+<text class="zone-label" x="32" y="172">THE DRIVER'S MACHINE</text>
+<text class="note" x="32" y="188">the operator's own, or the controller</text>
+<rect class="hot" x="32" y="200" width="564" height="300" rx="10"/>
+<text class="name" x="48" y="222">the driver</text><text class="note" x="124" y="222">one process for each run</text>
+<rect class="box" x="48" y="236" width="160" height="52" rx="8"/>
+<text class="code mid" x="128" y="258">decision</text><text class="note mid" x="128" y="276">the core: no I/O, no clock</text>
+<rect class="box" x="416" y="236" width="160" height="52" rx="8"/>
+<text class="code mid" x="496" y="258">gateway</text><text class="note mid" x="496" y="276">one end of each session</text>
+<rect class="box" x="48" y="328" width="528" height="44" rx="8"/>
+<text class="code mid" x="312" y="347">runtime</text><text class="note mid" x="312" y="364">carries out the core's decisions</text>
+<rect class="box" x="48" y="412" width="160" height="52" rx="8"/>
+<text class="name mid" x="128" y="434">the record</text><text class="note mid" x="128" y="452">log, exchanges, outcome</text>
+<rect class="box" x="232" y="412" width="160" height="52" rx="8"/>
+<text class="code mid" x="312" y="434">route</text><text class="note mid" x="312" y="452">the model route, closed</text>
+<rect class="box" x="416" y="412" width="160" height="52" rx="8"/>
+<text class="code mid" x="496" y="434">provider</text><text class="note mid" x="496" y="452">Docker, EC2 or Modal</text>
+<path class="arrow" d="M118 327V290" marker-end="url(#head)"/>
+<path class="arrow" d="M138 289V326" marker-end="url(#head)"/>
+<text class="note" x="110" y="312" text-anchor="end">events</text>
+<text class="note" x="146" y="312">actions</text>
+<path class="arrow" d="M496 290V326" marker-start="url(#tail)" marker-end="url(#head)"/>
+<text class="note" x="486" y="305" text-anchor="end">ops and model requests,</text>
+<text class="note" x="486" y="320" text-anchor="end">files and commands</text>
+<path class="arrow" d="M128 373V410" marker-end="url(#head)"/>
+<text class="note" x="136" y="396">writes</text>
+<path class="arrow" d="M312 373V410" marker-end="url(#head)"/>
+<text class="note" x="304" y="396" text-anchor="end">model requests</text>
+<path class="arrow" d="M496 373V410" marker-end="url(#head)"/>
+<text class="note" x="504" y="396">create, delete</text>
+
+<rect class="zone" x="684" y="200" width="180" height="300" rx="12"/>
+<text class="zone-label" x="698" y="220">SANDBOXES</text>
+<text class="note" x="698" y="236">untrusted; one for each</text>
+<text class="note" x="698" y="252">instance of a role</text>
+<rect class="box" x="698" y="262" width="152" height="52" rx="8"/>
+<text class="name mid" x="774" y="284">agent</text><text class="note mid" x="774" y="302">works on the task</text>
+<rect class="box" x="698" y="324" width="152" height="52" rx="8"/>
+<text class="name mid" x="774" y="346">judge</text><text class="note mid" x="774" y="364">judges a submission</text>
+<rect class="box" x="698" y="386" width="152" height="52" rx="8"/>
+<text class="name mid" x="774" y="408">runner</text><text class="note mid" x="774" y="426">leased by a role</text>
+<text class="note" x="698" y="458">each runs <tspan class="code">sandboxd</tspan>,</text>
+<text class="note" x="698" y="474">which serves its session</text>
+<path class="arrow" d="M578 276H682" marker-start="url(#tail)" marker-end="url(#head)"/>
+<text class="note mid" x="648" y="268">sessions</text>
+<path class="arrow" d="M578 438H682" marker-end="url(#head)"/>
+<text class="note mid" x="648" y="430">creates</text>
+
+<path class="arrow" d="M312 465V546" marker-end="url(#head)"/>
+<text class="note" x="322" y="530">the requests it admits, with the key</text>
+<rect class="box" x="192" y="548" width="240" height="52" rx="8"/>
+<text class="name mid" x="312" y="570">model provider</text><text class="note mid" x="312" y="588">an upstream the configuration names</text>
+</svg>

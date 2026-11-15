@@ -31,6 +31,8 @@ happened, and the runtime carries out those decisions on the providers and keeps
 A run is one process, the driver, on one machine: the operator's own, or the person's controller,
 an EC2 instance that runs the runs a machine sends it.
 
+![The programs and machines of a run: the operator's pumpkin starts the driver on the operator's machine or on the controller; the driver's parts, the sandboxes that the providers create and the model provider that the route reaches.](docs/figures/run-machines.svg)
+
 ## Entry points
 
 `pumpkin` (`crates/pumpkin`) is the operator's command line. `check` evaluates and checks a task
@@ -45,13 +47,15 @@ there over `ssh` through SSM, and follows, lists, stops and reaps the runs there
 controller, `controller job` runs each run or build in a systemd unit of its own, and
 `controller boot` reaps what lost runs left.
 
+![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it.](docs/figures/controller-data.svg)
+
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Run under the
 name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
 (`providers/ec2/boot`) boots each instance of the EC2 provider.
 
-`cargo xtask` (`xtask`) holds the contributor tasks: `ci`, `live`, `install`, `sandboxd`, `fmt`,
-`mutants`, `refill` and `install-tools`. A repository that uses Pumpkin copies in `deploy/pumpkin`
-as `./pumpkin`, which builds the Pumpkin it pins and runs it.
+`cargo xtask` (`xtask`) holds the contributor tasks, which `cargo xtask --help` lists. A repository
+that uses Pumpkin copies in `deploy/pumpkin` as `./pumpkin`, which builds the Pumpkin it pins and
+runs it.
 
 The key types are `ir::Workflow`, a workflow as written; `workflow::Workflow`, parsed, and
 `Placed`, its roles placed in the classes of sandbox that providers offer; `Core`, a run's
@@ -64,6 +68,8 @@ engine; and `Record`, a run's record.
 Each crate depends only on crates listed above it here, but for `test-support`, which many
 crates' tests use. Pay attention to the **Architecture Invariant** notes: they often name
 something deliberately absent, and each says what holds it.
+
+![How the workspace's crates depend on one another: a box for each crate, above the crates it depends on, with an arrow to each that no other of its arrows already leads to; the crates that build a binary are shaded.](docs/figures/crates.svg)
 
 ### `crates/stdx`
 
@@ -421,9 +427,10 @@ model provider's HTTP server. A helper that one crate's tests use stays in that 
 ### `xtask`
 
 The contributor tasks. `ci` runs the checks every change passes, among them the checks of Rust
-files (`tidy`) and of `.star` files (`star`); `live` runs those that reach a real environment;
-`install` installs `pumpkin` beside the static `sandboxd`, `ec2-boot`, the Modal helper and the
-pinned buildifier; `tools` pins the contributor tools.
+files, of documents and their figures (`tidy`), of `.star` files (`star`) and of the figure of the
+crates, which `figure` draws from `cargo metadata`; `live` runs those that reach a real
+environment; `install` installs `pumpkin` beside the static `sandboxd`, `ec2-boot`, the Modal
+helper and the pinned buildifier; `tools` pins the contributor tools.
 
 ### `deploy/pumpkin`
 
@@ -465,6 +472,8 @@ port, and a Modal sandbox opens no connection but DNS. Through the session it re
 host serves: file trees and command exits go to the runtime, ops go to the core, which authorizes
 each against the grants of the caller's role, and model requests go through the closed route.
 `sandboxd` and `sandboxctl` are no boundary inside a sandbox; the session is.
+
+![The data that flows in a run: between the sandboxes and the gateway, the runtime and the decision core, and from the route to the model provider, each arrow named by the code that carries it, and into the record that the record module lays out.](docs/figures/run-data.svg)
 
 A sandbox proves which it is by how it meets the gateway. On the host, it dials a socket of its
 own, which only it can reach. Elsewhere, its hello presents a grant (`RegistrationGrant`) that
