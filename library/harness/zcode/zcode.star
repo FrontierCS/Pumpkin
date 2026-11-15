@@ -3,10 +3,10 @@ and writes the runtime of one unattended `zcode --prompt`, with the route to its
 
 ZCode works in its workspace, and keeps its home (`HOME`), with its configuration, its sessions
 and its other data (`ZCODE_DATA_BASE_DIR`), and its temporary files (`TMPDIR`) in a directory of
-its own there. Its record of the run is the events it writes to its standard output as JSON
-lines, which the teardown collects. It reaches the model only at the endpoint `sandboxd` serves,
-`MODEL_URL`, on the Chat Completions API, through the one provider its provider file names, with
-a stand-in key: the host holds the key, and the route passes no client's.
+its own there. It writes its last message to its standard output and an error to its standard
+error. It reaches the model only at the endpoint `sandboxd` serves, `MODEL_URL`, on the Chat
+Completions API, through the one provider its provider file names, with a stand-in key: the host
+holds the key, and the route passes no client's.
 """
 
 load("@pumpkin//harness/node/node.star", "NODE", "node")
@@ -138,11 +138,12 @@ def zcode(
         "runtime": {"agent": {
             "command": {
                 # ZCode on `node`, started directly (`node.star` says why). `--prompt` runs one
-                # turn, unattended, on the prompt, which the
-                # option takes whole, whatever it begins with, given as `--prompt=<text>`; and it
-                # writes its events to its standard output as JSON lines, which the run's record
-                # keeps. It asks no one for permission (`--mode yolo`), for the agent's sandbox
-                # confines it, and offers no web search or fetch, which reach past the model.
+                # turn, unattended, on the prompt, which the option takes whole, whatever it begins
+                # with, given as `--prompt=<text>`; and, by default, it writes only its last
+                # message to its standard output, and an error to its standard error
+                # (https://github.com/zai-org/ZCode/blob/29628c9acdb81b703bbd4080c207a0e7ce5e276e/apps/zcode-cli/packages/cli/src/prompt-command.ts#L418-L422).
+                # It asks no one for permission (`--mode yolo`), for the agent's sandbox confines
+                # it, and offers no web search or fetch, which reach past the model.
                 "argv": [
                     NODE,
                     _ROOT + "/zcode.cjs",
@@ -150,8 +151,6 @@ def zcode(
                     "yolo",
                     "--cwd",
                     workspace,
-                    "--output-format",
-                    "stream-json",
                     "--disallowed-tools",
                     "WebSearch,WebFetch",
                     "--prompt=" + prompt,

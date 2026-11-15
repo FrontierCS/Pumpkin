@@ -236,12 +236,12 @@ fn roles() {
         &shown,
         &expect![[r#"
             model-small high native /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 ee811c2e99a8ede9e80570c6a373574bbcc8ee3e3fdae4a49588041615226810:
+            file 0600 /workspace/.codex/config.toml, sha256 8b9052558987320592d412af9c564e0809e5f8688dc1f409457077c3478c5db0:
               model = "model-small"
               model_reasoning_effort = "high"
               model_provider = "pumpkin"
@@ -270,9 +270,11 @@ fn roles() {
             # Nothing reaches past the model route, the only way out of the sandbox.
             web_search = "disabled"
 
-            # Codex's record of the run is the events it writes to its standard output, which the teardown
-            # collects. The databases it makes in its home as it starts stay there, uncollected: `exec`
-            # writes them no log, and its session, ephemeral, keeps nothing in them.
+            # No reasoning summary in the progress on the standard error: the model's answers hold them.
+            hide_agent_reasoning = true
+
+            # The databases Codex makes in its home as it starts stay there, uncollected: `exec` writes them
+            # no log, and its session, ephemeral, keeps nothing in them.
 
             # The model endpoint `sandboxd` serves, which needs no credential.
             [model_providers.pumpkin]
@@ -301,45 +303,45 @@ fn roles() {
             [plugins._default]
             enabled = false
             model-small high native /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 ee811c2e99a8ede9e80570c6a373574bbcc8ee3e3fdae4a49588041615226810:
+            file 0600 /workspace/.codex/config.toml, sha256 8b9052558987320592d412af9c564e0809e5f8688dc1f409457077c3478c5db0:
               model = "model-small"
               model_reasoning_effort = "high"
               model_provider = "pumpkin"
             route: responses model-small
             model-small high native /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 ee811c2e99a8ede9e80570c6a373574bbcc8ee3e3fdae4a49588041615226810:
+            file 0600 /workspace/.codex/config.toml, sha256 8b9052558987320592d412af9c564e0809e5f8688dc1f409457077c3478c5db0:
               model = "model-small"
               model_reasoning_effort = "high"
               model_provider = "pumpkin"
             route: responses model-small
             model-large low native /home/agent:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/home/agent/.codex TMPDIR=/home/agent/.tmp
             cwd: /home/agent
             dir 0700 /home/agent/.codex
             dir 0700 /home/agent/.tmp
-            file 0600 /home/agent/.codex/config.toml, sha256 2b61dbf17d70177420d3cff96e9d29b6ddfaeb5bb8d38f8835a55534329b790d:
+            file 0600 /home/agent/.codex/config.toml, sha256 4df80c6bdae7f455bd02fd17b9e36e63651851b279ea7615b7f1929ce579ad51:
               model = "model-large"
               model_reasoning_effort = "low"
               model_provider = "pumpkin"
             route: responses model-large
             gpt-6.1-terra xhigh functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 f51b61b2e69836ce741362bef47e261d767776b22c61c61f796cce5cd29b03ed:
+            file 0600 /workspace/.codex/config.toml, sha256 05e4d40af7a92a2f7dab9367df5b86cde8e1839dcef2350c22a2e6acaf4adc1e:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "xhigh"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -353,12 +355,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             glm-5.3 xhigh functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 cc7ba49f6cfbae4e13fe31a5d021536bb1342242722ce99d54b87dfd9edfcfa8:
+            file 0600 /workspace/.codex/config.toml, sha256 26ba3c05bfc017461924b58f04cb4d3b7e31444656530c9b5a18d69622fdfc32:
               model = "glm-5.3"
               model_reasoning_effort = "xhigh"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -372,12 +374,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses glm-5.3
             gpt-6.1-terra xhigh native /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 f51b61b2e69836ce741362bef47e261d767776b22c61c61f796cce5cd29b03ed:
+            file 0600 /workspace/.codex/config.toml, sha256 05e4d40af7a92a2f7dab9367df5b86cde8e1839dcef2350c22a2e6acaf4adc1e:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "xhigh"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -391,12 +393,12 @@ fn roles() {
                 experimental_supported_tools: ["send_user_message_async","clock"]
             route: responses gpt-6.1-terra
             glm-5.3 high native /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 065099ae03a8c39bbf8e99b92db9cf0c87c17dfb052c5fc334aef5d964722d88:
+            file 0600 /workspace/.codex/config.toml, sha256 6850fb3b65c5554f2cfc88d4e1f281f5b6244a70211d3805b5638c78d8d66ded:
               model = "glm-5.3"
               model_reasoning_effort = "high"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -410,34 +412,34 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses glm-5.3
             model-small xhigh native /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 03e451614854ed18c17d89d8cf9ca542345298cdf55f010fdc5a17c288c8b98a:
+            file 0600 /workspace/.codex/config.toml, sha256 0bddd09dc5bcb3cb9a03537325a5bc5ac6208006e284b692172b279132e5c748:
               model = "model-small"
               model_reasoning_effort = "xhigh"
               model_provider = "pumpkin"
             route: responses model-small
             vendor/"quoted"\model xhigh native /srv/work:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/srv/work/.codex TMPDIR=/srv/work/.tmp
             cwd: /srv/work
             dir 0700 /srv/work/.codex
             dir 0700 /srv/work/.tmp
-            file 0600 /srv/work/.codex/config.toml, sha256 f99b52cc82c34b9cbb743ec23deb8079395f9f0e8941aea56ef222693e91bb3e:
+            file 0600 /srv/work/.codex/config.toml, sha256 043e1021813f1a6efcaa3769d68032cc1ef810fdbc284783ef6c8e1994a8312e:
               model = "vendor/\"quoted\"\\model"
               model_reasoning_effort = "xhigh"
               model_provider = "pumpkin"
             route: responses vendor/"quoted"\model
             glm-5.3 high functions /:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/.codex TMPDIR=/.tmp
             cwd: /
             dir 0700 /.codex
             dir 0700 /.tmp
-            file 0600 /.codex/config.toml, sha256 5289f9135155be9da1bbb911d15af8bc6c0d5d478ee69758a7dd9e788443e6cd:
+            file 0600 /.codex/config.toml, sha256 d0df3a4fc969805e18c18c7c1a66c5367bfd12f62464ef7e1726d293e73fdc09:
               model = "glm-5.3"
               model_reasoning_effort = "high"
               model_catalog_json = "/.codex/model-catalog.json"
@@ -451,12 +453,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses glm-5.3
             gpt-6.1-terra none functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 dd5594d733a50bfd35565060dad4259fc6f4d95f6d73275f6cbe02e201185878:
+            file 0600 /workspace/.codex/config.toml, sha256 c9630022a6bec391265bd09b2119da84381e17f95b2f7a6f920f8a185d247773:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "none"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -470,12 +472,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra minimal functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 f1f185ba1f3e8747990c0fb1a84d19d8ced0ffed89be049f7d91e7258478346d:
+            file 0600 /workspace/.codex/config.toml, sha256 947c59ff1d96b1a325efbae18743a0d17d30ad628ff8db4629bb4d902e01d0c1:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "minimal"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -489,12 +491,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra low functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 a79a41fca71d88b22b21a1ce7fc2bf57ea377dddad9e60169e7bb500e5825c1b:
+            file 0600 /workspace/.codex/config.toml, sha256 4f91dbdb1d778d2fca0c91982c9d80be4abec425184e34f9afb6f689f31be5e7:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "low"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -508,12 +510,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra medium functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 20a1f5d1eb22fed61eb4c212de1430dba0445c9838c4c2791a4106050e5b05a3:
+            file 0600 /workspace/.codex/config.toml, sha256 dead42908bf272d8a4704964d24637489f3a198deffbb377588ef50cdf07f45d:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "medium"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -527,12 +529,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra high functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 11ad0da254120fd52f3e4130dc08568e864c1462fe116119448de51e831a06e0:
+            file 0600 /workspace/.codex/config.toml, sha256 dce690432adb53bccf633e351dd4f7b8245b2915efd801e6b00f2a67c104fdf9:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "high"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -546,12 +548,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra xhigh functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 f51b61b2e69836ce741362bef47e261d767776b22c61c61f796cce5cd29b03ed:
+            file 0600 /workspace/.codex/config.toml, sha256 05e4d40af7a92a2f7dab9367df5b86cde8e1839dcef2350c22a2e6acaf4adc1e:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "xhigh"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -565,12 +567,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra max functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 8848e32e0cfada3f2fdb92b2aae155659290a6c2d019a34cfb92bfa4edd1ee4c:
+            file 0600 /workspace/.codex/config.toml, sha256 41a91ae5fca1959303385d4f84bad148ccc0603de64997a6e1d48a87b1bd3926:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "max"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -584,12 +586,12 @@ fn roles() {
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
             gpt-6.1-terra ultra functions /workspace:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check --json -
+            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
-            file 0600 /workspace/.codex/config.toml, sha256 6cd0aa5b1a7a9e698a13adb32d9e44e4ae53bb2fb759d89558c740b76e233733:
+            file 0600 /workspace/.codex/config.toml, sha256 3c03e89a93acba7c6fc9a45117c25d4c5b34b5cc298d7bf79ab587e4beadd34b:
               model = "gpt-6.1-terra"
               model_reasoning_effort = "ultra"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
@@ -651,24 +653,24 @@ fn refusals() {
     check(
         &refused.join("\n"),
         &expect![[r#"
-            @pumpkin//harness/codex/codex.star:169:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
-                169 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/codex/codex.star:171:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
+                171 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9
-            @pumpkin//harness/codex/codex.star:186:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
-                186 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
+            @pumpkin//harness/codex/codex.star:188:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
+                188 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9
-            @pumpkin//harness/codex/codex.star:183:13: fail: Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
-                183 |             fail(message.format(model, slugs))
+            @pumpkin//harness/codex/codex.star:185:13: fail: Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
+                185 |             fail(message.format(model, slugs))
                     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9
-            @pumpkin//harness/codex/codex.star:193:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                193 |     home = below + "/.codex"
+            @pumpkin//harness/codex/codex.star:195:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+                195 |     home = below + "/.codex"
                     |            ^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
-            @pumpkin//harness/codex/codex.star:171:9: fail: `None` is not a prompt: give a string, which may be empty
-                171 |         fail("`None` is not a prompt: give a string, which may be empty")
+            @pumpkin//harness/codex/codex.star:173:9: fail: `None` is not a prompt: give a string, which may be empty
+                173 |         fail("`None` is not a prompt: give a string, which may be empty")
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9"#]],
     );

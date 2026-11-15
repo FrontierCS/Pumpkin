@@ -176,7 +176,7 @@ fn roles() {
         &shown,
         &expect![[r#"
             qwen3.8-max high /workspace 1000000 65536 {"enable_thinking": true, "temperature": 1}:
-            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format stream-json "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
+            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format text "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
             env: HOME=/workspace/.qwen-home TMPDIR=/workspace/.qwen-home/tmp QWEN_HOME=/workspace/.qwen-home/qwen PUMPKIN_MODEL_KEY=pumpkin QWEN_STREAM_MAX_LIFETIME_MS=0 QWEN_CODE_MODELS_DEV_REFRESH=off
             cwd: /workspace
             dir 0700 /workspace/.qwen-home
@@ -199,7 +199,7 @@ fn roles() {
               COPY --link --from=node --chown=0:0 /out/ /
               COPY --link --from=qwen-code-0.25.0 --chown=0:0 /layer/ /
             vendor/"quoted"\model xhigh /srv/my "work" dir 1 1 {"max_tokens": 7, "reasoning_effort": "none"}:
-            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model vendor/"quoted"\model --approval-mode yolo --output-format stream-json "--prompt=-leading dash\nsecond line, \"quoted\"\n"
+            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model vendor/"quoted"\model --approval-mode yolo --output-format text "--prompt=-leading dash\nsecond line, \"quoted\"\n"
             env: "HOME=/srv/my \"work\" dir/.qwen-home" "TMPDIR=/srv/my \"work\" dir/.qwen-home/tmp" "QWEN_HOME=/srv/my \"work\" dir/.qwen-home/qwen" PUMPKIN_MODEL_KEY=pumpkin QWEN_STREAM_MAX_LIFETIME_MS=0 QWEN_CODE_MODELS_DEV_REFRESH=off
             cwd: /srv/my "work" dir
             dir 0700 /srv/my "work" dir/.qwen-home
@@ -209,7 +209,7 @@ fn roles() {
             {"$version":4,"general":{"enableAutoUpdate":false},"mcpServers":{},"memory":{"enableAutoSkill":false,"enableManagedAutoDream":false,"enableManagedAutoMemory":false},"model":{"name":"vendor/\"quoted\"\\model"},"modelProviders":{"openai":[{"baseUrl":"http://127.0.0.1:11235/v1","envKey":"PUMPKIN_MODEL_KEY","generationConfig":{"contextWindowSize":1,"extra_body":{"max_tokens":1,"reasoning_effort":"xhigh"},"maxRetries":16,"streamIdleTimeoutMs":3600000,"timeout":3600000},"id":"vendor/\"quoted\"\\model","wireApi":"chat-completions"}]},"privacy":{"usageStatisticsEnabled":false},"security":{"auth":{"selectedType":"openai"}},"skills":{"disabledLevels":["project","extension","bundled"]},"telemetry":{"enabled":false},"tools":{"disabled":["web_fetch","web_search"],"shell":{"defaultTimeoutMs":0}}}
             route: chat vendor/"quoted"\model
             model-small low / 200000 32000 {}:
-            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model model-small --approval-mode yolo --output-format stream-json --prompt=Go.
+            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model model-small --approval-mode yolo --output-format text --prompt=Go.
             env: HOME=/.qwen-home TMPDIR=/.qwen-home/tmp QWEN_HOME=/.qwen-home/qwen PUMPKIN_MODEL_KEY=pumpkin QWEN_STREAM_MAX_LIFETIME_MS=0 QWEN_CODE_MODELS_DEV_REFRESH=off
             cwd: /
             dir 0700 /.qwen-home

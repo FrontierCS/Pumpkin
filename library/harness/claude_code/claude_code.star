@@ -3,11 +3,11 @@
 route to its model.
 
 Claude Code works in its workspace, and keeps its home (`HOME`), its configuration and sessions
-(`CLAUDE_CONFIG_DIR`) and its temporary files (`TMPDIR`) in a directory of its own there. Its
-record of the run is the events it writes to its standard output as JSON lines, which the
-teardown collects. It reaches the model only at the endpoint `sandboxd` serves, `MODEL_URL`, on
-the Messages API, with a stand-in key: the host holds the key, and the route passes no client's.
-It reads every setting from its command and its environment, none from a file.
+(`CLAUDE_CONFIG_DIR`) and its temporary files (`TMPDIR`) in a directory of its own there. It
+writes its last message, or its error, to its standard output. It reaches the model only at the
+endpoint `sandboxd` serves, `MODEL_URL`, on the Messages API, with a stand-in key: the host holds
+the key, and the route passes no client's. It reads every setting from its command and its
+environment, none from a file.
 """
 
 # Where `layer/Dockerfile` installs Claude Code, with the loader and the libraries it runs on.
@@ -108,10 +108,10 @@ def claude_code(
         "runtime": {"agent": {
             "command": {
                 # `claude`, started directly, which `layer/Dockerfile` makes run on any base.
-                # `--print` runs one turn, unattended, on the prompt it
-                # reads on its standard input, which takes any text, and writes its events to its
-                # standard output as JSON lines (`--output-format stream-json`, which needs
-                # `--verbose`), which the run's record keeps. It asks no one for permission, for
+                # `--print` runs one turn, unattended, on the prompt it reads on its standard
+                # input, which takes any text, and writes only its last message, or its error, to
+                # its standard output (`--output-format text`,
+                # https://code.claude.com/docs/en/cli-reference). It asks no one for permission, for
                 # the agent's sandbox confines it; offers no web search or fetch, which only the
                 # provider could run; starts no MCP server; and reads no settings file, the
                 # image's user's or the workspace's (`--setting-sources ''`).
@@ -123,8 +123,7 @@ def claude_code(
                     "--effort",
                     effort,
                     "--output-format",
-                    "stream-json",
-                    "--verbose",
+                    "text",
                     "--dangerously-skip-permissions",
                     "--disallowedTools",
                     "WebSearch,WebFetch",

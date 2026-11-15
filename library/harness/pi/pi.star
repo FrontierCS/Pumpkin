@@ -1,13 +1,13 @@
 """Pi, Earendil's coding agent (`@earendil-works/pi-coding-agent`), as an agent's harness: `pi`
-adds Pi 1.2.0 to an agent's image and writes the runtime of one `pi --mode json`, with the route to
-its model.
+adds Pi 1.2.0 to an agent's image and writes the runtime of one `pi --print`, with the route to its
+model.
 
 Pi works in its workspace, and keeps its home (`HOME`), with its configuration and its sessions in
-`.pi/agent`, and its temporary files (`TMPDIR`) in a directory of its own there. Its record of the
-run is the events it writes to its standard output as JSON lines, which the teardown collects. It
-reaches the model only at the endpoint `sandboxd` serves, `MODEL_URL`, on the Chat Completions
-API, through the one provider its model file names, with a stand-in key: the host holds the key,
-and the route passes no client's.
+`.pi/agent`, and its temporary files (`TMPDIR`) in a directory of its own there. It writes its last
+message to its standard output and an error to its standard error. It reaches the model only at
+the endpoint `sandboxd` serves, `MODEL_URL`, on the Chat Completions API, through the one provider
+its model file names, with a stand-in key: the host holds the key, and the route passes no
+client's.
 """
 
 load("@pumpkin//harness/node/node.star", "NODE", "node")
@@ -36,7 +36,7 @@ def pi(
         context_tokens):
     """An agent role's `image`, `runtime` and `egress`, for Pi on `model` at `effort`.
 
-    Pi runs once, as `pi --mode json`, unattended, with its files readable by the agent's user alone.
+    Pi runs once, as `pi --print`, unattended, with its files readable by the agent's user alone.
     It takes the arguments every harness takes, `max_output_tokens` and `context_tokens`, in the
     sense `crates/library` gives them, and none of its own.
 
@@ -113,18 +113,19 @@ def pi(
         ),
         "runtime": {"agent": {
             "command": {
-                # Pi on `node`, started directly (`node.star` says why). `--mode json` runs one
-                # turn on the prompt, which follows `--` so
-                # that it may begin with `-`, and writes its events to its standard output as JSON
-                # lines, which the run's record keeps. It reads no project's own configuration
-                # (`--no-approve`), fetches nothing but the model's answers (`--offline`), and
-                # loads no extension, MCP server, prompt template, theme or skill. Its tools are
-                # those it starts with but `grep` and `find`, which would download their programs.
+                # Pi on `node`, started directly (`node.star` says why). `--print` runs one turn on
+                # the prompt, which follows `--` so that it may begin with `-`, and writes only its
+                # last message to its standard output, or an error to its standard error and exits
+                # nonzero
+                # (https://github.com/earendil-works/pi/blob/06a466935536f8c9bcacb2d5efc0fc021be1bdff/packages/coding-agent/docs/cli-integration.md?plain=1#L22-L30).
+                # It reads no project's own configuration (`--no-approve`), fetches nothing but the
+                # model's answers (`--offline`), and loads no extension, MCP server, prompt
+                # template, theme or skill. Its tools are those it starts with but `grep` and
+                # `find`, which would download their programs.
                 "argv": [
                     NODE,
                     _ROOT + "/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
-                    "--mode",
-                    "json",
+                    "--print",
                     "--offline",
                     "--no-approve",
                     "--provider",

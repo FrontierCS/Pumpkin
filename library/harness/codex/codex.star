@@ -2,10 +2,10 @@
 image and writes the runtime of one unattended `codex exec`, with the route to its model.
 
 Codex works in its workspace, and keeps its home (`CODEX_HOME`), with its configuration and its
-databases, and its temporary files (`TMPDIR`) in two directories of their own there. Its record of
-the run is the events it writes to its standard output as JSON lines, which the teardown collects.
-It reaches the model only at the endpoint `sandboxd` serves, `MODEL_URL`, on the Responses API,
-with no credential: the host holds the key.
+databases, and its temporary files (`TMPDIR`) in two directories of their own there. It writes its
+last message to its standard output and its progress to its standard error. It reaches the model
+only at the endpoint `sandboxd` serves, `MODEL_URL`, on the Responses API, with no credential: the
+host holds the key.
 """
 
 load("@pumpkin//harness/codex/catalog.star", "CATALOG")
@@ -102,9 +102,11 @@ allow_login_shell = false
 # Nothing reaches past the model route, the only way out of the sandbox.
 web_search = "disabled"
 
-# Codex's record of the run is the events it writes to its standard output, which the teardown
-# collects. The databases it makes in its home as it starts stay there, uncollected: `exec`
-# writes them no log, and its session, ephemeral, keeps nothing in them.
+# No reasoning summary in the progress on the standard error: the model's answers hold them.
+hide_agent_reasoning = true
+
+# The databases Codex makes in its home as it starts stay there, uncollected: `exec` writes them
+# no log, and its session, ephemeral, keeps nothing in them.
 
 # The model endpoint `sandboxd` serves, which needs no credential.
 [model_providers.pumpkin]
@@ -214,17 +216,17 @@ def codex(
         "runtime": {"agent": {
             "command": {
                 # `exec` runs one turn, unattended, on the prompt it reads on its standard input
-                # (`-`), and writes its events to its standard output as JSON lines (`--json`),
-                # which the run's record keeps; it writes no session files (`--ephemeral`), reads
-                # no command rules (`--ignore-rules`), and works in any directory, a Git
-                # repository or not.
+                # (`-`), and writes its last message to its standard output and its progress to
+                # its standard error, where `--json` would write its events as JSON lines
+                # (https://learn.chatgpt.com/docs/non-interactive-mode); it writes no session files
+                # (`--ephemeral`), reads no command rules (`--ignore-rules`), and works in any
+                # directory, a Git repository or not.
                 "argv": [
                     _ROOT + "/bin/codex",
                     "exec",
                     "--ephemeral",
                     "--ignore-rules",
                     "--skip-git-repo-check",
-                    "--json",
                     "-",
                 ],
                 "env": ["CODEX_HOME=" + home, "TMPDIR=" + tmp],

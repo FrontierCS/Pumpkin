@@ -158,7 +158,7 @@ fn roles() {
         &shown,
         &expect![[r#"
             claude-opus-5-5 max /workspace 64000:
-            argv: /harness/claude-code-2.1.296/claude --print --model claude-opus-5-5 --effort max --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model claude-opus-5-5 --effort max --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_MODEL=claude-opus-5-5 ANTHROPIC_SMALL_FAST_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_FABLE_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_SONNET_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-opus-5-5 CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5 CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=claude-opus-5-5 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
@@ -175,7 +175,7 @@ fn roles() {
               FROM base
               COPY --link --from=claude-code-2.1.296 --chown=0:0 /out/ /
             glm-5.3 max /workspace 128000:
-            argv: /harness/claude-code-2.1.296/claude --print --model glm-5.3 --effort max --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model glm-5.3 --effort max --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=glm-5.3 ANTHROPIC_DEFAULT_MODEL=glm-5.3 ANTHROPIC_SMALL_FAST_MODEL=glm-5.3 ANTHROPIC_DEFAULT_FABLE_MODEL=glm-5.3 ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3 ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3 ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3 CLAUDE_CODE_SUBAGENT_MODEL=glm-5.3 CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=glm-5.3 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
@@ -183,7 +183,7 @@ fn roles() {
             dir 0700 /workspace/.claude-code/tmp
             route: messages glm-5.3
             vendor/"quoted"\model high /srv/my "work" dir 1:
-            argv: /harness/claude-code-2.1.296/claude --print --model vendor/"quoted"\model --effort high --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model vendor/"quoted"\model --effort high --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: "HOME=/srv/my \"work\" dir/.claude-code" "CLAUDE_CONFIG_DIR=/srv/my \"work\" dir/.claude-code/config" "TMPDIR=/srv/my \"work\" dir/.claude-code/tmp" ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=vendor/"quoted"\model ANTHROPIC_DEFAULT_MODEL=vendor/"quoted"\model ANTHROPIC_SMALL_FAST_MODEL=vendor/"quoted"\model ANTHROPIC_DEFAULT_FABLE_MODEL=vendor/"quoted"\model ANTHROPIC_DEFAULT_OPUS_MODEL=vendor/"quoted"\model ANTHROPIC_DEFAULT_SONNET_MODEL=vendor/"quoted"\model ANTHROPIC_DEFAULT_HAIKU_MODEL=vendor/"quoted"\model CLAUDE_CODE_SUBAGENT_MODEL=vendor/"quoted"\model CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=vendor/"quoted"\model DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=1
             cwd: /srv/my "work" dir
             dir 0700 /srv/my "work" dir/.claude-code
@@ -191,7 +191,7 @@ fn roles() {
             dir 0700 /srv/my "work" dir/.claude-code/tmp
             route: messages vendor/"quoted"\model
             model-small high / 32000:
-            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort high --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort high --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/.claude-code CLAUDE_CONFIG_DIR=/.claude-code/config TMPDIR=/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /
             dir 0700 /.claude-code
@@ -199,7 +199,7 @@ fn roles() {
             dir 0700 /.claude-code/tmp
             route: messages model-small
             model-small low /workspace 32000:
-            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort low --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort low --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
@@ -207,7 +207,7 @@ fn roles() {
             dir 0700 /workspace/.claude-code/tmp
             route: messages model-small
             model-small medium /workspace 32000:
-            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort medium --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort medium --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
@@ -215,7 +215,7 @@ fn roles() {
             dir 0700 /workspace/.claude-code/tmp
             route: messages model-small
             model-small xhigh /workspace 32000:
-            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort xhigh --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
+            argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort xhigh --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
