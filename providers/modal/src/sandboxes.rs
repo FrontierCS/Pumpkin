@@ -10,6 +10,8 @@
 //! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
 //! and Modal ends it at its run's hard end, if nothing ends it first. Its report names its App,
 //! its image's id and digest, its `sandboxd` and its GPU.
+//!
+//! The provider never stops the App, as an App with no sandbox costs nothing.
 
 use std::collections::BTreeMap;
 use std::fs;

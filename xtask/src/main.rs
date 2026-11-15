@@ -1,6 +1,9 @@
 //! See <https://github.com/matklad/cargo-xtask/>.
 //!
 //! This is integrated as a `cargo` subcommand by using an alias in `.cargo/config.toml`.
+//!
+//! A check that every change must pass is a step of `ci`, as `tidy`'s are; the checks that reach
+//! a real environment are `live`'s.
 
 #![expect(
     clippy::print_stdout,

@@ -75,6 +75,9 @@ pub fn docker_context() -> String {
 }
 
 /// `docker`, given only the environment it needs, against [`docker_context`] alone.
+///
+/// Tests run `docker` directly only to observe containers and images, or to make and remove their
+/// own.
 pub fn docker() -> Command {
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
     let mut docker = stdx::process::command("docker", kept);
