@@ -576,7 +576,7 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 498 prefixes evaluate
+            == lib/images.star: 0 of 493 prefixes evaluate
 
             == lib/judged.star: 0 of 563 prefixes evaluate
 

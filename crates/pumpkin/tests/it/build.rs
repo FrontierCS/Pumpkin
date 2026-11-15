@@ -96,17 +96,18 @@ fn refusals() {
               keeps it in ir.json; the builds' output goes to the standard error.
 
               Every problem that `check` finds is said before the configuration is read, and
-              so before the engine is reached and any image is built. An image is
-              built from a stage of its context, and tagged by the digest of the build's
-              inputs, in pumpkin/<its recipe's directory below the root>, or a harness's layer
-              in <its base's repository>/<harness>; one that the engine has under its tag
-              already is not built again. Images are built at once, as many as the CPUs of
-              this machine that `pumpkin` may run on, as Cargo's jobs are, even if the engine
-              is another machine's, each once those it is built on are built. All that each
-              build's `docker build` wrote is said at once when it ends, as `make
-              --output-sync` says a job's, then that it ended. A failed build is said at the
-              image() call that declares its image; once one has failed, no other starts but
-              those started with it, and each that runs is waited for, and said if it fails.
+              so before the engine is reached and any image is built. An image is built from
+              a stage of its context, and tagged by the digest of the build's inputs, in
+              pumpkin/<its recipe's directory below the root>, or, for a recipe of the
+              standard library, in pumpkin-library/<its directory below @pumpkin//>; one that
+              the engine has under its tag already is not built again. Images are built at
+              once, as many as the CPUs of this machine that `pumpkin` may run on, as Cargo's
+              jobs are, even if the engine is another machine's, each once those it is built
+              on are built. All that each build's `docker build` wrote is said at once when it
+              ends, as `make --output-sync` says a job's, then that it ended. A failed build
+              is said at the image() call that declares its image; once one has failed, no
+              other starts but those started with it, and each that runs is waited for, and
+              said if it fails.
 
               With [controller] in the configuration, `build` sends the task as `pumpkin run`
               does, follows the build's job on the controller, and prints the IR it printed.
@@ -116,14 +117,14 @@ fn refusals() {
               build while more than 85% of the controller's volume is used.
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
-            lib/bench.star:78:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does
-                78 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
+            lib/bench.star:80:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does
+                80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:31:18: `tasks/broken/judge/Dockerfile` doesn't exist: name a regular file below the root that does
-                31 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:33:18: `tasks/broken/judge/Dockerfile` doesn't exist: name a regular file below the root that does
+                33 |         "image": image(recipe, mount = SHARED),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:80:9
+                in `_judge()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
             tasks/broken/task.star:6:28: `cpu_millis` can't be `0`: expected a positive int
                 6 |     agent = {"cpu_millis": 0, "memory_bytes": 32 * GiB},
@@ -261,11 +262,11 @@ fn builds_on_docker() {
             $ pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml
             exit status: Some(0)
             builds' output shown: false, echoing: [], its steps' errors: []
-            builds ended: ["pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/agent/codex-0.167.0", "pumpkin: built an image in pumpkin/tasks/bench/judge"]
+            builds ended: ["pumpkin: built an image in pumpkin-library/harness/codex/layer", "pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/judge"]
             pumpkin: building an image in pumpkin/tasks/bench/agent
             pumpkin: building an image in pumpkin/tasks/bench/judge
-            pumpkin: building an image in pumpkin/tasks/bench/agent/codex-0.167.0
-            images labelled: pumpkin/tasks/bench/agent, pumpkin/tasks/bench/agent/codex-0.167.0, pumpkin/tasks/bench/judge
+            pumpkin: building an image in pumpkin-library/harness/codex/layer
+            images labelled: pumpkin-library/harness/codex/layer, pumpkin/tasks/bench/agent, pumpkin/tasks/bench/judge
             the workflow parses: true
             printed as a record keeps it: true
             printed:
@@ -301,7 +302,7 @@ fn builds_on_docker() {
                         }
                       }
                     ],
-                    "image": "<pumpkin/tasks/bench/agent/codex-0.167.0>",
+                    "image": "<pumpkin-library/harness/codex/layer>",
                     "name": "agent",
                     "needs": {
                       "cpu_millis": 8000,
@@ -469,14 +470,14 @@ fn builds_on_docker() {
             builds ended: ["pumpkin: the build of an image in pumpkin/tasks/failing/agent failed", "pumpkin: the build of an image in pumpkin/tasks/failing/judge failed"]
             pumpkin: building an image in pumpkin/tasks/failing/agent
             pumpkin: building an image in pumpkin/tasks/failing/judge
-            lib/bench.star:78:19: building the image failed: `docker build` of `agent/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-                78 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
+            lib/bench.star:80:19: building the image failed: `docker build` of `agent/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/failing/task.star:5:1
-            lib/bench.star:31:18: building the image failed: `docker build` of `judge/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-                31 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:33:18: building the image failed: `docker build` of `judge/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                33 |         "image": image(recipe, mount = SHARED),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:80:9
+                in `_judge()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/failing/task.star:5:1
             pumpkin: tasks/failing/task.star: the task has 2 problems
             pumpkin: to build it again: pumpkin build --arg model=model-a --config <scratch>/pumpkin.toml <scratch>/tasks/failing/task.star
@@ -484,10 +485,10 @@ fn builds_on_docker() {
             $ pumpkin build nested/tasks/bench/task.star --arg model=model-a --config pumpkin.toml
             exit status: Some(0)
             builds' output shown: false, echoing: [], its steps' errors: []
-            builds ended: ["pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/agent/codex-0.167.0", "pumpkin: built an image in pumpkin/tasks/bench/shared/sub"]
+            builds ended: ["pumpkin: built an image in pumpkin-library/harness/codex/layer", "pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/shared/sub"]
             pumpkin: building an image in pumpkin/tasks/bench/agent
             pumpkin: building an image in pumpkin/tasks/bench/shared/sub
-            pumpkin: building an image in pumpkin/tasks/bench/agent/codex-0.167.0
+            pumpkin: building an image in pumpkin-library/harness/codex/layer
             the judges' image is the deeper mount's recipe's: true"#]],
     );
 }
@@ -532,22 +533,22 @@ fn variants_on_docker() {
             $ pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml
             exit status: Some(0)
             builds' output shown: false, echoing: [], its steps' errors: []
-            builds ended: ["pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/agent/codex-0.167.0", "pumpkin: built an image in pumpkin/tasks/bench/judge, stage eval", "pumpkin: built an image in pumpkin/tasks/bench/judge, stage train", "pumpkin: built an image in pumpkin/tasks/bench/toolchain, stage go", "pumpkin: built an image in pumpkin/tasks/bench/tools"]
+            builds ended: ["pumpkin: built an image in pumpkin-library/harness/codex/layer", "pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/judge, stage eval", "pumpkin: built an image in pumpkin/tasks/bench/judge, stage train", "pumpkin: built an image in pumpkin/tasks/bench/toolchain, stage go", "pumpkin: built an image in pumpkin/tasks/bench/tools"]
             pumpkin: building an image in pumpkin/tasks/bench/tools
             pumpkin: building an image in pumpkin/tasks/bench/toolchain
             pumpkin: building an image in pumpkin/tasks/bench/judge
             pumpkin: building an image in pumpkin/tasks/bench/agent
-            pumpkin: building an image in pumpkin/tasks/bench/agent/codex-0.167.0
+            pumpkin: building an image in pumpkin-library/harness/codex/layer
             agent: image 1, note=one
             train_judge: image 2, stage=train
             final_judge: image 3, stage=eval
             $ pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml --arg note=two
             exit status: Some(0)
             builds' output shown: false, echoing: [], its steps' errors: []
-            builds ended: ["pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/agent/codex-0.167.0", "pumpkin: built an image in pumpkin/tasks/bench/tools"]
+            builds ended: ["pumpkin: built an image in pumpkin-library/harness/codex/layer", "pumpkin: built an image in pumpkin/tasks/bench/agent", "pumpkin: built an image in pumpkin/tasks/bench/tools"]
             pumpkin: building an image in pumpkin/tasks/bench/tools
             pumpkin: building an image in pumpkin/tasks/bench/agent
-            pumpkin: building an image in pumpkin/tasks/bench/agent/codex-0.167.0
+            pumpkin: building an image in pumpkin-library/harness/codex/layer
             agent: image 4, note=two
             train_judge: image 2, stage=train
             final_judge: image 3, stage=eval
@@ -555,8 +556,8 @@ fn variants_on_docker() {
             exit status: Some(1)
             builds' output shown: false, echoing: [], its steps' errors: []
             builds ended: []
-            lib/bench.star:81:13: tasks/bench/tools/Dockerfile:2: `${BASE}` expands to the build argument's value: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                81 |     tools = image("tools/Dockerfile", args = {"BASE": BASE, "NOTE": NOTE})
+            lib/bench.star:83:13: tasks/bench/tools/Dockerfile:2: `${BASE}` expands to the build argument's value: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                83 |     tools = image("tools/Dockerfile", args = {"BASE": BASE, "NOTE": NOTE})
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/bench/task.star:5:1
             pumpkin: tasks/bench/task.star: the task has 1 problem

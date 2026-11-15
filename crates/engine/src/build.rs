@@ -91,8 +91,8 @@ const FORM: &str = "pumpkin-build/4";
 // make an image of its own even from the cache. `--provenance` is Buildx's, from its version
 // 0.10. Docker 23.0 ships Buildx 0.10.2 as a plugin, which `docker build` runs when it is
 // installed; without it, `docker build` falls back to the classic builder, which has no such
-// option. And the recipe that adds a harness to an agent's image (`Pin::recipe`) fetches with
-// `ADD --checksum`, which BuildKit's Dockerfile frontend takes outside its labs channel only
+// option. And a recipe that fetches a file pins it with `ADD --checksum`, as `recipe::check`
+// requires, which BuildKit's Dockerfile frontend takes outside its labs channel only
 // from BuildKit 0.12, which Docker 25.0 is the first to ship. So builds need Docker 25.0 or later
 // with its Buildx plugin, which the engine's own floor, Docker 28.0, as the crate's doc says,
 // meets.

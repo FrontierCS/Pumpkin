@@ -229,8 +229,8 @@ pub const CONTROL_SOCKET: &str = "/pumpkin/sandboxctl/socket";
 
 /// The directory that holds an agent's harness, `/harness`, which a task's images leave out.
 ///
-/// Pumpkin adds a harness to a task's agent image in a directory of its own below this one,
-/// named for the harness and its version, such as `codex-0.167.0`.
+/// A harness of Pumpkin's standard library is added to a task's agent image in a directory of its
+/// own below this one, named for the harness and its version.
 pub fn harness_dir() -> AbsolutePath {
     const { AbsolutePath::from_static("/harness") }
 }

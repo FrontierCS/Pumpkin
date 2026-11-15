@@ -1,11 +1,9 @@
 """A neutral library: `images_task` writes the workflow of a task whose package's recipes build
-its images: the agent's, on the package's build tools with its toolchain copied in, with Codex
-added on it, and each judge's, a stage of one recipe."""
+its images: the agent's, on the package's build tools with its toolchain copied in, with its
+harness added on it, and each judge's, a stage of one recipe."""
 
 # The run's choices, each given as `--arg <name>=<value>`, or else its default.
 MODEL = arg("model", str, default = "model-small")
-EFFORT = arg("effort", str, default = "high")
-TOOLS = arg("tools", str, default = "native")
 DEADLINE = arg("deadline", int, default = 5 * 3600)
 STRICT = arg("strict", bool, default = False)
 
@@ -32,8 +30,8 @@ def _judge(name, stage):
     }
 
 def images_task(*, agent):
-    """The workflow of the task in the entry's package: Codex works as the agent, with `agent`'s
-    needs, on the image of the package's agent recipe, and two judges score it."""
+    """The workflow of the task in the entry's package: a harness works as the agent, with
+    `agent`'s needs, on the image of the package's agent recipe, and two judges score it."""
     task = package_name().split("/")[-1]
     tools = image("tools/Dockerfile", args = BASE_ARGS)
     toolchain = image("toolchain/Dockerfile", target = "Go")
@@ -42,26 +40,22 @@ def images_task(*, agent):
     # Declared between the agent's image and the layer on it, so that the layer's base is not the
     # image built just before it.
     judges = [_judge("train_judge", "train"), _judge("final_judge", "eval")]
-    codex_agent = codex(
-        agent_image,
-        model = MODEL,
-        effort = EFFORT,
-        tools = TOOLS,
-        workspace = "/workspace",
-        prompt = "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n",
-        deadline_seconds = DEADLINE,
-        finalize_grace_seconds = 0 if STRICT else 60,
-    )
+    harness = image("Dockerfile", context = "//harness", contexts = {"base": agent_image})
     workflow(
         name = "neutral/" + task.replace("_", "-"),
         roles = [
             {
                 "name": "agent",
-                "image": codex_agent["image"],
+                "image": harness,
                 "user": {"uid": 1000, "gid": 1000},
                 "needs": agent,
-                "runtime": codex_agent["runtime"],
-                "egress": codex_agent["egress"],
+                "runtime": {"agent": {
+                    "command": {"argv": ["/harness/bin/agent"], "cwd": "/workspace"},
+                    "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n",
+                    "deadline_seconds": DEADLINE,
+                    "finalize_grace_seconds": 0 if STRICT else 60,
+                }},
+                "egress": {"model": [{"api": "responses", "models": [MODEL]}]},
                 "grants": [
                     {"judge": {
                         "name": "train",

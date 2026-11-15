@@ -2,8 +2,11 @@
 //! ([`Workspace`]), so that what a repository's Pumpkin builds, records and fetches stays with
 //! the repository, apart from every other's, and goes with the directory.
 
-use std::env;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
+
+use stdx::Context as _;
+use tempfile::TempDir;
 
 pub(crate) const DIR: &str = ".pumpkin";
 
@@ -59,6 +62,15 @@ impl Workspace {
     /// while it runs.
     pub(crate) fn tmp(&self) -> PathBuf {
         self.0.join("tmp")
+    }
+
+    /// A directory of this command's own, 0700, named from `prefix`, in [`Self::tmp`], which
+    /// dropping removes.
+    pub(crate) fn scratch(&self, prefix: &str) -> Result<TempDir, String> {
+        let tmp = self.tmp();
+        fs::create_dir_all(&tmp).context(tmp.display())?;
+        let made = tempfile::Builder::new().prefix(prefix).tempdir_in(&tmp);
+        made.context(tmp.display())
     }
 
     /// The directory of the build slots, of which a controller's job takes one while it builds

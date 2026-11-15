@@ -1,6 +1,8 @@
 """A workflow whose agent is Codex, on the model that `--arg model=<name>` names: it writes a
 greeting and submits it, and the judge scores the greeting's size."""
 
+load("@pumpkin//harness/codex/codex.star", "codex")
+
 MODEL = arg("model", str)
 EFFORT = arg("effort", str, default = "high")
 

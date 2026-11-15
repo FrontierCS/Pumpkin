@@ -198,10 +198,13 @@ impl<'l, L: Loader> Evaluation<'l, L> {
                 .iter()
                 .filter(|load| load.label.root() == Root::Task);
             faults.extend(task_loads.map(|load| {
-                let message = format!(
-                    "`{label}`, a file of the standard library, loads `{}`, a task's file, though \
-                     the standard library depends on no task: load only `@pumpkin//` files in it",
-                    load.label
+                let message = refusal(
+                    format_args!(
+                        "a load of a task's file, `{}`, in a file of the standard library, which \
+                         depends on no task,",
+                        load.label
+                    ),
+                    "load only `@pumpkin//` files there",
                 );
                 Fault::new(load.at, message)
             }));
