@@ -292,9 +292,7 @@ impl Upstream {
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
-        client
-            .keep
-            .request(closed.body(), Some(closed.conversation()));
+        client.keep.request(closed.body(), Some(closed.apart()));
         let call = self.agent.post(self.url.clone()).config();
         let call = call.timeout_global(bound(client.by)).build();
         let call = closed

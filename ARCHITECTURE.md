@@ -519,7 +519,8 @@ as failed and appends each sandbox it deleted to `reaps.jsonl`.
 
 The record keeps every model exchange as the route saw it pass, which no sandbox can alter: each
 request as it went upstream, or as its client sent it if the route refused it, each conversation
-item once by its digest, and the answer as the upstream sent it. `pumpkin ls`, `wait` and a run's
+item and each field its API keeps whole, such as the list of tools, once by its digest, and the
+answer as the upstream sent it. `pumpkin ls`, `wait` and a run's
 ending read only the record, through `Record` and its `Readout`, so whatever ran the run, a
 machine shows it the same way; a controller's ended runs are copied into the machine's runs
 directory.

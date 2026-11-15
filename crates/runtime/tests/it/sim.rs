@@ -41,7 +41,7 @@ use schema::sandbox::{
     ToSandbox, dir_mode, file_mode, frame, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Offers, UsdPerHour};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use test_support::suite::{Locals, Subject};
 
@@ -1193,11 +1193,14 @@ enum Step {
     },
     /// `call`, a `status` or a `lease_status`, made until its reply gives `state`.
     Await { call: OpCall, state: String },
-    /// A model request that names `model`, whose input is what it `said`, and what of its
-    /// response the next step waits for.
+    /// A model request that names `model`, through Chat Completions if `chat` and else the
+    /// Responses API, whose input is what it `said`, whose body holds `fields` too, and what of
+    /// its response the next step waits for.
     Model {
         model: String,
+        chat: bool,
         said: Vec<String>,
+        fields: Map<String, Value>,
         wait: Wait,
     },
     /// A wait, in seconds, before the next step.
@@ -1345,8 +1348,14 @@ impl Caller {
                     payload,
                     less,
                 }) => (call, payload, less),
-                Some(Step::Model { model, said, wait }) => {
-                    if self.request(&model, &said, replies) {
+                Some(Step::Model {
+                    model,
+                    chat,
+                    said,
+                    fields,
+                    wait,
+                }) => {
+                    if self.request((&model, chat), &said, fields, replies) {
                         self.waits = Some(wait);
                         return false;
                     }
@@ -1411,14 +1420,16 @@ impl Caller {
         }
     }
 
-    /// Makes a model request that names `model`, in `replies`, whose input is the first of what
-    /// it `said`, then an item for each of the rest whose content is a list that holds it; and
-    /// returns whether it did: without the model endpoint, the command prints that the connection
-    /// was refused, and exits with 1, taking no more steps.
+    /// Makes a model request that names `model`, through Chat Completions if `chat`, in
+    /// `replies`, whose input is the first of what it `said`, then an item for each of the rest
+    /// whose content is a list that holds it, unless `fields` sets it, and whose body holds
+    /// `fields` too; and returns whether it did: without the model endpoint, the command prints
+    /// that the connection was refused, and exits with 1, taking no more steps.
     fn request(
         &mut self,
-        model: &str,
+        (model, chat): (&str, bool),
         said: &[String],
+        fields: Map<String, Value>,
         replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     ) -> bool {
         if !self.endpoint {
@@ -1437,8 +1448,17 @@ impl Caller {
             let content = json!([{ "type": "input_text", "text": part }]);
             json!({ "type": "message", "role": "user", "content": content })
         }));
-        let body = json!({ "model": model, "store": false, "input": input }).to_string();
-        let (method, path) = ("POST".to_owned(), "/responses".to_owned());
+        let mut body = fields;
+        body.insert("model".to_owned(), json!(model));
+        let (conversation, path) = if chat {
+            ("messages", "/v1/chat/completions")
+        } else {
+            body.insert("store".to_owned(), json!(false));
+            ("input", "/responses")
+        };
+        body.entry(conversation).or_insert(json!(input));
+        let body = Value::Object(body).to_string();
+        let (method, path) = ("POST".to_owned(), path.to_owned());
         let header = |name: &str, value: &str| (name.to_owned(), value.to_owned());
         let headers = vec![
             header("content-type", "application/json"),
@@ -1566,9 +1586,12 @@ fn step(arg: &str) -> Step {
     // until its last transfer ended so; `lease_put <lease> <tree> <to> [replace]` or `lease_get
     // <lease> <from> <to>`; `model <model> <text> [<part>...]`, a model request that names `model`,
     // with `text` as its input, then each `part`, whose response's end the next step waits for,
-    // or `ask <model> <text>`, one whose response's first part it waits for; `result`, a judge's
-    // result of what a lease's command printed, or a model answered ([`Step::Result`]); or `sleep
-    // <seconds>`, `exit`, `release` ([`Step::Release`]), or the session's end, `crash` or `close`.
+    // and whose body holds too the fields of each part that is a JSON object, in place of an
+    // input, or of the conversation if they hold its field; `chat <model> <text> [<part>...]`,
+    // alike through Chat Completions; or `ask <model> <text>`, one whose response's first part it
+    // waits for; `result`, a judge's result of what a lease's command printed, or a model
+    // answered ([`Step::Result`]); or `sleep <seconds>`, `exit`, `release` ([`Step::Release`]),
+    // or the session's end, `crash` or `close`.
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {
@@ -1613,18 +1636,8 @@ fn step(arg: &str) -> Step {
             let (call, state) = (OpCall::LeaseStatus { lease }, format!("transfer {end}"));
             return Step::Await { call, state };
         }
-        [kind @ ("model" | "ask"), model, _, ..] => {
-            let said = words[2..].iter().map(|word| (*word).to_owned()).collect();
-            let wait = if kind == "model" {
-                Wait::End
-            } else {
-                Wait::Part
-            };
-            return Step::Model {
-                model: model.to_owned(),
-                said,
-                wait,
-            };
+        [kind @ ("model" | "chat" | "ask"), model, _, ..] => {
+            return model_step(kind, model, &words[2..]);
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["exit"] => return Step::Exit,
@@ -1638,6 +1651,24 @@ fn step(arg: &str) -> Step {
         call,
         payload,
         less,
+    }
+}
+
+/// The model request of kind `kind` that names `model` and of which `words` say the rest
+/// ([`step`]).
+fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
+    let (fields, said): (Vec<&str>, Vec<&str>) =
+        (words.iter()).partition(|word| word.starts_with('{'));
+    let fields = (fields.into_iter())
+        .flat_map(|fields| serde_json::from_str::<Map<String, Value>>(fields).unwrap())
+        .collect();
+    let wait = if kind == "ask" { Wait::Part } else { Wait::End };
+    Step::Model {
+        model: model.to_owned(),
+        chat: kind == "chat",
+        said: said.into_iter().map(str::to_owned).collect(),
+        fields,
+        wait,
     }
 }
 
