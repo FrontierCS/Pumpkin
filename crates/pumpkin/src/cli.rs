@@ -373,6 +373,22 @@ The port to serve at, on 127.0.0.1.
 Default: one that is free, which `view` says"
     )]
     pub(crate) port: Option<u16>,
+    #[arg(
+        long,
+        value_name = "dir",
+        conflicts_with = "port",
+        help = "\
+Serve nothing: write into <dir> the runs' data as files that a static
+copy of the page reads, with the page, and a robots.txt that asks
+search engines to stay out. Each file that holds a reply that the page
+reads, as `pumpkin controller view` answers it, is deflated: a host
+serves it with `Content-Encoding: deflate`. A file is written only if
+its bytes changed, one whose reply can't change only once, and a run
+that had ended at the last export is read no further. Says how many
+files it wrote.
+Default: serve the runs"
+    )]
+    pub(crate) export: Option<PathBuf>,
 }
 
 #[derive(Args)]

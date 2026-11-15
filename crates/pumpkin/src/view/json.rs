@@ -55,6 +55,15 @@ pub(super) fn cut(value: Value) -> Value {
     }
 }
 
+/// Whether `text` is a string that [`cut`] cut: it ends with the length of the whole.
+pub(super) fn was_cut(text: &str) -> bool {
+    let Some(rest) = text.strip_suffix(" bytes in all]") else {
+        return false;
+    };
+    let length = rest.rsplit_once("… [").map(|(_, length)| length);
+    length.is_some_and(|length| length.parse::<usize>().is_ok())
+}
+
 /// The list's row of `held`, a live run, as JSON.
 pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     let progress = held.readout.progress.clone();

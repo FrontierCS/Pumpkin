@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use route::read::{self, Item};
-use runtime::Record;
+use runtime::{KeptPart, KeptRequest, Record};
 use schema::ir::Api;
 use serde_json::{Map, Value, json};
 
@@ -26,6 +26,12 @@ const SEARCH_HITS: usize = 1000;
 
 /// The most bytes of an entry's text that a place of a search shows on each side of it.
 const SEARCH_CONTEXT_BYTES: usize = 80;
+
+/// How many steps a chunk of a trace's searchable text holds ([`Trace::search_chunk_json`]).
+// A page searches a static copy of a trace by reading every chunk once, so fewer, larger chunks
+// cost fewer requests; a live run's copy rewrites only its last chunk as it grows, so smaller ones
+// cost fewer bytes.
+const SEARCH_CHUNK_STEPS: usize = 256;
 
 /// The columns of a trace's steps.
 const STEP_COLUMNS: [&str; 36] = [
@@ -275,35 +281,44 @@ impl Trace {
         })
     }
 
+    /// The entries of `step` that a search reads, each with its index among them, its address,
+    /// its kind and its text, or why it can't be read.
+    fn searched<'s>(
+        &'s self,
+        step: &'s Step,
+    ) -> impl Iterator<Item = (usize, Address, &'static str, String)> + 's {
+        self.entries_of(step).map(|(at, address, item, _)| {
+            let text = match item {
+                Ok(item) => item_json(item)["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                Err(error) => error.clone(),
+            };
+            (at, address, item.map_or("unread", kind_name), text)
+        })
+    }
+
     /// The places where `query` is, in the text of an entry of `kind` and of thread `thread` if
-    /// given, matched by ASCII letters of either case: their count, and the first
-    /// [`SEARCH_HITS`], each with [`SEARCH_CONTEXT_BYTES`] of the text on each side.
+    /// given, as [`searchable`] matches them: their count, and the first [`SEARCH_HITS`], each
+    /// with [`SEARCH_CONTEXT_BYTES`] of the text on each side.
     pub(super) fn search_json(
         &self,
         query: &str,
         kind: Option<&str>,
         thread: Option<u64>,
     ) -> Value {
-        let query = query.to_ascii_lowercase();
+        let query = searchable(query);
         let (mut count, mut hits) = (0_usize, Vec::new());
         for step in self.at.values().map(|&index| &self.steps[index]) {
             if query.is_empty() || thread.is_some_and(|thread| step.thread != Some(thread)) {
                 continue;
             }
-            for (at, address, item, _) in self.entries_of(step) {
-                let kind_of = item.map_or("unread", kind_name);
+            for (at, address, kind_of, text) in self.searched(step) {
                 if kind.is_some_and(|kind| kind != kind_of) {
                     continue;
                 }
-                let text = match item {
-                    Ok(item) => item_json(item)["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    Err(error) => error.clone(),
-                };
-                let lower = text.to_ascii_lowercase();
-                for (found, _) in lower.match_indices(&query) {
+                for (found, _) in searchable(&text).match_indices(&query) {
                     count += 1;
                     if hits.len() < SEARCH_HITS {
                         let end = found + query.len();
@@ -321,6 +336,31 @@ impl Trace {
             }
         }
         json!({ "count": count, "hits": hits })
+    }
+
+    /// Chunk `chunk` of the text that a search reads, the entries of [`SEARCH_CHUNK_STEPS`] steps
+    /// in the order of their requests, as JSON: `{"steps": [{"request": n, "thread": t,
+    /// "entries": [[index, at, kind, text], ...]}], "next": c}`, each text in its [`searchable`]
+    /// form, an entry with no text left out, and `c` the next chunk, or `null` after the last.
+    /// [`Self::search_json`] finds a query in an entry where it is a substring of that text, at
+    /// the same byte.
+    pub(super) fn search_chunk_json(&self, chunk: usize) -> Value {
+        let first = chunk.saturating_mul(SEARCH_CHUNK_STEPS);
+        let chunked = self.at.values().skip(first).take(SEARCH_CHUNK_STEPS);
+        let steps: Vec<Value> = chunked
+            .map(|&index| {
+                let step = &self.steps[index];
+                let entries: Vec<Value> = (self.searched(step))
+                    .filter(|(.., text)| !text.is_empty())
+                    .map(|(at, address, kind, text)| {
+                        json!([at, address.of(step.request), kind, searchable(&text)])
+                    })
+                    .collect();
+                json!({ "request": step.request, "thread": step.thread, "entries": entries })
+            })
+            .collect();
+        let more = self.at.len() > first.saturating_add(SEARCH_CHUNK_STEPS);
+        json!({ "steps": steps, "next": more.then_some(chunk + 1) })
     }
 
     /// The entries of the steps of requests `from` to `to`, of thread `thread` and of `kind` if
@@ -420,6 +460,13 @@ impl Trace {
     }
 }
 
+/// The form of `text` that a search matches in, and of the query that it matches: its ASCII
+/// letters lower-cased, so that a query matches letters of either case, each byte where it is in
+/// `text`.
+fn searchable(text: &str) -> String {
+    text.to_ascii_lowercase()
+}
+
 /// The side an address names: `head`, `in` or `out`.
 fn address_side(address: &str) -> &str {
     address.split('/').nth(1).unwrap_or_default()
@@ -453,6 +500,34 @@ fn item_json(item: &Item) -> Value {
         Item::Output { call_id, text } => json!({ "call_id": call_id, "text": text }),
         Item::Other { json } => json!({ "text": json.to_string() }),
     }
+}
+
+/// `kept`, a request's body as the record keeps it, as JSON: `{"conversation": {"field": f,
+/// "items": [part, ...]}, "fields": [{"name": n, ...part}, ...]}`, each part `{"item": hex}`, kept
+/// apart as the item that `hex` names, or `{"sent": v}`, held as sent, and `conversation` `null`
+/// if the record kept no items apart. The body is `fields`, each part's value in place, with `f`
+/// holding `items`' values in their order.
+pub(super) fn kept_json(kept: KeptRequest) -> Value {
+    let KeptRequest {
+        conversation,
+        fields,
+    } = kept;
+    let part = |part: KeptPart| match part {
+        KeptPart::Kept(digest) => json!({ "item": digest.hex() }),
+        KeptPart::Sent(value) => json!({ "sent": value }),
+    };
+    let conversation = conversation.map(|(field, items)| {
+        let items: Vec<Value> = items.into_iter().map(part).collect();
+        json!({ "field": field, "items": items })
+    });
+    let fields: Vec<Value> = (fields.into_iter())
+        .map(|(name, kept)| {
+            let mut field = part(kept);
+            field["name"] = json!(name);
+            field
+        })
+        .collect();
+    json!({ "conversation": conversation, "fields": fields })
 }
 
 /// What the log says of request `request` of `exchanges`, of `record`, which it names, and what
