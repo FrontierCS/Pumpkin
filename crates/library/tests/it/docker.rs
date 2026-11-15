@@ -222,3 +222,34 @@ fn zcode_layer() {
             the layer on another base: the same"#]],
     );
 }
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn qwen_code_layer() {
+    // The package's thousand files, by the count of those not root's or writable; `node` started
+    // as itself, and starting itself again as a child, as a harness's worker starts; Qwen Code run
+    // as the library's `argv` runs it; and the ripgrep it searches with.
+    let script = "cd /harness && stat -c '%A %u:%g %n' qwen-code-0.25.0 \
+                  qwen-code-0.25.0/cli-entry.js qwen-code-0.25.0/vendor/ripgrep/x64-linux/rg \
+                  && find . '(' ! -user 0 -o ! -group 0 -o -perm /0222 ')' | wc -l \
+                  && /harness/node-24.14.0/node --version \
+                  && /harness/node-24.14.0/node -e 'process.stdout.write(require(\"node:child_process\")\
+                  .execFileSync(process.execPath, [\"-p\", \"`${process.execPath} ${process.version}`\"]))' \
+                  && /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --version \
+                  && /harness/qwen-code-0.25.0/vendor/ripgrep/x64-linux/rg --version | head -n 1";
+    check(
+        "harness/qwen_code/layer/Dockerfile",
+        &[("node", "harness/node/layer/Dockerfile")],
+        script,
+        &expect![[r#"
+            dr-xr-xr-x 0:0 qwen-code-0.25.0
+            -r-xr-xr-x 0:0 qwen-code-0.25.0/cli-entry.js
+            -r-xr-xr-x 0:0 qwen-code-0.25.0/vendor/ripgrep/x64-linux/rg
+            0
+            v24.14.0
+            /harness/node-24.14.0/node v24.14.0
+            0.25.0
+            ripgrep 15.0.0 (rev 3a612f88b8)
+            the layer on another base: the same"#]],
+    );
+}
