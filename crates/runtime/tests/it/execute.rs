@@ -1,8 +1,3 @@
-//! Executing a prepared run through the library's entry point, [`Run::execute`], on the
-//! simulated provider ([`Sim`]), and on the machine's host ([`System`]) or a simulated one
-//! ([`SimHost`]). The agent's model route, where it has one, reaches a stand-in model provider
-//! ([`StandIn`]).
-
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -45,35 +40,22 @@ use crate::sim::{
     UNDELETABLE, UNLISTABLE, UNPUBLISHED, VANISHING,
 };
 
-/// A `sandboxd` that dials.
 const SANDBOXD: &str = "/sim/sandboxd";
 
-/// The startup of a simulated provider whose tests wait for a start, or a teardown, to run out,
-/// in seconds.
-// Short, so that the wait takes seconds, but far longer than a simulated sandbox takes to start,
-// so that a busy machine makes a start that succeeds wait longer, never fail.
+// Short, so that waiting it out takes seconds, but far longer than a simulated sandbox takes to
+// start, so that a busy machine makes a start that succeeds wait longer, never fail.
 const SHORT_STARTUP: u64 = 1;
 
-/// The file that a sync of the agent's `sandbox.json` writes, and what it holds once it records
-/// the sandbox's delete.
 const AGENT_SANDBOX: &str = "agent/.sandbox.json.partial";
 const DELETED: &str = r#""state": "deleted""#;
 
-/// A time past the hard end, 6 s, of the runs of [`short_workflow`] with a deadline of 2 s on a
-/// provider whose startup is [`SHORT_STARTUP`].
+// Half a second past the 6 s hard end of a run of `SHORT_STARTUP` and a deadline of 2 s.
 const PAST_THE_HARD_END: Duration = Duration::from_millis(6_500);
 
-/// The seconds that what an interrupted run waits on lasts, a start's startup or a work phase's
-/// deadline.
 // Far past the signal's latency, yet short, so that a run that misses the signal fails its case
 // within a minute or so, rather than holding `ci` up.
 const WAITED: u64 = 60;
 
-/// Where an [`Interrupting`] provider notes SIGTERM: as it publishes `sandboxd`, the first publish;
-/// as it publishes an image; once it has created the sandbox of a name; as it first deletes a
-/// sandbox; or, from a thread of the test's own, once the run log records that the agent started
-/// ([`interrupt_once_started`]). At [`At::SwapPayloads`] it notes nothing: as it deletes a sandbox,
-/// it overwrites each payload in the record instead.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum At {
     PublishSandboxd,
@@ -84,12 +66,9 @@ enum At {
     SwapPayloads,
 }
 
-/// What [`At::SwapPayloads`] overwrites each payload with: a size of its own, within the score
-/// slot's 16 bytes.
+// A size of its own, within the score slot's 16 bytes.
 const SWAPPED: &str = "yyyyyyyyy";
 
-/// The simulated provider `sim`, which [interrupts](interrupt) the test's process at the step
-/// `at` names, or, at [`At::SwapPayloads`], swaps the payloads in `record`, the run's.
 struct Interrupting<'a> {
     sim: &'a Sim,
     at: Option<At>,
@@ -104,13 +83,11 @@ impl Interrupting<'_> {
     }
 }
 
-/// Sends the test's process SIGTERM, which it notes ([`stdx::signal::catch`]), so that its run
-/// stops, and returns once it is noted.
 fn interrupt() {
     use rustix::process::{Signal, getpid, kill_process};
     stdx::signal::catch(&[Signal::TERM]).unwrap();
     kill_process(getpid(), Signal::TERM).unwrap();
-    // Any thread may take it, after the kill returns.
+    // Any thread may take the signal, after `kill` returns.
     while stdx::signal::caught().is_none() {
         thread::yield_now();
     }
@@ -185,8 +162,6 @@ fn named<'s, P>(providers: &'s [(&'static str, P)], name: &ir::Name) -> &'s P {
     &found.unwrap().1
 }
 
-/// Each of `providers`, by its name, [`Interrupting`] `at` a step, or swapping the payloads in
-/// `record`, the run's.
 fn interrupting<'a>(
     providers: &[(&'static str, &'a Sim)],
     at: Option<At>,
@@ -197,11 +172,6 @@ fn interrupting<'a>(
         .collect()
 }
 
-/// Executes `run` with `sandboxd`, a grant listener on the loopback if one of `providers` is
-/// private, and a dialer that trusts the stand-in TLS edge, interrupted `at` a step, if given, by
-/// the [`Interrupting`] providers it was prepared on: what `execute` returns, and for an
-/// interrupted run, whether it started, whether it returned within [`WAITED`], and what it
-/// published.
 fn interrupted_at(
     run: Run<'_, impl Host>,
     providers: &[(&'static str, &Sim)],
@@ -246,8 +216,6 @@ fn interrupted_at(
     lines
 }
 
-/// [Interrupts](interrupt) the process once the run log in `record` records that the agent
-/// started, which it looks for every 10 ms, for a minute at most.
 fn interrupt_once_started(record: &Path) {
     for _ in 0..6000 {
         let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
@@ -260,8 +228,6 @@ fn interrupt_once_started(record: &Path) {
     panic!("the agent didn't start in a minute");
 }
 
-/// What `sim`'s platform shows of a run that the provider's calls don't: whether each create
-/// asked for the model endpoint, if one did, and its journal, if it has one.
 fn shown(sim: &Sim) -> Vec<String> {
     let mut lines = Vec::new();
     let endpoints = sim.models();
@@ -280,9 +246,6 @@ fn shown(sim: &Sim) -> Vec<String> {
     lines
 }
 
-/// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one, on
-/// `host`, executes it on `providers`, where its roles are placed ([`placed_on`]), with
-/// `sandboxd`, and checks what becomes of it ([`executed`]).
 fn check(
     host: &impl Shown,
     name: &str,
@@ -294,7 +257,6 @@ fn check(
     expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &[]));
 }
 
-/// What [`check`] checks, showing too how the log gives each poll ([`Also::Polls`]).
 fn check_polls(
     host: &impl Shown,
     name: &str,
@@ -307,22 +269,13 @@ fn check_polls(
     expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &also));
 }
 
-/// What a test of a run shows of it, or does to it, beyond what [`executed`] shows of each run.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Also {
-    /// A SIGTERM interrupts the run at a step, as each provider is [`Interrupting`]; it shows too
-    /// whether the run started, whether it returned within [`WAITED`], and what it published.
     Interrupted(At),
-    /// The record's files.
     Listing,
-    /// The usage that `outcome.json` records.
     Usage,
-    /// Each model exchange that the record keeps, as kept ([`kept_exchanges`]).
     Exchanges,
-    /// What rebuilding model request 0 gives once the first item it names is changed, and what
-    /// reading it gives once the log names its files outside the record.
     ChangedItem,
-    /// How the log gives each `status` and `lease_status` op answered ([`polls`]).
     Polls,
 }
 
@@ -333,14 +286,6 @@ fn interruption(also: &[Also]) -> Option<At> {
     })
 }
 
-/// What [`check`] checks of `ir`'s run, as test `name`, on `host`, with `sandboxd`, on
-/// `providers`, and what it shows `also`. It fails unless what holds of every run holds of this
-/// one ([`held`], [`kept_exchanges`], [`left`], [`folds_as_whole`]), and its socket directories
-/// are gone. It shows
-/// what `execute` returned, the log ([`logged`]), when its last record came ([`when`]), what the
-/// sandboxes printed, the stand-in's hang-ups, and what departs from the normal run. It shows the
-/// socket directories, the stand-in's address, the record, as made and once made, and the runs
-/// directory as `<sockets>`, `<stand-in>`, `<partial>`, `<record>` and `<runs>`.
 fn executed<H: Shown>(
     host: &H,
     name: &str,
@@ -402,12 +347,12 @@ fn executed<H: Shown>(
     assert!(!sockets.exists(), "{name}: its socket directories are left");
     lines.extend(left(name, providers, &tag.unwrap()));
     for hung_up in hung_ups {
-        // A run whose stream stalled has started. The stand-in reads the clock after the
-        // hang-up, so this errs late.
+        // A run whose stream stalled has started. The stand-in reads the clock after the hang-up,
+        // so this errs late.
         let hung_up = Duration::from_nanos(hung_up - start.unwrap());
+        let at = when(&placed, hung_up);
         // Its place among the run's records isn't shown: a `model_answered` may come after the
         // run's last record, and so may a hang-up that its answer follows.
-        let at = when(&placed, hung_up);
         lines.push(format!("a stalled stream's client hung up {at}"));
     }
     let runs_dir = record.parent().unwrap().display().to_string();
@@ -423,9 +368,8 @@ fn executed<H: Shown>(
     })
 }
 
-/// The prices of the stand-in's models, by which [`executed`] runs: `m-small`'s alone, so a
-/// record shows a model with a price beside one without.
 fn prices() -> BTreeMap<ModelName, TokenPrices> {
+    // Only `m-small` is priced, so that a record shows a model with a price beside one without.
     let small = ModelName::try_from("m-small".to_owned()).unwrap();
     let prices = json!({ "input": 3, "cached": 0.3, "cache_write": 3.75, "output": 15 });
     BTreeMap::from([(small, serde_json::from_value(prices).unwrap())])
@@ -435,12 +379,6 @@ fn kept(prices: &BTreeMap<ModelName, TokenPrices>) -> Recorded<'_> {
     Recorded { args: &[], prices }
 }
 
-/// What [`executed`] shows of the files in `record`, a run's, as test `name`, beside its log,
-/// `log`: the listing and the usage if the test shows them `also`, each `sandbox.json` that isn't
-/// of a deleted sandbox ([`undeleted`]), the payloads kept, the roles' model routes, and of a run
-/// on more than one of `providers`, where it placed each role. It fails unless `provider.json`
-/// holds what each declared and the routes ([`declared`]), and `outcome.json` what `returned`,
-/// the line that shows what `execute` returned, shows ([`outcome_holds`], [`usage_holds`]).
 fn held(
     name: &str,
     record: &Path,
@@ -478,10 +416,6 @@ fn held(
     lines
 }
 
-/// What `record`, a run's, keeps of each model exchange, by its number: the request, as kept, and
-/// the answer's body, each line break shown as `\n`; and how many conversation items it keeps,
-/// each once. It fails, as test `name`, unless the requests that the log says went upstream
-/// rebuild ([`Record::model_request`]) to the bodies that the stand-in `received`, byte for byte.
 fn kept_exchanges(name: &str, record: &Path, mut received: Vec<Vec<u8>>) -> Vec<String> {
     let dir = record.join("model");
     let kept: Vec<String> = fs::read_dir(&dir)
@@ -531,8 +465,6 @@ fn kept_exchanges(name: &str, record: &Path, mut received: Vec<Vec<u8>>) -> Vec<
     lines
 }
 
-/// Why model request 0 of `record`, a run's, doesn't rebuild once the first item it names is
-/// changed.
 fn changed_item(record: &Path) -> String {
     let request = fs::read(record.join("model/0.request")).unwrap();
     let request: Value = serde_json::from_slice(&request).unwrap();
@@ -572,8 +504,6 @@ fn changed_item(record: &Path) -> String {
     said
 }
 
-/// The records of the run log in `record`, a run's, each as JSON; none for a run that failed
-/// before it started, which has no log.
 fn read_log(record: &Path) -> Vec<Value> {
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
     (log.lines())
@@ -581,9 +511,6 @@ fn read_log(record: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// Each `sandbox.json` in `record`, a run's, that isn't of a deleted sandbox ([`sandboxes`]). It
-/// fails, as test `name`, unless `log`, the run's, records the delete of each sandbox that it
-/// leaves out, by its id and provider.
 fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
     let deletes: Vec<&Value> = (log.iter())
         .filter(|logged| logged["event"]["kind"] == "sandbox_deleted")
@@ -616,9 +543,6 @@ fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
     lines.filter(|line| normal(line).is_none()).collect()
 }
 
-/// The usage that `outcome`, a run's `outcome.json`, records, and the rest of a finished run's
-/// outcome. It fails, as test `name`, unless the rest is what `returned`, the line that shows
-/// what `execute` returned, shows, and a finished run's `log` records that it finished.
 fn outcome_holds(
     name: &str,
     returned: &str,
@@ -647,10 +571,6 @@ fn outcome_holds(
     (usage, None)
 }
 
-/// Fails, as test `name`, unless `usage`, what `outcome.json` in `record`, a run's, records,
-/// counts its sandboxes as [`sandboxes_hold`] says, given `log`, the run's, and `providers`, and
-/// each kept model request; and, unless the test `shows` it, records no tokens and no call's
-/// usage.
 fn usage_holds(
     name: &str,
     record: &Path,
@@ -660,7 +580,6 @@ fn usage_holds(
     shows: bool,
 ) {
     if usage.is_null() {
-        // A run that never started records no usage.
         return;
     }
     sandboxes_hold(name, record, log, usage, providers);
@@ -688,10 +607,6 @@ fn usage_holds(
     }
 }
 
-/// Fails, as test `name`, unless `usage`, what `outcome.json` in `record`, a run's, records,
-/// counts each sandbox start that `log`, the run's, records, and of each of `providers` at least
-/// its creates of each class; each sandbox whose `sandbox.json` records no delete, by its
-/// provider; and times each class's leased use if the run leased.
 fn sandboxes_hold(
     name: &str,
     record: &Path,
@@ -752,10 +667,6 @@ fn sandboxes_hold(
     );
 }
 
-/// Whether `provider.json` in `record`, a run's, holds the report of each of `providers`, by its
-/// name, and of each class it declared, its startup and its price, and holds `routes`, which
-/// fails test `name` if not; the routes, if a role has one; and, of a run on more than one, where
-/// it places each role.
 fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
     let recorded = fs::read_to_string(record.join("provider.json")).unwrap();
     let recorded: Value = serde_json::from_str(&recorded).unwrap();
@@ -783,7 +694,6 @@ fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String
     if !routes.is_empty() {
         lines.push(format!("provider.json routes: {}", recorded["routes"]));
     }
-    // A run on one provider places each role on it.
     if providers.len() > 1 {
         lines.push(format!(
             "provider.json places the roles: {}",
@@ -793,10 +703,6 @@ fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String
     lines
 }
 
-/// What each of `providers` shows of run `tag` once it has ended: its journal ([`shown`]), and
-/// what its list finds, if anything; and, of a run on more than one, by each one's name, what it
-/// published, and the class of each create, too. It fails test `name` unless each socket
-/// directory's directory was `700` at each create.
 fn left(name: &str, providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
     let listed = |provider: &Sim| {
         let listed = provider.list(tag).unwrap();
@@ -832,19 +738,9 @@ fn left(name: &str, providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
     lines
 }
 
-/// A stand-in for a model provider, on the loopback, which answers a request whose input is
-/// `stream` with a whole stream that echoes the request's line, its `authorization` and its
-/// body, one whose input is a number with that number as its whole body, one whose input is
-/// `stall` with a stream's head and first part, then nothing, until its client hangs up, one
-/// whose input is `expired` with a 401, as a provider refuses an expired key, one whose input is
-/// `forbidden` with a 403, one whose input is `down` with a 502 that names its id for the
-/// request, and one whose input is `silent` with none. Each stream's head names in `openai-model`
-/// the model that the request's body named, as a provider does that answers with it.
 struct StandIn {
     address: String,
     stops: Sender<()>,
-    /// Returns the body of each request it received, and when the client of each stream it
-    /// stalled hung up, in nanoseconds since the Unix epoch.
     thread: JoinHandle<(Vec<Vec<u8>>, Vec<u64>)>,
 }
 
@@ -854,14 +750,14 @@ impl StandIn {
         let address = listener.local_addr().unwrap().to_string();
         let (stops, stopped) = mpsc::channel();
         let thread = thread::spawn(move || {
-            // Each connection is answered on a thread of its own, so that a stream it stalls
-            // holds no other request.
             let mut answering = Vec::new();
             for connection in listener.incoming() {
                 if stopped.try_recv().is_ok() {
                     break;
                 }
                 let connection = connection.unwrap();
+                // Each connection is answered on a thread of its own, so that a stalled stream
+                // holds no other request.
                 answering.push(thread::spawn(move || answer(connection)));
             }
             let answered = answering
@@ -877,8 +773,6 @@ impl StandIn {
         }
     }
 
-    /// How a run serves each role's route in `workflow` through `stand_in`, which is there if a
-    /// role has one, with its key in a file in `dir`.
     fn servings(stand_in: Option<&Self>, workflow: &Workflow, dir: &Path) -> ByRole<Vec<Serving>> {
         let servings = workflow.by_role(|(_, sandbox)| {
             let entries = sandbox
@@ -892,7 +786,6 @@ impl StandIn {
         servings
     }
 
-    /// How a run serves `entry`, a route's, through it, with its key in a file in `dir`.
     fn serving(&self, dir: &Path, entry: &ir::ApiRoute) -> Serving {
         let models = entry.models.as_slice().iter().map(ModelName::as_str);
         let models: Vec<&str> = models.collect();
@@ -908,17 +801,14 @@ impl StandIn {
         }
     }
 
-    /// Stops it, and returns what its thread does: the body of each request it received, and
-    /// when the client of each stream it stalled hung up.
     fn stop(self) -> (Vec<Vec<u8>>, Vec<u64>) {
         self.stops.send(()).unwrap();
+        // The accept loop blocks in `incoming`: a connection wakes it to see the stop.
         drop(TcpStream::connect(&self.address).unwrap());
         self.thread.join().unwrap()
     }
 }
 
-/// Answers the request on `connection` as [`StandIn`] says, and returns its body, and when its
-/// client hung up, if the stand-in stalled its stream.
 fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     let (line, headers, body) = read_request(&mut BufReader::new(&connection));
     let received = body.clone();
@@ -972,8 +862,8 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
         write_chunk(&mut connection, "");
         return (received, None);
     }
+    // As a provider answered a rate limit, with a 200.
     if said == Some("limited") {
-        // As a provider answered a rate limit, with a 200.
         write_chunk(
             &mut connection,
             "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"},\"usage\":null}}\n\n\
@@ -993,8 +883,6 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     (received, Some(unix_ns()))
 }
 
-/// A host as a test shows its run: whether its clock reads only the times its script sets, so
-/// that the run's times are the same each time it runs.
 trait Shown: Host {
     const SCRIPTED: bool;
 }
@@ -1007,14 +895,6 @@ impl Shown for SimHost {
     const SCRIPTED: bool = true;
 }
 
-/// The records of `log`, a run's ([`read_log`]), one per line, once [`in_order`] has checked
-/// them; when the run started, in nanoseconds since the Unix epoch; and its last record's time.
-/// It leaves out the `status` and `lease_status` ops answered, whose number depends on timing,
-/// once it checks that their lines give each reply by its kind alone, and numbers the rest, and
-/// their ops, in turn. The run's start is shown only if it isn't within `started`, the call to
-/// `execute`. Unless the run's times are `scripted`, a record's times are shown only if 0, and the
-/// time left in a reply as `<s>`; a run of more than 64 `x`s, which a command of the simulated
-/// provider's prints, as `<n x>`.
 fn logged(
     log: Vec<Value>,
     started: &RangeInclusive<u64>,
@@ -1023,6 +903,8 @@ fn logged(
     let (mut records, mut start, mut polls) = (Vec::new(), None, 0);
     let last = in_order(&log);
     for mut logged in log {
+        // A poll answered by its own kind is dropped, as how many an `await` makes depends on
+        // timing, and the later op numbers drop with it.
         let kind = &logged["event"]["request"]["kind"];
         if (kind == "status" || kind == "lease_status")
             && logged.pointer("/actions/0/reply/kind") == Some(kind)
@@ -1038,6 +920,7 @@ fn logged(
         if let Some(op) = logged.pointer_mut("/event/op") {
             *op = json!(op.as_u64().unwrap() - polls);
         }
+        // A scripted host's clock gives exact times, which stay; a real clock's are hidden.
         let times = [
             "/at_ns",
             "/observed_ns",
@@ -1083,8 +966,6 @@ fn logged(
     (numbered(records), start, last)
 }
 
-/// The request and the reply of each `status` and `lease_status` op answered in `log`, a run's,
-/// by its kind, which [`logged`] leaves out, each once.
 fn polls(log: &[Value]) -> Vec<String> {
     let mut polls = BTreeSet::new();
     for logged in log {
@@ -1097,10 +978,6 @@ fn polls(log: &[Value]) -> Vec<String> {
     polls.into_iter().collect()
 }
 
-/// The time of the last of `log`'s records, a run log's, once it checks that they are numbered
-/// from 0 with no gap, none timed before the one before it, no event observed after its record
-/// was written, and each model request's start, its answer's first byte, its first token and its
-/// end in that order, where the log has them, its start before its answer in the log.
 fn in_order(log: &[Value]) -> Option<Duration> {
     let time = |ns: &Value| Duration::from_nanos(nanos(ns).unwrap());
     let (mut last, mut started) = (None, BTreeMap::new());
@@ -1131,7 +1008,6 @@ fn in_order(log: &[Value]) -> Option<Duration> {
     last
 }
 
-/// `records`, each numbered in turn.
 fn numbered(mut records: Vec<Value>) -> Vec<String> {
     let lines = (records.iter_mut().enumerate()).map(|(seq, record)| {
         record["seq"] = json!(seq);
@@ -1140,8 +1016,8 @@ fn numbered(mut records: Vec<Value>) -> Vec<String> {
     lines.collect()
 }
 
-/// `line`, with each run of more than 64 `x`s as `<n x>`.
 fn elided(line: &str) -> String {
+    // A payload is a run of `x`; a run past 64 shows as its length, so a snapshot stays readable.
     let (mut elided, mut rest) = (String::new(), line);
     while let Some(start) = rest.find('x') {
         let run = rest[start..].len() - rest[start..].trim_start_matches('x').len();
@@ -1157,11 +1033,6 @@ fn elided(line: &str) -> String {
     elided
 }
 
-/// Fails, as test `name`, unless the log of `record`, a run's, taken by one fold as it grows in
-/// pieces, each line in halves and its newline on its own, reads after each half as before it,
-/// and after each newline of the first lines, of every 16th and of the last as the log then
-/// does read whole; and unless, then found shorter, it is read again from its start. It leaves
-/// the log as it was, but for when it was last written.
 fn folds_as_whole(name: &str, record: &Path) {
     let path = record.join("log.jsonl");
     let whole = fs::read(&path).unwrap_or_default();
@@ -1193,8 +1064,8 @@ fn folds_as_whole(name: &str, record: &Path) {
             "{name}: a growing log read as shorter"
         );
         before = format!("{:?}", fold.readout().unwrap());
-        // A read whole costs what the log holds, so reading it at every line would cost the
-        // square of its lines.
+        // Reading the whole log at every line is quadratic: compare at the first lines, at every
+        // 16th and at the last.
         if index < 16 || index % 16 == 0 || index == last {
             assert_eq!(before, read_whole(), "{name}: the log read in pieces");
         }
@@ -1215,12 +1086,10 @@ fn folds_as_whole(name: &str, record: &Path) {
     assert_eq!(read, read_whole(), "{name}: the log read in pieces");
 }
 
-/// How long after its start, `start` nanoseconds since the Unix epoch, the log in `record`, a
-/// run's, was last written, if the run started.
 fn written(record: &Path, start: Option<u64>) -> Option<Duration> {
-    // By the record alone: the call to `execute` also publishes before the run's clock starts,
-    // and removes its sockets after its log ends.
     let start = Duration::from_nanos(start?);
+    // By the record alone: the call to `execute` also publishes before the run's clock starts, and
+    // removes its sockets after its log ends.
     let modified = fs::metadata(record.join("log.jsonl")).and_then(|log| log.modified());
     let written = modified.unwrap().duration_since(UNIX_EPOCH).unwrap();
     Some(written.saturating_sub(start))
@@ -1241,9 +1110,6 @@ fn final_judge_stderr(record: &Path) -> Option<String> {
     ))
 }
 
-/// When `last`, a time since a run of `placed` started, came: before the agent's teardown was
-/// to end, at most the hard end ([`lasts`]) less the final judge's startup and timeout; before
-/// the hard end; or after it.
 fn when(placed: &Placed, last: Duration) -> &'static str {
     let score = placed.workflow().score();
     let startup = placed.startup(score.slot.judge().role());
@@ -1258,8 +1124,6 @@ fn when(placed: &Placed, last: Duration) -> &'static str {
     }
 }
 
-/// The fixture's workflow, without the agent's model route ([`routed`] gives one), and with
-/// `argv` as the agent's command.
 fn workflow(argv: &[&str]) -> Value {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     let agent = &mut ir["roles"][0];
@@ -1268,40 +1132,36 @@ fn workflow(argv: &[&str]) -> Value {
     ir
 }
 
-/// The workflow of the runs whose agents make ops: [`workflow`]'s, with `argv` as the agent's
-/// command and `deadline` as the agent's deadline, in seconds; both judges judging the payload
-/// in their slot as the simulated provider's `judge` command does; room in the train judge's
-/// slot for 8 bytes and in the score's for 16, the most an op of the agent's may carry; and a
-/// call timeout of 1 s, shorter than the time left in any run that makes its calls soon after it
-/// starts, without a cumulative limit, so that it is each call's timeout, and what a reply has
-/// left depends on no command's time.
 fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = workflow(argv);
     let grant = &mut ir["roles"][0]["grants"][0]["judge"];
+    // A call timeout shorter than the time left in any run that makes its calls soon after it
+    // starts, with no cumulative limit, so that it is each call's timeout and what a reply has left
+    // depends on no command's time.
     grant["call_timeout_seconds"] = json!(1);
     grant.as_object_mut().unwrap().remove("cumulative_seconds");
     for role in [1, 2] {
         let judge = &mut ir["roles"][role]["runtime"]["judge"];
         judge["command"]["argv"] = json!(["judge", "/pumpkin/in/payload/raw"]);
     }
+    // The train judge's slot holds 8 bytes and the score's 16, the most an op of the agent's may
+    // carry: a payload of 9 or 17 is over its limit, one of 6 is not.
     ir["roles"][1]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(8);
     ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = json!(16);
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(deadline);
     ir
 }
 
-/// `ir`, with a model route for its agent that allows `m-large`.
 fn routed(mut ir: Value) -> Value {
     let route = json!([{ "api": "responses", "models": ["m-large"] }]);
     ir["roles"][0]["egress"] = json!({ "model": route });
     ir
 }
 
-/// [`ops_workflow`]'s workflow, with the run's other shares of its hard end as short as they
-/// go: no finalize grace, and a score timeout of 1 s, so that a run that waits for its
-/// teardown's end or its hard end waits seconds.
 fn short_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = ops_workflow(argv, deadline);
+    // The run's other shares of its hard end as short as they go: no finalize grace and a score
+    // timeout of 1 s, so that a wait for the teardown's end or the hard end takes seconds.
     ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0);
     ir["score"]["timeout_seconds"] = json!(1);
     ir
@@ -1376,14 +1236,11 @@ fn unstarted_undeletable() {
     .assert_eq(&shown);
 }
 
-// A run whose agent's command exits: its exit ends the work phase without a submission, and
-// the agent's sandbox is collected and deleted, so the run finishes without a score.
 #[test]
 fn exits() {
-    // A deadline far later than the exit, so that an exit the run misses ends the work phase.
     let mut ir = workflow(&["exit", "3"]);
+    // A deadline far later than the exit, so that an exit the run misses ends the work phase.
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
-    // Its class priced, so that `outcome.json` prices its sandbox.
     let shown = executed(
         &System,
         "exits",
@@ -1408,9 +1265,9 @@ fn exits() {
 
 #[test]
 fn crashes() {
+    let mut ir = workflow(&["crash"]);
     // A deadline far later than the session's end, so that an end the run misses ends the work
     // phase.
-    let mut ir = workflow(&["crash"]);
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
     check(
         &System,
@@ -1502,12 +1359,8 @@ fn unstarted() {
         its last record came before the agent's teardown was to end"#]].assert_eq(&listed);
 }
 
-// A run that SIGTERM interrupts stops as one that fails does, deleting its sandboxes, and records
-// the signal, long before what it waits on would end (`WAITED`). Each case is a test of its own,
-// as a signal interrupts every later run of the process.
-
-/// Checks the run of `ir`, as test `name`, on a simulated provider whose startup is `startup`
-/// seconds, with `sandboxd`, interrupted `at` a step.
+// A run that a signal interrupts stops as one that fails does, long before what it waits on
+// (`WAITED`) would end. Each case is a test of its own: a signal interrupts every later run.
 fn interrupted(name: &str, startup: u64, ir: &Value, sandboxd: &str, at: At, expect: &Expect) {
     let provider = Sim::with_startup(startup);
     let test = format!("interrupted-{name}");
@@ -1524,7 +1377,6 @@ fn interrupted(name: &str, startup: u64, ir: &Value, sandboxd: &str, at: At, exp
 
 #[test]
 fn interrupted_publishing_sandboxd() {
-    // One interrupted as it publishes never starts, nor publishes more.
     interrupted(
         "publishing-sandboxd",
         30,
@@ -1542,7 +1394,6 @@ fn interrupted_publishing_sandboxd() {
 
 #[test]
 fn interrupted_publishing_image() {
-    // Nor does one interrupted once its last publish is under way.
     let mut one_image = workflow(&["exit", "0"]);
     for judge in [1, 2] {
         one_image["roles"][judge]["image"] = one_image["roles"][0]["image"].clone();
@@ -1564,7 +1415,6 @@ fn interrupted_publishing_image() {
 
 #[test]
 fn interrupted_agent_start() {
-    // Once the agent's sandbox is created, whose `sandboxd` never dials, it ends the agent's start.
     interrupted(
         "agent-start",
         WAITED,
@@ -1586,8 +1436,6 @@ fn interrupted_agent_start() {
 
 #[test]
 fn interrupted_judge_start() {
-    // Once a judge's sandbox is created, of an image whose `sandboxd` never dials, while the agent
-    // awaits the call, it ends the judge's start.
     let mut judged = ops_workflow(&["ops", "judge train 6", "await 0 completed"], WAITED);
     judged["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
     interrupted(
@@ -1615,8 +1463,6 @@ fn interrupted_judge_start() {
 
 #[test]
 fn interrupted_working() {
-    // Once the agent has started, while it works and makes no op, it ends the loop's wait for its
-    // next event.
     let mut works = workflow(&["work"]);
     works["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(WAITED);
     interrupted(
@@ -1720,8 +1566,6 @@ fn unlistable() {
     );
 }
 
-// A run whose agent's `sandboxd` speaks the sandbox protocol's next version: the gateway refuses
-// its hello at once, and the agent fails, saying which version each end speaks.
 #[test]
 fn mismatched() {
     let provider = Sim::new();
@@ -1805,8 +1649,6 @@ fn unpublished() {
     .assert_eq(&shown);
 }
 
-// A run whose judge's image the provider can't publish: the run fails before it starts, naming
-// the judge, and nothing is created.
 #[test]
 fn unpublished_image() {
     let mut ir = workflow(&["exit", "0"]);
@@ -1913,8 +1755,6 @@ fn swapped_payload() {
         its last record came before the agent's teardown was to end"#]].assert_eq(&swapped);
 }
 
-// A run whose agent finalizes a submission whose final judge writes a result over the most a
-// result may hold: the result is removed from the record, and the run finishes with no score.
 #[test]
 fn result_over_the_limit() {
     let shown = executed(
@@ -2041,15 +1881,12 @@ fn judge_placed_apart() {
     );
 }
 
-/// `sim`, as provider `there` of a run on two, beside `here`: its classes offer less memory than
-/// the agent needs, and more than each judge does, so the agent is placed on `here`, and each
-/// judge that needs no more memory than the others on `there`.
 fn there(sim: Sim) -> Sim {
+    // Less memory than the agent needs, so that a role with the agent's needs is placed on `here`,
+    // and more than a judge needs, so that one with a judge's is placed on `there`.
     sim.named("there").offering_memory(16 << 30)
 }
 
-// `there` is private, so its sandboxes dial the run's grant listener, or it listens, so the run
-// dials them, and `here`'s dial their sockets, alike either way.
 #[test]
 fn spans_providers() {
     let argv = [
@@ -2061,6 +1898,8 @@ fn spans_providers() {
     let mut ir = ops_workflow(&argv, 30);
     ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
     ir["roles"][0]["image"] = ir["roles"][1]["image"].clone();
+    // `there` is private, so its sandboxes dial the run's grant listener, or it listens, so the
+    // run dials them, and `here`'s dial their sockets, alike either way.
     for reach in [Sim::private, Sim::listening] {
         let (here, there) = (Sim::new().named("here"), there(reach(Sim::new())));
         let providers = [("here", &here), ("there", &there)];
@@ -2142,11 +1981,11 @@ fn sweeps_each_provider() {
 // The watcher takes each provider's list for that provider's starts alone.
 #[test]
 fn watches_each_provider() {
-    // The agent can't tell when a start is handed to the watcher, so a second's sleep orders the
-    // two: `here`'s start waits as `there`'s begins.
     let argv = [
         "ops",
         "judge near 6",
+        // The agent can't tell when a start is handed to the watcher, so a second's sleep orders
+        // the two: `here`'s start waits as `there`'s begins.
         "sleep 1",
         "judge train 6",
         "await 0 errored",
@@ -2214,9 +2053,7 @@ fn judge_stalls() {
         "finalize submit 6",
     ];
     // A deadline seconds after the agent's ops, so that the teardown's end, which follows it,
-    // comes soon; and a call timeout a second longer than the agent takes to finalize, so that
-    // the stop ends the call, and a second shorter than the time left when the call is made, so
-    // that it is the call's timeout.
+    // comes soon.
     let mut ir = short_workflow(&argv, 2);
     ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
     ir["roles"][2]["image"] = json!(sim::image(UNDELETABLE).as_str());
@@ -2248,8 +2085,8 @@ fn judge_stalls() {
     );
 }
 
-// The run's clock passes the hard end as the agent's delete is recorded, while the stopped call's
-// delete waits for the agent's, so the hard end's tick comes before the call's end.
+// The run's clock passes the hard end as the agent's delete is recorded, while the stopped
+// call's delete waits for the agent's, so the hard end's tick comes before the call's end.
 #[test]
 fn abandoned() {
     let argv = ["ops", "judge train slow", "await 0 running", "exit"];
@@ -2285,8 +2122,8 @@ fn abandoned() {
     );
 }
 
-// The provider finishes the agent's delete only after the stopped call's, whose record reaches the
-// loop only once the agent's teardown, which writes its own, is done.
+// The provider finishes the agent's delete only after the stopped call's, whose record reaches
+// the loop only once the agent's teardown, which writes its own, is done.
 #[test]
 fn deleted_while_torn_down() {
     let argv = ["ops", "judge train slow", "await 0 running", "exit"];
@@ -2318,8 +2155,8 @@ fn deleted_while_torn_down() {
     );
 }
 
-// The late op and the call's report each came before the hard end, at the time it carries, so the
-// report ends the call in time and the run finishes rather than be abandoned.
+// The late op and the call's report each came before the hard end, at the time it carries, so
+// the report ends the call in time and the run finishes rather than be abandoned.
 #[test]
 fn reported_before_the_hard_end() {
     // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
@@ -2391,8 +2228,8 @@ fn reported_past_the_deadline() {
     );
 }
 
-// [`reported_past_the_deadline`]'s run, with its loop's take an hour in, past the run's hard
-// end: the call's failure waits while the tick abandons the run, and is recorded after it.
+// `reported_past_the_deadline`'s run, with its loop's take an hour in, past the run's hard end:
+// the call's failure waits while the tick abandons the run, and is recorded after it.
 #[test]
 fn reported_past_the_hard_end() {
     let late = LateTake {
@@ -2454,8 +2291,8 @@ fn torn_down_past_the_hard_end() {
     );
 }
 
-// The agent checks that the `ops` after its 1 s sleep leaves at least 1 s less than the one before,
-// however long it took to start.
+// The agent checks that the `ops` after its 1 s sleep leaves at least 1 s less than the one
+// before, however long it took to start.
 #[test]
 fn late_ops() {
     let argv = [
@@ -2660,8 +2497,8 @@ fn refusal_held_by_a_slow_sync() {
     );
 }
 
-// The agent's start leads to no act, so it is synced with the next record that does; the note of
-// what its teardown collected, which no such record follows, by the run's end.
+// The agent's start leads to no act, so it is synced with the next record that does; the note
+// of what its teardown collected, which no such record follows, by the run's end.
 #[test]
 fn syncs() {
     let journal = Journal::default();
@@ -2717,10 +2554,10 @@ fn syncs() {
 // work phase.
 #[test]
 fn model_requests() {
-    // The first request's last item holds what JSON escapes, and what it writes as UTF-8, in a
-    // list in an object, which its rebuild must give back byte for byte.
     let argv = [
         "ops",
+        // The first request's last item holds what JSON escapes, and what it writes as UTF-8, in a
+        // list in an object, which its rebuild must give back byte for byte.
         "model m-large stream \"quoted\"\\back\nline\u{1}\ttab/é→😀",
         "model m-huge stream",
         "finalize submit 6",
@@ -3212,9 +3049,6 @@ fn model_grace_cut() {
     .assert_eq(&shown);
 }
 
-/// `ir`, with a model route for judge `judge`, 1 for the train judge or 2 for the score's, that
-/// allows `m-small`, whose command takes `steps` (`ops`), and a timeout of 20 s for each of the
-/// train judge's calls, shorter than what the agent's deadline leaves any call.
 fn judge_routed(mut ir: Value, judge: usize, steps: &[&str]) -> Value {
     let route = json!([{ "api": "responses", "models": ["m-small"] }]);
     ir["roles"][judge]["egress"] = json!({ "model": route });
@@ -3391,19 +3225,17 @@ fn judge_key_refused() {
     .assert_eq(&shown);
 }
 
-/// Nanoseconds since the Unix epoch.
 fn unix_ns() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     u64::try_from(since.as_nanos()).unwrap()
 }
 
-/// A time or duration of the log's, a decimal string of nanoseconds, as a number.
 fn nanos(value: &Value) -> Option<u64> {
     value.as_str()?.parse().ok()
 }
 
-// A run holds what it reserved until its end, interrupted or not: a signal ends the second before
-// it publishes, and a third is then prepared.
+// A run holds what it reserved until its end, interrupted or not: a signal ends the second
+// before it publishes, and a third is then prepared.
 #[test]
 fn holds_until_its_end() {
     let runs = Runs::new("holds-until-its-end");
@@ -3460,10 +3292,6 @@ fn holds_until_its_end() {
         then a third: prepared"#]].assert_eq(&lines.join("\n"));
 }
 
-/// [`ops_workflow`]'s workflow, with `argv` as the agent's command and `deadline` as its
-/// deadline, in seconds, and a runner, `gpu_runner`, of image `image`, which the agent leases
-/// under grant `gpu`: 2 at once, each for at most 600 s, with no bound on its time in all, 4
-/// commands in all, and transfers of 64 bytes each.
 fn lease_workflow(argv: &[&str], deadline: u64, image: &str) -> Value {
     let mut ir = ops_workflow(argv, deadline);
     let mut runner = ir["roles"][1].clone();
@@ -3482,7 +3310,6 @@ fn lease_workflow(argv: &[&str], deadline: u64, image: &str) -> Value {
     ir
 }
 
-/// An image of the simulated provider's that no fault names, for a runner.
 const RUNNER: &str = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
 
 #[test]
@@ -3502,8 +3329,8 @@ fn leases() {
         "lease_run 0 1 sleep",
         "await_lease 0 ready",
         "lease_close 0",
-        // The lease's end and the agent's ops reach the run's loop from different threads; `closed`
-        // is said only once the loop has taken the end, so the end comes before the next op.
+        // The lease's end and the agent's ops reach the run's loop from different threads;
+        // `closed` is said only once the loop has taken the end, so it comes before the next op.
         "await_lease 0 closed",
         "lease_run 0 - print three",
         "finalize submit 6",
@@ -3600,8 +3427,8 @@ fn lease_ends() {
     );
 }
 
-// The runner's create fails, as a provider with no room refuses one: the lease fails at no cost to
-// its grant.
+// The runner's create fails, as a provider with no room refuses one: the lease fails at no cost
+// to its grant.
 #[test]
 fn lease_unstarted() {
     let argv = [
@@ -3792,11 +3619,6 @@ fn transfer_cut() {
     .assert_eq(&shown);
 }
 
-/// [`ops_workflow`]'s workflow, with `argv` as the agent's command, and a deadline of 30 s, whose
-/// judge `judge`, 1 for the train judge and 2 for the score's, runs `judge_argv`, and leases a
-/// runner, `box`, under its grant `box`, 1 at a time, each for 60 s, whose image is [`DAWDLING`],
-/// so that a lease that ends with its call ends once the call has; and whose train calls time out
-/// after 20 s.
 fn judge_lease_workflow(argv: &[&str], judge: usize, judge_argv: &[&str]) -> Value {
     let mut ir = ops_workflow(argv, 30);
     ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
@@ -3813,9 +3635,6 @@ fn judge_lease_workflow(argv: &[&str], judge: usize, judge_argv: &[&str]) -> Val
     ir
 }
 
-/// What a judge that leases runs: it opens a lease, puts its slot's payload there, runs a command
-/// there, which prints 7, reads the command's end from the lease's status, and scores what it
-/// printed.
 const LEASING_JUDGE: [&str; 8] = [
     "ops",
     "lease_open box",
@@ -3876,8 +3695,6 @@ fn judge_leases() {
     );
 }
 
-// A run whose score's judge leases a runner in the final phase, as [`LEASING_JUDGE`] does, and
-// scores what its command printed; the run ends once its lease has, after the call.
 #[test]
 fn score_leases() {
     check(
@@ -3960,8 +3777,6 @@ fn lease_starts_by_its_holders_end() {
     );
 }
 
-// A run whose train judge exits as a command it started in its lease still runs: the lease
-// closes as the call's command ends, with the command in it, and the call ends without a result.
 #[test]
 fn judge_exits_leasing() {
     let judge = [
