@@ -13,6 +13,7 @@ function render() {
   const { parts } = route();
   setKeys(null);
   byId("follow").replaceChildren();
+  byId("notice").hidden = true;
   const where = byId("where");
   if (parts[0] === "run" && parts[1] && parts[2] === "trace") {
     const caller = route().query.get("caller") || "agent";

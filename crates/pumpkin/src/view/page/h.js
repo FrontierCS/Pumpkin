@@ -10,6 +10,13 @@
 // How long after a read's reply the next poll of a live run goes.
 export const POLL_MS = 1500;
 
+// How long after a read that failed to arrive the next goes, and the most that each wait doubles
+// to while reads go on failing. Each read through a lost controller opens a connection to it
+// anew, so seldom enough that one is done before the next starts; the first soon, so that the
+// page resumes soon after a dropped connection, which is routine.
+const AGAIN_FIRST_MS = 5000;
+const AGAIN_MOST_MS = 60000;
+
 /** @typedef {string | number | Node | null | undefined | false} Child */
 /** @typedef {Record<string, any>} Attrs */
 
@@ -102,16 +109,30 @@ export class Refused extends Error {
   }
 }
 
-// The JSON at `path`; a `Refused` if the server refuses it, a `SyntaxError` if its reply is cut
-// short. `signal` aborts the read.
+// A read whose reply didn't arrive whole: the connection failed, or ended before or during the
+// reply.
+export class Unarrived extends Error {}
+
+// The JSON at `path`; a `Refused` if the server refuses it, an `Unarrived` if its reply doesn't
+// arrive whole. `signal` aborts the read.
 /** @param {string} path @param {AbortSignal} [signal] @returns {Promise<any>} */
 export async function get(path, signal) {
-  const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN }, signal });
+  /** @param {unknown} error */
+  const unarrived = (error) => {
+    if (error instanceof DOMException && error.name === "AbortError") return error;
+    return new Unarrived("Reading " + path + " failed: " + (error instanceof Error ? error.message : String(error)));
+  };
+  const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN }, signal }).catch((error) => {
+    throw unarrived(error);
+  });
   if (!response.ok) {
     const refusal = await response.json().catch(() => ({}));
     throw new Refused(response.status, refusal.error || response.status + " " + response.statusText);
   }
-  return response.json();
+  // An answer cut short, whose JSON doesn't parse, didn't arrive whole.
+  return response.json().catch((error) => {
+    throw unarrived(error);
+  });
 }
 
 // The bytes at `path` as text, as the server keeps them; a `Refused` if it refuses them.
@@ -144,6 +165,17 @@ function unauthorized() {
 
 // ---- following
 
+// What the page says of `error`, a read's, if a later read may well arrive, which it then makes:
+// a reply that didn't arrive whole, or a 502, which the server answers alone for a controller that
+// it can't reach. Null for an answer, such as a refusal of a run that doesn't exist, which the
+// page shows.
+/** @param {unknown} error @returns {string | null} */
+function unreached(error) {
+  if (error instanceof Unarrived) return "A reply of this pumpkin view's was cut short or never came, so this page shows what it read last.";
+  if (error instanceof Refused && error.status === 502) return "Can't reach the controller, so this page shows what it read last.";
+  return null;
+}
+
 /** @type {object | null} */
 let following = null;
 
@@ -156,6 +188,8 @@ export function follow(read) {
   const mine = {};
   following = mine;
   const current = () => following === mine;
+  // The wait after the next read that fails to arrive.
+  let againMs = AGAIN_FIRST_MS;
   const again = async () => {
     if (!current()) return;
     if (document.hidden) {
@@ -164,10 +198,19 @@ export function follow(read) {
     }
     /** @type {number | null} */
     let wait = null;
+    const notice = byId("notice");
     try {
       wait = await read(current);
+      notice.hidden = true;
+      againMs = AGAIN_FIRST_MS;
     } catch (error) {
-      if (current()) show(error instanceof Refused && error.status === 401 ? unauthorized() : h("p", { class: "error" }, "Reading the record failed: " + (error instanceof Error ? error.message : String(error))));
+      const said = unreached(error);
+      if (current() && said !== null) {
+        wait = againMs;
+        againMs = Math.min(2 * againMs, AGAIN_MOST_MS);
+        notice.textContent = said + " It tries again in " + wait / 1000 + " s. " + sentence(error instanceof Error ? error.message : String(error));
+        notice.hidden = false;
+      } else if (current()) show(error instanceof Refused && error.status === 401 ? unauthorized() : h("p", { class: "error" }, "Reading the record failed: " + (error instanceof Error ? error.message : String(error))));
     }
     if (current() && wait !== null) setTimeout(again, wait);
   };
