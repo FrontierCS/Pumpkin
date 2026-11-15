@@ -3,6 +3,7 @@
 // whole on asking; the bytes the record keeps are shown as kept.
 
 import { bytes, clock, count, fill, get, getText, h, plural, span, utc } from "./h.js";
+import { diffTab } from "./diff.js";
 import { firstLine } from "./ledger.js";
 import { Steps } from "./steps.js";
 
@@ -245,7 +246,7 @@ function inspectStep(node, s, ctx) {
       ["Parent", parent === null ? "-" : link(parent, "Request " + parent)],
       ["Turn", c.turn[s] === null ? "-" : "Begun by request " + c.turn[s]],
       ["Again", again],
-      ["Differs", c.differs[s] && c.differs[s]?.length ? "its " + (c.differs[s] || []).join(" and ") + " from its parent's" : null],
+      ["Differs", c.differs[s] && c.differs[s]?.length ? h("button", { title: "Show how, in the Diff tab", onclick: () => ctx.setTab("Diff") }, "Its " + (c.differs[s] || []).join(" and ") + " from its parent's") : null],
       ["Calls", steps.calls(s) || "-"],
       ["Items", c.items[s] === null ? "-" : c.items[s] + " sent, " + (c.added[s] ?? "-") + " added"],
       ["Notes", c.notes[s] ? (c.notes[s] || []).join("; ") : null],
@@ -280,6 +281,7 @@ function inspectStep(node, s, ctx) {
     [h("h3", {}, h("span", { class: "mark " + steps.tone(s) }), h("span", { class: "kind" }, "Step"), "#" + n, h("span", { class: "dim" }, c.thread[s] === null ? "In flight" : "Thread " + c.thread[s] + " · " + at + "/" + of))],
     [
       ["Summary", summary],
+      ["Diff", () => diffTab(steps, s, ctx.base)],
       ["Options", () => config],
       ["Usage", usage],
       ["Timing", timing],
