@@ -92,27 +92,6 @@ fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String
     route.as_slice().iter().map(served).collect()
 }
 
-/// The run log's note on which upstream serves each entry of the route of `sandbox`'s role,
-/// `servings`, by its name, and the name that it takes for each model, if it has one.
-pub(super) fn started(sandbox: &Sandbox, servings: &[Serving]) -> Option<String> {
-    let entries: Vec<String> = servings
-        .iter()
-        .map(|serving| {
-            let taken: Vec<String> = (serving.models.iter())
-                .map(|(model, upstream_name)| format!("`{model}` as `{upstream_name}`"))
-                .collect();
-            format!(
-                "`{}` to the upstream `{}`, which takes {}",
-                serving.api,
-                serving.name,
-                taken.join(", ")
-            )
-        })
-        .collect();
-    (!entries.is_empty())
-        .then(|| format!("`{}`'s model route: {}", sandbox.name, entries.join("; ")))
-}
-
 impl Served {
     /// The route that `servings` serve, a role's as [`routes`] gives it, with upstreams of its
     /// own, or `None` for a role without one.

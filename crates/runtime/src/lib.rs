@@ -193,7 +193,7 @@ impl<'r, H: Host> Run<'r, H> {
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
-        let provided = record::provided(&self.placed, &self.providers, self.tags);
+        let provided = record::provided(&self.placed, &self.providers, self.tags, &self.routes);
         record::write_json(host, &self.dir, "provider.json", &provided)?;
         let published = Published::create(
             &self.providers,
@@ -531,11 +531,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.log
             .start(self.workflow(), unix, self.hard_end(), &actions)?;
         self.serve(Caller::Agent, self.workflow().agent().role);
-        for (role, sandbox) in self.workflow().roles() {
-            if let Some(note) = model::started(sandbox, self.routes.get(role)) {
-                self.log.note(&note)?;
-            }
-        }
         // Judge calls' threads borrow the run's workflow and sandboxes, and the scope ends once
         // each has, so that no sandbox starts after the run's end, and the drain takes all they
         // reported. A stop waits so for a child whose provider's create is under way, which

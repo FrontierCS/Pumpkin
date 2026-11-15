@@ -406,8 +406,8 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// The files of `record`, a run's, each sandbox's `sandbox.json` and console it holds, its run
-/// log's notes on the upstreams that served its model routes and its record of how each model
+/// The files of `record`, a run's, each sandbox's `sandbox.json` and console it holds, the model
+/// routes that `provider.json` holds, if a role has one, its run log's record of how each model
 /// request was answered, if it has a run log, what the agent's `out` and the first job's evidence
 /// held of a model's answer, if anything, what the driver wrote to `driver.log`, if anything, its
 /// `outcome.json`, and whether `stdout` is that.
@@ -416,14 +416,17 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
     let mut lines = vec![format!("record: {}", files(record).join(", "))];
     lines.extend(sandboxes(record));
+    // A run that didn't start has no `provider.json`.
+    if let Ok(provided) = fs::read_to_string(record.join("provider.json")) {
+        let routes = &serde_json::from_str::<Value>(&provided).unwrap()["routes"];
+        if routes.as_object().is_some_and(|routes| !routes.is_empty()) {
+            lines.push(format!("provider.json routes: {routes}"));
+        }
+    }
     // A run that didn't start has no run log.
     let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
     for line in log.lines() {
         let logged: Value = serde_json::from_str(line).unwrap();
-        let note = logged["note"].as_str();
-        if let Some(note) = note.filter(|note| note.contains("'s model route: ")) {
-            lines.push(format!("the run log notes: {note}"));
-        }
         if logged["event"]["kind"] == "model_answered" {
             let mut event = logged["event"].clone();
             for time in ["first_byte_ns", "first_token_ns"] {
