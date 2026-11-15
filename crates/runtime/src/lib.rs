@@ -28,7 +28,7 @@ use gateway::{
 };
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
-use schema::ir::{Api, Name};
+use schema::ir::{Api, ModelName, Name};
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{ByProvider, ByRole, JudgeCall, LeaseGrantId, Placed, RoleId, Workflow};
 use serde_json::json;
@@ -42,6 +42,7 @@ mod judge;
 mod lease;
 mod log;
 mod model;
+mod price;
 mod record;
 mod sandbox;
 
@@ -58,6 +59,7 @@ pub use log::{
 use log::{Entry, Log, ModelAnswer};
 use model::{Exchange, Served};
 pub use model::{KeptPart, KeptRequest};
+pub use price::TokenPrices;
 pub use record::{
     BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
 };
@@ -74,6 +76,8 @@ const LOOK: Duration = Duration::from_millis(50);
 pub struct Recorded<'a> {
     /// The arguments of the `pumpkin run` that started the run.
     pub args: &'a [String],
+    /// The price of each model that has one, by the name that a route allows.
+    pub prices: &'a BTreeMap<ModelName, TokenPrices>,
 }
 
 /// A run, prepared on its host, `H`: its workflow placed, on the providers its roles are placed
@@ -83,6 +87,7 @@ pub struct Run<'r, H> {
     placed: Placed,
     providers: ByProvider<&'r dyn Provider>,
     routes: ByRole<Vec<Serving>>,
+    prices: &'r BTreeMap<ModelName, TokenPrices>,
     id: RunTag,
     dir: PathBuf,
     /// Held until `outcome.json` is written: see [`Lock`].
@@ -111,7 +116,7 @@ impl<'r, H: Host> Run<'r, H> {
         servings: &ByRole<Vec<Serving>>,
         recorded: Recorded<'r>,
     ) -> Result<Self, String> {
-        let Recorded { args } = recorded;
+        let Recorded { args, prices } = recorded;
         let routes = model::routes(placed.workflow(), servings)?;
         let reserved = placed.by_provider(|name| {
             let phases = sandbox::phases(&placed, name);
@@ -125,6 +130,7 @@ impl<'r, H: Host> Run<'r, H> {
             placed,
             providers,
             routes,
+            prices,
             id,
             dir,
             lock,
@@ -192,7 +198,7 @@ impl<'r, H: Host> Run<'r, H> {
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
-        let provided = record::provided(&self.placed, &self.providers, &self.routes);
+        let provided = record::provided(&self.placed, &self.providers, &self.routes, self.prices);
         record::write_json(host, &self.dir, "provider.json", &provided)?;
         let published = Published::create(
             &self.providers,

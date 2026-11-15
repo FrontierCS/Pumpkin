@@ -29,7 +29,7 @@ use provider::{
     RunTag, SandboxId, SandboxdRef, Sweep,
 };
 use route::Serving;
-use runtime::{Ending, Host, Record, Recorded, Run, System, new_id};
+use runtime::{Ending, Host, Record, Recorded, Run, System, TokenPrices, new_id};
 use schema::ir::{self, Image, ModelName};
 use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByRole, Placed, Workflow};
@@ -363,7 +363,8 @@ fn executed<H: Shown>(
     let record = runs.dir.join(id.as_str());
     let interrupting = interrupting(providers, at, &record);
     let on = providers_of(&placed, |name| named(&interrupting, name));
-    let recorded = Recorded { args: &[] };
+    let prices = prices();
+    let recorded = kept(&prices);
     let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, &servings, recorded);
     let run = run.unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
@@ -420,6 +421,18 @@ fn executed<H: Shown>(
     (names.into_iter()).fold(lines.join("\n"), |shown, (path, name)| {
         shown.replace(&path, name)
     })
+}
+
+/// The prices of the stand-in's models, by which [`executed`] runs: `m-small`'s alone, so a
+/// record shows a model with a price beside one without.
+fn prices() -> BTreeMap<ModelName, TokenPrices> {
+    let small = ModelName::try_from("m-small".to_owned()).unwrap();
+    let prices = json!({ "input": 3, "cached": 0.3, "cache_write": 3.75, "output": 15 });
+    BTreeMap::from([(small, serde_json::from_value(prices).unwrap())])
+}
+
+fn kept(prices: &BTreeMap<ModelName, TokenPrices>) -> Recorded<'_> {
+    Recorded { args: &[], prices }
 }
 
 /// What [`executed`] shows of the files in `record`, a run's, as test `name`, beside its log,
@@ -3230,7 +3243,7 @@ fn judge_model() {
     expect![[r#"
         finished, with score Some(Number(7))
         payloads hold: ["xxxxxx"]
-        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small"}},"upstream":"stand-in"}]}
+        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
         outcome.json: {"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         outcome.json's usage: {"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
@@ -3285,7 +3298,7 @@ fn judge_and_agent_model() {
     expect![[r#"
         finished, with score Some(Number(6))
         payloads hold: ["xxx", "xxxxxx"]
-        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"train_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small"}},"upstream":"stand-in"}]}
+        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"train_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
         outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":2,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":3,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
@@ -3348,7 +3361,7 @@ fn judge_key_refused() {
     expect![[r#"
         failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again
         payloads hold: ["xxx", "xxxxxx"]
-        provider.json routes: {"train_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small"}},"upstream":"stand-in"}]}
+        provider.json routes: {"train_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -3396,6 +3409,7 @@ fn holds_until_its_end() {
     let runs = Runs::new("holds-until-its-end");
     let sim = Sim::new().with_cpus(16);
     let ir: ir::Workflow = serde_json::from_value(workflow(&["exit", "0"])).unwrap();
+    let unpriced = BTreeMap::new();
     let prepare = |name: &str| {
         let placed = placed(&ir, sim.ready()).unwrap();
         let dir = runs.dir.join(name);
@@ -3403,7 +3417,10 @@ fn holds_until_its_end() {
             .workflow()
             .by_role(|_| Ok::<_, Infallible>(Vec::new()));
         let on = providers_of(&placed, |_| &sim);
-        let recorded = Recorded { args: &[] };
+        let recorded = Recorded {
+            args: &[],
+            prices: &unpriced,
+        };
         let id = new_id(SystemTime::now()).unwrap();
         Run::prepare(&System, placed, on, &dir, id, &unrouted, recorded)
     };

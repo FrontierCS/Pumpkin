@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
@@ -9,9 +10,9 @@ use engine::Engine;
 use gateway::{Dialer, GrantListener};
 use modal::Modal;
 use provider::{Meeting, Provider, RunTag};
-use runtime::{Record, Recorded, Run, System};
+use runtime::{Record, Recorded, Run, System, TokenPrices};
 use rustix::process::Signal;
-use schema::ir::Name;
+use schema::ir::{ModelName, Name};
 use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use stdx::Context;
@@ -171,6 +172,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         providers,
         gateway,
         servings,
+        prices,
     } = prepared.map_err(|error| refused(error, again.as_deref()))?;
     let (placed, placed_on) = place(
         Path::new(entry.path()),
@@ -187,7 +189,10 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
     let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
     let on = placed_on.map(Connected::provider);
-    let kept = Recorded { args: &words };
+    let kept = Recorded {
+        args: &words,
+        prices: &prices,
+    };
     let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     begun(&id, &dir, &names, reader);
@@ -265,6 +270,7 @@ struct Prepared<'e> {
     gateway: config::Gateway,
     /// How each role's model route is served, an entry at a time.
     servings: ByRole<Vec<route::Serving>>,
+    prices: BTreeMap<ModelName, TokenPrices>,
 }
 
 /// What a run of `task`, checked, starts from, on the machine that the configuration at `config`
@@ -294,6 +300,7 @@ fn prepared<'e>(
             Some(route) => upstreams.serving(route).context(config.display()),
             None => Ok(Vec::new()),
         })?;
+    let prices = upstreams.prices();
     let engine = &*engine.insert(crate::engine(context, reader)?);
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
@@ -302,6 +309,7 @@ fn prepared<'e>(
         providers,
         gateway,
         servings,
+        prices,
     }))
 }
 
