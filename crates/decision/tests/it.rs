@@ -127,10 +127,8 @@ fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
     BTreeMap::from([(name("provider"), BTreeMap::from(classes))])
 }
 
-/// What a script needs to know as it runs.
 struct Run<'w> {
     workflow: &'w Workflow,
-    /// The ops made so far.
     ops: u64,
     /// Who makes the line's op: the agent, unless the line names a job's call.
     caller: Caller,
@@ -204,7 +202,6 @@ impl Run<'_> {
         }
     }
 
-    /// A lease's op, or the runtime's report on a lease, as [`Run::event`] reads it.
     fn lease_event(&mut self, words: &[&str]) -> Event {
         let lease = || LeaseId(words[1].parse().unwrap());
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
@@ -255,7 +252,6 @@ impl Run<'_> {
         }
     }
 
-    /// A transfer's op, or the runtime's report on one, as [`Run::event`] reads it.
     fn transfer_event(&mut self, words: &[&str]) -> Event {
         let lease = || LeaseId(words[1].parse().unwrap());
         match words[0] {
@@ -320,8 +316,6 @@ impl Run<'_> {
         }
     }
 
-    /// Notes an event, the actions it called for, and when the next tick is due if that
-    /// changed.
     fn note(&mut self, event: &str, actions: &[Action], tick_due: Duration) {
         writeln!(self.transcript, "{event}").unwrap();
         for action in actions {
@@ -424,7 +418,6 @@ fn holder_text(holder: Caller) -> String {
     }
 }
 
-/// What a transfer's action says.
 fn transfer_text(
     (lease, holder): (LeaseId, Caller),
     transfer: u64,
@@ -451,7 +444,6 @@ fn transfer_text(
     )
 }
 
-/// The absolute path `path`.
 fn path(path: &str) -> AbsolutePath {
     AbsolutePath::try_from(path.to_owned()).unwrap()
 }

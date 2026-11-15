@@ -1,20 +1,13 @@
 //! The leases that lease grants open, the meter they keep, and when the core ends them.
 //!
-//! Each lease has a holder ([`Caller`]), the agent or a judge's call, whose grant's limits it
-//! counts against: a grant's meter is its holder's, so each call of a judge starts with its
-//! grants' limits whole.
+//! Each lease has a holder ([`Caller`]) whose grant's limits it counts against: a grant's meter
+//! is its holder's, so each call of a judge starts with its grants' limits whole.
 //!
 //! A lease counts against its grant's `instances` from when it is accepted until its sandbox is
 //! gone. Its time runs from when its runner is ready, as the runtime observed it, until the core
-//! closes it, or the runtime reports its runner failed: the core closes it at its holder's close,
-//! at the end of its own time (its grant's
-//! [`instance_seconds`](schema::ir::LeaseGrant::instance_seconds), or less as its holder asked),
-//! at the end of its grant's
-//! ([`cumulative_seconds`](schema::ir::LeaseGrant::cumulative_seconds)), at the work phase's
-//! end, or, for a call's, once the call's command has ended. The grant's time left is what it
-//! allows less what its holder's leases have used, which each of them that is ready spends at
-//! once, so the core closes them all once it has run out, and its tick comes then
-//! ([`Core::tick_due`]).
+//! closes it, or the runtime reports its runner failed. The grant's time left is what it allows
+//! less what its holder's leases have used; each lease that is ready spends it at once
+//! ([`Core::tick_due`]). [`Core`] decides what closes a lease.
 //!
 //! A lease runs one command or transfer at a time, and each counts against its grant's `commands`
 //! once accepted, even if it fails to start. Of its time, it is busy from when the core accepts a
@@ -44,9 +37,7 @@ pub(super) struct Leases(Vec<Lease>);
 pub(super) struct Lease {
     /// Who opened it, and alone may use it.
     pub(super) holder: Caller,
-    /// The holder's grant the lease was opened under.
     pub(super) grant: LeaseGrantId,
-    /// When it was opened.
     pub(super) opened: Duration,
     /// How long it lasts once its runner is ready.
     pub(super) life: Duration,
@@ -63,7 +54,6 @@ pub(super) struct Lease {
     working: Option<Duration>,
 }
 
-/// Where a lease is.
 #[derive(Debug)]
 pub(super) enum State {
     /// Accepted; its runner is starting.
@@ -77,14 +67,12 @@ pub(super) enum State {
     Ended { used: Duration, end: End },
 }
 
-/// Why a lease ended.
 #[derive(Debug)]
 pub(super) enum End {
     /// Its holder closed it, or its holder's work ended.
     Closed,
     /// Its time, or its grant's, ran out.
     Expired,
-    /// Its runner failed, for this reason.
     Failed(String),
 }
 
@@ -119,7 +107,6 @@ pub(super) struct Usage {
 }
 
 impl State {
-    /// Notes that a starting lease's runner is ready.
     pub(super) fn ready(&mut self, at: Duration) {
         if let Self::Starting = self {
             *self = Self::Ready { since: at };
@@ -147,7 +134,6 @@ impl State {
         };
     }
 
-    /// How long its runner has been ready, until `now`.
     fn used(&self, now: Duration) -> Duration {
         match *self {
             Self::Starting => Duration::ZERO,
@@ -220,13 +206,11 @@ impl Lease {
         }
     }
 
-    /// Closes it, as [`State::close`] does, and returns whether it did.
     pub(super) fn close(&mut self, at: Duration, end: End) -> bool {
         self.rest(at);
         self.state.close(at, end)
     }
 
-    /// Ends it, as [`State::report`] does.
     pub(super) fn report(&mut self, at: Duration, end: End) {
         self.rest(at);
         self.state.report(at, end);
@@ -239,7 +223,6 @@ impl Lease {
         (busy, self.state.used(now).saturating_sub(busy))
     }
 
-    /// Ends its busy time at `at`, if it is busy.
     fn rest(&mut self, at: Duration) {
         if let Some(since) = self.working.take() {
             self.busy += at.saturating_sub(since);
@@ -283,7 +266,6 @@ impl Leases {
         lease
     }
 
-    /// The lease numbered `number`, if one is.
     pub(super) fn find(&self, number: u64) -> Option<LeaseId> {
         let index = usize::try_from(number).ok()?;
         (index < self.0.len()).then_some(LeaseId(number))
@@ -308,13 +290,11 @@ impl Leases {
         (self.0.iter()).all(|lease| matches!(lease.state, State::Ended { .. }))
     }
 
-    /// Whether `holder` holds a lease that hasn't ended.
     pub(super) fn holds(&self, holder: Caller) -> bool {
         (self.0.iter())
             .any(|lease| lease.holder == holder && !matches!(lease.state, State::Ended { .. }))
     }
 
-    /// What `holder`'s leases of `grant` have used by `now`.
     pub(super) fn usage(&self, grant: LeaseGrantId, holder: Caller, now: Duration) -> Usage {
         let mut usage = Usage::default();
         let held = |lease: &&Lease| lease.grant == grant && lease.holder == holder;
@@ -390,7 +370,6 @@ impl Core<'_> {
             .min()
     }
 
-    /// Closes each lease whose time, or whose grant's, has run out by now.
     pub(super) fn expire_leases(&mut self, actions: &mut Vec<Action>) {
         let ends: Vec<Option<Duration>> = (self.leases.0.iter())
             .map(|lease| self.lease_end(lease))
@@ -405,7 +384,6 @@ impl Core<'_> {
         }
     }
 
-    /// Applies a report on lease `lease` to it, if the run has a lease by that number.
     pub(super) fn on_lease(&mut self, lease: LeaseId, apply: impl FnOnce(&mut Lease)) {
         if let Some(lease) = self.leases.find(lease.0) {
             apply(&mut self.leases[lease]);

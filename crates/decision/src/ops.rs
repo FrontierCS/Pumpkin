@@ -81,8 +81,7 @@ impl Working {
     }
 }
 
-/// A grant of the caller's. Only the agent holds judge grants and its submit grant, which carry
-/// the work phase's deadline.
+/// A grant of the caller's; a judge or submit grant carries the work phase's deadline.
 enum Held {
     Judge(JudgeGrantId, Duration),
     Lease(LeaseGrantId),
@@ -237,7 +236,7 @@ impl Core<'_> {
         })
     }
 
-    /// The reply about `caller`'s job `number`: one of the agent's calls'.
+    /// The status of `caller`'s job `number`: one it made under a judge grant.
     fn own_job(&self, caller: Caller, number: u64) -> Result<StatusReply, String> {
         let job = JobId(number);
         let found = self
@@ -261,10 +260,9 @@ impl Core<'_> {
         end.saturating_sub(self.now).as_secs()
     }
 
-    /// The grant named `name` of `working`'s caller.
     fn held(&self, working: Working, name: &Name) -> Result<Held, String> {
         let role = working.role();
-        // Only the agent holds judge grants and its submit grant.
+        // Parsing gives judge and submit grants to the agent alone (`Parser::roles`).
         let deadline = match working {
             Working::Agent { deadline, .. } => Some(deadline),
             Working::Job { .. } => None,
@@ -568,10 +566,8 @@ impl Core<'_> {
         self.workflow.slot(self.workflow.score().slot).max_bytes()
     }
 
-    /// The reply to `ops`, of `working`'s caller.
     fn ops(&self, working: Working) -> OpsReply {
         let (caller, role, end) = (working.caller(), working.role(), working.end());
-        // Only the agent holds judge grants and its submit grant.
         let agent = matches!(working, Working::Agent { .. });
         let judges = (self.workflow.judge_grants())
             .filter(|_| agent)
@@ -628,7 +624,6 @@ impl Core<'_> {
         }
     }
 
-    /// The reply to `status`, of the agent's job `id`, a call of grant `grant`.
     fn status(&self, id: JobId, job: &Job, grant: JudgeGrantId) -> StatusReply {
         let state = match &job.state {
             State::Queued => JobState::Queued,
@@ -653,7 +648,6 @@ impl Core<'_> {
         }
     }
 
-    /// The reply that names lease `id`, with what it and its grant have left.
     fn lease_reply(&self, id: LeaseId) -> LeaseReply {
         LeaseReply {
             lease: id.0,
@@ -661,7 +655,6 @@ impl Core<'_> {
         }
     }
 
-    /// The reply to `lease status`, of lease `id`.
     fn lease_status(&self, id: LeaseId) -> LeaseStatusReply {
         let lease = &self.leases[id];
         let (state, failure) = match &lease.state {
@@ -712,7 +705,6 @@ impl Core<'_> {
         }
     }
 
-    /// What lease `id` and its grant have left of their limits.
     fn lease_remaining(&self, id: LeaseId) -> LeaseRemaining {
         let lease = &self.leases[id];
         let own = match lease.state {
@@ -744,7 +736,6 @@ impl Core<'_> {
         }
     }
 
-    /// What grant `id` has left of its quotas.
     fn remaining(&self, id: JudgeGrantId) -> Remaining {
         let (grant, usage) = (self.workflow.judge_grant(id), self.jobs.usage(id));
         Remaining {

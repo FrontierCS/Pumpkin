@@ -1,10 +1,3 @@
-//! `stdx`'s helpers. `process::output` runs stand-ins for a command line, scripts for `sh`: one
-//! that ends; two that hang past their deadline, one with its first process waiting on another,
-//! one with that process alone holding its output; and one whose deadline has passed before it
-//! starts; and `process::fed` one that reads its input, and one that exits without reading it.
-//! This process adopts the processes a script starts once the script's own process has ended, so
-//! a test learns how each ended. `net::set_options` is read back from a connection's socket.
-
 #![expect(
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
@@ -24,11 +17,11 @@ use stdx::Deadline;
 use stdx::process::Environment;
 
 /// How long a stand-in that hangs first runs before its deadline, which [`check`] doubles until
-/// the stand-in has started its process by then: short, since the test waits it out. Each such
-/// stand-in sleeps far longer, so its deadline comes first.
+/// the stand-in has started its process by then.
+// Short, since the test waits it out. Each such stand-in sleeps far longer, so its deadline
+// comes first.
 const LIMIT: Duration = Duration::from_millis(200);
 
-/// What runs a stand-in.
 #[derive(Clone, Copy)]
 enum Caller {
     /// [`stdx::process::output`], until this long from the stand-in's start, or twice that, and
@@ -78,14 +71,12 @@ fn check(script: &str, caller: Caller, expect: &Expect) {
     expect.assert_eq(&format!("{ended}\nthe processes it started: {started:?}"));
 }
 
-/// Runs `script` with `sh` in `dir` through [`stdx::process::output`], until `limit` from now.
 fn run(script: &str, dir: &Path, limit: Duration) -> Option<Output> {
     let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
     command.args(["-c", script]).current_dir(dir);
     stdx::process::output(&mut command, Deadline::after(limit)).unwrap()
 }
 
-/// How `output` says a stand-in exited, and how much it wrote.
 fn exited(output: &Output) -> String {
     format!(
         "exited with {}, after writing {} bytes to its standard output and {} to its standard \

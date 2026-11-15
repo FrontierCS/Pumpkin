@@ -151,7 +151,6 @@ impl Name {
     }
 }
 
-/// Whether `name` is a [`Name`].
 const fn is_name(name: &str) -> bool {
     let [first, rest @ ..] = name.as_bytes() else {
         return false;

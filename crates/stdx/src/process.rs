@@ -1,9 +1,5 @@
 //! The process control `std` lacks: commands whose caller chooses what of the environment
 //! they get, a process group's kill and a bounded run ([`output`]).
-//!
-//! A bounded run may feed the command its standard input too ([`fed`]).
-//!
-//! A wait for whichever of several children exits first is [`wait_any`].
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
@@ -18,20 +14,17 @@ use rustix::process::{Pid, Signal};
 
 use crate::Deadline;
 
-/// The first pause between checks that a command has ended, which doubles up to [`MAX_PAUSE`].
 const FIRST_PAUSE: Duration = Duration::from_millis(1);
 
-/// The longest pause between checks that a command has ended.
-// A command that starts a process of its own takes milliseconds at least, so ending up to 10
-// ms after it is noise beside it, and the checks wake this thread at most 100 times a second.
+// The longest pause between checks that a command has ended. A command that starts a process of
+// its own takes milliseconds at least, so ending up to 10 ms after it is noise beside it, and the
+// checks wake this thread at most 100 times a second.
 const MAX_PAUSE: Duration = Duration::from_millis(10);
 
-/// What a child gets of this process's environment.
 #[derive(Clone, Copy, Debug)]
 pub enum Environment {
     /// Only the variables named, those that are set.
     Only(&'static [&'static str]),
-    /// All of it.
     Inherited,
 }
 
@@ -80,26 +73,16 @@ pub fn cargo_package_vars() -> Vec<OsString> {
 ///
 /// `None` if it hasn't ended, exited with its output closed, by then, and never started if `by`
 /// has passed; at `by` its group is killed. If this process dies first, the command outlives it.
-///
-/// # Errors
-///
-/// Fails if the command or a reader can't start, if it can't be waited for or killed, or read.
 pub fn output(command: &mut Command, by: Deadline) -> io::Result<Option<Output>> {
     run(command, None, by)
 }
 
 /// Runs `command` as [`output`] does, but with `input` on its standard input, which then closes,
 /// though the command may read none of it.
-///
-/// # Errors
-///
-/// Fails as [`output`] does, or if `input` can't be written but for the command's closing its
-/// standard input first.
 pub fn fed(command: &mut Command, input: &[u8], by: Deadline) -> io::Result<Option<Output>> {
     run(command, Some(input), by)
 }
 
-/// Runs `command` as [`output`] says, with `input`, if any, on its standard input, else none.
 fn run(command: &mut Command, input: Option<&[u8]>, by: Deadline) -> io::Result<Option<Output>> {
     if by.remaining().is_none() {
         return Ok(None);
@@ -164,7 +147,6 @@ fn run(command: &mut Command, input: Option<&[u8]>, by: Deadline) -> io::Result<
     }))
 }
 
-/// Reads all of `pipe` into `into`, on a thread of `scope`.
 fn read_all<'scope>(
     scope: &'scope Scope<'scope, '_>,
     mut pipe: impl Read + Send + 'scope,
@@ -180,14 +162,13 @@ fn read_all<'scope>(
     })
 }
 
-/// Writes all of `input` to `pipe`, then closes it, on a thread of `scope`; a command that closes
-/// its end first takes no more, which is no failure.
 fn write_all<'scope>(
     scope: &'scope Scope<'scope, '_>,
     mut pipe: impl Write + Send + 'scope,
     input: &'scope [u8],
 ) -> io::Result<ScopedJoinHandle<'scope, io::Result<()>>> {
     let spawned = thread::Builder::new().spawn_scoped(scope, move || match pipe.write_all(input) {
+        // A command that closes its end first takes no more, which is no failure.
         Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
         Ok(()) | Err(_) => Ok(()),
     });
@@ -252,15 +233,12 @@ fn kill(child: &mut Child) -> io::Result<()> {
     child.wait().map(drop)
 }
 
-/// Kills every process left in the process group `group`, by SIGKILL.
+/// Kills every process left in the process group `group`, by SIGKILL; finding none left is no
+/// failure.
 ///
 /// # Panics
 ///
 /// Panics if `group` is 1 or less, which names no single process group.
-///
-/// # Errors
-///
-/// Fails if this process may kill none of the group's processes; finding none left is no failure.
 pub fn kill_group(group: i32) -> io::Result<()> {
     // For 1, `killpg` would kill every process this one may signal, and for 0 its own group.
     let Some(pid) = Pid::from_raw(group).filter(|_| group > 1) else {

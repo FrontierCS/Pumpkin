@@ -9,8 +9,8 @@
 //! writes the IR.
 //!
 //! Deserialization checks each value on its own, so a deserialized IR holds only well-formed
-//! names, images, paths, modes and limits. [`crate::workflow::Workflow::parse`] checks how the parts
-//! fit together, and the limits a protocol bounds.
+//! names, images, paths, modes and limits. [`crate::workflow::Workflow::parse`] checks how the
+//! parts fit together, and the limits a protocol bounds.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -25,7 +25,7 @@ pub use values::{
     ModelName, Models, Name, Returns, RolePath, Sha256Digest, WorkflowName,
 };
 
-/// A workflow.
+/// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
 ///
 /// A run has two phases. In the work phase, the run starts the agent, which works until it
 /// exits, finalizes a submission or reaches its deadline, calls the judges its grants name and

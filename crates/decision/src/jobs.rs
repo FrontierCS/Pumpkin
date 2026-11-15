@@ -63,8 +63,7 @@ impl Failure {
     }
 }
 
-/// The run's jobs, each numbered by its index, in the order they were added: the agent's calls',
-/// then the score's, last.
+/// The run's jobs, each numbered by its index, in the order they were added.
 #[derive(Debug, Default)]
 pub(super) struct Jobs(Vec<Job>);
 
@@ -72,12 +71,10 @@ pub(super) struct Jobs(Vec<Job>);
 pub(super) struct Job {
     /// What the call was made under.
     pub(super) call: JudgeCall,
-    /// The longest its command may run.
     pub(super) timeout: Duration,
     pub(super) state: State,
 }
 
-/// Where a job is.
 #[derive(Debug)]
 pub(super) enum State {
     /// Accepted; its command has not started.
@@ -96,7 +93,6 @@ pub(super) enum State {
     },
 }
 
-/// How a job's command ended.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum End {
     /// By itself.
@@ -107,10 +103,9 @@ pub(super) enum End {
     Stopped,
 }
 
-/// What a grant's calls have used.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Usage {
-    /// The calls accepted.
+    /// The calls charged: those accepted, less those that failed before their command started.
     pub(super) calls: u64,
     /// The time the commands that have ended ran.
     pub(super) used: Duration,
@@ -119,15 +114,14 @@ pub(super) struct Usage {
 }
 
 impl State {
-    /// Notes that a queued job's command started.
     pub(super) fn started(&mut self, at: Duration) {
         if let Self::Queued = self {
             *self = Self::Running { started: at };
         }
     }
 
-    /// Notes that a job's command ended. A job whose start wasn't reported ran for no time
-    /// the core saw, but ends all the same, so that a timeout still leaves no result.
+    /// A job whose start wasn't reported ran for no time the core saw, but ends all the same, so
+    /// that a timeout still leaves no result.
     pub(super) fn ended(&mut self, at: Duration, end: End) {
         let used = match *self {
             Self::Queued => Duration::ZERO,
@@ -137,9 +131,8 @@ impl State {
         *self = Self::Ending { used, end };
     }
 
-    /// Ends a job with what its last report says came of it. A report that skips a step, such
-    /// as a failure before the command started, ends the job all the same, its command's time
-    /// running until the report if it had started.
+    /// A report that skips a step, such as a failure before the command started, ends the job
+    /// all the same, its command's time running until the report if it had started.
     pub(super) fn report(&mut self, at: Duration, outcome: Result<JudgeResult, Failure>) {
         let charged = !matches!((&*self, &outcome), (Self::Queued, Err(_)));
         let (used, outcome) = match *self {
@@ -162,7 +155,6 @@ impl State {
 }
 
 impl Jobs {
-    /// Adds a job, queued, made under `call`, whose command may run for `timeout`.
     pub(super) fn add(&mut self, call: JudgeCall, timeout: Duration) -> JobId {
         let job = JobId(self.0.len() as u64);
         self.0.push(Job {
@@ -173,7 +165,6 @@ impl Jobs {
         job
     }
 
-    /// The jobs made under `grant`.
     pub(super) fn of(&self, grant: JudgeGrantId) -> impl Iterator<Item = JobId> {
         let jobs = self.0.iter().enumerate();
         jobs.filter(move |(_, job)| job.call == JudgeCall::Grant(grant))
@@ -210,7 +201,6 @@ impl Jobs {
             .all(|job| matches!(job.state, State::Ended { .. }))
     }
 
-    /// What `grant`'s calls have used so far.
     pub(super) fn usage(&self, grant: JudgeGrantId) -> Usage {
         let mut usage = Usage::default();
         for job in (self.0.iter()).filter(|job| job.call == JudgeCall::Grant(grant)) {

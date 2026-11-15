@@ -13,11 +13,8 @@ static CAUGHT: AtomicI32 = AtomicI32::new(0);
 /// Has each of `signals` noted, for [`caught`] to read, instead of what it would do.
 ///
 /// Each that this process started with ignored stays ignored. A call that a noted signal lands in
-/// goes on once it is noted, rather than failing with `EINTR`.
-///
-/// # Errors
-///
-/// Fails if a signal's action can't be read or set, as SIGKILL's can't be.
+/// goes on once it is noted, rather than failing with `EINTR`. Fails for a signal whose action
+/// can't be set, as SIGKILL's can't be.
 #[expect(
     unsafe_code,
     reason = "neither `std` nor `rustix` can set a signal's action, which `sigaction` does"
@@ -75,7 +72,6 @@ extern "C" fn note(number: libc::c_int) {
     let _ = CAUGHT.compare_exchange(0, number, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-/// Turns what `sigaction` returns into an error, if it failed.
 fn check(result: libc::c_int) -> io::Result<()> {
     if result == -1 {
         Err(io::Error::last_os_error())

@@ -12,19 +12,16 @@ use std::time::Duration;
 
 use crate::Context as _;
 
-/// How long a taker waits, once each slot is held, before it looks again.
-// What a slot is held for lasts seconds or minutes.
+// How long a taker waits, once each slot is held, before it looks again. What a slot is held for
+// lasts seconds or minutes.
 const POLL: Duration = Duration::from_millis(500);
 
 /// One of `count` slots, the files `0` to `count - 1` of `dir`, locked by the file returned.
 ///
 /// It makes `dir` if need be, and takes the first slot that none holds, or, while each is held,
 /// the first let go, looked for every `POLL`, and names `holder` in it. If each is held at
-/// first, `waiting` hears what each holder named, once, before the wait.
-///
-/// # Errors
-///
-/// Fails if `dir` or a slot can't be made, read, locked or written, or as `waiting` does.
+/// first, `waiting` hears what each holder named, once, before the wait. Fails with `waiting`'s
+/// error, if it fails.
 pub fn take(
     dir: &Path,
     count: NonZeroUsize,

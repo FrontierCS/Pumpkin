@@ -15,8 +15,8 @@
 //!
 //! Ops go the other way ([`op`]): [`FromSandbox::Op`] gives a payload's size before its bytes
 //! follow in [`FromSandbox::OpData`], and the gateway answers once ([`ToSandbox::OpReply`]), at
-//! most one op in flight a sandbox. A session takes ops only if accepted with an
-//! [`OpPayloadLimit`], and model requests only if accepted for them ([`FromSandbox::ModelRequest`]).
+//! most one op in flight a sandbox. A session takes ops only if accepted with [`OpPayloadLimit`],
+//! and model requests ([`FromSandbox::ModelRequest`]) only if accepted for them.
 //!
 //! Every provider presents [`pumpkin_dir()`] as [`pumpkin_subdirs()`] says, within
 //! [`PUMPKIN_BYTES`]. A role that makes ops has `sandboxctl` at [`SANDBOXCTL_PATH`], served at
@@ -357,7 +357,6 @@ impl TryFrom<Value> for Hello {
 #[serde(try_from = "String")]
 pub struct RegistrationGrant([u8; REGISTRATION_GRANT_BYTES]);
 
-/// How many bytes a [`RegistrationGrant`] holds.
 pub const REGISTRATION_GRANT_BYTES: usize = 16;
 
 impl From<[u8; REGISTRATION_GRANT_BYTES]> for RegistrationGrant {
@@ -461,8 +460,9 @@ pub struct TcpDial {
 /// `sandboxd` listens, with `--listen` and an address of the sandbox's own, and `--by` the start's
 /// deadline, `grant`'s digits kept as for a [`TcpDial`], and the gateway dials it after the create,
 /// until that deadline, at the [`Endpoint`] the create gives, behind TLS that the provider ends
-/// with a Web PKI certificate for the endpoint's name. `sandboxd` opens the session with the first peer whose answer to its
-/// hello presents `grant` ([`HelloReply`]), and TLS keeps the grant from any but the provider.
+/// with a Web PKI certificate for the endpoint's name. `sandboxd` opens the session with the first
+/// peer whose answer to its hello presents `grant` ([`HelloReply`]), and TLS keeps the grant from
+/// any but the provider.
 #[derive(Debug)]
 pub struct Listening {
     pub grant: RegistrationGrant,
@@ -480,8 +480,6 @@ impl Endpoint {
     /// The endpoint at `host`, a DNS name, as letters, digits and `-` in labels of 1 to 63
     /// characters, neither starting nor ending with `-`, joined by `.`, at most 253 in all, the
     /// last not all digits, and `port`, which isn't 0.
-    ///
-    /// # Errors
     ///
     /// Fails if `host` isn't such a name, or `port` is 0.
     pub fn new(host: String, port: u16) -> Result<Self, String> {
