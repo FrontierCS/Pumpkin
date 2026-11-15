@@ -14,6 +14,8 @@ use super::{Config, Dialect, Item, Streamed, config_of, string, text};
 pub(super) const DIALECT: Dialect = Dialect {
     output,
     item,
+    // Its API marks no item for one request alone.
+    unmarked: Value::clone,
     items,
     body,
     stream,

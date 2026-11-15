@@ -362,6 +362,52 @@ fn messages_of_any_form() {
 }
 
 #[test]
+fn messages_resent_unmarked() {
+    let mark = json!({ "type": "ephemeral" });
+    // As Claude Code sends a conversation: it marks the last block of each request, as a text
+    // block where it is a text, and sends the message it marked before as it was.
+    let first = [json!({ "role": "user",
+        "content": [{ "type": "text", "text": "Solve the task", "cache_control": mark }] })];
+    let next = [
+        json!({ "role": "user", "content": "Solve the task" }),
+        json!({ "role": "assistant", "content": [{ "type": "text", "text": "Listing." },
+            { "type": "tool_use", "id": "toolu_01A", "name": "Bash", "input": { "command": "ls" } }] }),
+        json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_01A",
+            "content": "a.txt", "cache_control": mark }] }),
+    ];
+    let unmarked = |items: &[Value]| -> Vec<Value> {
+        let unmarked = items.iter().map(|item| read::unmarked(Api::Messages, item));
+        unmarked.collect()
+    };
+    assert!(unmarked(&next).starts_with(&unmarked(&first)));
+    let others = [
+        json!({ "role": "assistant", "content": [{ "type": "text", "text": "Done.", "citations": [] }] }),
+        json!({ "role": "user", "content": [{ "type": "text", "text": "Go on" },
+            { "type": "text", "text": "Finish soon", "cache_control": mark }] }),
+        json!({ "role": "user", "content": [{ "type": "image", "cache_control": mark,
+            "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" } }] }),
+    ];
+    let mut out = String::new();
+    for item in first.iter().chain(&next).chain(&others) {
+        writeln!(out, "{}", read::unmarked(Api::Messages, item)).unwrap();
+    }
+    // Another API's item is as it was sent, whatever it holds.
+    let responses = json!({ "type": "message", "role": "user",
+        "content": [{ "type": "input_text", "text": "Solve the task", "cache_control": mark }] });
+    writeln!(out, "{}", read::unmarked(Api::Responses, &responses)).unwrap();
+    expect![[r#"
+        {"content":"Solve the task","role":"user"}
+        {"content":"Solve the task","role":"user"}
+        {"content":[{"text":"Listing.","type":"text"},{"id":"toolu_01A","input":{"command":"ls"},"name":"Bash","type":"tool_use"}],"role":"assistant"}
+        {"content":[{"content":"a.txt","tool_use_id":"toolu_01A","type":"tool_result"}],"role":"user"}
+        {"content":[{"citations":[],"text":"Done.","type":"text"}],"role":"assistant"}
+        {"content":[{"text":"Go on","type":"text"},{"text":"Finish soon","type":"text"}],"role":"user"}
+        {"content":[{"source":{"data":"AAAA","media_type":"image/png","type":"base64"},"type":"image"}],"role":"user"}
+        {"content":[{"cache_control":{"type":"ephemeral"},"text":"Solve the task","type":"input_text"}],"role":"user","type":"message"}
+    "#]].assert_eq(&out);
+}
+
+#[test]
 fn messages_answers_of_any_form() {
     check(
         &[

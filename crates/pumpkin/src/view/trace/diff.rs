@@ -93,14 +93,15 @@ impl Trace {
         super::cut(reply)
     }
 
-    /// What names `step`'s `part`: the parts that hold its system's entries, or its tools'.
+    /// What names `step`'s `part`: the parts that hold its system's entries, each named by its
+    /// [`Part::same`](super::Part::same), or its tools'.
     pub(super) fn key(&self, step: &Step, part: Compared) -> Vec<u32> {
         match part {
             Compared::Tools => step.tools_part.into_iter().collect(),
             Compared::System => {
                 let fields = step.fields.values().copied();
-                let parts = (fields.filter(|&part| Some(part) != step.tools_part))
-                    .chain(step.list.iter().copied());
+                let items = step.list.iter().map(|&part| self.parts[part as usize].same);
+                let parts = (fields.filter(|&part| Some(part) != step.tools_part)).chain(items);
                 parts.filter(|&part| self.is_system(part)).collect()
             }
         }

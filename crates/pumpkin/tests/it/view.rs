@@ -1821,13 +1821,18 @@ fn traces_a_messages_exchange() {
         "thinking": { "type": "adaptive" } })
     };
     let first = json!({ "role": "user", "content": "list the files" });
+    // Claude Code marks the last message's last block for the cache, as a text block where it is a
+    // text, and sends that message in its next request as the text, unmarked.
+    let marked = json!({ "role": "user", "content": [{ "type": "text", "text": "list the files",
+        "cache_control": { "type": "ephemeral" } }] });
     let call = json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "call_1",
         "name": "Bash", "input": { "command": "ls -la" } }] });
     let result = json!({ "role": "user", "content": [{ "type": "tool_result",
         "tool_use_id": "call_1", "content": "ls: cannot access 'x'", "is_error": true }] });
     // Claude Code puts its own environment updates into the conversation as `system` messages.
     let update = json!({ "role": "system", "content": [{ "type": "text",
-        "text": "# Environment update\n - Primary working directory: /workspace" }] });
+        "text": "# Environment update\n - Primary working directory: /workspace",
+        "cache_control": { "type": "ephemeral" } }] });
     let answer = |text: &str| {
         let start = json!({ "type": "content_block_start", "index": 0,
             "content_block": { "type": "text", "text": "" } });
@@ -1841,7 +1846,7 @@ fn traces_a_messages_exchange() {
     let kept = model.keep(
         0,
         "messages",
-        std::slice::from_ref(&first),
+        &[marked],
         &whole,
         rest(),
         Some(MESSAGES_STREAM),
@@ -1856,12 +1861,28 @@ fn traces_a_messages_exchange() {
     let kept = model.keep(
         1,
         "messages",
-        &[first, call, result, update],
+        &[first.clone(), call.clone(), result.clone(), update],
         &whole,
         rest(),
         Some(&answer("a.txt is there")),
     );
     log.push(answered(4, "agent", 1, 200, kept, Some("messages")));
+    // This request sends the update again, its mark left out: its system is its parent's.
+    let update = json!({ "role": "system",
+        "content": "# Environment update\n - Primary working directory: /workspace" });
+    let reply = json!({ "role": "assistant", "content": "a.txt is there" });
+    let next = json!({ "role": "user", "content": [{ "type": "text", "text": "and b?",
+        "cache_control": { "type": "ephemeral" } }] });
+    log.push(started(5, "agent", 2));
+    let kept = model.keep(
+        2,
+        "messages",
+        &[first, call, result, update, reply, next],
+        &whole,
+        rest(),
+        Some(&answer("b.txt is not")),
+    );
+    log.push(answered(6, "agent", 2, 200, kept, Some("messages")));
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(
         &scratch,
@@ -1897,11 +1918,12 @@ fn traces_a_messages_exchange() {
             the agent's steps:
             added=1 added_entries=2 answer="forwarded" answers=2 api="messages" back_bytes=1376 cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls=["Bash"] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=36838 items=1 kept_bytes=335 model_ns=1000000001 output=83 request=0 sent_bytes=100 start_ns="999999999" status=200 stop="tool_use" thread=0 tools=0 turn=0 upstream="zai" whole=true
             added=3 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=297 cache_hit=0.5 cached=50 calls=[] differs=["system"] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=true
+            added=2 added_entries=1 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=200 items=6 kept_bytes=705 model_ns=1000000001 output=10 parent=1 request=2 sent_bytes=100 start_ns="4999999999" status=200 thread=0 tools=0 turn=2 upstream="zai" whole=true
             caller: "agent"
-            end: 1484
+            end: 2136
             live: false
             log_epoch: 0
-            thread_spans: {"span_ns":[3000000001],"thread":[0]}
+            thread_spans: {"span_ns":[5000000001],"thread":[0]}
             threads: 1
             tool_lists: [{"digest":"0000000000000000000000000000000000000000000000000000000000000002","names":["Bash"]}]
 
@@ -1910,17 +1932,18 @@ fn traces_a_messages_exchange() {
             {"at":"0/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000000","index":1,"kind":"user","request":0,"side":"added","text":"list the files"}
             {"at":"0/out/0","digest":null,"index":2,"kind":"reasoning","request":0,"side":"answer","text":"Tars built."}
             {"at":"0/out/1","call_id":"call_1","digest":null,"index":3,"kind":"call","name":"Bash","output":"1/in/2/0","request":0,"side":"answer","text":"{\"command\":\"ls -la\"}"}
-            {"at":"1/in/2/0","call":"0/out/1","call_id":"call_1","digest":"0000000000000000000000000000000000000000000000000000000000000004","error":true,"index":0,"kind":"output","request":1,"side":"added","text":"ls: cannot access 'x'"}
-            {"at":"1/in/3/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"system","request":1,"side":"added","text":"# Environment update\n - Primary working directory: /workspace"}
+            {"at":"1/in/2/0","call":"0/out/1","call_id":"call_1","digest":"0000000000000000000000000000000000000000000000000000000000000005","error":true,"index":0,"kind":"output","request":1,"side":"added","text":"ls: cannot access 'x'"}
+            {"at":"1/in/3/0","digest":"0000000000000000000000000000000000000000000000000000000000000006","index":1,"kind":"system","request":1,"side":"added","text":"# Environment update\n - Primary working directory: /workspace"}
             {"at":"1/out/0","digest":null,"index":2,"kind":"assistant","request":1,"side":"answer","text":"a.txt is there"}
             next: null
             found: {"count":1,"hits":[{"at":"1/in/2/0","byte":4,"context":["ls: ","cannot"," access 'x'"],"index":0,"kind":"output","request":1}]}
             by step:
             cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={"Bash":1} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0
             cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
+            cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=2 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
             by: "step"
             caller: "agent"
-            totals: {"cache_hit":0.9906870972981753,"cache_write":120,"cache_write_unknown":1,"cached":36594,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":800000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":36938,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":2000000002,"model_ns_unknown":0,"output":93,"output_unknown":0,"queue_ns":999999999,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":2,"refusals":0,"repeats":0,"retries":0,"span_ns":3000000001,"steps":2,"threads":1,"tok_s":116.25,"turns":1}
+            totals: {"cache_hit":0.9866982605417631,"cache_write":120,"cache_write_unknown":2,"cached":36644,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":1200000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":37138,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":3000000003,"model_ns_unknown":0,"output":103,"output_unknown":0,"queue_ns":1999999998,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":0,"retries":0,"span_ns":5000000001,"steps":3,"threads":1,"tok_s":85.83333333333333,"turns":2}
 
             exchange 0:
             answer: {"kind":"forwarded"}
