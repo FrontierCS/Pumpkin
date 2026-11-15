@@ -798,6 +798,7 @@ fn serves_the_page() {
             /scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; no-store
             /h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /key.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
