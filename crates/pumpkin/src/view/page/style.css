@@ -7,7 +7,7 @@
 :root {
   /* surfaces and lines */
   --bg: #ffffff; --panel: #ffffff; --hover: #f1f3f4; --select: #ecf2fb; --mark: #fdd663;
-  --line: #dadce0; --line-soft: #eceff1; --rule: #3c4043; --edge: #80868b;
+  --line: #dadce0; --line-soft: #eceff1; --mark-bar: #e3a008; --rule: #3c4043; --edge: #80868b;
   /* text */
   --text: #1f1f1f; --text-2: #3c4043; --dim: #5f6368;
   /* accent and state */
@@ -29,7 +29,9 @@
   --row: 32px; --lane: 28px; --axis: 28px; --bar: 56px;
   /* the diagram of who talks to whom, whose boxes are sized for this size */
   --fs-diagram: 12px;
-  --control: 30px; --field: 32px; --search: 14em;
+  --control: 30px; --field: 32px; --tab: 36px;
+  /* so that a trace's toolbar keeps its counts on its line at 1100 px */
+  --search: 14em;
   --r-box: 4px; --r-panel: 6px;
   --pop: 0 6px 18px rgba(32, 33, 36, 0.14);
 }
@@ -37,7 +39,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #202124; --panel: #202124; --hover: #303134; --select: #2b3a55; --mark: #6b5a1a;
-    --line: #3c4043; --line-soft: #2c2d30; --rule: #9aa0a6; --edge: #80868b;
+    --line: #3c4043; --line-soft: #2c2d30; --mark-bar: #fdd663; --rule: #9aa0a6; --edge: #80868b;
     --text: #e8eaed; --text-2: #bdc1c6; --dim: #9aa0a6;
     --accent: #8ab4f8; --accent-hover: #aecbfa; --live: #ff8bcb; --focus: #8ab4f8;
     --ok: #81c995; --fail: #f28b82; --warn: #bcaaa4; --ok-bar: #81c995; --fail-bar: #f28b82; --warn-bar: #bcaaa4;
@@ -101,6 +103,10 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 /* A run: the verdict, the facts, the command again. */
 .verdict { display: flex; align-items: flex-start; font-weight: 600; color: var(--text); font-size: var(--fs-verdict); line-height: var(--lh-verdict); }
 .verdict .mark { width: 12px; height: 12px; border-radius: 3px; margin-top: calc((var(--lh-verdict) - 12px) / 2); }
+/* A caller's page: the caller as its title, and under it, muted, the run it is in. */
+.title { margin: 0; font-size: var(--fs-verdict); line-height: var(--lh-verdict); font-weight: 600; color: var(--text); }
+.within { color: var(--dim); }
+.within .mark { margin-right: var(--s1); }
 .facts { display: flex; flex-wrap: wrap; gap: 0 var(--s4); }
 .fact .name, .again .name { color: var(--dim); margin-right: var(--s1); }
 .fact .value { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); }
@@ -210,6 +216,105 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .inspector li button { text-align: left; border-color: transparent; background: none; padding: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inspector li button:hover { background: var(--hover); }
 
+/* The links from a run to its callers' traces. */
+.traces { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); }
+.traces:empty { display: none; }
+.traces .name { color: var(--dim); }
+.traces a.kind:hover { text-decoration: underline; }
+
+/* A trace: its tabs, its toolbar, then the ledger and the inspector side by side. */
+.tabs { flex: none; display: flex; align-items: flex-end; gap: var(--s1); border-bottom: 1px solid var(--line); }
+.tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; height: var(--tab); padding: 0 var(--s2); color: var(--dim); }
+.tabs button.on { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+.tabs .callers { margin-left: auto; display: flex; gap: var(--s3); align-items: baseline; padding-bottom: var(--s1); }
+.tabs .callers a.on { font-weight: 600; text-decoration: underline; }
+.tabs.small { margin: 0 0 var(--s2); }
+.tabs.small button { height: var(--field); }
+.toolbar .folds { display: flex; gap: var(--s1); align-items: center; }
+.toolbar button.on { color: var(--accent); border-color: var(--accent); background: var(--select); }
+.toolbar .status { margin-left: auto; }
+.dim { color: var(--dim); }
+.trace-split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--inspector, 440px); }
+.trace-split .left { min-width: 0; }
+.trace-split .list { border: 1px solid var(--line); border-top: 1px solid var(--rule); border-radius: 0 0 var(--r-panel) var(--r-panel); }
+.grip { cursor: col-resize; position: relative; }
+.grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms; }
+.grip:hover::after, .grip:focus-visible::after { background: var(--accent); }
+.grip:focus-visible { outline: none; }
+
+/* The ledger: every row one line, numbers in columns, kinds as mono words in their ink. */
+.lrow { font-family: var(--mono); font-size: var(--fs-mono); gap: var(--s2); }
+.lrow > span { flex: none; overflow: hidden; text-overflow: ellipsis; }
+.lrow .caret { width: 2ch; color: var(--dim); text-align: center; cursor: pointer; }
+.lrow .caret:hover { color: var(--accent); }
+.lrow .mark { margin: 0; }
+.lrow.step { background: var(--hover); border-bottom-color: var(--line); color: var(--text-2); }
+.lrow.step:hover { background: var(--line-soft); }
+.lrow.step .req { width: 7ch; text-align: right; color: var(--text); font-weight: 600; }
+.lrow.step .pos { width: 8ch; color: var(--dim); }
+.lrow.step .t { width: 10ch; text-align: right; }
+.lrow.step .dur { width: 8ch; text-align: right; color: var(--text); }
+.lrow.step .tk { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.lrow.step .tk0 { width: 14ch; }
+.lrow.step .tk1 { width: 10ch; }
+.lrow.step .tk2 { width: 10ch; }
+.lrow.step .calls { flex: 0 1 auto; min-width: 0; color: var(--text); }
+.lrow.step .again { flex: 0 1 auto; min-width: 18ch; color: var(--text-2); }
+.lrow.step .turn { color: var(--text-2); }
+.lrow.step .turn::before { content: "› "; color: var(--dim); }
+.lrow.step .differs, .lrow.step .branch { flex: none; color: var(--dim); }
+.lrow.step .note { color: var(--text-2); }
+.lrow.step .note::before { content: "※ "; color: var(--dim); }
+.lrow.step.live .calls { color: var(--live); }
+.lrow.thread { border-top: 1px solid var(--rule); border-bottom-color: var(--line); color: var(--text-2); }
+.lrow.thread .name { width: 14ch; color: var(--text); font-weight: 600; }
+.lrow.thread .said { flex: 0 1 52ch; min-width: 0; }
+.lrow.thread .t { width: auto; text-align: left; color: var(--dim); }
+.lrow.entry { padding-left: calc(var(--s2) + 4ch); }
+.lrow.entry .kind { width: 10ch; }
+.lrow.entry .text { display: flex; gap: 1ch; overflow: hidden; }
+.lrow.entry .text > span { flex: none; }
+.lrow.entry .text .args { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+.lrow.entry .text .line { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lrow.entry .text .result { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.lrow.entry .text { flex: 1; min-width: 0; color: var(--text); }
+.lrow.entry .name { color: var(--runner-ink); }
+.lrow.entry .arrow { color: var(--dim); }
+.lrow.entry.folded .text, .lrow.wait .text { color: var(--dim); }
+.lrow.wait .kind { width: 10ch; }
+.lrow.on, .lrow.step.on { background: var(--select); }
+.lrow.wait { padding-left: calc(var(--s2) + 4ch); cursor: default; }
+.lrow.hit { box-shadow: inset 3px 0 0 var(--mark-bar); }
+.lrow.hit.on { box-shadow: inset 2px 0 0 var(--accent), inset 5px 0 0 var(--mark-bar); }
+.lrow .hits { flex: none; margin-left: auto; color: var(--text-2); background: var(--mark); padding: 0 var(--s1); border-radius: 2px; line-height: 16px; }
+.lrow.step .calls { min-width: 14ch; }
+.kind.k-system { color: var(--text-2); font-weight: 600; }
+.kind.k-user { color: var(--agent-ink); }
+.of-judge .kind.k-user { color: var(--judge-ink); }
+.kind.k-assistant { color: var(--model-ink); }
+.kind.k-reasoning { color: var(--model-ink); }
+.kind.k-call, .kind.k-output { color: var(--runner-ink); }
+.kind.k-unread { color: var(--fail); }
+.kind.k-other { color: var(--dim); }
+
+/* The trace's inspector: texts as sent, in mono, their whitespace kept. */
+.inspector pre.sent { border-top: none; padding: 0; font-size: var(--fs-mono); }
+.inspector .tools { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); color: var(--dim); }
+.inspector .tools .name { color: var(--text); }
+.inspector .raw { margin-bottom: var(--s3); }
+.inspector details { margin-bottom: var(--s2); border-left: 2px solid var(--line); padding-left: var(--s2); }
+.inspector summary { cursor: pointer; color: var(--model-ink); font-family: var(--mono); font-size: var(--fs-mono); }
+.inspector .why { color: var(--dim); font-family: var(--sans); font-size: var(--fs); }
+.inspector h3 .mark { margin: 0; align-self: center; }
+mark { background: var(--mark); color: inherit; border-radius: 2px; }
+
 @media (max-width: 1200px) {
   .split { grid-template-columns: minmax(0, 1fr) minmax(260px, 36%); }
+  .lrow.step .tk0 { width: 12ch; }
+  .lrow.step .tk1 { display: none; }
+  .lrow.step .tk2 { width: 8ch; }
+  .lrow.step .again { min-width: 0; flex-shrink: 4; }
+  .lrow.step .calls { min-width: 8ch; }
+  .lrow.step .pos { width: 7ch; }
+  .lrow.step .t { width: 9.5ch; }
 }
