@@ -5,7 +5,7 @@
 //! its databases, and its temporary files (`TMPDIR`) in two directories of their own there. Its
 //! record of the run is the events it writes to its standard output as JSON lines, which the
 //! teardown collects as `command.stdout` ([`command_stdout()`]). It reaches the model only at the
-//! endpoint `sandboxd` serves ([`MODEL_PORT`]), with no credential: the host holds the key.
+//! endpoint `sandboxd` serves ([`model_url()`]), with no credential: the host holds the key.
 //!
 //! [`command_stdout()`]: schema::sandbox::command_stdout
 
@@ -19,7 +19,7 @@ use core::num::NonZeroU64;
 use schema::ir::{
     self, AbsolutePath, AgentRuntime, Argv, Command, Dir, Env, EnvVar, ModelName, RolePath,
 };
-use schema::sandbox::{MAX_MODEL_REQUESTS_IN_FLIGHT, MODEL_PORT, harness_dir};
+use schema::sandbox::{MAX_MODEL_REQUESTS_IN_FLIGHT, harness_dir, model_url};
 use serde_json::{Value, json};
 
 use crate::{Mode, Pin, PinnedFile};
@@ -284,6 +284,7 @@ fn config(model: &ModelName, effort: ReasoningEffort, catalog: Option<&RolePath>
         format!("model_catalog_json = {}\n", toml_string(path.as_str()))
     });
     let threads = MAX_MODEL_REQUESTS_IN_FLIGHT - 1;
+    let model_url = model_url();
     format!(
         r#"model = {model}
 model_reasoning_effort = "{effort}"
@@ -305,7 +306,7 @@ web_search = "disabled"
 [model_providers.pumpkin]
 # Any name but `OpenAI` keeps off the features Codex keeps for the provider of that name.
 name = "Pumpkin"
-base_url = "http://127.0.0.1:{MODEL_PORT}"
+base_url = "{model_url}"
 wire_api = "responses"
 requires_openai_auth = false
 # A run of hours meets transient failures.

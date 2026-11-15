@@ -1,6 +1,8 @@
 //! Pumpkin's predeclared names: the functions that make an evaluation's workflow and images and
-//! read its `--arg`s ([`Args`](crate::Args)), and the units `KiB`, `MiB` and `GiB`, the ints
-//! 2^10, 2^20 and 2^30.
+//! read its `--arg`s ([`Args`](crate::Args)); the units `KiB`, `MiB` and `GiB`, the ints 2^10,
+//! 2^20 and 2^30; and two values of the contract between a sandbox and what runs in it, which
+//! `schema::sandbox` holds: `MODEL_URL`, the string of the model endpoint's URL, its
+//! `model_url()`, and `MAX_MODEL_REQUESTS`, the int of its `MAX_MODEL_REQUESTS_IN_FLIGHT`.
 //!
 //! Each function takes its arguments as a `def` of its signature would. All but `arg()` refuse a
 //! call made while a file other than the entry loads ([`Site::in_entry`]).
@@ -15,7 +17,7 @@ use core::num::NonZeroU64;
 
 use harness::codex::{self, CODEX_0_167_0, ReasoningEffort, Tools, Workspace};
 use schema::ir::{self, AbsolutePath, ModelName};
-use schema::sandbox::RelativePath;
+use schema::sandbox::{MAX_MODEL_REQUESTS_IN_FLIGHT, RelativePath, model_url};
 use serde::Serialize;
 use serde_json::Value as Json;
 
@@ -28,11 +30,23 @@ use crate::value::{
 };
 use crate::{Label, is_component};
 
+/// `MAX_MODEL_REQUESTS_IN_FLIGHT`, as an int of the language.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "the assertion below holds the cap within an int"
+)]
+const MAX_MODEL_REQUESTS: i64 = MAX_MODEL_REQUESTS_IN_FLIGHT as i64;
+
+// A cap past 2^63 - 1 would wrap to a negative int.
+const _: () = assert!(MAX_MODEL_REQUESTS > 0);
+
 pub(crate) fn predeclared(name: &str) -> Option<Kind> {
     let kind = match name {
         "KiB" => Kind::Int(1 << 10),
         "MiB" => Kind::Int(1 << 20),
         "GiB" => Kind::Int(1 << 30),
+        "MODEL_URL" => Kind::Str(Text::literal(&Rc::from(model_url()))),
+        "MAX_MODEL_REQUESTS" => Kind::Int(MAX_MODEL_REQUESTS),
         _ => {
             let pumpkin = Pumpkin::ALL
                 .into_iter()

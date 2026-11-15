@@ -3318,6 +3318,13 @@ fn builtins() {
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
+        r#"fail("{} {}".format(MODEL_URL, MAX_MODEL_REQUESTS - 1))"#,
+        &expect![[r#"
+            text.star:1:1: fail: http://127.0.0.1:11235 6
+                1 | fail("{} {}".format(MODEL_URL, MAX_MODEL_REQUESTS - 1))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
         r#"
 A = image("Dockerfile", context = "//images")
 B = image("Dockerfile", context = "//images", mount = {})
