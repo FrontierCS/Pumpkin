@@ -61,11 +61,10 @@ use_self = "warn"
 [profile.dev.package."*"]
 debug = "line-tables-only"
 
-# A panic is a bug, so it ends the whole process, as `unreachable!` is meant to: under
-# unwinding, one in a thread would end only that thread. Release builds abort. Dev builds
-# unwind, which Cargo forces on tests anyway, so that `cargo test` builds each library once for
-# both the tests and the binaries they run; the binaries abort from a panic hook instead
-# (`stdx::abort_on_panic`).
+# A panic is a bug, so it ends the whole process: under unwinding, one in a thread would end only
+# that thread. Dev builds unwind, which Cargo forces on tests anyway, so that `cargo test` builds
+# each library once for both the tests and the binaries they run; the binaries abort from a panic
+# hook instead (`stdx::abort_on_panic`).
 [profile.release]
 panic = "abort"
 # An overflow is a bug too, so release builds check for it, as dev builds do, rather than wrap.

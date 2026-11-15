@@ -86,10 +86,10 @@ concurrent `plan` or `apply` of the same state waits on its lock.
   plain `aws ssm start-session` shell is no SSH session, so the idle stop doesn't count it.
 - `terraform output -raw ec2` is the body of the EC2 provider's table in `pumpkin.toml`, under a
   header such as `[providers.aws.ec2]`: the region, the repositories, the timer, and each class's
-  template, at the version its creates launch, with the CPUs, memory, CPU flags and model it
-  offers, and the price a class's `usd_per_hour` gives it, if any, which `pumpkin ls` and a
-  run's summary price its sandboxes by; a Modal class takes `usd_per_hour` too. The controller's settings hold it already; a machine that runs Pumpkin itself in the
-  controller's security group takes it from here.
+  template, at the version its creates launch, with the CPUs, memory, CPU flags and model it offers,
+  and the price a class's `usd_per_hour` gives it, if any, which `pumpkin ls` and a run's summary
+  price its sandboxes by; a Modal class takes `usd_per_hour` too. The controller's settings hold it
+  already; a machine that runs Pumpkin itself in the controller's security group takes it from here.
 - `terraform output -raw modal_images` is the `images` key of the Modal provider's table, which
   the controller's settings hold already.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it

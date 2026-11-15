@@ -1,7 +1,4 @@
-# One person's Pumpkin on AWS: the EC2 envelope that the `ec2` provider launches sandboxes in
-# (sandboxes.tf), the image repositories and Modal's pull role (images.tf), the AMI that the
-# sandboxes boot (ami.tf), the controller and its jobs' settings (controller.tf) and the
-# security groups (network.tf). README.md says how to apply it, and what each output feeds.
+# One person's Pumpkin on AWS. README.md says how to apply it, and what each output feeds.
 
 data "aws_partition" "current" {}
 

@@ -36,10 +36,9 @@ output "client_config" {
   value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\n"
 }
 
-# What `pumpkin` on the person's machine calls: it finds the controller by its tag, starts it,
-# waits until SSM sees it, pushes the machine's key for the controller's user once, to enrol it,
-# and opens SSH sessions through SSM's `AWS-StartSSHSession` alone, which the access check holds
-# it to.
+# What the person's machine needs to reach the controller: find it by its tag, start it, wait
+# until SSM sees it, push the machine's key for the controller's user, and open SSH sessions
+# through SSM's `AWS-StartSSHSession` alone, which the access check holds it to.
 resource "aws_iam_policy" "client" {
   name        = "${local.prefix}-client"
   description = "What the machine of a person needs to reach its Pumpkin controller"

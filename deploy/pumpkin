@@ -1,12 +1,11 @@
 #!/usr/bin/env sh
 # Runs the Pumpkin that `.pumpkinversion` names, building it first if it isn't built: copy this
 # file into a repository as `./pumpkin`, and run `./pumpkin check task.star` from anywhere. It
-# fetches a pinned toolchain, verifies its SHA-256, and hands over to it. Everything after that is
-# Rust, in `cargo xtask install`.
+# fetches a pinned toolchain, verifies its SHA-256, and hands over to it; the rest is Rust, in
+# `cargo xtask install`.
 #
 # Everything lives in `.pumpkin/` beside this file, which ignores itself in git and is safe to
-# delete; nothing is written elsewhere, and the `pumpkin` it builds there writes nowhere else
-# either. `.pumpkinversion` holds Pumpkin's tag, then the full
+# delete; nothing is written elsewhere. `.pumpkinversion` holds Pumpkin's tag, then the full
 # commit the tag must name. It needs Linux x86_64, curl, git, sha256sum, and a C linker (`cc`).
 #
 # Everything after this script's own option goes to `pumpkin`. The option, only if it comes
@@ -72,9 +71,8 @@ entry="$state/$commit"
 
 # Runs a command with only these variables of the environment: Rust's own, kept in `.pumpkin/`
 # and never in ~/.rustup and ~/.cargo, a temporary directory there too, for the compilers' files,
-# and what downloads need. `RUSTFLAGS`, `CARGO_TARGET_DIR`, `RUSTC_WRAPPER` and the like are gone,
-# so they can't steer the build, and so are git's, such as the `GIT_INDEX_FILE` that a hook is
-# given, which would make git work in the caller's repository.
+# and what downloads need. The rest can't steer the build, as `RUSTFLAGS` would, nor make git work
+# in the caller's repository, as the `GIT_INDEX_FILE` that a hook is given would.
 clean() {
     for name in SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE \
         http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do

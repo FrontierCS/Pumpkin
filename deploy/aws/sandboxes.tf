@@ -1,6 +1,4 @@
-# The EC2 envelope that the `ec2` provider's module doc, "The envelope", relies on: what each
-# sandbox's instance runs as, a launch template for each class, and the timer that terminates an
-# instance at its run's hard end.
+# The EC2 envelope that the `ec2` provider's module doc, "The envelope", relies on.
 
 # A sandbox's instance pulls its role's image and the `sandboxd` image, and may do nothing else.
 resource "aws_iam_role" "sandbox" {
@@ -80,8 +78,8 @@ resource "aws_launch_template" "class" {
   }
 }
 
-# The timer outside each instance's guest: the controller makes a one-shot schedule in this
-# group for each instance at its run's hard end, which terminates it with this role.
+# The timer outside each instance's guest: one-shot schedules in this group terminate an instance
+# at its run's hard end, with the role below.
 resource "aws_scheduler_schedule_group" "timer" {
   name = local.prefix
 }

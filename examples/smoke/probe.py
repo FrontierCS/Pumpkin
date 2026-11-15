@@ -2,8 +2,8 @@
 or keep open, `<sandbox> <check>: ok|FAILED (<what it saw>)`, where `ok` says the sandbox is as
 it should be: its role's user isn't root; the instance metadata address and a public address
 can't be reached; DNS can't be either, but where `sandboxd` listens, as on Modal, whose
-sandboxes reach Modal's resolver and nothing else, so a name resolves there; and the gateway can,
-as `sandboxd`, which dials it, or which it dials, holds the session that this probe runs over."""
+sandboxes reach Modal's resolver and nothing else, so a name resolves there; and the gateway
+can, as `sandboxd` holds the session that this probe runs over."""
 
 import os
 import socket
