@@ -79,6 +79,14 @@ Stop a run, wait until it has ended, remove what it left, and print its
 outcome.json.")]
     #[command(after_help = CANCEL_NOTES)]
     Cancel(Cancel),
+    #[command(about = "Serve the runs' records to this machine's browser")]
+    #[command(long_about = "\
+Serve the runs in --runs to a browser on this machine, until it is stopped, and
+print the address to open: a page that lists the runs as `ls` does, newest
+first, and shows a run's summary, its sandboxes' lanes, who talks to whom, and
+its log, which it follows while the run is live.")]
+    #[command(after_help = VIEW_NOTES)]
+    View(View),
     #[command(about = "Write a recipe's fetch stage, which pins what a step fetches")]
     #[command(long_about = LOCK_ABOUT, after_help = LOCK_NOTES)]
     Lock(Lock),
@@ -182,6 +190,7 @@ pub(crate) enum Command {
     Fmt(Fmt),
     Build(Build),
     Lock(Lock),
+    View(View),
     /// `pumpkin controller job`, a job on the controller.
     Job(Job),
     /// `pumpkin controller boot`, the controller's boot.
@@ -342,6 +351,23 @@ pub(crate) struct Wait {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
+}
+
+/// What `pumpkin view` is asked for, as `pumpkin view --help` says.
+#[derive(Args)]
+pub(crate) struct View {
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
+The directory of the runs to serve.
+Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+    pub(crate) runs: Option<String>,
+    #[arg(
+        long,
+        value_name = "port",
+        help = "\
+The port to serve at, on 127.0.0.1.
+Default: one that is free, which `view` says"
+    )]
+    pub(crate) port: Option<u16>,
 }
 
 #[derive(Args)]
@@ -702,6 +728,31 @@ of a run that is yet to start on the controller, and cancels one that has
 started there, sending this machine's Modal configuration file for the reap,
 then copies its record here, as `pumpkin wait` does.";
 
+const VIEW_NOTES: &str = "\
+Examples:
+  pumpkin view
+  pumpkin view --runs runs --port 8080
+
+Exit status:
+  1  The port can't be bound, or another error.
+  2  A usage error.
+`view` serves until a signal stops it, as Ctrl-C's SIGINT or SIGTERM does, so it
+doesn't exit 0.
+
+`view` prints on the standard error the address to open, such as
+`http://127.0.0.1:41873/?t=0123...`. It listens on 127.0.0.1 alone, so no other
+machine reaches it, and answers a request only if it names this machine as its
+host, and, for the runs' data, carries the token after `?t=`, which the page
+sends: another user of this machine can't read the runs, nor can a page of
+another site that the browser has open. It reads the records as `ls` and `wait`
+do, and asks nothing of a provider.
+
+The page's cancel of a run runs `pumpkin cancel --runs <dir> <run>`, and shows
+what that says. Nothing else the page does changes a run.
+
+With [controller] in the configuration, `view` serves the runs in --runs, by
+default the copies in the default runs directory, not the controller's.";
+
 const LOCK_ABOUT: &str = "\
 Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
 lock line, `# pumpkin lock: <resolver> <argument>...`, in the comment right
@@ -1039,6 +1090,12 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
             None => refusal(error.format(&mut cli)),
         }
     })?;
+    command_of(&mut cli, parsed).map_err(refusal)
+}
+
+/// The command that `parsed`, a line of `cli`, asks for. Fails with the usage problem of a job's
+/// command or of a help's topic.
+fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::Error> {
     Ok(match parsed {
         Parsed::Run(run) => Command::Run(run),
         Parsed::Wait(wait) => Command::Wait(wait),
@@ -1049,6 +1106,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
         Parsed::Fmt(fmt) => Command::Fmt(fmt),
         Parsed::Build(build) => Command::Build(build),
         Parsed::Lock(lock) => Command::Lock(lock),
+        Parsed::View(view) => Command::View(view),
         Parsed::Controller {
             action: Action::Boot,
         } => Command::Boot,
@@ -1072,9 +1130,9 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
             region,
             parameter,
             tree,
-            command: job_command(&mut cli, command).map_err(refusal)?,
+            command: job_command(cli, command)?,
         }),
-        Parsed::Help { topic } => return help_of(&mut cli, topic.as_deref()).map_err(refusal),
+        Parsed::Help { topic } => return help_of(cli, topic.as_deref()),
     })
 }
 
@@ -1091,6 +1149,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Check(_)
         | Command::Fmt(_)
         | Command::Lock(_)
+        | Command::View(_)
         | Command::Job(_)
         | Command::Boot
         | Command::Follow(_)

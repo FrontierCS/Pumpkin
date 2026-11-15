@@ -1,0 +1,1086 @@
+// A run: its verdict and the command that runs it again, its sandboxes' lanes, who talks to whom,
+// its log as a list that draws only the rows in view, and the inspector of what is selected.
+//
+// The log is read from its start in windows (`/log?at=<byte>`) up to the byte that the run's
+// reply was read to, then, while the run is live, polled from where the last read ended
+// (`/since?log=<byte>`): a reply of only `end` and `live` changes nothing; one with records
+// replaces the run and appends them. A refusal of the byte, or a log shorter than it, means the
+// log started over, and the run is read again from its start.
+
+import {
+  POLL_MS,
+  Refused,
+  bytes,
+  byId,
+  clock,
+  count,
+  fill,
+  follow,
+  get,
+  h,
+  plural,
+  post,
+  route,
+  setKeys,
+  setQuery,
+  show,
+  span,
+  svg,
+  tone,
+  typing,
+  utc,
+} from "./h.js";
+
+/**
+ * @typedef {object} Run `/api/runs/<id>`
+ * @property {string} id
+ * @property {string | null} task
+ * @property {boolean} live
+ * @property {string} state
+ * @property {boolean} scored
+ * @property {string} verdict
+ * @property {{ command: string, error?: undefined } | { error: string, command?: undefined }} again
+ * @property {string | null} other_build
+ * @property {Times | null} times
+ * @property {Lane[] | null} lanes
+ * @property {Talk | null} talk
+ * @property {ModelUse | null} model
+ * @property {{ count: number, said: string } | null} unread
+ * @property {string | null} summary what `pumpkin summary` prints of it
+ * @property {number} end the byte of the log that the run was read to
+ * @property {number} log_epoch how many times the log started over since the view started
+ * @typedef {object} Times seconds since the run started, but `started_unix`
+ * @property {number} started_unix
+ * @property {number} hard_end
+ * @property {number} last
+ * @property {number | null} end
+ * @property {number | null} now
+ * @typedef {object} ModelUse
+ * @property {number} requests
+ * @property {Array<{ code: string, count: number }>} failed
+ * @property {number} not_2xx how many were not forwarded whole with a 2xx status
+ * @property {Array<{ request: number, since: number }>} in_flight each with when it went
+ * @property {{ median: number | null, count: number }} took
+ * @property {{ median: number | null, count: number }} first_token
+ * @property {{ input: number | null, output: number | null, cached: number | null }} tokens
+ * @property {string[]} dropped_headers the request headers the route left behind, the first by name
+ * @property {boolean} more_dropped_headers whether it left more than `dropped_headers`
+ * @typedef {object} Lane a sandbox's lane: the agent's, a judge call's (`job <n>`) or a lease's
+ * @property {string} lane
+ * @property {"agent" | "judge" | "runner"} kind
+ * @property {string | null} [role]
+ * @property {string | null} [grant]
+ * @property {string} [holder]
+ * @property {{ place: string, asked: number, started: number | null, gone: number | null, deleted: boolean | null }} sandbox
+ * @property {string} said
+ * @property {number[]} [answered] the times of its model answers, at most 500 of them, to draw
+ * @property {number[]} [failed] those of `answered` that stand for a failed answer
+ * @property {{ count: number, failed: number }} [answers] how many model answers it has, and failed
+ * @property {Work[] | null} [work]
+ * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
+ * @typedef {{ roles: Role[], edges: Edge[] }} Talk
+ * @typedef {{ name: string, kind: string | null, place: string | null, routed: boolean, score: boolean, routes: Route[] | "unknown" }} Role
+ * @typedef {{ api: string, upstream: string, models: Record<string, string> }} Route an entry of a role's model route: each model by the name the upstream takes it as
+ * @typedef {{ from: string, to: string, kind: string, count: number, bytes: number | null, back_bytes: number | null }} Edge
+ * @typedef {object} LogRecord a record of the run's log, its strings cut, a note's or an event's
+ * @property {number} byte where it starts in the log
+ * @property {number | null} when seconds since the run started
+ * @property {number} [seq]
+ * @property {string} [note]
+ * @property {string} [unread] the line, if it is no JSON object
+ * @property {{ kind: string, [field: string]: any }} [event]
+ * @property {Array<{ kind: string, [field: string]: any }>} [actions]
+ * @typedef {{ records: LogRecord[], next: number, end: number }} Window `/log`
+ * @typedef {{ end: number, live: boolean, run?: Run, records?: LogRecord[], next?: number }} Since `/since`
+ * @typedef {{ fold: LogRecord[] }} Fold
+ * @typedef {LogRecord | Fold} Item
+ */
+
+// The rows drawn past those in view.
+const OVERSCAN_ROWS = 20;
+// The widths of a character of the diagram's names and places, in its font, `--fs-diagram`.
+const NAME_CHAR_PX = 7.3;
+const PLACE_CHAR_PX = 7.3;
+// The bounds of the characters of the lanes' names and places before the tracks, which the style
+// turns into `--label` in its monospace.
+const LABEL_MIN_CHARS = 18;
+const LABEL_MAX_CHARS = 48;
+// How many records the log's list is drawn again after while the log is read from its start.
+const DRAW_EVERY_RECORDS = 2000;
+// How often a cancel under way is read.
+const CANCEL_POLL_MS = 1000;
+
+// ---- a list of one-line rows, drawing only those in view
+
+class LogList {
+  // `draw(item, index)` makes an item's row; `pick(item, index)` is called when one is clicked.
+  /** @param {(item: Item, index: number) => HTMLElement} draw @param {(item: Item, index: number) => void} pick */
+  constructor(draw, pick) {
+    /** @type {Item[]} */
+    this.items = [];
+    this.selected = -1;
+    this.draw = draw;
+    this.pick = pick;
+    // Whether the list keeps to its end as items are added: a reader at the end stays there.
+    this.tail = false;
+    // The height of a row in px, `--row` in the style.
+    this.px = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row"));
+    this.rows = h("div", { class: "rows" });
+    this.node = h("div", { class: "list", tabindex: 0 }, this.rows);
+    this.node.addEventListener("scroll", () => {
+      this.tail = this.atTail();
+      this.paint();
+    });
+  }
+
+  atTail() {
+    const node = this.node;
+    return node.scrollTop + node.clientHeight >= node.scrollHeight - 2;
+  }
+
+  // Shows `items`, the one at `selected` selected, keeping to the end if the reader was there.
+  /** @param {Item[]} items @param {number} selected */
+  set(items, selected) {
+    this.items = items;
+    this.selected = selected;
+    this.rows.style.setProperty("--count", String(items.length));
+    if (this.tail) this.node.scrollTop = this.node.scrollHeight;
+    this.paint();
+  }
+
+  // Goes to the end, and keeps to it.
+  end() {
+    this.tail = true;
+    this.node.scrollTop = this.node.scrollHeight;
+    this.paint();
+  }
+
+  /** @param {number} index @param {boolean} scroll */
+  select(index, scroll) {
+    this.selected = index;
+    if (scroll && index >= 0) {
+      const top = index * this.px;
+      if (top < this.node.scrollTop || top > this.node.scrollTop + this.node.clientHeight - this.px) this.node.scrollTop = top - this.node.clientHeight / 2;
+    }
+    this.paint();
+  }
+
+  paint() {
+    const first = Math.max(0, Math.floor(this.node.scrollTop / this.px) - OVERSCAN_ROWS);
+    const end = Math.min(this.items.length, first + Math.ceil(this.node.clientHeight / this.px) + 2 * OVERSCAN_ROWS);
+    const rows = [];
+    for (let index = first; index < end; index++) {
+      const row = this.draw(this.items[index], index);
+      row.classList.add("row");
+      if (index === this.selected) row.classList.add("on");
+      row.style.top = index * this.px + "px";
+      row.addEventListener("click", () => this.pick(this.items[index], index));
+      rows.push(row);
+    }
+    this.rows.replaceChildren(...rows);
+  }
+}
+
+// ---- what a record says
+
+// The lanes that a log record concerns, by their names: `agent`, `job <n>`, `lease <n>`.
+/** @param {LogRecord} record */
+function lanesOf(record) {
+  const lanes = new Set();
+  const event = /** @type {Record<string, any>} */ (record.event || {});
+  const caller = event.caller;
+  if (typeof caller === "string") lanes.add(caller.replace("-", " "));
+  if (event.kind === "agent_started" || event.kind === "agent_exited" || event.kind === "agent_failed") lanes.add("agent");
+  if (event.job !== undefined) lanes.add("job " + event.job);
+  if (event.lease !== undefined) lanes.add("lease " + event.lease);
+  if (event.sandbox) lanes.add(String(event.sandbox).replace("-", " "));
+  const request = event.request || {};
+  if (request.lease !== undefined) lanes.add("lease " + request.lease);
+  if (request.job !== undefined) lanes.add("job " + request.job);
+  for (const action of record.actions || []) {
+    if (action.lease !== undefined) lanes.add("lease " + action.lease);
+    if (action.job !== undefined) lanes.add("job " + action.job);
+    if (action.kind === "start_agent" || action.kind === "tear_down_agent") lanes.add("agent");
+  }
+  return lanes;
+}
+
+// What a model answer's `failed` says, after its status: the answer stated that it failed.
+/** @param {{ code?: string } | null | undefined} failed */
+const failure = (failed) => (failed ? ", failed: " + (failed.code ?? "no code given") : "");
+
+// A log record in a line: its kind, what happened and what the core did about it, and whether it
+// failed or was refused.
+/** @param {LogRecord} record @returns {[string, string, string]} */
+function said(record) {
+  if (record.unread !== undefined) return ["unread", record.unread, "failed"];
+  if (record.note !== undefined) return ["note", record.note, ""];
+  const event = /** @type {Record<string, any>} */ (record.event || {});
+  const replies = (record.actions || []).filter((action) => action.kind === "reply");
+  const acts = (record.actions || []).filter((action) => action.kind !== "reply").map((action) => action.kind);
+  let text = "";
+  switch (event.kind) {
+    case "op_arrived": {
+      const { kind, ...rest } = event.request || {};
+      const args = Object.entries(rest)
+        .filter(([, value]) => value !== null)
+        .map(([name, value]) => name + "=" + (typeof value === "object" ? JSON.stringify(value) : value));
+      text = kind + " " + args.join(" ");
+      const reply = replies[0] && replies[0].reply;
+      if (reply) text += "  → " + reply.kind + (reply.kind === "refused" ? ": " + reply.message : "");
+      return [kind, text, reply && reply.kind === "refused" ? "refused" : ""];
+    }
+    case "command_ended":
+      text = "lease " + event.lease + " command " + event.command + ": " + JSON.stringify(event.end);
+      break;
+    case "transfer_ended": {
+      const moved = event.end && event.end.moved;
+      text = "lease " + event.lease + " transfer " + event.transfer + ": " + (moved ? plural(moved.entries, "entry") + ", " + bytes(moved.bytes) : JSON.stringify(event.end));
+      return [event.kind, text, moved ? "" : "failed"];
+    }
+    case "model_answered": {
+      const usage = event.usage ? " · " + count(event.usage.input_tokens, "tok") + " in, " + count(event.usage.output_tokens, "tok") + " out" : "";
+      text = "request " + event.request + " of " + (event.caller || "?") + ": " + event.answer.kind + " " + (event.upstream_status ?? "") + failure(event.failed) + usage;
+      return [event.kind, text, event.failed ? "failed" : event.answer.kind === "forwarded" ? "" : "refused"];
+    }
+    case "judge_collected":
+      text = "job " + event.job + ": " + JSON.stringify(event.result ?? event.invalid);
+      break;
+    case "run_started":
+      text = "hard end at " + clock(Number(event.hard_end_ns) / 1e9);
+      break;
+    default: {
+      const { kind, ...rest } = event;
+      text = Object.entries(rest)
+        .map(([name, value]) => name + "=" + JSON.stringify(value))
+        .join(" ");
+    }
+  }
+  if (acts.length) text += "  ⇒ " + acts.join(", ");
+  return [event.kind, text, event.kind && event.kind.endsWith("failed") ? "failed" : ""];
+}
+
+// `said(record)`, worked out once for each record.
+const saidOnce = new WeakMap();
+/** @param {LogRecord} record @returns {[string, string, string]} */
+function saidOf(record) {
+  if (!saidOnce.has(record)) saidOnce.set(record, said(record));
+  return saidOnce.get(record);
+}
+
+// The ops that a caller sends again and again to wait for something.
+const POLLS = ["status", "lease_status"];
+// The fewest polls in a row that the log folds into one row.
+const FOLD_MIN = 3;
+
+// `records` with each run of FOLD_MIN or more of the same poll in a row folded into one
+// `{ fold: [...] }`, which is followed by its records if `open` holds its first record's byte.
+/** @param {LogRecord[]} records @param {Set<number>} open @returns {Item[]} */
+function folded(records, open) {
+  /** @type {Item[]} */
+  const out = [];
+  for (let index = 0; index < records.length; ) {
+    const [kind, text] = saidOf(records[index]);
+    let end = index + 1;
+    if (POLLS.includes(kind) && records[index].event?.kind === "op_arrived") {
+      while (end < records.length && saidOf(records[end])[1] === text) end++;
+    }
+    if (end - index >= FOLD_MIN) {
+      const fold = { fold: records.slice(index, end) };
+      out.push(fold);
+      if (open.has(records[index].byte)) out.push(...fold.fold);
+    } else {
+      out.push(...records.slice(index, end));
+    }
+    index = end;
+  }
+  return out;
+}
+
+/** @param {Lane} lane @param {Run} data */
+function laneRole(lane, data) {
+  if (lane.kind === "agent") {
+    const agent = data.talk && data.talk.roles.find((role) => role.kind === "agent");
+    return agent ? agent.name : null;
+  }
+  return lane.role ?? null;
+}
+
+// ---- the run's page
+
+/** @param {string} id */
+export async function runView(id) {
+  const base = "/api/runs/" + encodeURIComponent(id);
+  // `cursor` is the byte the log is read to; `open` holds the first record's byte of each fold
+  // opened; `shown` the records the address's filters keep; `selected` the `sel` last drawn.
+  /** @type {{ data: Run | null, records: LogRecord[], cursor: number, caught: boolean, drawnAt: number, open: Set<number>, kinds: string, shown: LogRecord[], selected: string | null | undefined, inspected: boolean }} */
+  const state = { data: null, records: [], cursor: 0, caught: false, drawnAt: 0, open: new Set(), kinds: "", shown: [], selected: undefined, inspected: false };
+  const { query } = route();
+  const counted = h("span", { class: "counted" });
+  const all = h("span", {});
+  const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the records of one kind" }));
+  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
+  const verdict = h("div", { class: "verdict" });
+  const facts = h("div", { class: "facts" });
+  const again = h("div", { class: "again" });
+  const cancelBox = h("div", { class: "cancel" });
+  const unread = h("div", { class: "unread" });
+  const startedOver = h("p", { class: "empty" });
+  const lanes = h("div", { class: "lanes panel" });
+  const talk = h("div", { class: "talk panel" });
+  const filter = h("div", { class: "filter" }, kinds, search, counted, all);
+  const inspector = h("div", { class: "inspector panel" });
+  const list = new LogList(
+    (item) => {
+      const fold = "fold" in item ? item.fold : null;
+      const first = fold ? fold[0] : /** @type {LogRecord} */ (item);
+      const [kind, text, flag] = saidOf(first);
+      const who = [...lanesOf(first)].join(" ");
+      const opened = fold && state.open.has(first.byte);
+      const times = fold ? (opened ? "▾ " : "▸ ") + "×" + fold.length + " to " + clock(fold[fold.length - 1].when) : null;
+      const started = state.data && state.data.times && state.data.times.started_unix;
+      return h(
+        "div",
+        { class: (flag || "") + (fold ? " fold" : ""), title: fold ? "Show or hide these records" : null },
+        h("span", { class: "t", title: utc(started, first.when) }, clock(first.when)),
+        h("span", { class: "who" }, who),
+        h("span", { class: "kind" }, kind),
+        h("span", { class: "text" }, text),
+        times && h("span", { class: "times" }, times),
+      );
+    },
+    (item) => {
+      if ("fold" in item) {
+        const first = item.fold[0].byte;
+        if (!state.open.delete(first)) state.open.add(first);
+        return redraw();
+      }
+      select(item);
+    },
+  );
+  show(verdict, facts, again, cancelBox, unread, startedOver, h("div", { class: "split" }, h("div", { class: "left" }, lanes, filter, list.node), h("div", { class: "right" }, talk, inspector)));
+
+  // Selects `record`: the lanes and the diagram light what it concerns.
+  const select = (/** @type {LogRecord} */ record) => {
+    setQuery({ sel: record.byte, lane: null });
+    redraw();
+    list.select(list.selected, true);
+    inspectRecord(record, inspector, recordLinks(record), state.data);
+  };
+  // The record before (`step` -1) or after one on the lane `name`, among those shown.
+  const near = (/** @type {LogRecord} */ record, /** @type {string} */ name, /** @type {number} */ step) => {
+    const at = state.shown.indexOf(record);
+    for (let index = at + step; at >= 0 && index >= 0 && index < state.shown.length; index += step) {
+      if (lanesOf(state.shown[index]).has(name)) return state.shown[index];
+    }
+    return null;
+  };
+  // The buttons of a record's inspector: to its lanes, to their roles, and to the records before
+  // and after it on each lane.
+  const recordLinks = (/** @type {LogRecord} */ record) => {
+    const data = /** @type {Run} */ (state.data);
+    const names = [...lanesOf(record)];
+    const roles = new Set();
+    for (const lane of data.lanes || []) {
+      const role = laneRole(lane, data);
+      if (role && names.includes(lane.lane)) roles.add(role);
+    }
+    const keep = (/** @type {string} */ title, /** @type {Record<string, string | null>} */ change, /** @type {string} */ text) =>
+      h("button", { title, onclick: () => (setQuery(change), redraw()) }, text);
+    const step = (/** @type {string} */ name, /** @type {number} */ by) => {
+      const other = near(record, name, by);
+      const text = by < 0 ? "← Previous on " + name : "Next on " + name + " →";
+      return other && h("button", { title: "Select the record " + (by < 0 ? "before" : "after") + " this one on " + name, onclick: () => select(other) }, text);
+    };
+    return [
+      ...names.map((name) => keep("Keep the records of " + name, { lane: name, role: null }, name)),
+      ...[...roles].map((role) => keep("Keep the records of role " + role, { role, lane: null }, "Role " + role)),
+      ...names.flatMap((name) => [step(name, -1), step(name, 1)]),
+    ];
+  };
+  // Selects the record of lane `name` nearest `time`.
+  const nearest = (/** @type {string} */ name, /** @type {number} */ time) => {
+    const of = state.shown.filter((record) => lanesOf(record).has(name));
+    const distance = (/** @type {LogRecord} */ record) => Math.abs((record.when ?? 0) - time);
+    if (of.length) select(of.reduce((best, record) => (distance(record) < distance(best) ? record : best)));
+  };
+  // The inspector with nothing selected: how to select, and the run's summary.
+  const unselected = () => [
+    h("p", { class: "empty" }, "Select a record (j and k step), a lane or a role, or drag across the lanes to keep the records of a stretch of time; Esc clears them."),
+    state.data && state.data.summary ? h("pre", { class: "summary" }, state.data.summary) : null,
+  ];
+
+  // Draws what the address's filters keep of the records read, and what the selection lights.
+  const redraw = () => {
+    const data = state.data;
+    if (!data) return;
+    const { query } = route();
+    // A stretch of time is kept only whole, from both its ends.
+    const stretch = query.has("from") && query.has("to");
+    const from = stretch ? Number(query.get("from")) : null;
+    const to = stretch ? Number(query.get("to")) : null;
+    const lane = query.get("lane");
+    const role = query.get("role");
+    const roleLanes = role && data.lanes ? new Set(data.lanes.filter((l) => laneRole(l, data) === role).map((l) => l.lane)) : null;
+    const kind = query.get("kind");
+    const needle = search.value.trim().toLowerCase();
+    const shown = state.records.filter((record) => {
+      const [what, text] = saidOf(record);
+      if (kind && what !== kind) return false;
+      if (needle && !(what + " " + text).toLowerCase().includes(needle)) return false;
+      const at = record.when ?? 0;
+      if (from !== null && to !== null && (at < from || at > to)) return false;
+      const of = lanesOf(record);
+      if (lane && !of.has(lane)) return false;
+      if (roleLanes && ![...of].some((name) => roleLanes.has(name))) return false;
+      return true;
+    });
+    const parts = [];
+    if (from !== null) parts.push("between " + clock(from) + " and " + clock(to));
+    if (lane) parts.push("of " + lane);
+    if (role) parts.push("of role " + role);
+    if (kind) parts.push("of kind " + kind);
+    if (needle) parts.push("holding “" + needle + "”");
+    const reading = state.caught ? "" : ", reading the log: " + bytes(state.cursor) + " of " + bytes(data.end);
+    counted.textContent = shown.length.toLocaleString("en-US") + " of " + plural(state.records.length, "record") + (parts.length ? ", " + parts.join(", ") : "") + reading;
+    fill(all, parts.length ? h("button", { title: "Remove every filter", onclick: () => ((search.value = ""), setQuery({ from: null, to: null, lane: null, role: null, kind: null, q: null }), redraw()) }, "Show all") : null);
+    drawKinds(kinds, state, kind);
+    const selected = query.get("sel");
+    const holder = shown.find((record) => String(record.byte) === selected);
+    if (holder) {
+      for (const item of folded(shown, new Set())) if ("fold" in item && item.fold.includes(holder)) state.open.add(item.fold[0].byte);
+    }
+    state.shown = shown;
+    const items = folded(shown, state.open);
+    list.set(items, holder ? items.indexOf(holder) : -1);
+    const lit = litOf(data, { lane, role, needle }, holder, shown);
+    drawLanes(lanes, data, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), (l) => inspectLane(l, inspector, nearest, data));
+    drawTalk(talk, data, lit, role, (name) => {
+      setQuery({ role: name === role ? null : name, lane: null, sel: null });
+      redraw();
+      if (name === role) fill(inspector, unselected());
+      else inspectRole(name, inspector, data);
+    });
+    if (selected !== state.selected) lanes.querySelector(".lane.lit")?.scrollIntoView({ block: "nearest" });
+    state.selected = selected;
+  };
+
+  // Draws the run: its verdict, facts, the command that runs it again, its cancel.
+  const drawRun = () => {
+    const data = /** @type {Run} */ (state.data);
+    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.verdict));
+    drawFacts(facts, data);
+    drawAgain(again, data);
+    drawCancel();
+    fill(unread, data.unread ? h("p", { class: "warn" }, h("span", { class: "mark warn" }), plural(data.unread.count, "line") + " of the log can't be read: " + data.unread.said) : null);
+    drawFollow();
+  };
+  const drawFollow = () => {
+    const data = state.data;
+    const live = !!data && data.live;
+    fill(
+      byId("follow"),
+      live ? h("span", { class: "mark live", title: "The run is live: its log is read every " + POLL_MS / 1000 + " s" }) : null,
+      live ? (list.tail ? "Following the end" : h("button", { title: "Go to the end of the log, and keep to it (f)", onclick: () => list.end() }, "Follow the end")) : null,
+    );
+  };
+  list.node.addEventListener("scroll", drawFollow);
+
+  kinds.addEventListener("change", () => (setQuery({ kind: kinds.value || null }), redraw()));
+  search.addEventListener("input", () => (setQuery({ q: search.value.trim().toLowerCase() || null }), redraw()));
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      search.blur();
+    }
+  });
+  setKeys((event) => {
+    if (typing()) return;
+    const step = { j: 1, k: -1 }[event.key];
+    if (event.key === "/") {
+      event.preventDefault();
+      search.focus();
+      search.select();
+    } else if (step) {
+      // The next record shown, past folds closed.
+      event.preventDefault();
+      const items = list.items;
+      for (let index = list.selected + step; index >= 0 && index < items.length; index += step) {
+        const item = items[index];
+        if (!("fold" in item)) return select(item);
+      }
+    } else if (event.key === "f" && state.data && state.data.live) {
+      list.end();
+      drawFollow();
+    } else if (event.key === "Escape") {
+      setQuery({ sel: null, lane: null, role: null, from: null, to: null });
+      fill(inspector, unselected());
+      redraw();
+    }
+  });
+
+  // The page's cancel of this run: asked for, confirmed, going (read from the server until
+  // `pumpkin cancel` has ended), done or refused, with the server's own words as text.
+  /** @type {{ phase: "idle" | "confirm" | "going" | "done" | "refused", said: string, error: string, exit: number | null }} */
+  const cancel = { phase: "idle", said: "", error: "", exit: null };
+  const watchCancel = async () => {
+    while (current()) {
+      try {
+        const reply = await get(base + "/cancelling");
+        cancel.said = reply.said;
+        if (reply.ended) {
+          [cancel.phase, cancel.exit] = ["done", reply.exit];
+          return drawCancel();
+        }
+      } catch (error) {
+        [cancel.phase, cancel.error] = ["refused", error instanceof Error ? error.message : String(error)];
+        return drawCancel();
+      }
+      drawCancel();
+      await new Promise((resolve) => setTimeout(resolve, CANCEL_POLL_MS));
+    }
+  };
+  const startCancel = async () => {
+    [cancel.phase, cancel.said, cancel.error] = ["going", "", ""];
+    drawCancel();
+    try {
+      const { status, body } = await post(base + "/cancel");
+      if (status === 202) return watchCancel();
+      // A server without a cancel answers that nothing is there, or that it reads by GET alone.
+      cancel.error = status === 404 || status === 405 ? "This pumpkin view doesn't serve a cancel: run `pumpkin cancel " + id + "` in a terminal instead." : body.error || "Status " + status;
+      // A cancel of the page's own that is under way is watched, as one just started is.
+      if (status === 409) {
+        drawCancel();
+        return watchCancel();
+      }
+    } catch (error) {
+      cancel.error = "The page's server could not be reached: " + (error instanceof Error ? error.message : String(error));
+    }
+    cancel.phase = "refused";
+    drawCancel();
+  };
+  const drawCancel = () => {
+    const live = !!state.data && state.data.live;
+    const said = cancel.said ? h("pre", {}, cancel.said) : null;
+    const to = (/** @type {typeof cancel.phase} */ phase) => () => ((cancel.phase = phase), drawCancel());
+    const ask = h("button", { class: "danger", title: "Stop this run: asks you to confirm first", onclick: to("confirm") }, "Cancel run…");
+    if (cancel.phase === "idle") return fill(cancelBox, live ? ask : null);
+    if (cancel.phase === "confirm") {
+      return fill(
+        cancelBox,
+        h(
+          "div",
+          { class: "sure" },
+          h("p", {}, "Cancel run ", h("code", {}, id), "? It stops the run, waits until it has ended, removes what it left, and writes its outcome.json. This ends a real run and can't be undone."),
+          h("button", { class: "danger", title: "Send the cancel now", onclick: startCancel }, "Cancel run"),
+          h("button", { title: "Leave the run as it is", onclick: to("idle") }, "Keep it running"),
+        ),
+      );
+    }
+    if (cancel.phase === "going") return fill(cancelBox, h("div", { class: "sure" }, h("p", {}, "Cancelling run ", h("code", {}, id), "…"), cancel.error ? h("p", { class: "error" }, cancel.error) : null, said));
+    const how = cancel.exit === 0 ? "The run has ended and what it left is removed." : cancel.exit === 3 ? "The run has ended, but its provider was not reached." : "The cancel exited with status " + cancel.exit + ".";
+    if (cancel.phase === "done") return fill(cancelBox, h("div", { class: "sure" }, h("p", {}, how), said, h("button", { title: "Close this", onclick: to("idle") }, "OK")));
+    return fill(
+      cancelBox,
+      h("div", { class: "sure" }, h("p", { class: "error" }, cancel.error), live ? h("button", { class: "danger", title: "Ask to cancel again", onclick: to("confirm") }, "Cancel run…") : null, h("button", { title: "Close this", onclick: to("idle") }, "OK")),
+    );
+  };
+
+  const take = (/** @type {LogRecord[]} */ records, /** @type {number} */ next) => {
+    state.records.push(...records);
+    state.cursor = next;
+  };
+  // Forgets what was read, to read the log again from its start.
+  const again0 = () => {
+    Object.assign(state, { data: null, records: [], cursor: 0, caught: false, drawnAt: 0 });
+    state.open.clear();
+  };
+  // The first time the log is read to the run's end: a live run goes to its end, and what the
+  // address selects is inspected.
+  const caughtUp = () => {
+    const data = /** @type {Run} */ (state.data);
+    state.caught = true;
+    if (data.live && !route().query.has("sel")) list.tail = true;
+    redraw();
+    if (state.inspected) return;
+    state.inspected = true;
+    const { query } = route();
+    const lane = query.get("lane") && (data.lanes || []).find((l) => l.lane === query.get("lane"));
+    const record = state.records.find((r) => String(r.byte) === query.get("sel"));
+    const role = query.get("role");
+    if (lane) inspectLane(lane, inspector, nearest, data);
+    else if (role && !record) inspectRole(role, inspector, data);
+    else if (record) {
+      inspectRecord(record, inspector, recordLinks(record), data);
+      list.select(list.selected, true);
+    } else fill(inspector, unselected());
+  };
+  const read = async (/** @type {() => boolean} */ current) => {
+    if (!state.data) {
+      /** @type {Run} */
+      const data = await get(base);
+      if (!current()) return null;
+      state.data = data;
+      drawRun();
+      redraw();
+      return 0;
+    }
+    const data = state.data;
+    if (state.cursor < data.end) {
+      /** @type {Window} */
+      const window = await get(base + "/log?at=" + state.cursor + "&log_epoch=" + data.log_epoch);
+      if (!current()) return null;
+      if (window.end < state.cursor) return again0(), 0;
+      take(window.records, window.next);
+      if (state.cursor >= data.end) caughtUp();
+      else if (state.records.length - state.drawnAt >= DRAW_EVERY_RECORDS) {
+        state.drawnAt = state.records.length;
+        redraw();
+      } else counted.textContent = plural(state.records.length, "record") + ", reading the log: " + bytes(state.cursor) + " of " + bytes(data.end);
+      return 0;
+    }
+    if (!state.caught) caughtUp();
+    if (!data.live) return null;
+    /** @type {Since} */
+    const since = await get(base + "/since?log=" + state.cursor + "&log_epoch=" + data.log_epoch);
+    if (!current()) return null;
+    if (since.end < state.cursor) return again0(), 0;
+    if (!since.run) {
+      if (since.live) return POLL_MS;
+      // It ended with no record after the last: its ending is in the run alone.
+      state.data = await get(base);
+      if (!current()) return null;
+      drawRun();
+      redraw();
+      return null;
+    }
+    state.data = since.run;
+    take(since.records || [], since.next ?? since.end);
+    drawRun();
+    redraw();
+    if (state.cursor < since.end) return 0;
+    return since.live ? POLL_MS : null;
+  };
+  const current = follow(async (current) => {
+    try {
+      return await read(current);
+    } catch (error) {
+      // The log started over (409), or a byte starts no line of it (400): what was read isn't this
+      // log.
+      if (error instanceof Refused && (error.status === 409 || error.status === 400) && state.data) {
+        again0();
+        startedOver.textContent = "The log started over: read again from its start.";
+        return 0;
+      }
+      throw error;
+    }
+  });
+}
+
+// The choice of the kinds of records in `state`, each with its count, `kind` chosen; drawn again
+// only when the kinds or their counts change, so that an open choice stays open.
+/** @param {HTMLSelectElement} select @param {{ records: LogRecord[], kinds: string }} state @param {string | null} kind */
+function drawKinds(select, state, kind) {
+  const counts = new Map();
+  for (const record of state.records) {
+    const [what] = saidOf(record);
+    counts.set(what, (counts.get(what) || 0) + 1);
+  }
+  const names = [...counts.keys()].sort();
+  const key = names.map((name) => name + counts.get(name)).join(" ") + "/" + kind;
+  if (key === state.kinds) return;
+  state.kinds = key;
+  select.replaceChildren(h("option", { value: "" }, "Every kind"), ...names.map((name) => h("option", { value: name }, name + " (" + counts.get(name).toLocaleString("en-US") + ")")));
+  select.value = kind || "";
+}
+
+// What a selection lights, or null where everything is lit: the lanes, and the roles of the
+// diagram, that the selection concerns. A record selected (`holder`) wins over a role, a role
+// over a search, a search over a lane. `here` is the record's time, `focus` a role picked, whose
+// neighbours stay lit.
+/** @typedef {{ lanes: Set<string>, roles: Set<string>, focus: string | null, here: number | null }} Lit */
+/** @param {Run} data @param {{ lane: string | null, role: string | null, needle: string }} view @param {LogRecord | undefined} holder @param {LogRecord[]} shown @returns {Lit | null} */
+function litOf(data, view, holder, shown) {
+  const known = data.lanes || [];
+  // The lit set of the lanes among `names`, with their roles; null if none is.
+  /** @param {Set<string>} names @returns {Lit | null} */
+  const of = (names) => {
+    const lanes = new Set(known.filter((lane) => names.has(lane.lane)).map((lane) => lane.lane));
+    if (!lanes.size) return null;
+    /** @type {Set<string>} */
+    const roles = new Set();
+    for (const lane of known) {
+      const role = laneRole(lane, data);
+      if (role && lanes.has(lane.lane)) roles.add(role);
+    }
+    return { lanes, roles, focus: null, here: null };
+  };
+  if (holder) {
+    const lit = of(lanesOf(holder));
+    if (lit) {
+      lit.here = holder.when;
+      if (holder.event?.kind === "model_answered") lit.roles.add("model");
+    }
+    return lit;
+  }
+  if (view.role) {
+    const lanes = new Set(known.filter((lane) => laneRole(lane, data) === view.role).map((lane) => lane.lane));
+    return { lanes, roles: new Set([view.role]), focus: view.role, here: null };
+  }
+  if (view.needle) return of(new Set(shown.flatMap((record) => [...lanesOf(record)])));
+  if (view.lane) return of(new Set([view.lane]));
+  return null;
+}
+
+// The run's facts in a line, each a muted name and its value: its task, when it started, how
+// long it ran of its hard end, and what its model requests took.
+/** @param {HTMLElement} facts @param {Run} data */
+function drawFacts(facts, data) {
+  const times = data.times;
+  const model = data.model;
+  const fact = (/** @type {string} */ name, /** @type {string} */ value, /** @type {string | null} */ title = null) => h("span", { class: "fact", title }, h("span", { class: "name" }, name), h("span", { class: "value" }, value));
+  const ran = times && (times.end ?? times.now ?? times.last);
+  const failed = model ? model.failed.reduce((sum, f) => sum + f.count, 0) : 0;
+  // How long each request in flight has gone unanswered, to now, or to the end of a run that ended.
+  const at = times ? (times.now ?? times.end ?? times.last) : 0;
+  const flying = model ? [...model.in_flight].sort((a, b) => a.since - b.since) : [];
+  const notOk = "not forwarded whole with a 2xx status: cut short, refused or barred by the route, or answered with another status";
+  fill(
+    facts,
+    fact("Task", data.task || "-"),
+    times ? fact("Started", utc(times.started_unix, 0).slice(0, 19) + " UTC") : null,
+    fact("Ran", clock(ran), times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null),
+    fact("Hard end", clock(times && times.hard_end)),
+    model
+      ? fact(
+          "Requests",
+          count(model.requests, "req") + (failed ? ", " + failed + " failed" : "") + (model.not_2xx ? ", " + model.not_2xx.toLocaleString("en-US") + " not 2xx" : ""),
+          [model.failed.map((f) => f.count + " " + f.code).join(", "), model.not_2xx ? plural(model.not_2xx, "answer") + " " + notOk : ""].filter(Boolean).join("; ") || null,
+        )
+      : null,
+    model ? fact("Tokens", count(model.tokens.input, "tok") + " in · " + count(model.tokens.output, "tok") + " out", model.tokens.input === null ? "Unknown: no response reported its tokens" : model.tokens.cached !== null ? count(model.tokens.cached, "tok") + " of the input cached" : null) : null,
+    model && model.took.median !== null ? fact("Median took", span(model.took.median), "Of " + plural(model.took.count, "answer")) : null,
+    model && model.first_token.median !== null ? fact("First token", span(model.first_token.median), "Median, of " + plural(model.first_token.count, "answer")) : null,
+    flying.length
+      ? fact(
+          "In flight",
+          plural(flying.length, "request") + ", the oldest for " + span(at - flying[0].since),
+          flying.map((f) => "Request " + f.request + " for " + span(at - f.since)).join(", "),
+        )
+      : null,
+    model && model.dropped_headers.length ? fact("Dropped request headers", model.dropped_headers.join(", ") + (model.more_dropped_headers ? ", and more" : ""), "The request headers that the route left behind") : null,
+    data.other_build ? fact("Made by", "pumpkin " + data.other_build) : null,
+  );
+}
+
+// The command that runs the run again from here, with a copy button, or why there is none.
+/** @param {HTMLElement} node @param {Run} data */
+function drawAgain(node, data) {
+  const command = data.again.command;
+  if (command === undefined) return fill(node, h("span", { class: "name" }, "Again"), h("span", { class: "why", title: data.again.error ?? "" }, "-"));
+  fill(
+    node,
+    h("span", { class: "name" }, "Again"),
+    h("code", { title: command }, command),
+    h("button", { title: "Copy the command that runs this run again", onclick: () => navigator.clipboard && navigator.clipboard.writeText(command) }, "Copy"),
+  );
+}
+
+// The lanes of the run's sandboxes, each from when the core asked for it until it was gone: its
+// start faint, its life solid, a lease's commands and transfers on it, and a tick at each model
+// answer. A sandbox that isn't gone runs to the last time the record knows, its end open.
+/** @param {HTMLElement} node @param {Run} data @param {{ from: number | null, to: number | null, lit: Lit | null }} view @param {string | null} picked @param {(change: Record<string, string | null>) => void} change @param {(lane: Lane) => void} inspect */
+function drawLanes(node, data, view, picked, change, inspect) {
+  const times = data.times;
+  if (!data.lanes || !times) {
+    node.replaceChildren(h("p", { class: "empty" }, "The run's log doesn't record its start yet."));
+    return;
+  }
+  const known = times.end ?? times.now ?? times.last;
+  const span = Math.max(known, ...data.lanes.map((lane) => lane.sandbox.gone || 0), 1);
+  const at = (/** @type {number} */ seconds) => (100 * seconds) / span + "%";
+  const width = (/** @type {number} */ from, /** @type {number} */ to) => Math.max(0.15, (100 * (to - from)) / span) + "%";
+  const ticks = [];
+  for (let index = 0; index <= 4; index++) ticks.push(h("span", { style: { left: index * 25 + "%" } }, clock((span * index) / 4)));
+  // A lane's name says its role and the role's place; the lane's own place, which can name its
+  // GPU, is in its title and the inspector.
+  const labels = data.lanes.map((lane) => {
+    const role = laneRole(lane, data);
+    const name = lane.lane + (role && role !== lane.lane ? " · " + role : "");
+    const placed = data.talk && data.talk.roles.find((r) => r.name === role);
+    return { name, place: (placed && placed.place) || lane.sandbox.place };
+  });
+  const widest = Math.max(...labels.map(({ name, place }) => name.length + 1 + place.length));
+  node.style.setProperty("--label-chars", String(Math.min(LABEL_MAX_CHARS, Math.max(LABEL_MIN_CHARS, widest))));
+  const across = (/** @type {number} */ fraction) => "calc(var(--label) + (100% - var(--label)) * " + fraction + ")";
+  const rows = data.lanes.map((lane, index) => {
+    const { asked, started, gone } = lane.sandbox;
+    const end = gone ?? known;
+    const parts = [];
+    if (started !== null) {
+      parts.push(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }));
+      parts.push(h("div", { class: "span" + (gone === null ? " open" : ""), style: { left: at(started), width: width(started, end) }, title: lane.said }));
+    } else {
+      parts.push(h("div", { class: "span starting" + (gone === null ? " open" : ""), style: { left: at(asked), width: width(asked, end) }, title: lane.said }));
+    }
+    for (const work of lane.work || []) {
+      const failed = work.end && (work.end.failed || (work.end.exited && work.end.exited.code !== 0) || typeof work.end === "string");
+      parts.push(h("div", { class: "work" + (failed ? " failed" : ""), style: { left: at(work.from), width: width(work.from, work.to ?? known) }, title: work.kind + " " + work.label }));
+    }
+    const failed = new Set(lane.failed || []);
+    for (const answered of lane.answered || []) parts.push(h("div", { class: "tick" + (failed.has(answered) ? " failed" : ""), style: { left: at(answered) } }));
+    const role = laneRole(lane, data);
+    const { name, place } = labels[index];
+    const title = lane.lane + (role ? " of role " + role : "") + (lane.grant ? ", grant " + lane.grant : "") + ", on " + lane.sandbox.place;
+    const lit = view.lit;
+    const classes = ["lane", lane.kind, picked === lane.lane ? "on" : "", lit && !lit.lanes.has(lane.lane) ? "dim" : "", lit && lit.here !== null && lit.lanes.has(lane.lane) ? "lit" : ""];
+    const pick = () => (change({ lane: picked === lane.lane ? null : lane.lane, role: null, sel: null }), inspect(lane));
+    return h("div", { class: classes.join(" ") }, h("div", { class: "name", title, onclick: pick }, name, " ", h("span", { class: "place" }, place)), h("div", { class: "track" }, parts));
+  });
+  const axis = h("div", { class: "axis" }, h("div", { class: "ticks" }, ticks));
+  const guides = ticks.map((_, index) => h("div", { class: "guide", style: { left: across(index / 4) } }));
+  const tracks = h("div", { class: "tracks" }, guides, rows);
+  if (times.now !== null) tracks.append(h("div", { class: "now", title: "Now", style: { left: across(times.now / span) } }));
+  if (view.lit && view.lit.here !== null) tracks.append(h("div", { class: "here", style: { left: across(view.lit.here / span) } }));
+  if (view.from !== null && view.to !== null) {
+    tracks.append(h("div", { class: "window", style: { left: across(view.from / span), width: "calc((100% - var(--label)) * " + (view.to - view.from) / span + ")" } }));
+  }
+  // A drag across the tracks keeps the records of that stretch of time.
+  tracks.addEventListener("mousedown", (down) => {
+    const box = tracks.getBoundingClientRect();
+    const labelPx = parseFloat(getComputedStyle(axis).paddingLeft);
+    const left = box.left + labelPx;
+    const time = (/** @type {number} */ x) => Math.max(0, Math.min(span, ((x - left) / (box.width - labelPx)) * span));
+    if (down.clientX < left) return;
+    const window = h("div", { class: "window" });
+    tracks.append(window);
+    const move = (/** @type {MouseEvent} */ event) => {
+      const [a, b] = [down.clientX, event.clientX].sort((x, y) => x - y);
+      window.style.left = a - box.left + "px";
+      window.style.width = b - a + "px";
+    };
+    const up = (/** @type {MouseEvent} */ event) => {
+      removeEventListener("mousemove", move);
+      removeEventListener("mouseup", up);
+      if (Math.abs(event.clientX - down.clientX) < 4) return window.remove();
+      const [from, to] = [time(down.clientX), time(event.clientX)].sort((x, y) => x - y);
+      change({ from: from.toFixed(2), to: to.toFixed(2), sel: null });
+    };
+    addEventListener("mousemove", move);
+    addEventListener("mouseup", up);
+  });
+  node.replaceChildren(axis, tracks);
+}
+
+// Who talks to whom: the agent, with the model upstream under it, in the left column and the
+// judges then the runners in the right one; a line for each pair that the log shows talking, one
+// within a column bowed out past its side so that it passes no box, and below, what went between
+// them. What a selection lights is lit, the rest dim; a role picked lights the lines it has.
+/** @param {HTMLElement} node @param {Run} data @param {Lit | null} lit @param {string | null} picked @param {(name: string) => void} pick */
+function drawTalk(node, data, lit, picked, pick) {
+  if (!data.talk) return fill(node, h("p", { class: "empty" }, "The record has no roles yet."));
+  const { roles, edges } = data.talk;
+  /** @type {Record<string, number>} */
+  const order = { agent: 0, judge: 1, runner: 2 };
+  const shown = roles.map((role) => ({ ...role, column: role.kind === "agent" ? 0 : 1 }));
+  if (roles.some((role) => role.routed) || edges.some((edge) => edge.to === "model")) {
+    shown.push({ name: "model", kind: "model", place: "The route's upstream", routed: false, score: false, routes: [], column: 0 });
+  }
+  shown.sort((a, b) => a.column - b.column || (order[a.kind ?? ""] ?? 3) - (order[b.kind ?? ""] ?? 3));
+  const [boxH, gapX, gapY, bow] = [34, 72, 12, 28];
+  const widthOf = (/** @type {Role} */ n) => Math.ceil(Math.max(n.name.length * NAME_CHAR_PX + (n.score ? 14 : 0), (n.place || "-").length * PLACE_CHAR_PX)) + 14;
+  const columnW = [0, 1].map((column) => Math.max(0, ...shown.filter((n) => n.column === column).map(widthOf)));
+  const xs = [bow, bow + columnW[0] + gapX];
+  /** @typedef {Role & { column: number, x: number, y: number, w: number, row: number }} Box */
+  /** @type {Map<string, Box>} */
+  const nodes = new Map();
+  const rows = [0, 0];
+  for (const n of shown) {
+    nodes.set(n.name, { ...n, x: xs[n.column], y: 4 + rows[n.column] * (boxH + gapY), w: columnW[n.column], row: rows[n.column] });
+    rows[n.column] += 1;
+  }
+  const width = xs[1] + columnW[1] + bow;
+  const height = Math.max(0, ...[...nodes.values()].map((n) => n.y + boxH)) + 4;
+  /** @type {Map<string, Edge[]>} */
+  const pairs = new Map();
+  for (const edge of edges) {
+    const key = edge.from + "\u0000" + edge.to;
+    pairs.set(key, [...(pairs.get(key) || []), edge]);
+  }
+  const touches = (/** @type {string} */ from, /** @type {string} */ to) => !lit || (lit.focus ? from === lit.focus || to === lit.focus : lit.roles.has(from) && lit.roles.has(to));
+  const touch = (/** @type {string} */ a, /** @type {string} */ b) => pairs.has(a + "\u0000" + b) || pairs.has(b + "\u0000" + a);
+  // Each left box's lines to the right column leave its side spread out, in the order of the boxes
+  // they reach, rather than from one point.
+  /** @type {Map<string, string[]>} */
+  const fans = new Map();
+  for (const key of pairs.keys()) {
+    const [a, b] = key.split("\u0000").map((name) => nodes.get(name));
+    if (!a || !b || a.column === b.column) continue;
+    const [l, r] = a.column < b.column ? [a, b] : [b, a];
+    const fan = fans.get(l.name) || [];
+    fans.set(l.name, fan);
+    if (!fan.includes(r.name)) fan.push(r.name);
+  }
+  const y = (/** @type {string} */ name) => nodes.get(name)?.y ?? 0;
+  for (const fan of fans.values()) fan.sort((p, q) => y(p) - y(q));
+  const lines = [...pairs.entries()].map(([key, list]) => {
+    const [from, to] = key.split("\u0000");
+    const [a, b] = [nodes.get(from), nodes.get(to)];
+    if (!a || !b) return null;
+    const count = list.reduce((sum, edge) => sum + edge.count, 0);
+    const look = { "stroke-width": Math.min(6, 1 + Math.log2(count)), class: touches(from, to) ? "" : "dim" };
+    if (a.column !== b.column) {
+      const [l, r] = a.column < b.column ? [a, b] : [b, a];
+      const fan = fans.get(l.name) || [r.name];
+      const y1 = l.y + (boxH * (fan.indexOf(r.name) + 1)) / (fan.length + 1);
+      return svg("line", { x1: l.x + l.w, y1, x2: r.x, y2: r.y + boxH / 2, ...look });
+    }
+    const [top, bottom] = a.row < b.row ? [a, b] : [b, a];
+    if (bottom.row - top.row === 1) return svg("line", { x1: top.x + top.w / 2, y1: top.y + boxH, x2: top.x + top.w / 2, y2: bottom.y, ...look });
+    const [side, out] = a.column === 0 ? [a.x, -bow] : [a.x + a.w, bow];
+    const [y1, y2] = [top.y + boxH / 2, bottom.y + boxH / 2];
+    return svg("path", { d: "M" + side + " " + y1 + " C" + (side + out) + " " + y1 + " " + (side + out) + " " + y2 + " " + side + " " + y2, ...look });
+  });
+  const boxes = [...nodes.values()].map((n) =>
+    svg(
+      "g",
+      { class: "node " + n.kind + (n.name === picked ? " on" : "") + (lit && !lit.roles.has(n.name) && !(lit.focus && touch(lit.focus, n.name)) ? " dim" : ""), transform: "translate(" + n.x + "," + n.y + ")", onclick: () => pick(n.name) },
+      svg("title", {}, n.name + (n.score ? " (the score)" : "") + (n.place ? " on " + n.place : "")),
+      svg("rect", { width: n.w, height: boxH, rx: 6 }),
+      n.score ? svg("rect", { class: "score", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
+      svg("text", { x: n.score ? 20 : 6, y: 14 }, n.name),
+      svg("text", { x: 6, y: 27, class: "place" }, n.place || "-"),
+    ),
+  );
+  const items = [...pairs.entries()]
+    .filter(([key]) => touches(...(/** @type {[string, string]} */ (key.split("\u0000")))))
+    .map(([key, list]) => {
+      const [from, to] = key.split("\u0000");
+      const what = list.map((edge) => {
+        let text = plural(edge.count, edge.kind);
+        if (edge.bytes !== null) text += " " + bytes(edge.bytes);
+        if (edge.back_bytes !== null) text += ", " + bytes(edge.back_bytes) + " back";
+        return text;
+      });
+      return h("li", {}, h("span", { class: "pair" }, from + " → " + to), " " + what.join(" · "));
+    });
+  fill(
+    node,
+    svg("svg", { viewBox: "0 0 " + width + " " + height, width, height }, lines, boxes),
+    items.length ? h("ul", {}, items) : h("p", { class: "empty" }, lit ? "No line joins the lit roles." : "The log shows no op or model request between roles yet."),
+  );
+}
+
+// Shows role `name` in the inspector: its kind, its place, and its model route, each entry's API,
+// upstream and models, by the name the upstream takes each as; the model upstream, each role's
+// route that reaches it.
+/** @param {string} name @param {HTMLElement} inspector @param {Run} data */
+function inspectRole(name, inspector, data) {
+  const roles = data.talk ? data.talk.roles : [];
+  const unknown = "Unknown: the build of pumpkin that made this record kept no table of its routes";
+  /** @param {Role} role */
+  const routes = (role) => {
+    if (role.routes === "unknown") return h("dd", { title: unknown }, "Unknown");
+    if (!role.routes.length) return h("dd", {}, "None: the role has no model route");
+    return h(
+      "dd",
+      {},
+      role.routes.map((route) =>
+        h(
+          "div",
+          { class: "route" },
+          h("div", {}, h("span", { class: "name" }, "API "), route.api, h("span", { class: "name" }, " Upstream "), route.upstream),
+          h("ul", { title: "Each model the route allows, → the name the upstream takes it as" }, Object.entries(route.models).map(([model, upstream]) => h("li", {}, model + " → " + upstream))),
+        ),
+      ),
+    );
+  };
+  if (name === "model") {
+    const routed = roles.filter((role) => role.routes === "unknown" || role.routes.length);
+    return fill(
+      inspector,
+      h("h3", {}, h("span", { class: "kind model" }, "model"), " the route's upstream"),
+      h("p", { class: "said" }, "Each role with a route reaches it, as its route says:"),
+      routed.length ? h("dl", {}, routed.flatMap((role) => [h("dt", {}, role.name), routes(role)])) : h("p", { class: "empty" }, "No role has a model route."),
+    );
+  }
+  const role = roles.find((r) => r.name === name);
+  if (!role) return fill(inspector, h("p", { class: "empty" }, "The record names no role " + name + "."));
+  fill(
+    inspector,
+    h("h3", {}, h("span", { class: "kind " + (role.kind || "") }, role.kind || "role"), " ", role.name),
+    h(
+      "dl",
+      {},
+      h("dt", {}, "Place"),
+      h("dd", {}, role.place || "-"),
+      role.score ? [h("dt", {}, "Score"), h("dd", {}, "The final judge, whose score is the run's")] : null,
+      h("dt", {}, "Model route"),
+      routes(role),
+    ),
+  );
+}
+
+/** @param {Lane} lane @param {HTMLElement} inspector @param {(lane: string, time: number) => void} nearest @param {Run} data */
+function inspectLane(lane, inspector, nearest, data) {
+  const { place, asked, started, gone, deleted } = lane.sandbox;
+  const at = (/** @type {number | null} */ seconds) => h("dd", { title: utc(data.times && data.times.started_unix, seconds) }, clock(seconds));
+  const work = (lane.work || []).map((w) =>
+    h("li", {}, h("button", { class: "mono", title: "Select the record nearest the start of this", onclick: () => nearest(lane.lane, w.from) }, clock(w.from) + "–" + clock(w.to) + " " + w.kind + " " + w.label + "  " + (w.end ? JSON.stringify(w.end) : "running"))),
+  );
+  /** @type {Array<[string, string | null | undefined]>} */
+  const named = [
+    ["Role", lane.role],
+    ["Grant", lane.grant],
+    ["Held by", lane.holder],
+  ];
+  const answers = lane.answers || { count: 0, failed: 0 };
+  fill(
+    inspector,
+    h("h3", {}, h("span", { class: "kind " + lane.kind }, lane.kind), " ", lane.lane),
+    h("p", { class: "said" }, lane.said),
+    h(
+      "dl",
+      {},
+      named.filter(([, value]) => value).flatMap(([name, value]) => [h("dt", {}, name), h("dd", {}, value)]),
+      h("dt", {}, "Place"),
+      h("dd", {}, place),
+      h("dt", {}, "Asked"),
+      at(asked),
+      h("dt", {}, "Started"),
+      at(started),
+      h("dt", {}, "Gone"),
+      at(gone),
+      h("dt", {}, "Deleted"),
+      h("dd", {}, deleted === null ? "Not recorded" : String(deleted)),
+      h("dt", {}, "Model answers"),
+      h("dd", {}, count(answers.count, "ans") + (answers.failed ? ", " + answers.failed.toLocaleString("en-US") + " failed" : "")),
+    ),
+    work.length ? h("ul", {}, work) : null,
+  );
+}
+
+// Shows `record` in the inspector: its kind and time, its fields that are no object, the buttons
+// `links`, then the record whole, as the log holds it, its strings cut.
+/** @param {LogRecord} record @param {HTMLElement} inspector @param {Array<HTMLElement | false | null | undefined>} links @param {Run | null} data */
+function inspectRecord(record, inspector, links, data) {
+  const [kind] = saidOf(record);
+  const started = data && data.times && data.times.started_unix;
+  const { byte, when, ...kept } = record;
+  const event = /** @type {Record<string, any>} */ (record.event || {});
+  /** @type {Array<[string, any]>} */
+  const scalars = [
+    ["seq", record.seq],
+    ["at", clock(when)],
+    ["UTC", utc(started, when)],
+    ["byte", byte.toLocaleString("en-US")],
+    ...Object.entries(event).filter(([name, value]) => name !== "kind" && (value === null || typeof value !== "object")),
+  ];
+  fill(
+    inspector,
+    h("h3", {}, h("span", { class: "kind" }, kind), " ", h("span", { class: "t", title: utc(started, when) }, clock(when))),
+    h("dl", {}, scalars.filter(([, value]) => value !== undefined && value !== "").flatMap(([name, value]) => [h("dt", {}, name), h("dd", {}, String(value))])),
+    links.some(Boolean) ? h("p", { class: "links" }, links) : null,
+    h("pre", {}, JSON.stringify(kept, null, 2)),
+  );
+}

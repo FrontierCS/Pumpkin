@@ -28,7 +28,7 @@ use crate::{config, next, say};
 const STALE: Duration = Duration::from_secs(10);
 
 /// A directory of this command's own, 0700, in the workspace's `tmp/` ([`Workspace::scratch`]).
-fn scratch() -> Result<TempDir, String> {
+pub(crate) fn scratch() -> Result<TempDir, String> {
     Workspace::find()?.scratch("pumpkin-")
 }
 

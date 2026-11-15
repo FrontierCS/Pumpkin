@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::{self, Read, Write};
+use std::ops::Range;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -35,14 +36,14 @@ use std::time::{Duration, SystemTime};
 use decision::PayloadRef;
 use provider::{Meeting, Provider, RunTag, SandboxId, Sweep, UnixTime};
 use route::Serving;
-use schema::ir::{GpuModel, Image, Name, Sha256Digest};
+use schema::ir::{Api, GpuModel, Image, Name, Sha256Digest};
 use schema::sandbox::{command_stderr, log_dir, out_dir};
 use schema::workflow::{ByProvider, ByRole, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
 
-use super::log::{self, LogFold, Readout};
+use super::log::{self, LogFold, Place, Readout, Used};
 use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System};
 
@@ -459,6 +460,16 @@ impl Record {
         Ok(records)
     }
 
+    /// The name of each directory in `runs` that may hold a record, sorted, so by id, oldest
+    /// first, as [`all`](Self::all) opens them, without opening any.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `runs` can't be listed.
+    pub fn names(runs: &Path) -> Result<Vec<String>, String> {
+        names(runs)
+    }
+
     /// The run's id, which is the name of its directory.
     pub fn id(&self) -> &str {
         &self.id
@@ -478,18 +489,58 @@ impl Record {
     /// The name of the run's workflow, from its `ir.json`; `None` if the record has none yet, as
     /// one just begun.
     pub fn task(&self) -> Result<Option<String>, String> {
-        let path = self.dir.join("ir.json");
-        let Some(bytes) = read_optional(&path)? else {
+        let Some(ir) = self.ir()? else {
             return Ok(None);
         };
-        let ir: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
         match ir["name"].as_str() {
             Some(name) => Ok(Some(name.to_owned())),
             None => Err(format!(
                 "{} holds no name: expected a workflow's IR",
-                path.display()
+                self.dir.join("ir.json").display()
             )),
         }
+    }
+
+    /// The run's workflow, as its `ir.json` keeps it ([`ir_json`]); `None` if the record has none
+    /// yet, as one just begun.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `ir.json` can't be read, or isn't JSON.
+    pub fn ir(&self) -> Result<Option<Value>, String> {
+        let path = self.dir.join("ir.json");
+        let Some(bytes) = read_optional(&path)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .context(path.display())
+    }
+
+    /// Where each of the run's roles is placed, by the role's name, as its `provider.json`
+    /// records it; `None` if the record has none yet, as one just begun.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `provider.json` can't be read, or isn't JSON.
+    pub fn places(&self) -> Result<Option<BTreeMap<String, Place>>, String> {
+        let path = self.dir.join("provider.json");
+        let Some(bytes) = read_optional(&path)? else {
+            return Ok(None);
+        };
+        let provided: Value = serde_json::from_slice(&bytes).context(path.display())?;
+        Ok(Some(log::places(&provided)))
+    }
+
+    /// Each whole line of the run's log from byte `bytes.start`, where one starts, to byte
+    /// `bytes.end`, where one ends, as a [`LogFold`] took them, in the log's order: the byte it
+    /// starts at, and its bytes, without the newline that ends it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the log can't be read, or ends before `bytes.end`.
+    pub fn log_lines(&self, bytes: Range<u64>) -> Result<Vec<(u64, Vec<u8>)>, String> {
+        log::lines(&self.dir, bytes)
     }
 
     /// What the run's log says of it so far, as far as this build can read it ([`Readout`]).
@@ -760,6 +811,73 @@ impl Record {
         reports.collect()
     }
 
+    /// Each role's model route as `provider.json` records it, by the role's name, each entry in
+    /// the route's order; a role that the table leaves out has no route. `None` if the record's
+    /// build kept no routes, which says nothing of which roles have one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `provider.json` can't be read, as before a run writes it, or its `routes` isn't
+    /// the form a record keeps.
+    pub fn routes(&self) -> Result<Option<BTreeMap<String, Vec<RouteEntry>>>, String> {
+        #[derive(serde::Deserialize)]
+        struct Provided {
+            routes: Option<BTreeMap<String, Vec<Entry>>>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            api: Api,
+            upstream: String,
+            models: BTreeMap<String, Model>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Model {
+            upstream_name: String,
+        }
+        let path = self.dir.join("provider.json");
+        let bytes = fs::read(&path).context(path.display())?;
+        let Provided { routes } = serde_json::from_slice(&bytes).context(path.display())?;
+        let entry = |entry: Entry| {
+            let Entry {
+                api,
+                upstream,
+                models,
+            } = entry;
+            let models = models.into_iter();
+            let models = models.map(|(model, Model { upstream_name })| (model, upstream_name));
+            RouteEntry {
+                api,
+                upstream,
+                models: models.collect(),
+            }
+        };
+        Ok(routes.map(|routes| {
+            let routes = routes.into_iter();
+            let routes = routes.map(|(role, entries)| (role, entries.into_iter().map(entry)));
+            routes
+                .map(|(role, entries)| (role, entries.collect()))
+                .collect()
+        }))
+    }
+
+    /// What the run used, as its `outcome.json` records it ([`Used`]); `None` while it has none,
+    /// or if it has one without what the run used, as a reap writes of a lost run.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `outcome.json` can't be read, or its `usage` isn't the form a run writes.
+    pub fn used(&self) -> Result<Option<Used>, String> {
+        let path = self.dir.join("outcome.json");
+        let Some(bytes) = read_optional(&path)? else {
+            return Ok(None);
+        };
+        let outcome: Value = serde_json::from_slice(&bytes).context(path.display())?;
+        match outcome.get("usage") {
+            None => Ok(None),
+            Some(usage) => log::used(usage).map(Some).context(path.display()),
+        }
+    }
+
     /// The record's `driver.pid`, opened, and its path.
     fn pid_file(&self) -> Result<(File, PathBuf), String> {
         let path = self.dir.join("driver.pid");
@@ -799,6 +917,17 @@ impl Record {
             )),
         }
     }
+}
+
+/// An entry of a role's model route, as `provider.json` records it.
+///
+/// Its API, the deployment's name of the upstream that serves it, and the name the upstream takes
+/// for each model it allows, by the model's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteEntry {
+    pub api: Api,
+    pub upstream: String,
+    pub models: BTreeMap<String, String>,
 }
 
 /// The bytes of the file at `path`, or `None` if there is no such file.

@@ -35,7 +35,7 @@ use std::{env, fmt, thread};
 
 use aws::{Bound, Cli};
 pub(crate) use commands::{build, cancel, here, reap, run, wait};
-pub(crate) use listing::ls;
+pub(crate) use listing::{ls, scratch};
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};

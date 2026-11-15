@@ -38,8 +38,9 @@ an EC2 instance that runs the runs a machine sends it.
 `pumpkin` (`crates/pumpkin`) is the operator's command line. `check` evaluates and checks a task
 without reaching an engine, `fmt` formats `.star` files, `build` builds a task's images and prints
 its IR, and `run` builds them and starts the run in a driver process. `wait`, `ls`, `cancel` and
-`reap` read runs, and end them, through their records. `lock` writes a recipe's fetch stage.
-`main.rs` dispatches the commands, and `run`'s path through the driver is the one to read first.
+`reap` read runs, and end them, through their records, and `view` shows them in a browser. `lock`
+writes a recipe's fetch stage. `main.rs` dispatches the commands, and `run`'s path through the
+driver is the one to read first.
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
@@ -386,7 +387,19 @@ workspace's commands share (`Reached`), over which its `send` sends a run's or a
 is what `send` sends a task's tree as, by content, to the controller's store, `job` is the
 controller's side, with the prune and the slots that admit its builds and publishes (`Admission`),
 `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs the formatter,
+`view` serves the runs' records to a browser, its `json` the JSON forms of what it answers with,
 and `Workspace` is the `.pumpkin` directory.
+
+**Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
+readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone; and it says of
+a run what the CLI says through `progress`, so the page and `ls` never differ.
+
+**Architecture Invariant:** `view` serves the person who started it alone, and changes a run only
+by running `pumpkin cancel`, as `pumpkin view --help` says.
+
+**Architecture Invariant:** the page is plain modules that the browser runs as they are, with no
+library, and puts the text of a record into the document only as text, under the content security
+policy of `view`'s `http`.
 
 **Architecture Invariant:** only `style` runs the formatter, buildifier, and none of its flags or
 forms is Pumpkin's interface: each file's text goes to it on its standard input, and `style` reads
@@ -427,10 +440,11 @@ model provider's HTTP server. A helper that one crate's tests use stays in that 
 ### `xtask`
 
 The contributor tasks. `ci` runs the checks every change passes, among them the checks of Rust
-files, of documents and their figures (`tidy`), of `.star` files (`star`) and of the figure of the
-crates, which `figure` draws from `cargo metadata`; `live` runs those that reach a real
-environment; `install` installs `pumpkin` beside the static `sandboxd`, `ec2-boot`, the Modal
-helper and the pinned buildifier; `tools` pins the contributor tools.
+files, of documents and their figures (`tidy`), of `.star` files (`star`), of the figure of the
+crates, which `figure` draws from `cargo metadata`, and of the types of the page that `view`
+serves (`page`); `live` runs those that reach a real environment; `install` installs `pumpkin`
+beside the static `sandboxd`, `ec2-boot`, the Modal helper and the pinned buildifier; `tools`
+pins the contributor tools.
 
 ### `deploy/pumpkin`
 
@@ -548,13 +562,13 @@ as failed and appends each sandbox it deleted to `reaps.jsonl`.
 The record keeps every model exchange as the route saw it pass, which no sandbox can alter: each
 request as it went upstream, or as its client sent it if the route refused it, each conversation
 item and each field its API keeps whole, such as the list of tools, once by its digest, and the
-answer as the upstream sent it. `pumpkin ls`, `wait` and a run's
-ending read only the record, through `Record` and its `Readout`, so whatever ran the run, a
-machine shows it the same way; a controller's ended runs are copied into the machine's runs
-directory. `ls` keeps a copy of what it reads of each run that was live on a controller, whose log
-is only ever a prefix of the controller's that ends at a line's end. A run's record is never
-replaced (run ids are unique, and a record's directory is made once), so the copy's length alone
-says what the controller has yet to send, and each listing sends only that.
+answer as the upstream sent it. `pumpkin ls`, `wait`, `view` and a run's ending read only the
+record, through `Record` and its `Readout`, so whatever ran the run, a machine shows it the same
+way; a controller's ended runs are copied into the machine's runs directory. `ls` keeps a copy of
+what it reads of each run that was live on a controller, whose log is only ever a prefix of the
+controller's that ends at a line's end. A run's record is never replaced (run ids are unique, and a
+record's directory is made once), so the copy's length alone says what the controller has yet to
+send, and each listing sends only that.
 
 ### Configuration
 

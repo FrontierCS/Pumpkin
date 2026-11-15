@@ -52,11 +52,14 @@ pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Direction, LeaseSpan, LogFold, ModelUse, Part,
-    Place, PlaceUse, Progress, Readout, Sandbox, StartedOver, Tokens, Unread, Work,
+    Place, PlaceUse, Progress, Readout, Sandbox, StartedOver, TakenLine, Tokens, Unread, Used,
+    Work,
 };
 use log::{Entry, Log, ModelAnswer};
 use model::{Exchange, Served};
-pub use record::{BUILD, Build, Ending, Reaped, Record, ir_json, minted, named, new_id};
+pub use record::{
+    BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
+};
 use record::{Lock, Payloads};
 use sandbox::{Published, Sandboxes, Which};
 

@@ -27,7 +27,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read as _, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -674,7 +675,7 @@ pub struct Place {
 /// with the bounds of its workflow and of its roles' classes.
 ///
 /// Each time is since the run started, as the log gives times.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Progress {
     /// When the run started, by the driving machine's clock.
     pub started: UnixTime,
@@ -966,13 +967,23 @@ pub struct Tokens {
 /// # Errors
 ///
 /// Fails if the log can't be read.
-fn records(dir: &Path, take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>, String> {
+fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>, String> {
     let path = dir.join("log.jsonl");
     let Some(log) = open(&path)? else {
         return Ok(None);
     };
     let mut unread = Vec::new();
-    take_lines(log, &path, &mut Cursor::default(), &mut unread, take)?;
+    take_lines(
+        log,
+        &path,
+        &mut Cursor::default(),
+        &mut unread,
+        |_, record| {
+            if let Some(record) = record {
+                take(record);
+            }
+        },
+    )?;
     Ok(Some(unread))
 }
 
@@ -994,17 +1005,17 @@ struct Cursor {
     lines: u64,
 }
 
-/// Takes each whole line of `log`, the run log at `path`, past `cursor`, whose frame reads, as
-/// a [`Line`] of the parts of it that read, in turn, by `take`, adds the parts that don't to
-/// `unread`, and moves `cursor` past each line as it takes it, so that a failed read leaves it
-/// past the lines taken before. A last line without its newline, one being written or that a
-/// crash cut short, is left to a later read.
+/// Takes each whole line of `log`, the run log at `path`, past `cursor`, in turn, by `take`, with
+/// the byte it starts at and its bytes, and, if its frame reads, as a [`Line`] of the parts of it
+/// that read; adds the parts that don't to `unread`, and moves `cursor` past each line before it
+/// takes it, so that a failed read leaves it past the lines taken before. A last line without its
+/// newline, one being written or that a crash cut short, is left to a later read.
 fn take_lines(
     log: File,
     path: &Path,
     cursor: &mut Cursor,
     unread: &mut Vec<Unread>,
-    mut take: impl FnMut(Line),
+    mut take: impl FnMut(TakenLine<'_>, Option<Line>),
 ) -> Result<(), String> {
     let mut log = BufReader::new(log);
     log.seek(SeekFrom::Start(cursor.size))
@@ -1016,11 +1027,11 @@ fn take_lines(
         let Some(whole) = line.strip_suffix(b"\n") else {
             return Ok(());
         };
+        let byte = cursor.size;
         cursor.size += line.len() as u64;
         cursor.lines += 1;
-        if let Some(record) = Line::read(whole, cursor.lines, unread) {
-            take(record);
-        }
+        let record = Line::read(whole, cursor.lines, unread);
+        take(TakenLine { byte, bytes: whole }, record);
     }
 }
 
@@ -1059,6 +1070,30 @@ pub(super) fn final_judge(dir: &Path) -> Result<u64, String> {
             Err(error)
         }
     }
+}
+
+/// The lines of the run log of the record in `dir`, as
+/// [`Record::log_lines`](crate::Record::log_lines) gives them.
+pub(super) fn lines(dir: &Path, bytes: Range<u64>) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    let path = dir.join("log.jsonl");
+    let size = usize::try_from(bytes.end.saturating_sub(bytes.start)).map_err(|_| {
+        format!(
+            "{}: {bytes:?} is past what this machine can hold",
+            path.display()
+        )
+    })?;
+    let mut read = vec![0; size];
+    let mut log = File::open(&path).context(path.display())?;
+    log.seek(SeekFrom::Start(bytes.start))
+        .and_then(|_| log.read_exact(&mut read))
+        .context(path.display())?;
+    let mut byte = bytes.start;
+    let lines = read.split_inclusive(|&byte| byte == b'\n').map(|line| {
+        let start = byte;
+        byte += line.len() as u64;
+        (start, line.strip_suffix(b"\n").unwrap_or(line).to_vec())
+    });
+    Ok(lines.collect())
 }
 
 /// Reads what the record in `dir` says of its run so far ([`Readout`]).
@@ -1102,6 +1137,14 @@ pub struct LogFold {
     /// The device and inode of the log file taken, once it is found.
     file: Option<(u64, u64)>,
     taken: Cursor,
+}
+
+/// A whole line of a run's log that a [`LogFold`] took: the byte it starts at, and its bytes,
+/// without the newline that ends it.
+#[derive(Clone, Copy, Debug)]
+pub struct TakenLine<'l> {
+    pub byte: u64,
+    pub bytes: &'l [u8],
 }
 
 /// Why a [`LogFold`] started over: its log is no longer the one it took some of.
@@ -1171,6 +1214,20 @@ impl LogFold {
     /// Fails if a file of the record can't be read, or, once the log exists, its `ir.json` or
     /// `provider.json` isn't JSON.
     pub fn take(&mut self) -> Result<Option<StartedOver>, String> {
+        self.take_each(|_| {})
+    }
+
+    /// Takes what the log gained as [`take`](Self::take) does, and hands `each` every whole line
+    /// it takes, in the log's order, whether it reads or not; after a [`StartedOver`], those of
+    /// the log from its start.
+    ///
+    /// # Errors
+    ///
+    /// As [`take`](Self::take).
+    pub fn take_each(
+        &mut self,
+        mut each: impl FnMut(TakenLine<'_>),
+    ) -> Result<Option<StartedOver>, String> {
         let path = self.dir.join("log.jsonl");
         let log = open(&path)?;
         let found = match &log {
@@ -1207,10 +1264,24 @@ impl LogFold {
         };
         let roles = self.roles.insert(roles);
         let reading = &mut self.reading;
-        take_lines(log, &path, &mut self.taken, &mut self.unread, |line| {
-            reading.take(&line, roles);
-        })?;
+        take_lines(
+            log,
+            &path,
+            &mut self.taken,
+            &mut self.unread,
+            |taken, line| {
+                if let Some(line) = line {
+                    reading.take(&line, roles);
+                }
+                each(taken);
+            },
+        )?;
         Ok(started_over)
+    }
+
+    /// The byte past the last whole line taken, which the next take reads on from: 0 before any.
+    pub fn taken(&self) -> u64 {
+        self.taken.size
     }
 
     /// What the lines taken say of the run ([`Readout`]), with what the record says now of
@@ -1302,6 +1373,19 @@ fn json_file(path: &Path) -> Result<Value, String> {
     }
 }
 
+/// Each role's place, by its name, as `provided`, a record's `provider.json`, names it.
+pub(super) fn places(provided: &Value) -> BTreeMap<String, Place> {
+    let roles_placed = provided["roles"].as_object().into_iter().flatten();
+    let places = roles_placed.filter_map(|(role, placed)| {
+        let place = Place {
+            provider: placed["provider"].as_str()?.to_owned(),
+            class: placed["class"].as_str()?.to_owned(),
+        };
+        Some((role.clone(), place))
+    });
+    places.collect()
+}
+
 /// Whether the sandbox whose record is in `dir` was deleted, as its `sandbox.json` says, if it
 /// is there.
 fn deleted(dir: &Path) -> Result<Option<bool>, String> {
@@ -1334,14 +1418,6 @@ struct Roles {
 
 impl Roles {
     fn of(ir: &Value, provided: &Value) -> Self {
-        let roles_placed = provided["roles"].as_object().into_iter().flatten();
-        let places = roles_placed.filter_map(|(role, placed)| {
-            let place = Place {
-                provider: placed["provider"].as_str()?.to_owned(),
-                class: placed["class"].as_str()?.to_owned(),
-            };
-            Some((role.clone(), place))
-        });
         let roles = ir["roles"].as_array().into_iter().flatten();
         let gpus = roles.clone().filter_map(|role| {
             let gpu = Gpu::deserialize(&role["needs"]["gpu"]).ok()?;
@@ -1390,7 +1466,7 @@ impl Roles {
             routed: !agent["egress"]["model"].is_null(),
             grants: grants.collect(),
             score_role: score.map(str::to_owned),
-            places: places.collect(),
+            places: places(provided),
             gpus: gpus.collect(),
             deadline: (agent["runtime"]["agent"]["deadline_seconds"].as_u64())
                 .map(Duration::from_secs),
@@ -1765,6 +1841,71 @@ pub(super) fn usage_of(progress: &Progress) -> Value {
         usage["usd"] = json!(progress.usd().0);
     }
     usage
+}
+
+/// What an ended run used, as its `outcome.json` records it.
+#[derive(Debug)]
+pub struct Used {
+    /// When its log last wrote, since the run started.
+    pub ran: Duration,
+    pub model_requests: u64,
+    pub tokens: Tokens,
+    /// What its sandboxes cost, in dollars, if a class of its providers declared a price, and
+    /// whether some lasted in a class without one, which the sum leaves out.
+    pub usd: Option<f64>,
+    pub unpriced: bool,
+}
+
+/// What `usage`, an `outcome.json`'s `usage` as [`usage_of`] writes it, says.
+pub(super) fn used(usage: &Value) -> Result<Used, String> {
+    #[derive(Deserialize)]
+    struct Usage {
+        #[serde(deserialize_with = "logged::nanos")]
+        ran_ns: Duration,
+        model_requests: u64,
+        tokens: Counted,
+        sandboxes: Vec<Placed>,
+        usd: Option<f64>,
+    }
+    #[derive(Deserialize)]
+    struct Counted {
+        responses: u64,
+        input: u64,
+        output: u64,
+        cached: Option<u64>,
+        reasoning: Option<u64>,
+    }
+    #[derive(Deserialize)]
+    struct Placed {
+        usd_per_hour: Option<f64>,
+    }
+    let Usage {
+        ran_ns,
+        model_requests,
+        tokens,
+        sandboxes,
+        usd,
+    } = Usage::deserialize(usage).map_err(|error| error.to_string())?;
+    let Counted {
+        responses,
+        input,
+        output,
+        cached,
+        reasoning,
+    } = tokens;
+    Ok(Used {
+        ran: ran_ns,
+        model_requests,
+        tokens: Tokens {
+            reported: responses,
+            input,
+            output,
+            cached,
+            reasoning,
+        },
+        usd,
+        unpriced: sandboxes.iter().any(|placed| placed.usd_per_hour.is_none()),
+    })
 }
 
 /// The JSON form of `tokens`, as [`usage_of`] gives it.

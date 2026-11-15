@@ -45,6 +45,7 @@ mod lock;
 mod ls;
 mod reap;
 mod run;
+mod view;
 mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");

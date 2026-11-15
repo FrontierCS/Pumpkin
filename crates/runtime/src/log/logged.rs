@@ -461,7 +461,7 @@ fn read_part<T: DeserializeOwned>(
 }
 
 /// A time or duration in nanoseconds, as a decimal string.
-fn nanos<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+pub(super) fn nanos<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let text = String::deserialize(deserializer)?;
     let nanos = text.parse().map_err(|_| {
         D::Error::invalid_value(de::Unexpected::Str(&text), &"nanoseconds, a decimal string")
