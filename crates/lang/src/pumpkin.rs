@@ -28,7 +28,7 @@ use crate::syntax::{Def, is_name};
 use crate::value::{
     Budget, Builtin, Dict, Entry, ImageId, Key, Kind, Nested, Span, Text, Value, escape, quote,
 };
-use crate::{Label, is_component};
+use crate::{Label, Root, is_component};
 
 /// `MAX_MODEL_REQUESTS_IN_FLIGHT`, as an int of the language.
 #[expect(
@@ -434,12 +434,16 @@ fn image(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<
     let args = build_args(args.as_ref())?;
     let contexts = named(contexts.as_ref())?;
     names_repository(context.path(), context_at)?;
+    let repositories = match context.root() {
+        Root::Task => REPOSITORIES,
+        Root::Library => LIBRARY_REPOSITORIES,
+    };
     let repository = match file.as_str().rsplit_once('/') {
         Some((dir, _)) => {
             names_repository(dir, recipe.span)?;
-            format!("{REPOSITORIES}/{}/{dir}", context.path())
+            format!("{repositories}/{}/{dir}", context.path())
         }
-        None => format!("{REPOSITORIES}/{}", context.path()),
+        None => format!("{repositories}/{}", context.path()),
     };
     let repository = fits(repository, at)?;
     let recipe = Recipe {
@@ -566,16 +570,21 @@ fn build_args(args: Option<&Value>) -> Result<BTreeMap<String, String>, Fault> {
         .collect()
 }
 
-/// The directory that `text`, a path written at `at`, names in the package `package`: `.` is the
-/// package, a path below it is relative to it, and `//` starts one below the root.
+/// The directory that `text`, a path written at `at`, names in the package `package`, below the
+/// task's root: `.` is the package, a path below it is relative to it, `//` starts one below the
+/// root, and `@pumpkin//` one below the standard library's.
 fn directory(package: &str, text: &str, at: Span) -> Result<Label, Fault> {
+    // A root's name, which a component can't start with.
+    if text.starts_with('@') && text.contains("//") {
+        return Label::parse(text).map_err(|message| Fault::new(at, message));
+    }
     let below = match (text, text.strip_prefix("//")) {
         (".", _) => String::from(package),
         (_, Some(rooted)) => String::from(rooted),
         (_, None) if package.is_empty() => String::from(text),
         (_, None) => format!("{package}/{text}"),
     };
-    Label::below(below).ok_or_else(|| {
+    Label::below(Root::Task, below).ok_or_else(|| {
         let message = format!(
             "`{}` names no directory below the root: write `.` for the entry file's directory, a \
              path below it, or `//` and a path below the root, each in `/`-separated components \
@@ -603,13 +612,17 @@ fn in_context(text: &str, at: Span) -> Result<RelativePath, Fault> {
 /// other images on the engine.
 const REPOSITORIES: &str = "pumpkin";
 
+/// The repository below which `image()`'s images of the standard library's directories are
+/// built, so that no task's directory names the repository of one of them.
+const LIBRARY_REPOSITORIES: &str = "pumpkin-library";
+
 /// The most characters that a Docker repository's name, below its registry, may hold.
 // `RepositoryNameTotalLengthMax` in Docker's reference grammar.
 const MAX_REPOSITORY: usize = 255;
 
 /// Refuses `directory`, a path of the directories that hold a recipe, written at `at`, unless
 /// each of them can name a part of a Docker repository, as the recipe's image's repository is
-/// the recipe's directory below the root, below [`REPOSITORIES`].
+/// the recipe's directory below its root, below [`REPOSITORIES`] or [`LIBRARY_REPOSITORIES`].
 fn names_repository(directory: &str, at: Span) -> Result<(), Fault> {
     // Docker's reference grammar's `path-component`: lowercase letters and digits, in runs
     // joined by one `.`, one or two `_`, or any number of dashes.

@@ -19,7 +19,7 @@ use std::path::Path;
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use lang::{Args, Bounds, Declared, Label, Loader, Problems, Recipe};
+use lang::{Args, Bounds, Declared, Label, Loader, Problems, Recipe, Root};
 use schema::ir;
 use schema::workflow::Workflow;
 
@@ -66,10 +66,10 @@ impl<'c> Case<'c> {
     /// `<name>=<value>`.
     /// After a newline that starts it, if one does, and dedented not at all, so that a file's
     /// columns are the editor's, the fixture has a line `#- --arg <name>=<value>` for each
-    /// `--arg`, then a line `#- //<label>` above each file, which holds the lines below it up to
-    /// the next; with no such line, the rest is the file `//text.star`. The first file is the
-    /// entry; a label with no line below it names one of `files` as the entry, the case holding
-    /// none of its text.
+    /// `--arg`, then a line `#- <label>` above each file, `//…` or `@pumpkin//…`, which holds the
+    /// lines below it up to the next; with no such line, the rest is the file `//text.star`. The
+    /// first file is the entry; a label with no line below it names one of `files` as the entry,
+    /// the case holding none of its text.
     fn parse(
         fixture: &'c str,
         files: &'c BTreeMap<String, String>,
@@ -88,10 +88,12 @@ impl<'c> Case<'c> {
         for line in rest.split_inclusive('\n') {
             if line.starts_with("#-") {
                 let label = line.trim_end_matches('\n');
-                let path = (label.strip_prefix("#- //")).unwrap_or_else(|| {
+                let label = (label.strip_prefix("#- ")).unwrap_or_else(|| {
                     panic!("`{label}` is no line of a fixture: write `#- //<label>` above a file")
                 });
-                Label::parse(&format!("//{path}")).unwrap();
+                Label::parse(label).unwrap();
+                // A task's file by its path, as `Sources` reads it, and the library's by its label.
+                let path = label.strip_prefix("//").unwrap_or(label);
                 heads.push((path, at, at + line.len()));
             }
             at += line.len();
@@ -180,7 +182,8 @@ impl Drop for Named<'_> {
     }
 }
 
-/// The files a case holds, then those of `tests/fixtures`, as a loader reads them.
+/// The files a case holds, then those of `tests/fixtures`, as a loader reads them: a task's by its
+/// path, and the standard library's, of which only the case holds any, by its label.
 struct Sources<'s> {
     held: &'s [(&'s str, &'s str)],
     files: &'s BTreeMap<String, String>,
@@ -188,11 +191,14 @@ struct Sources<'s> {
 
 impl Loader for Sources<'_> {
     fn load(&mut self, label: &Label) -> Result<String, String> {
-        let path = label.path();
-        if let Some((_, text)) = self.held.iter().find(|(held, _)| *held == path) {
+        let path = match label.root() {
+            Root::Task => label.path().to_owned(),
+            Root::Library => label.to_string(),
+        };
+        if let Some((_, text)) = self.held.iter().find(|(held, _)| **held == path) {
             return Ok((*text).to_owned());
         }
-        (self.files.get(path).cloned())
+        (self.files.get(&path).cloned())
             .ok_or_else(|| format!("no fixture is at `{path}`: name a file in the fixtures"))
     }
 }
@@ -279,8 +285,13 @@ fn run(
     bounds: Bounds,
     built: &mut Vec<String>,
 ) -> Result<Workflow, Problems> {
-    let entry = Label::parse(&format!("//{path}")).unwrap();
-    let plan = lang::evaluate(&entry, loader, args, bounds)?;
+    // A library's file by its label, as `Case::parse` names it.
+    let entry = if path.starts_with('@') {
+        Label::parse(path)
+    } else {
+        Label::parse(&format!("//{path}"))
+    };
+    let plan = lang::evaluate(&entry.unwrap(), loader, args, bounds)?;
     plan.check(|recipe, contexts| {
         let Recipe {
             context,
@@ -4362,4 +4373,198 @@ X = json.encode(L)"#,
         text.star:1:17: `json.decode` of a string that holds a UTF-16 surrogate of no pair, escaped at offset 1, is not in Pumpkin's Starlark: escape a character outside the Basic Multilingual Plane as a surrogate pair
             1 | X = json.decode('"\\udc8d\\ud83d"')
               |                 ^^^^^^^^^^^^^^^^^^"#]].assert_eq(&shown.join("\n"));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshots"
+)]
+fn labels() {
+    // A task's file loads the standard library's, which loads its own; an image's context and
+    // mounts may be its directories.
+    check(
+        r#"
+#- //tasks/bench/task.star
+load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
+load("@pumpkin//harness/agent.star", "agent")
+
+workflow(name = "neutral/library", roles = [AGENT | {"image": agent()}, JUDGE], score = SCORE)
+#- @pumpkin//harness/agent.star
+load("@pumpkin//harness/names.star", "NAME")
+
+def agent():
+    mount = {"m": "@pumpkin//harness/two"}
+    return image("Dockerfile", context = "@pumpkin//harness/one", mount = mount, args = {"N": NAME})
+#- @pumpkin//harness/names.star
+NAME = "one"
+"#,
+        &expect![[r#"
+            image 1: @pumpkin//harness/one's Dockerfile, with @pumpkin//harness/two at m, with N="one", in pumpkin-library/harness/one
+            building 1
+            {
+              "ir_version": "pumpkin.ir/v0",
+              "name": "neutral/library",
+              "roles": [
+                {
+                  "grants": [
+                    {
+                      "submit": {
+                        "name": "final"
+                      }
+                    }
+                  ],
+                  "image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1",
+                  "name": "agent",
+                  "needs": {
+                    "cpu_millis": 2000,
+                    "memory_bytes": 4294967296
+                  },
+                  "runtime": {
+                    "agent": {
+                      "command": {
+                        "argv": [
+                          "/usr/local/bin/agent"
+                        ],
+                        "cwd": "/workspace"
+                      },
+                      "deadline_seconds": 3600,
+                      "finalize_grace_seconds": 0,
+                      "stdin": "Solve the task in /task/README.md.\n"
+                    }
+                  },
+                  "user": {
+                    "gid": 1000,
+                    "uid": 1000
+                  }
+                },
+                {
+                  "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                  "name": "final_judge",
+                  "needs": {
+                    "cpu_millis": 1000,
+                    "memory_bytes": 536870912
+                  },
+                  "runtime": {
+                    "judge": {
+                      "command": {
+                        "argv": [
+                          "/opt/judge/run"
+                        ],
+                        "cwd": "/pumpkin/home"
+                      },
+                      "result": {
+                        "returns": [
+                          "/score",
+                          "/failure"
+                        ],
+                        "score": "/score"
+                      },
+                      "slots": [
+                        {
+                          "max_bytes": 65536,
+                          "name": "payload"
+                        }
+                      ]
+                    }
+                  },
+                  "user": {
+                    "gid": 65532,
+                    "uid": 65532
+                  }
+                }
+              ],
+              "score": {
+                "role": "final_judge",
+                "slot": "payload",
+                "timeout_seconds": 120
+              }
+            }"#]],
+    );
+    check(
+        r#"
+#- //tasks/bench/task.star
+load("@pumpkin//harness/agent.star", "AGENT")
+#- @pumpkin//harness/agent.star
+load("//lib/parts.star", "AGENT")
+load("@pumpkin//harness/names.star", "NAME")
+"#,
+        &expect![[r#"
+            @pumpkin//harness/agent.star:1:6: `@pumpkin//harness/agent.star`, a file of the standard library, loads `//lib/parts.star`, a task's file, though the standard library depends on no task: load only `@pumpkin//` files in it
+                1 | load("//lib/parts.star", "AGENT")
+                  |      ^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //tasks/bench/task.star
+load("@pumpkin//harness/agent.star", "AGENT")
+#- @pumpkin//harness/agent.star
+AGENT = 1 + "a"
+"#,
+        &expect![[r#"
+            @pumpkin//harness/agent.star:1:11: `+` can't take an int and a string: give it two ints, two strings, two lists or two tuples
+                1 | AGENT = 1 + "a"
+                  |           ^
+                the left operand, `1`, is made at @pumpkin//harness/agent.star:1:9
+                the right operand, `"a"`, is made at @pumpkin//harness/agent.star:1:13"#]],
+    );
+    // `.` in a library's file would name a directory below the task's root.
+    check(
+        r#"
+#- @pumpkin//harness/entry.star
+X = image("Dockerfile", context = ".")
+"#,
+        &expect![
+            "@pumpkin//harness/entry.star: a file of the standard library can't be an entry, whose directory is below the task's root: evaluate a `//` file"
+        ],
+    );
+    check(
+        r#"X = image("Dockerfile", context = "@x")"#,
+        &expect![[r#"
+            text.star:1:35: `@x` names no directory below the root: write `.` for the entry file's directory, a path below it, or `//` and a path below the root, each in `/`-separated components of ASCII letters, digits, `.`, `_` and `-`, none of them empty, `.` or `..`
+                1 | X = image("Dockerfile", context = "@x")
+                  |                                   ^^^^"#]],
+    );
+    check(
+        r#"load("@pumpkin//harness/none.star", "X")"#,
+        &expect![[r#"
+        text.star:1:6: loading `@pumpkin//harness/none.star`: no fixture is at `@pumpkin//harness/none.star`: name a file in the fixtures
+            1 | load("@pumpkin//harness/none.star", "X")
+              |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"load("@other//harness/agent.star", "X")"#,
+        &expect![[r#"
+        text.star:1:6: `@other//harness/agent.star` names a root Pumpkin has none of: start it with `//`, the task's root, or `@pumpkin//`, the standard library's
+            1 | load("@other//harness/agent.star", "X")
+              |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"load("lib//x.star", "X")"#,
+        &expect![[r#"
+        text.star:1:6: `lib//x.star` is no label: start it with `//`, the root
+            1 | load("lib//x.star", "X")
+              |      ^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"load("@pumpkin//../agent.star", "X")"#,
+        &expect![[r#"
+        text.star:1:6: `@pumpkin//../agent.star` is no label: after `@pumpkin//`, write `/`-separated components of ASCII letters, digits, `.`, `_` and `-`, none of them empty, `.` or `..`
+            1 | load("@pumpkin//../agent.star", "X")
+              |      ^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"X = image("Dockerfile", context = "@pumpkin//harness/../one")"#,
+        &expect![[r#"
+            text.star:1:35: `@pumpkin//harness/../one` is no label: after `@pumpkin//`, write `/`-separated components of ASCII letters, digits, `.`, `_` and `-`, none of them empty, `.` or `..`
+                1 | X = image("Dockerfile", context = "@pumpkin//harness/../one")
+                  |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"X = image("Dockerfile", context = "@other//harness")"#,
+        &expect![[r#"
+            text.star:1:35: `@other//harness` names a root Pumpkin has none of: start it with `//`, the task's root, or `@pumpkin//`, the standard library's
+                1 | X = image("Dockerfile", context = "@other//harness")
+                  |                                   ^^^^^^^^^^^^^^^^^"#]],
+    );
 }

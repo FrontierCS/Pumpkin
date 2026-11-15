@@ -3,9 +3,9 @@
 //! args to the plan that they evaluate to, checked with no engine, and on to the workflow that
 //! the plan's images give, built on one.
 //!
-//! What a label or an image names is a path below the root, as `lang::Label` says, and it stays
-//! below the root on disk, as no component on its way from the root may be a symbolic link
-//! ([`Root::reach`]).
+//! What a `//` label or an image names is a path below the root, as `lang::Label` says, and it
+//! stays below the root on disk, as no component on its way from the root may be a symbolic link
+//! ([`Root::reach`]). The standard library, below `@pumpkin//` labels, holds no file here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -233,6 +233,10 @@ impl Root {
         let mut problems = Vec::new();
         let mut reached = Vec::new();
         for dir in iter::once(context).chain(mounts.values()) {
+            if dir.root() == lang::Root::Library {
+                problems.push(no_library(dir));
+                continue;
+            }
             match self.reach(dir.path(), Kind::Directory) {
                 Ok(_) => reached.push(dir),
                 Err(problem) => problems.push(problem),
@@ -304,7 +308,13 @@ impl Root {
             args,
             repository: _,
         } = recipe;
-        let dir = |label: &Label| self.dir.join(label.path());
+        let dir = |label: &Label| match label.root() {
+            lang::Root::Task => self.dir.join(label.path()),
+            lang::Root::Library => unreachable!(
+                "`{label}` is a build's directory, though `Root::recipe` refuses each of the \
+                 standard library's, which holds none, before a build"
+            ),
+        };
         let context = BuildContext {
             dir: Some(dir(context)),
             mounts: (mounts.iter())
@@ -369,8 +379,16 @@ fn named<'b>(contexts: &BTreeMap<&str, &'b Built>) -> BTreeMap<String, &'b Built
 
 impl Loader for Root {
     fn load(&mut self, label: &Label) -> Result<String, String> {
-        self.text(label.path())
+        match label.root() {
+            lang::Root::Task => self.text(label.path()),
+            lang::Root::Library => Err(no_library(label)),
+        }
     }
+}
+
+/// The error of `label`, a place of the standard library, which holds no file here.
+fn no_library(label: &Label) -> String {
+    format!("the standard library holds no file, so `{label}` names nothing: name one below `//`")
 }
 
 /// Refuses `text`, the marker's, unless each of its lines holds a comment or nothing after its

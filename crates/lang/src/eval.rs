@@ -32,7 +32,7 @@ use crate::syntax::{
     Simple, Statement, Target, Unary,
 };
 use crate::value::{Budget, Builtin, Dict, Entry, FileId, Key, Kind, Nested, Span, Text, Value};
-use crate::{Label, Loader};
+use crate::{Label, Loader, Root};
 
 // Two fewer than the 50 frames that starlark-rust's evaluator holds by default: its top level
 // takes one, and so does a builtin or a method that the innermost function calls, so that every
@@ -130,6 +130,12 @@ impl<'l, L: Loader> Evaluation<'l, L> {
     }
 
     pub(crate) fn entry(&mut self, label: &Label) -> Result<(), Vec<Problem>> {
+        // An entry's package, which `.` names in `image()`, is a directory below the task's root.
+        if label.root() == Root::Library {
+            let message = "a file of the standard library can't be an entry, whose directory is \
+                           below the task's root: evaluate a `//` file";
+            return Err(Vec::from([Problem::file(label, message)]));
+        }
         let text = (self.loader.load(label))
             .map_err(|message| Vec::from([Problem::file(label, message)]))?;
         self.open(label, None, text)?;
@@ -185,7 +191,21 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         // levels.
         self.tops.push(Top::default());
         let module = syntax::parse(file, self.sources.text(file))?;
-        let faults = syntax::resolve(&module, file == FileId::ENTRY);
+        let mut faults = syntax::resolve(&module, file == FileId::ENTRY);
+        if label.root() == Root::Library {
+            let task_loads = module
+                .loads
+                .iter()
+                .filter(|load| load.label.root() == Root::Task);
+            faults.extend(task_loads.map(|load| {
+                let message = format!(
+                    "`{label}`, a file of the standard library, loads `{}`, a task's file, though \
+                     the standard library depends on no task: load only `@pumpkin//` files in it",
+                    load.label
+                );
+                Fault::new(load.at, message)
+            }));
+        }
         if !faults.is_empty() {
             return Err(faults.into_iter().map(Problem::At).collect());
         }
