@@ -1,20 +1,10 @@
-//! The leases that lease grants open, the meter they keep, and when the core ends them.
+//! The leases a run has opened, and what each holder has used of them.
 //!
-//! Each lease has a holder ([`Caller`]) whose grant's limits it counts against: a grant's meter
-//! is its holder's, so each call of a judge starts with its grants' limits whole.
+//! A grant's limits count per holder, so each call of a judge starts with its grants' limits
+//! whole. A lease's time counts from when its runner is ready, so the time a runner takes to
+//! start costs its holder nothing.
 //!
-//! A lease counts against its grant's `instances` from when it is accepted until its sandbox is
-//! gone. Its time runs from when its runner is ready, as the runtime observed it, until the core
-//! closes it, or the runtime reports its runner failed. The grant's time left is what it allows
-//! less what its holder's leases have used; each lease that is ready spends it at once
-//! ([`Core::tick_due`]). [`Core`] decides what closes a lease.
-//!
-//! A lease runs one command or transfer at a time, and each counts against its grant's `commands`
-//! once accepted, even if it fails to start. Of its time, it is busy from when the core accepts a
-//! command or transfer until the runtime reports its end, or the core closes the lease, and idle
-//! otherwise.
-//!
-//! The meter is not kept apart: what each grant has used is counted from its leases
+//! What a holder has used of a grant is counted from its leases when asked and never kept apart
 //! ([`Leases::usage`]), so the two can't disagree.
 
 use alloc::format;
@@ -29,7 +19,6 @@ use schema::workflow::LeaseGrantId;
 
 use super::{Action, Caller, Core, LeaseId};
 
-/// The run's leases, each numbered by its index, in the order they were opened.
 #[derive(Debug, Default)]
 pub(super) struct Leases(Vec<Lease>);
 
@@ -38,49 +27,50 @@ pub(super) struct Lease {
     /// Who opened it, and alone may use it.
     pub(super) holder: Caller,
     pub(super) grant: LeaseGrantId,
+    /// Since the run started.
     pub(super) opened: Duration,
-    /// How long it lasts once its runner is ready.
+    /// How long it lasts from when its runner is ready.
     pub(super) life: Duration,
-    /// Which of its grant's instances it is, below the grant's `instances`.
+    /// Which one it is among the grant's leases that have not ended, below the grant's
+    /// `instances` ([`Leases::open`]).
     pub(super) instance: u32,
     pub(super) state: State,
-    /// The commands and transfers accepted.
+    /// The commands and transfers accepted, even if one fails to start; they share one numbering.
     pub(super) commands: u64,
-    /// The last command or transfer accepted, if one was.
     pub(super) last: Option<Work>,
-    /// How long it was busy, until the command or transfer that runs, if one does, began.
+    /// The time it was busy before the work that runs began.
     busy: Duration,
-    /// When the command or transfer that runs began, until it ends, or the lease is closed.
+    /// Since when the work that runs has run, until it ends or the lease is closed.
     working: Option<Duration>,
 }
 
 #[derive(Debug)]
 pub(super) enum State {
-    /// Accepted; its runner is starting.
+    /// Opened; its runner has not started, and no time counts.
     Starting,
-    /// Its runner has been ready since `since`.
+    /// Its runner has been ready since `since`, and its time counts.
     Ready { since: Duration },
-    /// The core closed it, for `end`; its sandbox is being destroyed. `used` is how long its
-    /// runner was ready.
+    /// Closed by the core, for `end`; its runner is being destroyed, and it still holds its
+    /// instance. `used` is the time it counted.
     Closing { used: Duration, end: End },
-    /// Its sandbox is gone.
+    /// Its runner is gone.
     Ended { used: Duration, end: End },
 }
 
 #[derive(Debug)]
 pub(super) enum End {
-    /// Its holder closed it, or its holder's work ended.
+    /// The holder closed it, or the core did as the holder's work ended.
     Closed,
-    /// Its time, or its grant's, ran out.
+    /// Its own life or its grant's cumulative time ran out.
     Expired,
+    /// Its runner failed to start or to run, for the runtime's reason.
     Failed(String),
 }
 
-/// A command or a transfer a lease ran, each with its number among its lease's commands and
-/// transfers, from 0, and how it ended, once the runtime says.
 #[derive(Debug)]
+/// A command or a transfer of a lease, numbered from 0 among them, with its end once the
+/// runtime reports it.
 pub(super) enum Work {
-    /// A command, which ended with the ends of its standard output and error.
     Command {
         number: u64,
         ended: Option<(CommandEnd, String, String)>,
@@ -91,18 +81,17 @@ pub(super) enum Work {
     },
 }
 
-/// What a holder's leases of a grant have used.
 #[derive(Clone, Copy, Debug, Default)]
+/// What a holder's leases of one grant have used.
 pub(super) struct Usage {
-    /// The leases that haven't ended.
+    /// The leases that have not ended, those closing included, which still hold their instances.
     pub(super) open: u32,
-    /// Of them, those the core has closed, whose sandboxes are being removed.
     pub(super) closing: u32,
-    /// The leases whose runners are ready, each of which spends the grant's time.
+    /// Of those open, the ones whose time counts.
     pub(super) ready: u32,
-    /// How long its leases' runners have been ready, until the time asked about.
+    /// The time counted, the ended leases' included.
     pub(super) used: Duration,
-    /// The commands and transfers accepted.
+    /// The commands and transfers accepted, the ended leases' included.
     pub(super) commands: u64,
 }
 
@@ -113,7 +102,7 @@ impl State {
         }
     }
 
-    /// Closes a lease that hasn't been closed, for `end`, and returns whether it did.
+    /// Closes it with `end` and returns whether it did: one closing or ended keeps its end.
     pub(super) fn close(&mut self, at: Duration, end: End) -> bool {
         let used = match *self {
             Self::Starting => Duration::ZERO,
@@ -124,8 +113,8 @@ impl State {
         true
     }
 
-    /// Ends a lease whose sandbox is gone: for the end it was closed for, if the core closed it,
-    /// and else for `end`, its time running until then if its runner was ready.
+    /// Takes the runner as gone. The lease ends with `end` unless it was closing, whose end stays,
+    /// and a ready lease's time counts until `at`.
     pub(super) fn report(&mut self, at: Duration, end: End) {
         self.close(at, end);
         *self = match mem::replace(self, Self::Starting) {
@@ -144,7 +133,6 @@ impl State {
 }
 
 impl Work {
-    /// What it is, by its number, as a refusal names it.
     pub(super) fn name(&self) -> String {
         match self {
             Self::Command { number, .. } => format!("command {number}"),
@@ -161,12 +149,11 @@ impl Work {
 }
 
 impl Lease {
-    /// The command or transfer it runs, if one runs: accepted, and its end not yet reported.
     pub(super) fn running(&self) -> Option<&Work> {
         self.last.as_ref().filter(|work| !work.ended())
     }
 
-    /// Accepts `work`, at `now`, as its next command or transfer, and returns its number.
+    /// Takes in the work that `work` builds from the lease's next number, and returns the number.
     pub(super) fn accept(&mut self, work: impl FnOnce(u64) -> Work, now: Duration) -> u64 {
         let number = self.commands;
         self.commands += 1;
@@ -175,7 +162,7 @@ impl Lease {
         number
     }
 
-    /// Notes that its `number`th command ended at `at`, as `ended` says, if that is its last.
+    // A report of any work but the last changes nothing.
     pub(super) fn command_ended(
         &mut self,
         number: u64,
@@ -193,7 +180,6 @@ impl Lease {
         }
     }
 
-    /// Notes that its `number`th transfer ended at `at`, as `ended` says, if that is its last.
     pub(super) fn transfer_ended(&mut self, number: u64, ended: TransferEnd, at: Duration) {
         if let Some(Work::Transfer {
             number: last,
@@ -216,7 +202,8 @@ impl Lease {
         self.state.report(at, end);
     }
 
-    /// How long it has been busy, and idle, of the time its runner has been ready, until `now`.
+    /// The time the lease was busy, from when work was accepted until its end was reported or the
+    /// lease was closed, and the time it was ready and not busy, up to `now`.
     pub(super) fn busy_idle(&self, now: Duration) -> (Duration, Duration) {
         let working = (self.working).map_or(Duration::ZERO, |since| now.saturating_sub(since));
         let busy = self.busy + working;
@@ -231,8 +218,9 @@ impl Lease {
 }
 
 impl Leases {
-    /// Opens a lease for `holder`, starting, at `now`, under `grant`, to last `life` once ready,
-    /// as the first of its instances that no other open lease of `grant` is.
+    /// Opens a lease, under the lowest instance that no lease of the grant, not yet ended, holds.
+    /// The grant's limits are the caller's to check, and so is that no other holder has a lease of
+    /// the grant that has not ended: the instance is then below the grant's `instances`.
     pub(super) fn open(
         &mut self,
         (holder, grant): (Caller, LeaseGrantId),
@@ -271,7 +259,7 @@ impl Leases {
         (index < self.0.len()).then_some(LeaseId(number))
     }
 
-    /// Closes every lease `which` picks that hasn't been closed, at `now`, and returns them.
+    /// Closes each lease that `which` selects and that is not closing or ended, and returns them.
     pub(super) fn close_where(
         &mut self,
         now: Duration,
@@ -321,7 +309,6 @@ impl Leases {
 impl Index<LeaseId> for Leases {
     type Output = Lease;
 
-    /// The lease `lease`, which the core opened, as [`Leases::open`] or [`Leases::find`] gave it.
     fn index(&self, lease: LeaseId) -> &Lease {
         &self.0[usize::try_from(lease.0).unwrap_or(usize::MAX)]
     }
@@ -334,8 +321,6 @@ impl IndexMut<LeaseId> for Leases {
 }
 
 impl Core<'_> {
-    /// When lease `lease` ends, unless it is closed first, if its runner is ready
-    /// ([`Core::ready_end`]).
     fn lease_end(&self, lease: &Lease) -> Option<Duration> {
         match lease.state {
             State::Ready { since } => Some(self.ready_end(lease, since)),
@@ -343,8 +328,9 @@ impl Core<'_> {
         }
     }
 
-    /// When `lease`, whose runner has been ready since `since`, ends, unless it is closed first:
-    /// at its own time's end, or its grant's time's for its holder, whichever comes first.
+    /// When a ready lease ends, from when its runner was ready, `since`: its life from then, or
+    /// sooner if its grant's cumulative time runs out. What is left of that time is shared equally
+    /// among the holder's ready leases of the grant, so the end moves as leases come and go.
     pub(super) fn ready_end(&self, lease: &Lease, since: Duration) -> Duration {
         let own = since.saturating_add(lease.life);
         let Some(total) = self.workflow.lease_grant(lease.grant).cumulative() else {
@@ -352,9 +338,9 @@ impl Core<'_> {
         };
         let usage = self.leases.usage(lease.grant, lease.holder, self.now);
         let left = total.saturating_sub(usage.used);
-        // Each ready lease spends the time left at once, so it lasts a share of it, rounded up,
-        // so that once the share has passed for each, the time has run out.
         let share = left / usage.ready;
+        // Each ready lease spends the time left at once, so it lasts a share of it, rounded up, so
+        // that once the share has passed for each, the time has run out.
         let share = if share * usage.ready < left {
             share + Duration::from_nanos(1)
         } else {
@@ -363,7 +349,6 @@ impl Core<'_> {
         own.min(self.now.saturating_add(share))
     }
 
-    /// When the first of the leases ends, unless it is closed first.
     pub(super) fn leases_due(&self) -> Option<Duration> {
         (self.leases.0.iter())
             .filter_map(|lease| self.lease_end(lease))
@@ -371,6 +356,8 @@ impl Core<'_> {
     }
 
     pub(super) fn expire_leases(&mut self, actions: &mut Vec<Action>) {
+        // Every end is read before any lease closes: a close changes the others' shares, and leases
+        // that fall due together must expire together.
         let ends: Vec<Option<Duration>> = (self.leases.0.iter())
             .map(|lease| self.lease_end(lease))
             .collect();

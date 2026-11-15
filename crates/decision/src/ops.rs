@@ -1,28 +1,25 @@
 //! Authorizing ops, and the replies to them.
 //!
-//! The core authorizes every op from the raw request ([`Request`]) and refuses, with a reason,
-//! one that fails any of these:
+//! The core authorizes every op from the raw request ([`Request`]), and refuses it, with a
+//! reason that says what to do instead, if it fails any of these:
 //!
-//! - The agent's ops are taken only during the work phase, and refused once a finalize is
-//!   accepted ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)); a
-//!   call's, only while its judge's command runs.
+//! - The agent's ops are taken only during the work phase, and not once a finalize is accepted;
+//!   a call's, only while its judge's command runs.
 //! - An op names a grant its caller's role holds: a judge call one of the agent's judge grants, a
 //!   lease one of its role's lease grants, and a submission the agent's submit grant.
-//! - Its payload isn't empty, and fits its slot's
-//!   [`max_bytes`](schema::ir::Slot::max_bytes), the score's for a submission.
-//! - A judge grant has calls left, none of its calls queued or running, and judge time left.
-//!   A refused call is not charged.
-//! - A lease grant has fewer leases open than its `instances`, and time left, for its caller, and
-//!   a lease asks to last at most its `instance_seconds`; a lease runs a command or a transfer
-//!   once ready, one at a time, while its grant has commands left, a command with a timeout, if
-//!   given, of at most what the lease, and its holder's work, have left.
+//! - Its payload isn't empty, and fits its slot's `max_bytes`, the score's for a submission.
+//! - A judge grant has calls left, none of its calls queued or running, and judge time left. A
+//!   refused call is not charged.
+//! - A lease grant has fewer leases open than its `instances`, and time left, for its caller,
+//!   and a lease asks to last at most its `instance_seconds`; a lease runs a command or a
+//!   transfer once ready, one at a time, while its grant has commands left, a command with a
+//!   timeout, if given, of at most what the lease, and its holder's work, have left.
 //! - A status names one of the caller's jobs, and a lease op one of its leases.
 //!
-//! A judge call that passes becomes a job, run in the background with the timeout that
-//! [`call_timeout_seconds`](schema::ir::JudgeGrant::call_timeout_seconds) describes; a lease, a
-//! command or a transfer runs likewise, as the `leases` module meters it, a transfer within its
-//! grant's [`transfer_bytes`](schema::ir::LeaseGrant::transfer_bytes). Each reply gives the time
-//! left: the agent's until its deadline, a call's until its timeout.
+//! A refused op changes nothing. An op that passes changes the core's state and calls for
+//! [`Action`]s, which follow its reply: a judge call becomes a job, a lease, a command or a
+//! transfer is started and metered by the `leases` module. Each reply gives the time left: the
+//! agent's until its deadline, a call's until its timeout.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -45,9 +42,9 @@ use super::{
     Action, Caller, Core, Direction, JobId, LeaseId, OpId, PayloadRef, Phase, Request, WorkEnd,
 };
 
-/// A caller whose ops the run takes now ([`Core::working`]), with the role whose grants it
-/// holds, and when its work ends, unless it ends it first, as a time since the run started.
 #[derive(Clone, Copy)]
+/// A caller whose ops the run takes now, with the role whose grants it holds, and when its work
+/// ends, unless it ends it first, as a time since the run started.
 pub(super) enum Working {
     /// The agent, in the work phase, which ends at the deadline.
     Agent { role: RoleId, deadline: Duration },
@@ -89,8 +86,6 @@ enum Held {
 }
 
 impl Core<'_> {
-    /// Answers `caller`'s op, and acts on it: the reply comes first, then the actions the op
-    /// calls for.
     pub(super) fn op(
         &mut self,
         op: OpId,
@@ -155,8 +150,6 @@ impl Core<'_> {
         }
     }
 
-    /// Takes `request`, an op of `working`'s caller, and returns its reply, putting in `then` the
-    /// actions to follow it; or why it is refused.
     fn take(
         &mut self,
         working: Working,
@@ -228,7 +221,7 @@ impl Core<'_> {
         }
     }
 
-    /// `caller`'s lease `number`: one it opened.
+    // A lease that another caller holds is refused as one that doesn't exist.
     fn own_lease(&self, caller: Caller, number: u64) -> Result<LeaseId, String> {
         let lease = self.leases.find(number);
         (lease.filter(|lease| self.leases[*lease].holder == caller)).ok_or_else(|| {
@@ -236,8 +229,9 @@ impl Core<'_> {
         })
     }
 
-    /// The status of `caller`'s job `number`: one it made under a judge grant.
     fn own_job(&self, caller: Caller, number: u64) -> Result<StatusReply, String> {
+        // The agent asks only about its calls to judge grants: the final score's job, and any job
+        // it didn't make, are refused as absent.
         let job = JobId(number);
         let found = self
             .jobs
@@ -254,8 +248,8 @@ impl Core<'_> {
         Ok(self.status(job, found, grant))
     }
 
-    /// The time from now until `end`, as a reply gives the time left
-    /// ([`OpsReply::remaining_seconds`]): in whole seconds rounded down, and 0 once it has passed.
+    /// The time from now until `end`, as a reply gives the time left: in whole seconds rounded
+    /// down, and 0 once it has passed.
     fn seconds_left(&self, end: Duration) -> u64 {
         end.saturating_sub(self.now).as_secs()
     }
@@ -280,8 +274,6 @@ impl Core<'_> {
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
     }
 
-    /// Makes a call of grant `id` on `payload`, before the work phase's `deadline`, a job, which
-    /// `then` starts, and returns the reply that names it.
     fn judge(
         &mut self,
         id: JudgeGrantId,
@@ -321,8 +313,8 @@ impl Core<'_> {
         }
         // The work phase's end stops every call (`end_work`), so a call is given at most the time
         // the work phase has left when it is accepted; after a wait in the queue, its timeout can
-        // reach past the deadline, where that stop ends it all the same. Each term is positive:
-        // the work phase ends at the deadline, and every limit is left above zero.
+        // reach past the deadline, where that stop ends it all the same. Each term is positive: the
+        // work phase ends at the deadline, and every limit is left above zero.
         let work_left = deadline.saturating_sub(self.now);
         let judge_left =
             (grant.cumulative()).map_or(Duration::MAX, |total| total.saturating_sub(usage.used));
@@ -341,9 +333,8 @@ impl Core<'_> {
         })
     }
 
-    /// Opens a lease of grant `id` for `caller`, whose work ends at `end`, to last
-    /// `instance_seconds` once ready, if given, or else the grant's own time, which `then` starts,
-    /// and returns the reply that names it.
+    /// Opens a lease of grant `id` for `caller`, whose work ends at `end`, by which the lease's
+    /// runner is to have started.
     fn lease_open(
         &mut self,
         (caller, id): (Caller, LeaseGrantId),
@@ -399,8 +390,9 @@ impl Core<'_> {
         Ok(self.lease_reply(lease))
     }
 
-    /// `caller`'s lease `number`, and since when its runner has been ready, if it may take its
-    /// next command or transfer now, which the caller asked to `act`, as a refusal says it.
+    /// Checks that lease `number` can take work now, and returns it with when its runner became
+    /// ready: the caller holds it, its runner is ready and running nothing, and its grant has
+    /// commands left. `act` ends the advice in a refusal.
     fn idle_lease(
         &self,
         (caller, number): (Caller, u64),
@@ -440,8 +432,6 @@ impl Core<'_> {
         Ok((id, since))
     }
 
-    /// Copies a tree as `direction` says, between the caller's sandbox and the runner of its
-    /// lease `number`, as the lease's next transfer, which `then` starts, and returns the reply.
     fn transfer(
         &mut self,
         (caller, number): (Caller, u64),
@@ -471,9 +461,6 @@ impl Core<'_> {
         Ok(self.lease_reply(id))
     }
 
-    /// Runs `argv` in `caller`'s lease `number`, for at most `timeout_seconds`, if given, as its
-    /// next command, which `then` starts, and returns the reply. `caller`'s work ends at
-    /// `work_end`.
     fn lease_run(
         &mut self,
         (caller, number): (Caller, u64),
@@ -511,10 +498,6 @@ impl Core<'_> {
         Ok(self.lease_reply(id))
     }
 
-    /// Stores a submission of `payload` as the latest, or locks it as the selection if
-    /// `finalize`, settling when the work phase, whose deadline is `deadline`, ends ([`WorkEnd`]),
-    /// and returns the reply, with the time left until then; `then` ends the work phase if the
-    /// grace after a finalize is 0.
     fn submit(
         &mut self,
         finalize: bool,
@@ -527,8 +510,8 @@ impl Core<'_> {
             &payload,
             self.submission_max_bytes(),
         )?;
-        // Ops are taken only while the agent works (`working`): the phase goes on with the
-        // latest submission, or a finalize locks it.
+        // Ops are taken only while the agent works (`working`): the phase goes on with the latest
+        // submission, or a finalize locks it.
         if !finalize {
             self.phase = Phase::Work {
                 latest: Some(payload),
@@ -541,6 +524,7 @@ impl Core<'_> {
         }
         let grace = self.workflow.agent().finalize_grace;
         let grace_end = self.now.saturating_add(grace);
+        // A tie goes to the deadline, which names the end.
         let (end, work_end) = if grace_end < deadline {
             (grace_end, WorkEnd::Finalized)
         } else {
@@ -560,8 +544,7 @@ impl Core<'_> {
         })
     }
 
-    /// The most bytes a submission may hold: the score slot's, so that whatever is selected
-    /// fits it.
+    // The score slot's, so that whatever is selected fits it.
     fn submission_max_bytes(&self) -> NonZeroU64 {
         self.workflow.slot(self.workflow.score().slot).max_bytes()
     }
@@ -569,6 +552,7 @@ impl Core<'_> {
     fn ops(&self, working: Working) -> OpsReply {
         let (caller, role, end) = (working.caller(), working.role(), working.end());
         let agent = matches!(working, Working::Agent { .. });
+        // A call holds no judge or submit grant.
         let judges = (self.workflow.judge_grants())
             .filter(|_| agent)
             .map(|(_, grant)| Grant::Judge(self.judge_grant(grant)));
@@ -708,6 +692,7 @@ impl Core<'_> {
     fn lease_remaining(&self, id: LeaseId) -> LeaseRemaining {
         let lease = &self.leases[id];
         let own = match lease.state {
+            // A lease's life counts from when its runner is ready.
             leases::State::Starting => lease.life,
             leases::State::Ready { since } => {
                 (lease.life).saturating_sub(self.now.saturating_sub(since))
@@ -717,8 +702,7 @@ impl Core<'_> {
         self.grant_remaining((lease.grant, lease.holder), own)
     }
 
-    /// What grant `id` has left of its limits for `holder`, with `own` as a lease's own time
-    /// left.
+    /// What grant `id` has left of its limits for `holder`, with `own` as a lease's own time left.
     fn grant_remaining(
         &self,
         (id, holder): (LeaseGrantId, Caller),
@@ -746,7 +730,6 @@ impl Core<'_> {
 }
 
 impl Held {
-    /// Why naming this grant, `name`, is refused for an op that takes `kind` of grant.
     fn misnamed(&self, name: &Name, kind: &str) -> String {
         let (is, instead) = match self {
             Self::Judge(..) => ("a judge grant", "judge with it"),
@@ -757,7 +740,8 @@ impl Held {
     }
 }
 
-/// The start of `text`, of at most [`REASON_BYTES`], as a lease's status gives a runner's failure.
+// A runner's failure, as a lease's status gives it: the start of `text`, of at most
+// `REASON_BYTES`.
 fn cut(text: &str) -> String {
     let mut end = REASON_BYTES.min(text.len());
     while !text.is_char_boundary(end) {
@@ -766,7 +750,7 @@ fn cut(text: &str) -> String {
     text[..end].to_owned()
 }
 
-/// The command that runs `argv` in lease `lease`, with `timeout`, if given, as a shell takes it.
+// A refusal offers this line to be pasted back, so each word is quoted for a POSIX shell.
 fn rerun(lease: u64, timeout: Option<NonZeroU64>, argv: &Argv) -> String {
     let quoted = |arg: &str| {
         let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&byte);
@@ -785,7 +769,7 @@ fn rerun(lease: u64, timeout: Option<NonZeroU64>, argv: &Argv) -> String {
     )
 }
 
-/// Refuses a payload that is empty, or over `max_bytes`.
+// Refuses a payload that is empty, or over `max_bytes`.
 fn fits(name: &Name, payload: &PayloadRef, max_bytes: NonZeroU64) -> Result<(), String> {
     if payload.size == 0 {
         Err(format!(
