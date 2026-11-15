@@ -664,7 +664,15 @@ fn judged_log() -> Vec<Value> {
             json!([start]),
         )
     };
-    let run = |lease: u64, argv: &[&str]| json!([{ "kind": "run_command", "lease": lease, "command": 0, "argv": argv }]);
+    let ran = |seconds: u64, lease: u64, argv: &[&str]| {
+        let request = json!({ "kind": "lease_run", "lease": lease, "argv": argv });
+        let run = json!([{ "kind": "run_command", "lease": lease, "command": 0 }]);
+        logged(
+            seconds,
+            json!({ "kind": "op_arrived", "request": request }),
+            run,
+        )
+    };
     let ended = |lease: u64, end: Value| json!({ "kind": "command_ended", "lease": lease, "command": 0, "end": end });
     let exited = || json!({ "exited": { "code": 0 } });
     let saw = |sandbox: &str, gpu: &str| json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": [gpu] });
@@ -684,10 +692,11 @@ fn judged_log() -> Vec<Value> {
     let (opened_2, start_2_lease) = open("cpu", 2);
     let (opened_3, start_3_lease) = open("gpu", 3);
     let boxed = json!([{ "kind": "start_lease", "grant": "box", "holder": "job-0", "lease": 0 }]);
-    let put = json!([{
-        "kind": "transfer", "lease": 0, "command": 0, "direction": "put",
-        "from": "/pumpkin/in/payload", "to": "/work/in",
-    }]);
+    let put = json!({ "kind": "op_arrived", "request": {
+        "kind": "lease_put", "lease": 0, "tree": "/pumpkin/in/payload", "to": "/work/in",
+        "replace": false,
+    } });
+    let transfer = json!([{ "kind": "transfer", "lease": 0, "command": 0, "direction": "put" }]);
     let moved = json!({
         "kind": "transfer_ended", "lease": 0, "command": 0,
         "end": { "moved": { "bytes": 1, "entries": 1 } },
@@ -702,7 +711,7 @@ fn judged_log() -> Vec<Value> {
         "kind": "start_judge", "job": 4, "grant": null, "timeout_ns": "900000000000",
     }]);
     let returned = json!({ "raw_score": 49.36 });
-    let finish = json!([{ "kind": "finish", "outcome": judged(49.36, returned.clone()) }]);
+    let finish = json!([{ "kind": "finish" }]);
     let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
     let judge_started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
     let judge_answered = json!({
@@ -727,9 +736,9 @@ fn judged_log() -> Vec<Value> {
         logged(46, of_job("judge_started", 0), none()),
         logged(50, tick(), boxed),
         logged(55, of_lease("lease_ready", 0), none()),
-        logged(56, tick(), put),
+        logged(56, put, transfer),
         logged(57, moved, none()),
-        logged(58, tick(), run(0, &["sh", "-c", "set -e\nprint 7"])),
+        ran(58, 0, &["sh", "-c", "set -e\nprint 7"]),
         logged(62, ended(0, exited()), none()),
         logged(
             100,
@@ -741,12 +750,12 @@ fn judged_log() -> Vec<Value> {
         logged(120, opened_2, start_2_lease),
         logged(126, saw("lease-1", sxm), none()),
         logged(126, of_lease("lease_ready", 1), none()),
-        logged(130, tick(), run(1, &["nvidia-smi"])),
+        ran(130, 1, &["nvidia-smi"]),
         logged(132, ended(1, exited()), none()),
         logged(140, closing, json!([close(1)])),
         logged(145, of_lease("lease_ended", 1), none()),
         logged(150, of_lease("lease_ready", 2), none()),
-        logged(151, tick(), run(2, &["sleep", "60"])),
+        ran(151, 2, &["sleep", "60"]),
         logged(181, ended(2, json!("timed_out")), none()),
         logged(200, asked_1, start_1),
         logged(260, failed(1, unstarted), none()),
@@ -762,7 +771,7 @@ fn judged_log() -> Vec<Value> {
         logged(500, opened_3, start_3_lease),
         logged(505, saw("lease-3", "NVIDIA A100 80GB PCIe"), none()),
         logged(505, of_lease("lease_ready", 3), none()),
-        logged(506, tick(), run(3, &["true"])),
+        ran(506, 3, &["true"]),
         logged(507, ended(3, exited()), none()),
         logged(565, tick(), json!([close(3)])),
         logged(570, of_lease("lease_ended", 3), none()),

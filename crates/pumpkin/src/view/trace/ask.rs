@@ -380,15 +380,15 @@ fn exchange_bytes(
     request: u64,
     part: Side,
 ) -> Result<Answer, Failed> {
-    let Some(said) = exchanges.by_request.get(&request) else {
+    if !exchanges.by_request.contains_key(&request) {
         return Err(Failed::NotFound(format!(
             "run {}'s log names no model request {request}",
             record.id()
         )));
-    };
+    }
     let bytes = match part {
         Side::Request => record.model_request(request),
-        Side::Response => record.model_response(request, &said.event()["kept"]["response"]),
+        Side::Response => record.model_response(request),
     };
     let bytes = bytes.map_err(Failed::NotFound)?;
     Ok(Answer::Bytes(Response::bytes(

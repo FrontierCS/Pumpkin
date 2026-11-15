@@ -20,9 +20,9 @@
 //! digest, and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
 //! anything longer; a status's job, a number the agent gave, is a decimal string too. A `caller`
 //! or `holder` is its sandbox's name in the run, `agent`, or `job-<n>` for job `n`'s call.
-//! `start_judge` names the agent's grant of the call, or `null` for the score, `start_lease` the
-//! lease's grant; a `transfer` gives its paths, and its `transfer_ended` its sizes, never what it
-//! moved. A reply is the [`OpReply`] sent, but a `status` or `lease_status` one by its kind alone.
+//! `start_judge` names the agent's grant of the call, `null` for the score, `start_lease` the
+//! lease's; the op's request gives a command's argv and a transfer's paths, never what moved.
+//! A reply, to the line's op, is the [`OpReply`] sent, a `status` or `lease_status` by kind alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -437,15 +437,14 @@ fn event_json(event: &Event) -> Value {
             lease,
             command,
             end,
-            stdout,
-            stderr,
+            // The command's output files in the record hold the same bytes.
+            stdout: _,
+            stderr: _,
         } => json!({
             "kind": "command_ended",
             "lease": lease.0,
             "command": command,
             "end": end,
-            "stdout": stdout,
-            "stderr": stderr,
         }),
         Event::TransferEnded {
             lease,
@@ -531,7 +530,7 @@ fn request_json(request: &Request) -> Value {
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
         Action::StartAgent => json!({ "kind": "start_agent" }),
-        Action::Reply { op, reply } => {
+        Action::Reply { op: _, reply } => {
             // A poll's reply says how a job or a lease stood, which the job's and the lease's own
             // events in the log say too.
             let reply = match reply {
@@ -543,7 +542,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
                 | OpReply::Lease(_)
                 | OpReply::Refused { .. } => json!(reply),
             };
-            json!({ "kind": "reply", "op": op.0, "reply": reply })
+            json!({ "kind": "reply", "reply": reply })
         }
         Action::StartJudge {
             job,
@@ -578,13 +577,12 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         Action::RunCommand {
             lease,
             command,
-            argv,
+            argv: _,
             timeout,
         } => json!({
             "kind": "run_command",
             "lease": lease.0,
             "command": command,
-            "argv": argv,
             "timeout_ns": timeout.map(nanos),
         }),
         Action::Transfer {
@@ -594,28 +592,23 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             direction,
             max_bytes,
         } => {
-            let (direction, from, to) = match direction {
-                decision::Direction::Put { tree, to, replace } if *replace => {
-                    (Direction::Replace, tree, to)
-                }
-                decision::Direction::Put { tree, to, .. } => (Direction::Put, tree, to),
-                decision::Direction::Get { from, to } => (Direction::Get, from, to),
+            let direction = match direction {
+                decision::Direction::Put { replace: true, .. } => Direction::Replace,
+                decision::Direction::Put { replace: false, .. } => Direction::Put,
+                decision::Direction::Get { .. } => Direction::Get,
             };
             json!({
                 "kind": "transfer",
                 "lease": lease.0,
                 "transfer": transfer,
                 "direction": direction,
-                "from": from,
-                "to": to,
                 "max_bytes": max_bytes,
             })
         }
         Action::CloseLease { lease } => json!({ "kind": "close_lease", "lease": lease.0 }),
         Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),
-        Action::Finish { outcome } => {
-            json!({ "kind": "finish", "outcome": outcome_json(outcome) })
-        }
+        // `outcome.json` holds the outcome.
+        Action::Finish { outcome: _ } => json!({ "kind": "finish" }),
         Action::Abandon => json!({ "kind": "abandon" }),
     }
 }
@@ -865,6 +858,36 @@ pub enum Work {
         to: String,
         end: Option<TransferEnd>,
     },
+}
+
+impl Work {
+    fn asked(request: &logged::Request) -> Option<Self> {
+        match request {
+            logged::Request::LeaseRun { argv } => Some(Self::Command {
+                argv: argv.clone(),
+                end: None,
+            }),
+            logged::Request::LeasePut { tree, to, replace } => Some(Self::Transfer {
+                direction: if *replace {
+                    Direction::Replace
+                } else {
+                    Direction::Put
+                },
+                from: tree.clone(),
+                to: to.clone(),
+                end: None,
+            }),
+            logged::Request::LeaseGet { from, to } => Some(Self::Transfer {
+                direction: Direction::Get,
+                from: from.clone(),
+                to: to.clone(),
+                end: None,
+            }),
+            logged::Request::LeaseOpen { .. }
+            | logged::Request::LeaseClose
+            | logged::Request::Other => None,
+        }
+    }
 }
 
 impl LeaseSpan {
@@ -1548,14 +1571,28 @@ impl Reading {
             Some(logged::Request::LeaseOpen { instance_seconds }) => {
                 instance_seconds.map(Duration::from_secs)
             }
-            Some(logged::Request::LeaseClose | logged::Request::Other) | None => None,
+            Some(
+                logged::Request::LeaseRun { .. }
+                | logged::Request::LeasePut { .. }
+                | logged::Request::LeaseGet { .. }
+                | logged::Request::LeaseClose
+                | logged::Request::Other,
+            )
+            | None => None,
         };
+        let mut work = request.and_then(Work::asked);
         if let Some(note) = &line.note
             && note.starts_with("collected from the agent's sandbox")
         {
             self.agent.sandbox.gone = Some(at);
         }
         for action in &line.actions {
+            if let logged::Action::RunCommand { lease } | logged::Action::Transfer { lease } =
+                action
+                && let Some(work) = work.take()
+            {
+                self.lease_ran(at, *lease, work);
+            }
             self.action(at, action, (closed, ended), roles);
             if let (Some(asked), logged::Action::StartLease { lease, .. }) = (asked, action)
                 && let Some(lease) = self.lease(*lease)
@@ -1942,7 +1979,6 @@ impl Reading {
     /// Takes in `action`, which the core decided on at `at`, in a run whose roles are `roles`;
     /// a lease it closes is `closed`, but one that the judge call of job `ended`, which ended,
     /// holds.
-    #[expect(clippy::too_many_lines, reason = "one arm per kind of action")]
     fn action(
         &mut self,
         at: Duration,
@@ -1987,27 +2023,6 @@ impl Reading {
                 holder,
                 grant,
             } => self.open_lease(at, *lease, *holder, grant, roles),
-            logged::Action::RunCommand { lease, argv } => {
-                let command = Work::Command {
-                    argv: argv.clone(),
-                    end: None,
-                };
-                self.lease_ran(at, *lease, command);
-            }
-            logged::Action::Transfer {
-                lease,
-                direction,
-                from,
-                to,
-            } => {
-                let transfer = Work::Transfer {
-                    direction: *direction,
-                    from: from.clone(),
-                    to: to.clone(),
-                    end: None,
-                };
-                self.lease_ran(at, *lease, transfer);
-            }
             logged::Action::CloseLease { lease } => {
                 if let Some(lease) = self.lease(*lease) {
                     let closed = match lease.holder {
@@ -2021,7 +2036,12 @@ impl Reading {
                 self.work_end.get_or_insert(at);
             }
             logged::Action::Finish | logged::Action::Abandon => self.end = Some(at),
-            logged::Action::StartAgent | logged::Action::Reply | logged::Action::Unknown => {}
+            // Its work is its op's request's, which `take` reads.
+            logged::Action::RunCommand { .. }
+            | logged::Action::Transfer { .. }
+            | logged::Action::StartAgent
+            | logged::Action::Reply
+            | logged::Action::Unknown => {}
         }
     }
 

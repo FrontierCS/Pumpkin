@@ -342,7 +342,7 @@ impl Trace {
         };
         let step = &mut self.steps[index];
         step.api = Some(api);
-        if let Ok(bytes) = record.model_response(step.request, &Value::Null) {
+        if let Ok(bytes) = record.model_response(step.request) {
             let reply = read::answer(api, &bytes);
             (step.answer, step.stop, step.whole) = (reply.items, reply.stop, reply.whole);
         }
@@ -376,7 +376,7 @@ impl Trace {
         };
         match &kept["response"] {
             Value::Null => step.notes.push("its response was not kept".to_owned()),
-            response => match record.model_response(request, response) {
+            _ => match record.model_response(request) {
                 Ok(bytes) => {
                     let reply = read::answer(api, &bytes);
                     (step.answer, step.stop, step.whole) = (reply.items, reply.stop, reply.whole);
@@ -390,7 +390,7 @@ impl Trace {
             step.notes.push("its request was not kept".to_owned());
             return false;
         }
-        match record.kept_request(&kept["request"]) {
+        match record.kept_request(request, &kept["request"]) {
             Ok(kept) => {
                 self.read(index, api, kept, record);
                 true

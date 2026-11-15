@@ -3352,14 +3352,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308220, end: 308220
+            next: 308287, end: 308287
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "agent"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 308220"#]],
+            state: "finished", end: 308287"#]],
     );
 }
 
@@ -3389,7 +3389,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: it ended before it replied in full; `ssh` ended with exit status: 255; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308220, end: 308220"#]],
+            next: 308287, end: 308287"#]],
     );
 }
 

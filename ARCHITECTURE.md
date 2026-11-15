@@ -556,8 +556,10 @@ the `record` module lays out: the arguments that started it, the IR, the provide
 (`log.jsonl`), each accepted payload by its digest, each sandbox's report, console, outputs and
 logs, each model exchange, and `outcome.json`. The run log holds each event that the core decided
 on, with the actions it took, timed as the runtime observed it, so a run can be read back event by
-event. A reader takes the log in typed parts, each whole or not at all: a part that this build
-can't read is listed as unread (`Readout`), so no content of the log fails a read.
+event. It holds each fact once, and leaves to their own files what the record keeps elsewhere: a
+command's output, a model exchange's bodies and the outcome. A reader takes the log in typed parts,
+each whole or not at all: a part that this build can't read is listed as unread (`Readout`), so no
+content of the log fails a read.
 
 The record is written as the run goes, and each file is synced through the `Host`. The run log
 only grows, a whole line at a time, and `ir.json` and `provider.json` are written before it and

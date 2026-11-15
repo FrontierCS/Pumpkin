@@ -251,12 +251,25 @@ impl Event {
 }
 
 /// An op's request, by its `kind`, as far as a lease's readers read it: a lease's open, with
-/// the life its holder asked for, if it did, and its close.
+/// the life its holder asked for, if it did, the command or the transfer it asks to run, and its
+/// close.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Request {
     LeaseOpen {
         instance_seconds: Option<u64>,
+    },
+    LeaseRun {
+        argv: Vec<String>,
+    },
+    LeasePut {
+        tree: String,
+        to: String,
+        replace: bool,
+    },
+    LeaseGet {
+        from: String,
+        to: String,
     },
     LeaseClose,
     /// Any other op.
@@ -345,15 +358,13 @@ pub(super) enum Action {
         holder: Option<Caller>,
         grant: String,
     },
+    /// A command's start, of the line's op's request.
     RunCommand {
         lease: u64,
-        argv: Vec<String>,
     },
+    /// A transfer's start, of the line's op's request.
     Transfer {
         lease: u64,
-        direction: Direction,
-        from: String,
-        to: String,
     },
     CloseLease {
         lease: u64,

@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -337,10 +337,10 @@ impl<C: Clock> Exchange<C> {
         }
     }
 
-    /// What the run log's `model_answered` says of where it is kept so far: `{"request": {"path":
-    /// p, "bytes": b, "body_bytes": s, "body_sha256": h, "items": {"field": f, "count": c},
-    /// "whole": [w], "dropped_headers": [d]}, "response": {"path": p, "bytes": b}}`, each part once
-    /// it has bytes, with the paths below the record: `s` the size of the request's body and `h`
+    /// What the run log's `model_answered` says of how the exchange is kept so far: `{"request":
+    /// {"bytes": b, "body_bytes": s, "body_sha256": h, "items": {"field": f, "count": c}, "whole":
+    /// [w], "dropped_headers": [d]}, "response": {"bytes": b}}`, each part once it has bytes, `b`
+    /// the size of its file ([`kept_file`]): `s` the size of the request's body and `h`
     /// its SHA-256's 64 hexadecimal digits, `items` the field whose `c` items are kept apart, if
     /// any, `whole` the fields kept whole, in their API's order, if any, and `dropped_headers` the
     /// names of the request's headers that the route left behind ([`Keep::dropped_headers`]), if
@@ -349,8 +349,7 @@ impl<C: Clock> Exchange<C> {
         let mut kept = json!({});
         for part in [&self.request, &self.response] {
             if part.file.borrow().is_some() {
-                let path = format!("model/{}.{}", self.number, part.name);
-                kept[part.name] = json!({ "path": path, "bytes": part.bytes.get() });
+                kept[part.name] = json!({ "bytes": part.bytes.get() });
             }
         }
         if let (Some(body), Some(request)) = (&*self.body.borrow(), kept.get_mut("request")) {
@@ -402,9 +401,7 @@ impl<C: Clock> Exchange<C> {
         let written = match &mut *file {
             Some(file) => file.write_all(bytes),
             None => fs::create_dir_all(&self.dir)
-                .and_then(|()| {
-                    File::create_new(self.dir.join(format!("{}.{}", self.number, part.name)))
-                })
+                .and_then(|()| File::create_new(self.dir.join(file_name(self.number, part.name))))
                 .and_then(|made| file.insert(made).write_all(bytes)),
         };
         match written {
@@ -487,7 +484,7 @@ pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, Str
     let Some(Value::Object(kept)) = kept else {
         return Err(format!("the run log names no kept model request {number}"));
     };
-    let body = rebuilt_body(record, &kept)?;
+    let body = rebuilt_body(record, number, &kept)?;
     if let Some(sent) = kept.get("body_sha256") {
         let rebuilt = sha256(&body);
         if sent.as_str() != Some(rebuilt.hex()) {
@@ -504,11 +501,11 @@ pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, Str
     Ok(body)
 }
 
-/// The body of the request that `kept`, its run log's `kept.request`, names in the record at
-/// `record`.
-fn rebuilt_body(record: &Path, kept: &Map<String, Value>) -> Result<Vec<u8>, String> {
-    let Some(parts) = kept_parts(record, kept)? else {
-        let path = kept_path(record, kept)?;
+/// The body of model request `number`, whose run log's `kept.request` is `kept`, in the record
+/// at `record`.
+fn rebuilt_body(record: &Path, number: u64, kept: &Map<String, Value>) -> Result<Vec<u8>, String> {
+    let Some(parts) = kept_parts(record, number, kept)? else {
+        let path = kept_file(record, number, "request")?;
         return fs::read(&path).context(path.display());
     };
     let resolved = |part: KeptPart| match part {
@@ -555,19 +552,16 @@ pub enum KeptPart {
     Sent(Value),
 }
 
-/// The path of the file that `kept`, its run log's `kept.request` or `kept.response`, names in
-/// the record at `record`, or the refusal of a path that may leave the record: one that is
-/// absolute, that holds `..`, or that is a symbolic link, is the record's damage.
-pub(super) fn kept_path(record: &Path, kept: &Map<String, Value>) -> Result<PathBuf, String> {
-    let path = Path::new(kept.get("path").and_then(Value::as_str).unwrap_or_default());
-    let below = (path.components()).all(|part| matches!(part, Component::Normal(_)));
-    if !below || path.as_os_str().is_empty() {
-        return Err(format!(
-            "the run log names the kept file `{}`: expected a path below the record",
-            path.display()
-        ));
-    }
-    linked(record.join(path))
+/// The name of the file in `model/` that keeps `part`, `request` or `response`, of model
+/// exchange `number`.
+fn file_name(number: u64, part: &str) -> String {
+    format!("{number}.{part}")
+}
+
+/// The path of the file in the record at `record` that keeps `part`, `request` or `response`, of
+/// model exchange `number`, or the refusal of a symbolic link there, which is the record's damage.
+pub(super) fn kept_file(record: &Path, number: u64, part: &str) -> Result<PathBuf, String> {
+    linked(record.join("model").join(file_name(number, part)))
 }
 
 /// `path`, or the refusal of a symbolic link, which may lead out of the record.
@@ -583,24 +577,17 @@ fn linked(path: PathBuf) -> Result<PathBuf, String> {
 
 /// The bytes of model request `number`'s response in the record at `record`, as
 /// [`Record::model_response`](super::Record::model_response) gives them.
-pub(super) fn kept_response(record: &Path, number: u64, kept: &Value) -> Result<Vec<u8>, String> {
-    let path = match kept {
-        Value::Null => linked(record.join(format!("model/{number}.response")))?,
-        Value::Object(kept) => kept_path(record, kept)?,
-        other => {
-            return Err(format!(
-                "the run log's `kept.response` is {other}: expected an object"
-            ));
-        }
-    };
+pub(super) fn kept_response(record: &Path, number: u64) -> Result<Vec<u8>, String> {
+    let path = kept_file(record, number, "response")?;
     fs::read(&path).context(path.display())
 }
 
-/// The parts of the body of the request that `kept`, its run log's `kept.request`, names in the
-/// record at `record`, as [`Record::kept_request`](super::Record::kept_request) says; `None` if
-/// the record kept none of them apart, so its file holds the body as it went.
+/// The parts of the body of model request `number`, whose run log's `kept.request` is `kept`, in
+/// the record at `record`, as [`Record::kept_request`](super::Record::kept_request) says; `None`
+/// if the record kept none of them apart, so its file holds the body as it went.
 pub(super) fn kept_parts(
     record: &Path,
+    number: u64,
     kept: &Map<String, Value>,
 ) -> Result<Option<KeptRequest>, String> {
     // A record names the fields it kept apart, so a field that a client sent as a digest's text
@@ -613,7 +600,7 @@ pub(super) fn kept_parts(
     if items.is_none() && whole.is_empty() {
         return Ok(None);
     }
-    let path = kept_path(record, kept)?;
+    let path = kept_file(record, number, "request")?;
     let bytes = fs::read(&path).context(path.display())?;
     let unkept = |what: &str| {
         format!(
