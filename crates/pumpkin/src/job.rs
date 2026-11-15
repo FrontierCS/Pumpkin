@@ -286,18 +286,22 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
 }
 
 /// Follows run `id` for a client, as `pumpkin wait` does, saying its milestones until it ends,
-/// but none of its ending; then exits [`ENDED`].
+/// but none of its ending; then exits [`ENDED`]. Fails at the first line that can't be written.
 pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
     let runs = crate::default_runs()?;
     let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
     if record.ending()?.is_none() {
         // Of the client's `wait` or `run --wait`, which it doesn't know, and whose record is the
         // copy that the client names as it ends.
-        say(format_args!(
+        crate::tell(format_args!(
             "following run {}: ending this command does not stop it",
             record.id()
-        ));
-        crate::followed(&record)?;
+        ))
+        .context(format_args!(
+            "telling the client of run {} failed",
+            record.id()
+        ))?;
+        crate::followed(&record, crate::Reader::Follower)?;
     }
     Ok(ExitCode::from(ENDED))
 }

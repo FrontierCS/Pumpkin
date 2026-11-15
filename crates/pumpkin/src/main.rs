@@ -183,7 +183,7 @@ fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<ExitCode, Strin
                 // Whether the run is still live by now depends on how fast it went, which tells
                 // the operator nothing: `run` follows the run it started however soon it ends.
                 following(&record, "run");
-                let ending = followed(&record)?;
+                let ending = followed(&record, reader)?;
                 return end(&record, &ending, named, record.args());
             }
             if reader == Reader::Operator {
@@ -1088,7 +1088,7 @@ fn follow(record: &Record, command: &str, runs: Option<&str>) -> Result<ExitCode
         ending
     } else {
         following(record, command);
-        followed(record)?
+        followed(record, Reader::Operator)?
     };
     end(record, &ending, runs, record.args())
 }
@@ -1099,26 +1099,39 @@ const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
 /// says each of its milestones meanwhile, as its log records it ([`progress::milestones`]), and,
-/// once, the parts of its log that can't be read, if any ([`progress::unread`]).
-fn followed(record: &Record) -> Result<Ending, String> {
+/// once, the parts of its log that can't be read, if any ([`progress::unread`]), to `reader`.
+/// Fails if a follower can't be told.
+fn followed(record: &Record, reader: Reader) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
     let mut said_unread = false;
     let mut log = record.fold();
+    let tell_reader = |message: &dyn fmt::Display| match reader {
+        Reader::Operator => {
+            say(message);
+            Ok(())
+        }
+        // Its standard error is a connection's end, so a write that fails says that the other end
+        // has closed, and nothing else would end this loop before the run does.
+        Reader::Follower => tell(message).context(format_args!(
+            "telling the client of run {} failed",
+            record.id()
+        )),
+    };
     loop {
         // How it ended first, so that the log read after holds every milestone before the end.
         let ending = record.ending()?;
         if let Some(started_over) = log.take()? {
-            say(format_args!("run {}: {started_over}", record.id()));
+            tell_reader(&format_args!("run {}: {started_over}", record.id()))?;
         }
         let runtime::Readout { progress, unread } = log.readout()?;
         if !said_unread && let Some(unread) = progress::unread(&unread) {
-            say(format_args!("run {}: {unread}", record.id()));
+            tell_reader(&format_args!("run {}: {unread}", record.id()))?;
             said_unread = true;
         }
         if let Some(progress) = progress {
             for milestone in progress::milestones(&progress) {
                 if said.insert(milestone.clone()) {
-                    say(milestone);
+                    tell_reader(&milestone)?;
                 }
             }
         }
@@ -1546,9 +1559,16 @@ fn advise(to: &str, command: &str) {
     say(format_args!("to {to}: {command}"));
 }
 
-/// Writes `message` to standard error, as `pumpkin: <message>`.
+/// Writes `message` to standard error, as [`tell`] does, but drops the error of a write that
+/// fails, as [`to_stderr`] does.
 fn say(message: impl fmt::Display) {
-    to_stderr(format!("pumpkin: {message}\n").as_bytes());
+    let _ = tell(message);
+}
+
+/// Writes `message` to standard error, as `pumpkin: <message>`, and returns the error of a write
+/// that fails.
+fn tell(message: impl fmt::Display) -> io::Result<()> {
+    io::stderr().write_all(format!("pumpkin: {message}\n").as_bytes())
 }
 
 /// Writes `bytes` to standard error.
