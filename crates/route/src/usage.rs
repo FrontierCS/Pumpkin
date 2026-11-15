@@ -32,56 +32,13 @@ pub(crate) const CHAT_FIELDS: Fields = [
 
 /// Whether an event of an API's stream is the model's output: the first that is marks the
 /// stream's first token.
-// As deepseek-harness's `isTokenDelta` takes a chunk for the first token: a delta of text,
-// reasoning or a call's arguments that is not empty, or a call's delta that names it,
-// https://github.com/deepseek-ai/deepseek-harness/blob/39163dd30f703a79079e2d2446545cff3c453738/packages/llm/llm/src/assistant-stream.ts#L242-L258
 pub(crate) type Output = fn(&Value) -> bool;
 
-/// A Responses event that is output: a delta that is not empty, of text, a refusal, reasoning,
-/// or a call's arguments or input, or the item added of a call, which names it before its
-/// arguments come.
-// A custom tool call, such as Codex's `apply_patch`, streams as its item added and its input's
-// deltas, as Codex reads them:
-// https://github.com/openai/codex/blob/09db085f9456c608a7960fdd4c5c55a34c6a84ea/codex-rs/codex-api/src/sse/responses.rs#L399-L408
-pub(crate) fn responses_output(event: &Value) -> bool {
-    match event["type"].as_str() {
-        Some(
-            "response.output_text.delta"
-            | "response.refusal.delta"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_summary_text.delta"
-            | "response.function_call_arguments.delta"
-            | "response.custom_tool_call_input.delta",
-        ) => event["delta"]
-            .as_str()
-            .is_some_and(|delta| !delta.is_empty()),
-        Some("response.output_item.added") => {
-            matches!(
-                event["item"]["type"].as_str(),
-                Some("function_call" | "custom_tool_call")
-            )
-        }
-        _ => false,
-    }
-}
-
-/// A Chat Completions chunk that is output: one whose choice's delta holds content or reasoning
-/// that is not empty, or a tool call that is named or has arguments; a delta that only names its
-/// role, or holds empty content, isn't.
-// Providers name the reasoning `reasoning_content` (DeepSeek, Z.ai) or `reasoning` (OpenRouter).
-pub(crate) fn chat_output(event: &Value) -> bool {
-    let said = |value: &Value| value.as_str().is_some_and(|text| !text.is_empty());
-    let choices = event["choices"].as_array().into_iter().flatten();
-    choices.map(|choice| &choice["delta"]).any(|delta| {
-        let calls = delta["tool_calls"].as_array().into_iter().flatten();
-        let call = |call: &Value| {
-            call["function"]["name"].is_string() || said(&call["function"]["arguments"])
-        };
-        ["content", "reasoning_content", "reasoning"]
-            .into_iter()
-            .any(|field| said(&delta[field]))
-            || calls.into_iter().any(call)
-    })
+/// The event that `line`, one line of a server-sent stream without its end, holds: the JSON of
+/// its `data:` field, if it holds one.
+pub(crate) fn event(line: &[u8]) -> Option<Value> {
+    let data = line.strip_prefix(b"data:")?.trim_ascii();
+    serde_json::from_slice(data).ok()
 }
 
 /// The tokens that a model response reports it used, as its provider counts them.
@@ -222,8 +179,7 @@ impl Scan {
         let Some(held) = self.held.replace(Vec::new()) else {
             return;
         };
-        let data = held.strip_prefix(b"data:").map(<[u8]>::trim_ascii);
-        let Some(event) = data.and_then(|data| serde_json::from_slice::<Value>(data).ok()) else {
+        let Some(event) = event(&held) else {
             return;
         };
         self.usage = Usage::of(&event, self.fields).or(self.usage);

@@ -33,7 +33,7 @@ use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
 
 use super::upstream::Answer;
-use super::usage;
+use super::{read, usage};
 use crate::Apart;
 
 // Each is one the harness the runs use sends, and describes its client, its session, or the form
@@ -88,8 +88,8 @@ struct Rules {
     apart: Apart,
     /// Where a response's usage gives its tokens.
     usage: usage::Fields,
-    /// Which events of a response's stream are the model's output.
-    output: usage::Output,
+    /// The API, whose reader says which events of a response's stream are the model's output.
+    api: Api,
     /// Refuses a body that keeps state on the provider's side, or refers to state kept there.
     stored: fn(&Map<String, Value>) -> Result<(), Refusal>,
     /// Refuses a body that picks a feature of the provider's beyond its models and tools.
@@ -109,7 +109,7 @@ const RESPONSES: Rules = Rules {
         whole: &["tools", "instructions"],
     },
     usage: usage::RESPONSES_FIELDS,
-    output: usage::responses_output,
+    api: Api::Responses,
     stored: stateless,
     feature: picks_no_feature,
     tool: client_tool,
@@ -123,7 +123,7 @@ const CHAT: Rules = Rules {
         whole: &["tools"],
     },
     usage: usage::CHAT_FIELDS,
-    output: usage::chat_output,
+    api: Api::Chat,
     stored: stores_nothing,
     feature: searches_nothing,
     tool: function_tool,
@@ -273,7 +273,7 @@ impl Closed {
     }
 
     pub(crate) fn output(&self) -> usage::Output {
-        self.rules.output
+        read::dialect(self.rules.api).output
     }
 
     /// `answered`, the model that a response says answered the request, as the request named

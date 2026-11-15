@@ -19,6 +19,8 @@ use stdx::Deadline;
 use test_support::HUNG;
 use test_support::http::{read_request, write_chunk};
 
+use super::kept::{CHAT_STREAM, RESPONSES_CUT, RESPONSES_STREAM};
+use super::read::CHAT_CUSTOM;
 use super::{Request, chat, fake_sandbox, meeting, models, next_model_request, post};
 
 const KEY: &str = "sk-test-0123\n";
@@ -206,15 +208,20 @@ fn unanswered(name: &'static str) -> Case {
     }
 }
 
+/// Checks what came of each case against `expect`.
+fn check(cases: &[Case], expect: &Expect) {
+    expect.assert_eq(&exchanged(cases));
+}
+
 /// Makes each case's upstream, and through each that it makes, forwards the request of a client
 /// of the case's API, sent by a sandbox whose route allows `m-large` and `m-small`, to the
-/// stand-in, answering by a deadline that only a hang reaches. Checks what came of each against
-/// `expect`.
+/// stand-in, answering by a deadline that only a hang reaches, and shows what came of each, a
+/// line each.
 #[expect(
     clippy::too_many_lines,
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
-fn check(cases: &[Case], expect: &Expect) {
+fn exchanged(cases: &[Case]) -> String {
     // Kept if the test fails.
     let dir = tempfile::Builder::new()
         .prefix(&format!("route-{}-", thread::current().name().unwrap()))
@@ -291,9 +298,9 @@ fn check(cases: &[Case], expect: &Expect) {
         })
         .collect();
     let shown = lines.join("\n").replace(&address, "<stand-in>");
-    expect.assert_eq(&shown.replace(&dir.display().to_string(), "<dir>"));
     drop(session);
-    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    shown.replace(&dir.display().to_string(), "<dir>")
 }
 
 /// Serves `case`'s request, and its second if it has one, with `entry`, and returns how it
@@ -667,4 +674,55 @@ fn shutdown() {
             r#"a request in flight: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: None, request_id: None, status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false"#
         ]],
     );
+}
+
+#[test]
+fn first_output_as_read() {
+    let streams = [
+        ("a stream", Api::Responses, RESPONSES_STREAM),
+        ("a stream broken off", Api::Responses, RESPONSES_CUT),
+        ("a stream of Chat Completions", Api::Chat, CHAT_STREAM),
+        ("a custom call of Chat Completions", Api::Chat, CHAT_CUSTOM),
+    ];
+    let mut cases = Vec::new();
+    let mut read = Vec::new();
+    for (name, api, stream) in streams {
+        let at = route::read::answer(api, stream.as_bytes())
+            .first_output
+            .unwrap();
+        // Split where the reader says the first output's line ends, and a byte before: the route
+        // says its output began by the first part's end only if it reads the same event first.
+        for split in [at, at - 1] {
+            let (first, rest) = stream.split_at(split);
+            let parts = [first.to_owned().leak() as &str, rest.to_owned().leak()];
+            let answer = Answer::Streams(parts);
+            cases.push(match api {
+                Api::Responses => case(name, answer),
+                Api::Chat => chat_case(name, answer),
+            });
+            read.push((name, split, stream.len()));
+        }
+    }
+    let exchanged = exchanged(&cases);
+    let mut shown = String::new();
+    for ((name, split, bytes), line) in read.iter().zip(exchanged.lines()) {
+        let began = line.split("its output begun by byte ").nth(1);
+        let began = began.and_then(|began| began.split(';').next()).unwrap();
+        writeln!(
+            shown,
+            "{name}, split at {split} of {bytes}: begun by {began}"
+        )
+        .unwrap();
+    }
+    expect![[r#"
+        a stream, split at 1275 of 6988: begun by 1275
+        a stream, split at 1274 of 6988: begun by 6988
+        a stream broken off, split at 1262 of 1685: begun by 1262
+        a stream broken off, split at 1261 of 1685: begun by 1685
+        a stream of Chat Completions, split at 203 of 1206: begun by 203
+        a stream of Chat Completions, split at 202 of 1206: begun by 1206
+        a custom call of Chat Completions, split at 226 of 412: begun by 226
+        a custom call of Chat Completions, split at 225 of 412: begun by 412
+    "#]]
+    .assert_eq(&shown);
 }
