@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use runtime::{Ending, ModelUse, Progress, Readout, Tokens};
+use runtime::{Cost, Ending, ModelUse, Progress, Readout, Tokens};
 use serde_json::{Value, json};
 
 use super::talk::Talk;
@@ -146,10 +146,11 @@ fn how(ending: &Ending) -> String {
 }
 
 /// The run of `held`, as JSON, as of its last look: `{"id", "task", "live", "state", "scored",
-/// "verdict", "again", "other_build", "times", "lanes", "talk", "model", "summary", "unread",
-/// "end", "log_epoch"}`, where `again` is `{"command": c}`, the command that runs it again from
-/// here, or `{"error": e}`, why none can be made, and left out unless `again`; its runs directory
-/// is `named`, as commands name it, if not by default.
+/// "verdict", "again", "other_build", "times", "lanes", "talk", "model", "cost", "summary",
+/// "unread", "end", "log_epoch"}`, where `again` is `{"command": c}`, the command that runs it
+/// again from here, or `{"error": e}`, why none can be made, and left out unless `again`; its runs
+/// directory is `named`, as commands name it, if not by default.
+#[expect(clippy::too_many_lines, reason = "a field of the reply after another")]
 pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     let record = &held.record;
     let id = record.id();
@@ -211,6 +212,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "lanes": progress.as_ref().map(|progress| lanes(record.dir(), progress, held.talk.as_ref())),
         "talk": held.talk.as_ref().map(Talk::json),
         "model": progress.as_ref().map(|progress| model_json(&progress.model)),
+        "cost": progress.as_ref().and_then(Progress::cost).as_ref().map(cost_json),
         "summary": summary,
         "unread": unread,
         "end": held.fold.taken(),
@@ -223,6 +225,15 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         };
     }
     run
+}
+
+/// `cost`, a run's, as JSON: `{"shown", "said"}`, the whole as `ls`'s Cost column shows it, and
+/// what a summary's cost line says of it, after `cost: `.
+fn cost_json(cost: &Cost) -> Value {
+    json!({
+        "shown": progress::usd(cost.usd(), cost.unpriced()),
+        "said": progress::cost::line(cost),
+    })
 }
 
 /// `model`, a run's or a judge call's model requests, as JSON: how many, how many stated a

@@ -50,6 +50,7 @@ import { RowList } from "./rows.js";
  * @property {Lane[] | null} lanes
  * @property {Talk | null} talk
  * @property {ModelUse | null} model
+ * @property {Cost | null} cost null if nothing of it has a price
  * @property {{ count: number, said: string } | null} unread
  * @property {string | null} summary what `pumpkin summary` prints of it
  * @property {number} end the byte of the log that the run was read to
@@ -60,6 +61,9 @@ import { RowList } from "./rows.js";
  * @property {number} last
  * @property {number | null} end
  * @property {number | null} now
+ * @typedef {object} Cost what the run cost so far, at the prices its record keeps
+ * @property {string} shown the whole, as `ls`'s Cost column shows it: `$1.13`, `$1.13+`
+ * @property {string} said what the summary's cost line says of it, after `cost: `
  * @typedef {object} ModelUse
  * @property {number} requests
  * @property {Array<{ code: string, count: number }>} failed
@@ -522,7 +526,7 @@ function litOf(data, view, holder, shown) {
 }
 
 // The run's facts in a line, each a muted name and its value: its task, when it started, how
-// long it ran of its hard end, and what its model requests took.
+// long it ran of its hard end, what its model requests took, and what it cost.
 /** @param {HTMLElement} facts @param {Run} data */
 function drawFacts(facts, data) {
   const times = data.times;
@@ -548,6 +552,7 @@ function drawFacts(facts, data) {
         )
       : null,
     model ? fact("Tokens", count(model.tokens.input, "tok") + " in · " + count(model.tokens.output, "tok") + " out", model.tokens.input === null ? "Unknown: no response reported its tokens" : model.tokens.cached !== null ? count(model.tokens.cached, "tok") + " of the input cached" : null) : null,
+    data.cost ? fact("Cost", data.cost.shown, data.cost.said) : null,
     model && model.took.median !== null ? fact("Median took", span(model.took.median), "Of " + plural(model.took.count, "answer")) : null,
     model && model.first_token.median !== null ? fact("First token", span(model.first_token.median), "Median, of " + plural(model.first_token.count, "answer")) : null,
     flying.length

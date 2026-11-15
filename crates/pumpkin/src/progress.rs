@@ -18,7 +18,7 @@ use stdx::Utc;
 
 use crate::next;
 
-mod cost;
+pub(crate) mod cost;
 
 pub(crate) use cost::usd;
 

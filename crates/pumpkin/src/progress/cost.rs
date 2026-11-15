@@ -49,7 +49,7 @@ fn owners(models: &[String]) -> Option<String> {
 /// sandboxes`, then `, and more without a price` if something has none; of a run of which only
 /// one part has a price, that part, then the other if something of it lacks one: `$1.02 for
 /// tokens, and more for sandboxes, which lack a price`.
-pub(super) fn line(cost: &Cost) -> String {
+pub(crate) fn line(cost: &Cost) -> String {
     // Each amount is its exact sum rounded, so the parts may add up to a cent off the whole.
     match cost.priced {
         Priced::Both { tokens, sandboxes } => {

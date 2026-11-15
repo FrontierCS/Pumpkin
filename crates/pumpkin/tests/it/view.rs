@@ -181,15 +181,15 @@ fn write_served(scratch: &Scratch) -> File {
     let priced = lease_places(Prices::Both);
     let ended = SERVED_ENDED;
     let mut outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+    // Its sandboxes all priced, so that its unpriced model alone makes its cost more.
     outcome["usage"] = json!({
         "ran_ns": "1100000000000", "model_requests": 4,
         "tokens": { "responses": 2, "input": 3000, "output": 300, "cached": 2600 },
         "sandboxes": [{ "provider": "aws", "class": "judge", "count": 2, "lasted_ns": "1",
-            "usd_per_hour": 0.3672, "usd": 0.11 }, { "provider": "aws", "class": "box",
-            "count": 1, "lasted_ns": "1" }],
-        "usd": 0.11,
+            "usd_per_hour": 0.3672, "usd": 0.11 }],
+        "usd": 0.77, "unpriced_models": ["model-b"],
     });
-    let dir = write_run(
+    write_run(
         scratch,
         ended,
         asked(ended, 30),
@@ -197,10 +197,6 @@ fn write_served(scratch: &Scratch) -> File {
         Some(outcome),
         &priced,
     );
-    let mut routed = priced.clone();
-    routed["routes"] = json!({ "solver": [{ "api": "responses", "upstream": "zai",
-        "models": { "glm-5.3": { "upstream_name": "glm-5.3-flash" } } }] });
-    fs::write(dir.join("provider.json"), routed.to_string()).unwrap();
     let lost = "20261110-100000-0000000b";
     write_run(
         scratch,
@@ -253,6 +249,24 @@ fn serves_runs() {
     let scratch = Scratch::new("serves-runs");
     let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
     let driver = write_served(&scratch);
+    // And the ended run priced otherwise: its tokens alone, its sandboxes alone, and nothing.
+    let others = [
+        ("20261110-060000-00000005", Prices::Tokens),
+        ("20261110-050000-00000006", Prices::Sandboxes),
+        ("20261110-040000-00000007", Prices::Nothing),
+    ];
+    for (id, prices) in others {
+        let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+        let places = lease_places(prices);
+        write_run(
+            &scratch,
+            id,
+            asked(id, 30),
+            &judged_log(),
+            Some(outcome),
+            &places,
+        );
+    }
     let served = Served::start(&scratch);
     let mut steps = vec![format!(
         "pumpkin view --runs runs\n{}",
@@ -281,6 +295,10 @@ fn serves_runs() {
         "GET /api/runs/<ended>\n{}",
         fields(&run, &["lanes"])
     ));
+    for (id, _) in others {
+        let cost = &served.get(&format!("/api/runs/{id}"))["cost"];
+        steps.push(format!("GET /api/runs/{id}: its cost: {cost}"));
+    }
     let end = run["end"].as_u64().unwrap();
     let since = served.get(&format!("/api/runs/{ended}/since?log={end}"));
     steps.push(format!("GET /api/runs/<ended>/since?log=<end>\n{since}"));
@@ -339,14 +357,18 @@ fn serves_runs() {
               {"bound":"-","id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","scored":false,"state":"lost","time":"-","tokens":null,"usd":"-"}
               {"bound":"of 30m","id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","scored":false,"state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
-              {"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"}
+              {"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"}
               {"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"}
               {"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}
+              {"bound":"49.36","id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"}
+              {"bound":"49.36","id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"}
+              {"bound":"49.36","id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}
 
             GET /api/runs?before=<live>
-            {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}]}
+            {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"},{"bound":"49.36","id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"},{"bound":"49.36","id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"},{"bound":"49.36","id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
+            cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price","shown":"$1.10+"}
             end: 8432
             id: "<ended>"
             lanes:
@@ -367,12 +389,15 @@ fn serves_runs() {
             scored: true
             state: "finished"
             summary: "<as `wait` says it>"
-            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"judge call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"glm-5.3":"glm-5.3-flash"},"upstream":"zai"}],"score":false},{"kind":null,"name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"scorer","place":"modal/a100_80","routed":true,"routes":[],"score":true},{"kind":null,"name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":null,"name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
+            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"judge call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}],"score":false},{"kind":null,"name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}],"score":true},{"kind":null,"name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":null,"name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
             verdict: "Run <ended> finished with a score of 49.36, after the work phase ended when the agent exited with status 0"
 
+            GET /api/runs/20261110-060000-00000005: its cost: {"said":"$0.66 for tokens, and more for sandboxes, which lack a price","shown":"$0.66+"}
+            GET /api/runs/20261110-050000-00000006: its cost: {"said":"$0.44 for sandboxes, and more for tokens, which lack a price","shown":"$0.44+"}
+            GET /api/runs/20261110-040000-00000007: its cost: null
             GET /api/runs/<ended>/since?log=<end>
             {"end":8432,"live":false}
             GET /api/runs/<ended>/since?log=0
@@ -1298,7 +1323,8 @@ pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
     record
 }
 
-/// The `model_answered` of `caller`'s request `n`, at `seconds`, with `status`, kept as `kept`.
+/// The `model_answered` of `caller`'s request `n`, at `seconds`, with `status`, kept as `kept`;
+/// one that names its `api` names its model too, `model-a`.
 pub(super) fn answered(
     seconds: u64,
     caller: &str,
@@ -1314,6 +1340,7 @@ pub(super) fn answered(
     if let Some(api) = api {
         event["api"] = json!(api);
         event["upstream"] = json!("zai");
+        event["model"] = json!("model-a");
         event["first_byte_ns"] = json!((seconds * 1_000_000_000 - 500).to_string());
         event["first_token_ns"] = json!((seconds * 1_000_000_000 - 400_000_000).to_string());
     }
@@ -1632,7 +1659,7 @@ fn traces_a_caller() {
             added=1 added_entries=2 answer="forwarded" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
             caller: "agent"
-            end: 5267
+            end: 5375
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
@@ -1664,36 +1691,36 @@ fn traces_a_caller() {
             found in outputs: {"count":1,"hits":[{"at":"1/in/2/0","byte":0,"context":["","a.txt",""],"index":0,"kind":"output","request":1}]}
             by step:
             cached=50 calls={"exec":1} decode_ns=400000000 input=0 model_ns=1000000001 outcome="ok" output=10 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
-            cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
-            cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="failed" output=10 request=2 status=429 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
-            cache_hit=0.16666666666666666 cached=50 calls={} decode_ns=400000000 input=300 model_ns=1000000001 outcome="ok" output=10 request=3 retry_of=2 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
-            cache_hit=0.125 cached=50 calls={} decode_ns=400000000 input=400 model_ns=1000000001 outcome="ok" output=10 repeat_of=3 request=4 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
-            cache_hit=0.1 cached=50 calls={} decode_ns=400000000 input=500 model_ns=1000000001 outcome="ok" output=10 queue_ns=6999999999 request=5 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=5
+            cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0 usd=0.0315
+            cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="failed" output=10 request=2 status=429 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2 usd=0.0615
+            cache_hit=0.16666666666666666 cached=50 calls={} decode_ns=400000000 input=300 model_ns=1000000001 outcome="ok" output=10 request=3 retry_of=2 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2 usd=0.0915
+            cache_hit=0.125 cached=50 calls={} decode_ns=400000000 input=400 model_ns=1000000001 outcome="ok" output=10 repeat_of=3 request=4 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2 usd=0.1215
+            cache_hit=0.1 cached=50 calls={} decode_ns=400000000 input=500 model_ns=1000000001 outcome="ok" output=10 queue_ns=6999999999 request=5 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=5 usd=0.1515
             by: "step"
             caller: "agent"
-            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3}
+            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.4575,"usd_unknown":1}
 
             by turn:
-            cache_hit=1.0 cache_write_unknown=2 cached=100 cached_unknown=0 calls={"exec":1} decode_ns=800000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=100 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=2000000002 model_ns_unknown=0 output=20 output_unknown=0 queue_ns=999999999 queue_ns_unknown=1 reasoning_unknown=2 refusals=0 repeats=0 retries=0 span_ns=3000000001 steps=2 thread=0 tok_s=25.0 turn=0
-            cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=1 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0 turn=2
-            cache_hit=0.1 cache_write_unknown=1 cached=50 cached_unknown=0 calls={} decode_ns=400000000 decode_ns_unknown=0 failures=0 first_request=5 in_flight=0 input=500 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=1000000001 model_ns_unknown=0 output=10 output_unknown=0 queue_ns=6999999999 queue_ns_unknown=0 reasoning_unknown=1 refusals=0 repeats=0 retries=0 span_ns=1000000001 steps=1 thread=0 tok_s=25.0 turn=5
+            cache_hit=1.0 cache_write_unknown=2 cached=100 cached_unknown=0 calls={"exec":1} decode_ns=800000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=100 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=2000000002 model_ns_unknown=0 output=20 output_unknown=0 queue_ns=999999999 queue_ns_unknown=1 reasoning_unknown=2 refusals=0 repeats=0 retries=0 span_ns=3000000001 steps=2 thread=0 tok_s=25.0 turn=0 usd=0.0315 usd_unknown=1
+            cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=1 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0 turn=2 usd=0.27449999999999997 usd_unknown=0
+            cache_hit=0.1 cache_write_unknown=1 cached=50 cached_unknown=0 calls={} decode_ns=400000000 decode_ns_unknown=0 failures=0 first_request=5 in_flight=0 input=500 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=1000000001 model_ns_unknown=0 output=10 output_unknown=0 queue_ns=6999999999 queue_ns_unknown=0 reasoning_unknown=1 refusals=0 repeats=0 retries=0 span_ns=1000000001 steps=1 thread=0 tok_s=25.0 turn=5 usd=0.1515 usd_unknown=0
             by: "turn"
             caller: "agent"
-            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3}
+            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.4575,"usd_unknown":1}
 
             by thread:
-            cache_hit=0.25 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"exec":1} decode_ns=1200000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=600 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns=7999999998 queue_ns_unknown=1 reasoning_unknown=3 refusals=0 repeats=0 retries=0 span_ns=11000000001 steps=3 thread=0 tok_s=25.0
-            cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=1 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0
+            cache_hit=0.25 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"exec":1} decode_ns=1200000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=600 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns=7999999998 queue_ns_unknown=1 reasoning_unknown=3 refusals=0 repeats=0 retries=0 span_ns=11000000001 steps=3 thread=0 tok_s=25.0 usd=0.183 usd_unknown=1
+            cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=1 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0 usd=0.27449999999999997 usd_unknown=0
             by: "thread"
             caller: "agent"
-            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3}
+            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.4575,"usd_unknown":1}
 
             the judge's steps:
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.08333333333333333 cached=50 calls=["grep"] end_ns="13000000000" input=600 items=2 kept_bytes=243 output=10 request=6 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.07142857142857142 cached=50 calls=["grep"] end_ns="14000000000" input=700 items=2 kept_bytes=243 output=10 repeat_of=6 request=7 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
             caller: "job-0"
-            end: 5267
+            end: 5375
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[null],"thread":[6]}
@@ -1715,10 +1742,10 @@ fn traces_a_caller() {
             {"at":"8/out/0","digest":null,"index":1,"kind":"assistant","request":8,"side":"answer","text":"yes"}
             next: null
             by thread:
-            cache_hit=0.07142857142857142 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"grep":2} decode_ns_unknown=3 failures=0 first_request=6 in_flight=0 input=2100 input_unknown=0 median_to_first_byte_ns_unknown=3 median_to_first_token_ns_unknown=3 model_ns_unknown=3 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=0 steps=3 thread=6
+            cache_hit=0.07142857142857142 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"grep":2} decode_ns_unknown=3 failures=0 first_request=6 in_flight=0 input=2100 input_unknown=0 median_to_first_byte_ns_unknown=3 median_to_first_token_ns_unknown=3 model_ns_unknown=3 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=0 steps=3 thread=6 usd_unknown=3
             by: "thread"
             caller: "job-0"
-            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":3,"cached":150,"cached_unknown":0,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":3,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":0,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":3,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":3,"model_ns":null,"model_ns_unknown":3,"output":30,"output_unknown":0,"queue_ns":null,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":1,"retries":0,"span_ns":null,"steps":3,"threads":1,"tok_s":null,"turns":1}
+            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":3,"cached":150,"cached_unknown":0,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":3,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":0,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":3,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":3,"model_ns":null,"model_ns_unknown":3,"output":30,"output_unknown":0,"queue_ns":null,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":1,"retries":0,"span_ns":null,"steps":3,"threads":1,"tok_s":null,"turns":1,"usd":null,"usd_unknown":3}
 
             exchange 1:
             answer: {"kind":"forwarded"}
@@ -1729,7 +1756,7 @@ fn traces_a_caller() {
             kept: {"request":{"body_bytes":100,"bytes":437,"items":{"count":3,"field":"input"},"path":"model/1.request","whole":["instructions","tools"]},"response":{"bytes":130,"path":"model/1.response"}}
             request: 1
             request_id: null
-            stats: {"cache_hit":0.5,"cache_write":null,"cached":50,"calls":{},"decode_ns":400000000,"input":100,"model_ns":1000000001,"outcome":"ok","output":10,"queue_ns":999999999,"reasoning":null,"repeat_of":null,"request":1,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":25.0,"turn":0}
+            stats: {"cache_hit":0.5,"cache_write":null,"cached":50,"calls":{},"decode_ns":400000000,"input":100,"model_ns":1000000001,"outcome":"ok","output":10,"queue_ns":999999999,"reasoning":null,"repeat_of":null,"request":1,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":25.0,"turn":0,"usd":0.0315}
             status: 200
             times: {"end_ns":"4000000000","first_byte_ns":"3999999500","first_token_ns":"3600000000","start_ns":"2999999999"}
             upstream: "zai"
@@ -1929,7 +1956,7 @@ fn traces_a_messages_exchange() {
             added=3 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=297 cache_hit=0.5 cached=50 calls=[] differs=["system"] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=200 items=6 kept_bytes=705 model_ns=1000000001 output=10 parent=1 request=2 sent_bytes=100 start_ns="4999999999" status=200 thread=0 tools=0 turn=2 upstream="zai" whole=true
             caller: "agent"
-            end: 2136
+            end: 2190
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[5000000001],"thread":[0]}
@@ -1947,12 +1974,12 @@ fn traces_a_messages_exchange() {
             next: null
             found: {"count":1,"hits":[{"at":"1/in/2/0","byte":4,"context":["ls: ","cannot"," access 'x'"],"index":0,"kind":"output","request":1}]}
             by step:
-            cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={"Bash":1} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0
-            cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
-            cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=2 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
+            cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={"Bash":1} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0 usd=1.31802
+            cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0 usd=0.0315
+            cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=2 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2 usd=0.0615
             by: "step"
             caller: "agent"
-            totals: {"cache_hit":0.9866982605417631,"cache_write":120,"cache_write_unknown":2,"cached":36644,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":1200000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":37138,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":3000000003,"model_ns_unknown":0,"output":103,"output_unknown":0,"queue_ns":1999999998,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":0,"retries":0,"span_ns":5000000001,"steps":3,"threads":1,"tok_s":85.83333333333333,"turns":2}
+            totals: {"cache_hit":0.9866982605417631,"cache_write":120,"cache_write_unknown":2,"cached":36644,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":1200000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":37138,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":3000000003,"model_ns_unknown":0,"output":103,"output_unknown":0,"queue_ns":1999999998,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":0,"retries":0,"span_ns":5000000001,"steps":3,"threads":1,"tok_s":85.83333333333333,"turns":2,"usd":1.4110200000000002,"usd_unknown":0}
 
             exchange 0:
             answer: {"kind":"forwarded"}
@@ -1963,7 +1990,7 @@ fn traces_a_messages_exchange() {
             kept: {"request":{"body_bytes":100,"bytes":335,"items":{"count":1,"field":"messages"},"path":"model/0.request","whole":["system","tools"]},"response":{"bytes":1376,"path":"model/0.response"}}
             request: 0
             request_id: null
-            stats: {"cache_hit":0.9920191107009066,"cache_write":120,"cached":36544,"calls":{"Bash":1},"decode_ns":400000000,"input":36838,"model_ns":1000000001,"outcome":"ok","output":83,"queue_ns":null,"reasoning":null,"repeat_of":null,"request":0,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":207.5,"turn":0}
+            stats: {"cache_hit":0.9920191107009066,"cache_write":120,"cached":36544,"calls":{"Bash":1},"decode_ns":400000000,"input":36838,"model_ns":1000000001,"outcome":"ok","output":83,"queue_ns":null,"reasoning":null,"repeat_of":null,"request":0,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":207.5,"turn":0,"usd":1.31802}
             status: 200
             times: {"end_ns":"2000000000","first_byte_ns":"1999999500","first_token_ns":"1600000000","start_ns":"999999999"}
             upstream: "zai"
@@ -2119,7 +2146,7 @@ fn follows_a_trace() {
             answers=1 calls=[] request=1 start_ns="2999999999" whole=false
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="5000000000" first_byte_ns="4999999500" first_token_ns="4600000000" input=200 items=3 kept_bytes=265 model_ns=1000000001 output=10 parent=0 request=2 sent_bytes=100 start_ns="3999999999" status=200 thread=0 turn=2 upstream="zai" whole=false
             caller: "agent"
-            end: 1534
+            end: 1570
             live: true
             log_epoch: 0
             thread_spans: {"span_ns":[4000000001],"thread":[0]}
@@ -2131,7 +2158,7 @@ fn follows_a_trace() {
             next: null
             nothing new:
             caller: "agent"
-            end: 1534
+            end: 1570
             live: true
             log_epoch: 0
             thread_spans: {"span_ns":[],"thread":[]}
@@ -2143,7 +2170,7 @@ fn follows_a_trace() {
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="5000000000" first_byte_ns="4999999500" first_token_ns="4600000000" input=200 items=3 kept_bytes=265 model_ns=1000000001 output=10 parent=0 request=2 retry_count=1 retry_of=1 sent_bytes=100 start_ns="3999999999" status=200 thread=0 turn=1 upstream="zai" whole=false
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=172 cache_hit=0.16666666666666666 cached=50 calls=["exec"] differs=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=5 kept_bytes=413 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
             caller: "agent"
-            end: 2637
+            end: 2709
             live: true
             log_epoch: 0
             thread_spans: {"span_ns":[7000000001],"thread":[0]}
@@ -2163,7 +2190,7 @@ fn follows_a_trace() {
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=172 cache_hit=0.16666666666666666 cached=50 calls=["exec"] differs=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=5 kept_bytes=413 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=188 cache_hit=0.125 cached=50 calls=[] differs=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=7 kept_bytes=561 model_ns=1000000001 output=10 parent=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
             caller: "agent"
-            end: 3262
+            end: 3352
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[9000000001],"thread":[0]}
@@ -2175,7 +2202,7 @@ fn follows_a_trace() {
             {"at":"3/out/0","call_id":"c1","digest":null,"index":1,"kind":"call","name":"exec","output":"4/in/6/0","request":3,"side":"answer","text":"{}"}
             next: null
             of another epoch: HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 1534: read the run again, and its log from byte 0","log_epoch":0}"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 1570: read the run again, and its log from byte 0","log_epoch":0}"#]],
     );
 }
 

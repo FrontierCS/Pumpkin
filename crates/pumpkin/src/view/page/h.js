@@ -401,6 +401,16 @@ export function span(seconds) {
   return (seconds / 3600).toPrecision(3) + " h";
 }
 
+// Dollars: `$12.34` from $1, three significant digits below, as `$0.0412`; `-` for a cost the
+// record doesn't give.
+/** @param {number | null | undefined} usd */
+export function usd(usd) {
+  if (usd === null || usd === undefined) return "-";
+  if (usd >= 1 || usd === 0) return "$" + usd.toFixed(2);
+  // As many decimals as the place of the first digit that isn't 0, and two more.
+  return "$" + usd.toFixed(2 - Math.floor(Math.log10(usd)));
+}
+
 /** @param {number} count @param {string} noun */
 export const plural = (count, noun) => count.toLocaleString("en-US") + " " + noun + (count === 1 ? "" : "s");
 
