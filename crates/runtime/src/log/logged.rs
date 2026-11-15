@@ -176,6 +176,8 @@ pub(super) enum Event {
         answer: Answer,
         failed: Option<Failed>,
         usage: Option<Usage>,
+        #[serde(default)]
+        kept: Kept,
     },
     SandboxGpus {
         sandbox: SandboxName,
@@ -288,6 +290,21 @@ pub(super) enum Answer {
     Cut,
     Barred,
     Refused,
+}
+
+/// Where the record keeps an exchange, of which a reader reads what its request left behind.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct Kept {
+    #[serde(default)]
+    pub(super) request: KeptRequest,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct KeptRequest {
+    /// The names of the request's headers that the route left behind; none in a log written
+    /// before the route named them.
+    #[serde(default)]
+    pub(super) dropped_headers: Vec<String>,
 }
 
 /// An answer's statement that it failed, with the code it gave, if any.

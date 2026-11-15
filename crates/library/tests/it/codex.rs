@@ -239,6 +239,18 @@ fn roles() {
         // The layer and the configuration's whole text, once: the cases' configurations differ
         // only in the lines that name a model.
         if index == 0 {
+            for entry in agent.egress.model.as_ref().unwrap().as_slice() {
+                let names = |names: &[ir::HeaderName]| {
+                    let names: Vec<&str> = names.iter().map(ir::HeaderName::as_str).collect();
+                    names.join(" ")
+                };
+                let _ = writeln!(shown, "request headers: {}", names(&entry.request_headers));
+                let _ = writeln!(
+                    shown,
+                    "response headers: {}",
+                    names(&entry.response_headers)
+                );
+            }
             let [_, (layer, recipe)] = <[_; 2]>::try_from(images).unwrap();
             let _ = writeln!(shown, "image: {layer}");
             for line in recipe {
@@ -262,6 +274,8 @@ fn roles() {
           model_reasoning_effort = "high"
           model_provider = "pumpkin"
         route: responses model-small
+        request headers: originator user-agent session-id thread-id x-codex-beta-features x-codex-window-id x-codex-turn-metadata x-openai-internal-codex-responses-lite
+        response headers: openai-model x-reasoning-included x-models-etag x-codex-turn-state x-codex-safety-buffering-enabled x-codex-safety-buffering-faster-model x-codex-credits-has-credits x-codex-credits-unlimited x-codex-credits-balance x-codex-promo-message x-codex-rate-limit-reached-type x-codex-active-limit x-oai-request-id cf-ray x-openai-authorization-error x-error-json x-codex-primary-used-percent x-codex-primary-window-minutes x-codex-primary-reset-at x-codex-secondary-used-percent x-codex-secondary-window-minutes x-codex-secondary-reset-at x-codex-limit-name
         image: @pumpkin//harness/codex/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/codex/layer
           FROM busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e AS codex-0.167.0
           ADD --checksum=sha256:2dc9aa871abb513c3539d20d025f701faf1974c46ee906bda3a1e1f5026d4434 https://registry.npmjs.org/@openai/codex/-/codex-0.167.0-linux-x64.tgz /harness.tgz
@@ -616,7 +630,7 @@ fn roles() {
             multi_agent_version: "disabled"
             experimental_supported_tools: []
         route: responses gpt-6.1-terra
-    "#]],
+        "#]],
     );
 }
 
@@ -665,24 +679,24 @@ fn refusals() {
     check(
         &refused.join("\n"),
         &expect![[r#"
-            @pumpkin//harness/codex/codex.star:122:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
-                122 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/codex/codex.star:168:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
+                168 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9
-            @pumpkin//harness/codex/codex.star:139:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
-                139 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
+            @pumpkin//harness/codex/codex.star:185:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
+                185 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9
-            @pumpkin//harness/codex/codex.star:136:13: fail: Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
-                136 |             fail(message.format(model, slugs))
+            @pumpkin//harness/codex/codex.star:182:13: fail: Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
+                182 |             fail(message.format(model, slugs))
                     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9
-            @pumpkin//harness/codex/codex.star:146:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                146 |     home = below + "/.codex"
+            @pumpkin//harness/codex/codex.star:192:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+                192 |     home = below + "/.codex"
                     |            ^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
-            @pumpkin//harness/codex/codex.star:124:9: fail: `None` is not a prompt: give a string, which may be empty
-                124 |         fail("`None` is not a prompt: give a string, which may be empty")
+            @pumpkin//harness/codex/codex.star:170:9: fail: `None` is not a prompt: give a string, which may be empty
+                170 |         fail("`None` is not a prompt: give a string, which may be empty")
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:14:9"#]],
     );

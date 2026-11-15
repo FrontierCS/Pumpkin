@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
-use route::{Answer, Apart, Keep, Route, Serving, Upstream};
+use route::{Answer, Apart, Headers, Keep, Route, Serving, Upstream};
 use schema::ir::{Api, ApiRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
@@ -65,7 +65,12 @@ fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String
     };
     let role = &sandbox.name;
     let served = |entry: &ApiRoute| {
-        let ApiRoute { api, models } = entry;
+        let ApiRoute {
+            api,
+            models,
+            request_headers,
+            response_headers,
+        } = entry;
         let Some(serving) = servings.iter().find(|serving| serving.api == *api) else {
             return Err(format!(
                 "`{role}` has a model route, but no upstream serves its `{api}` entry: give one, \
@@ -87,6 +92,10 @@ fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String
             url: serving.url.clone(),
             key: serving.key.clone(),
             models: taken.collect::<Result<_, String>>()?,
+            headers: Headers {
+                request: request_headers.clone(),
+                response: response_headers.clone(),
+            },
         })
     };
     route.as_slice().iter().map(served).collect()
@@ -97,7 +106,7 @@ impl Served {
     /// own, or `None` for a role without one.
     pub(super) fn new(servings: &[Serving]) -> Option<Self> {
         let entries = servings.iter().map(|serving| {
-            let route = Route::new(serving.api, serving.models.clone());
+            let route = Route::new(serving.api, serving.models.clone(), &serving.headers);
             (route, Upstream::new(&serving.url, &serving.key))
         });
         let names = (servings.iter()).map(|serving| (serving.name.clone(), serving.api));
@@ -267,6 +276,8 @@ pub(super) struct Exchange<C> {
     response: Part,
     /// The request's body, once it has come.
     body: RefCell<Option<Body>>,
+    /// The names of the request's headers that the route left behind.
+    dropped_headers: RefCell<Vec<String>>,
     /// The items it made, to sync at its end.
     items: RefCell<Vec<File>>,
     /// Why keeping it failed, if it did: it is then kept no further.
@@ -320,6 +331,7 @@ impl<C: Clock> Exchange<C> {
             request: part("request"),
             response: part("response"),
             body: RefCell::new(None),
+            dropped_headers: RefCell::new(Vec::new()),
             items: RefCell::new(Vec::new()),
             failed: RefCell::new(None),
         }
@@ -327,10 +339,12 @@ impl<C: Clock> Exchange<C> {
 
     /// What the run log's `model_answered` says of where it is kept so far: `{"request": {"path":
     /// p, "bytes": b, "body_bytes": s, "body_sha256": h, "items": {"field": f, "count": c},
-    /// "whole": [w]}, "response": {"path": p, "bytes": b}}`, each part once it has bytes, with the
-    /// paths below the record: `s` the size of the request's body and `h` its SHA-256's 64
-    /// hexadecimal digits, `items` the field whose `c` items are kept apart, if any, and `whole`
-    /// the fields kept whole, in their API's order, if any.
+    /// "whole": [w], "dropped_headers": [d]}, "response": {"path": p, "bytes": b}}`, each part once
+    /// it has bytes, with the paths below the record: `s` the size of the request's body and `h`
+    /// its SHA-256's 64 hexadecimal digits, `items` the field whose `c` items are kept apart, if
+    /// any, `whole` the fields kept whole, in their API's order, if any, and `dropped_headers` the
+    /// names of the request's headers that the route left behind ([`Keep::dropped_headers`]), if
+    /// any.
     pub(super) fn kept(&self) -> Value {
         let mut kept = json!({});
         for part in [&self.request, &self.response] {
@@ -353,6 +367,10 @@ impl<C: Clock> Exchange<C> {
             }
             if !whole.is_empty() {
                 request["whole"] = json!(whole);
+            }
+            let dropped = self.dropped_headers.borrow();
+            if !dropped.is_empty() {
+                request["dropped_headers"] = json!(*dropped);
             }
         }
         kept
@@ -544,6 +562,10 @@ fn kept_item(record: &Path, digest: &Value) -> Option<Result<Value, String>> {
 }
 
 impl<C: Clock> Keep for Exchange<C> {
+    fn dropped_headers(&self, names: &[String]) {
+        *self.dropped_headers.borrow_mut() = names.to_vec();
+    }
+
     fn request(&self, body: &[u8], apart: Option<Apart>) {
         let unsplit = || (Cow::Borrowed(body), Body::of(body, None, Vec::new()));
         let (kept, read) = (apart.and_then(|apart| self.kept_apart(body, apart)))

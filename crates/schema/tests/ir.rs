@@ -809,6 +809,97 @@ fn checked_values() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn header_names() {
+    let entry = "/roles/0/egress/model/0";
+    let listed =
+        |list: &str, names: &[&str]| fixture_with(&format!("{entry}/{list}"), json!(names));
+    let refused = [
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "x-goog-api-key",
+        "x-goog-user-project",
+        "ocp-apim-subscription-key",
+        "cookie",
+        "set-cookie",
+        "openai-organization",
+        "openai-project",
+        "anthropic-organization-id",
+        "x-amz-security-token",
+        "x-amz-date",
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "upgrade",
+        "proxy-authenticate",
+        "accept-encoding",
+        "content-encoding",
+    ];
+    let mut cases = vec![
+        listed(
+            "request_headers",
+            &["x-codex-window-id", "x-amzn-trace-id", "a0!#$%&'*+-.^_`|~"],
+        ),
+        listed("request_headers", &[&"x".repeat(64)]),
+        listed("request_headers", &[&"x".repeat(65)]),
+        listed("request_headers", &[""]),
+        listed("request_headers", &["X-Codex-Window-Id"]),
+        listed("request_headers", &["x-codex window"]),
+        listed("response_headers", &["x-codex:primary"]),
+    ];
+    cases.extend(refused.map(|name| listed("request_headers", &[name])));
+    cases.push(listed("response_headers", &["set-cookie"]));
+    check(
+        cases,
+        &expect![[r#"
+            parsed
+            parsed
+            `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` is not a header name: use 1 to 64 characters from a-z, 0-9 and ``!#$%&'*+-.^_`|~``
+            `` is not a header name: use 1 to 64 characters from a-z, 0-9 and ``!#$%&'*+-.^_`|~``
+            `X-Codex-Window-Id` is not a header name: use 1 to 64 characters from a-z, 0-9 and ``!#$%&'*+-.^_`|~``
+            `x-codex window` is not a header name: use 1 to 64 characters from a-z, 0-9 and ``!#$%&'*+-.^_`|~``
+            `x-codex:primary` is not a header name: use 1 to 64 characters from a-z, 0-9 and ``!#$%&'*+-.^_`|~``
+            `authorization` carries a credential or picks an account, which are the host's alone: list another header
+            `proxy-authorization` carries a credential or picks an account, which are the host's alone: list another header
+            `x-api-key` carries a credential or picks an account, which are the host's alone: list another header
+            `api-key` carries a credential or picks an account, which are the host's alone: list another header
+            `x-goog-api-key` carries a credential or picks an account, which are the host's alone: list another header
+            `x-goog-user-project` carries a credential or picks an account, which are the host's alone: list another header
+            `ocp-apim-subscription-key` carries a credential or picks an account, which are the host's alone: list another header
+            `cookie` carries a credential or picks an account, which are the host's alone: list another header
+            `set-cookie` carries a credential or picks an account, which are the host's alone: list another header
+            `openai-organization` carries a credential or picks an account, which are the host's alone: list another header
+            `openai-project` carries a credential or picks an account, which are the host's alone: list another header
+            `anthropic-organization-id` carries a credential or picks an account, which are the host's alone: list another header
+            `x-amz-security-token` signs the request or carries a session's token, which are the host's alone: list another header
+            `x-amz-date` signs the request or carries a session's token, which are the host's alone: list another header
+            `host` frames the message on one hop, which the route does for each: list another header
+            `content-length` frames the message on one hop, which the route does for each: list another header
+            `transfer-encoding` frames the message on one hop, which the route does for each: list another header
+            `connection` frames the message on one hop, which the route does for each: list another header
+            `keep-alive` frames the message on one hop, which the route does for each: list another header
+            `proxy-connection` frames the message on one hop, which the route does for each: list another header
+            `te` frames the message on one hop, which the route does for each: list another header
+            `trailer` frames the message on one hop, which the route does for each: list another header
+            `upgrade` frames the message on one hop, which the route does for each: list another header
+            `proxy-authenticate` frames the message on one hop, which the route does for each: list another header
+            `accept-encoding` sets the body's coding, which the route keeps to `identity`: list another header
+            `content-encoding` sets the body's coding, which the route keeps to `identity`: list another header
+            `set-cookie` carries a credential or picks an account, which are the host's alone: list another header"#]],
+    );
+}
+
+#[test]
 fn needs_values() {
     let needs = "/roles/0/needs";
     let mut labelled = fixture();

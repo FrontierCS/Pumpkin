@@ -1087,6 +1087,7 @@ pub(super) fn provided(
             url: _,
             key: _,
             models,
+            headers: _,
         } = serving;
         let models = (models.iter())
             .map(|(model, upstream_name)| {

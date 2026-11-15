@@ -42,6 +42,52 @@ _FUNCTIONS = {
     "experimental_supported_tools": [],
 }
 
+# The request headers Codex sends that the route passes upstream, besides the Responses API's
+# own: those that describe its client or its session, and two that name a form of its requests,
+# which the route reads in any form: `x-codex-beta-features` the form of compaction they use, and
+# `x-openai-internal-codex-responses-lite` the form that lists the tools in an `additional_tools`
+# input item rather than in `tools`.
+_REQUEST_HEADERS = [
+    "originator",
+    "user-agent",
+    "session-id",
+    "thread-id",
+    "x-codex-beta-features",
+    "x-codex-window-id",
+    "x-codex-turn-metadata",
+    "x-openai-internal-codex-responses-lite",
+]
+
+# The response headers Codex reads that the route passes back, besides the API's own: the model
+# that answered, the request's ids, its credits and why a limit was reached, and an error's
+# details. Each rate-limit header is named whole, for Codex's one limit, `codex`.
+_RESPONSE_HEADERS = [
+    "openai-model",
+    "x-reasoning-included",
+    "x-models-etag",
+    "x-codex-turn-state",
+    "x-codex-safety-buffering-enabled",
+    "x-codex-safety-buffering-faster-model",
+    "x-codex-credits-has-credits",
+    "x-codex-credits-unlimited",
+    "x-codex-credits-balance",
+    "x-codex-promo-message",
+    "x-codex-rate-limit-reached-type",
+    "x-codex-active-limit",
+    "x-oai-request-id",
+    "cf-ray",
+    "x-openai-authorization-error",
+    "x-error-json",
+] + ["x-codex-" + end for end in [
+    "primary-used-percent",
+    "primary-window-minutes",
+    "primary-reset-at",
+    "secondary-used-percent",
+    "secondary-window-minutes",
+    "secondary-reset-at",
+    "limit-name",
+]]
+
 # Codex's `config.toml`, with `model`, `catalog` and `url` to fill as TOML, `effort` as the text
 # of a TOML string, and `threads` as an int.
 _CONFIG = """model = {model}
@@ -116,7 +162,7 @@ def codex(
 
     Returns:
       A dict of `image`, `base` with Codex added; `runtime`, the agent's runtime that runs it; and
-      `egress`, the route to `model`, on the Responses API.
+      `egress`, the route to `model`, on the Responses API, with the headers Codex sends and reads.
     """
     if effort not in _EFFORTS:
         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -189,5 +235,10 @@ def codex(
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
         }},
-        "egress": {"model": [{"api": "responses", "models": [model]}]},
+        "egress": {"model": [{
+            "api": "responses",
+            "models": [model],
+            "request_headers": _REQUEST_HEADERS,
+            "response_headers": _RESPONSE_HEADERS,
+        }]},
     }

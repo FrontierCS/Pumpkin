@@ -24,7 +24,7 @@
 //! lease's grant; a `transfer` gives its paths, and its `transfer_ended` its sizes, never what it
 //! moved. A reply is the [`OpReply`](schema::sandbox::op::OpReply) sent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
@@ -941,6 +941,11 @@ pub struct ModelUse {
     pub first_tokens: Vec<Duration>,
     /// The tokens of those whose responses reported their usage, summed.
     pub tokens: Tokens,
+    /// The names of the request headers that the route left behind, of any of them: the first
+    /// [`route::MAX_DROPPED_HEADERS`] by name.
+    pub dropped_headers: BTreeSet<String>,
+    /// Whether the route left behind more names than `dropped_headers` holds.
+    pub more_dropped_headers: bool,
 }
 
 /// Tokens summed over the responses that reported them: `reported` is how many did, and each
@@ -1559,9 +1564,11 @@ impl Reading {
                 answer,
                 failed,
                 usage,
+                kept,
             } => {
                 let answered = Answered {
                     request: *request,
+                    dropped_headers: &kept.request.dropped_headers,
                     first_token: *first_token_ns,
                     upstream_status: *upstream_status,
                     answer,
@@ -1917,6 +1924,8 @@ impl Reading {
 /// code of the failure it stated, if it stated one, and the tokens it reported, if it did.
 struct Answered<'e> {
     request: u64,
+    /// The names of its request's headers that the route left behind.
+    dropped_headers: &'e [String],
     first_token: Option<Duration>,
     upstream_status: Option<u16>,
     answer: &'e logged::Answer,
@@ -1929,6 +1938,7 @@ impl ModelUse {
     fn take(&mut self, at: Duration, answered: &Answered<'_>) {
         let Answered {
             request,
+            dropped_headers,
             first_token,
             upstream_status,
             answer,
@@ -1936,6 +1946,11 @@ impl ModelUse {
             usage,
         } = answered;
         self.requests += 1;
+        (self.dropped_headers).extend(dropped_headers.iter().cloned());
+        while self.dropped_headers.len() > route::MAX_DROPPED_HEADERS {
+            self.dropped_headers.pop_last();
+            self.more_dropped_headers = true;
+        }
         let started = self.in_flight.remove(request);
         if let Some(logged::Failed { code }) = failed {
             *self.failed.entry(code.clone()).or_default() += 1;
