@@ -105,6 +105,7 @@ pub(crate) struct Dialect {
     pub(crate) output: usage::Output,
     /// The entries of one item of a body's conversation.
     item: fn(&Value) -> Vec<Item>,
+    unmarked: fn(&Value) -> Value,
     /// The entries of a request's body, its conversation's and those of the fields that the
     /// API reads as items of it.
     items: fn(&Map<String, Value>) -> Vec<Item>,
@@ -129,6 +130,15 @@ pub(crate) fn dialect(api: Api) -> &'static Dialect {
 /// keeps it apart.
 pub fn item(api: Api, item: &Value) -> Vec<Item> {
     (dialect(api).item)(item)
+}
+
+/// `item`, one item of a request's conversation as `api` writes it, less what marks it for one
+/// request alone.
+///
+/// Two requests sent the same item if their items' unmarked forms are equal, however each marked
+/// it.
+pub fn unmarked(api: Api, item: &Value) -> Value {
+    (dialect(api).unmarked)(item)
 }
 
 /// The entries of `body`, a request's body as it went upstream, in order.

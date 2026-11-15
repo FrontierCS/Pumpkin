@@ -2,11 +2,12 @@
 //! exchanges and held, extended as the log grows.
 //!
 //! A request sends its conversation again, as a list of items, each of which the record keeps
-//! once, by its digest. A request whose list extends another's is that one's child, so the
-//! requests of a caller make a forest: each tree is a thread, named by its first root's request.
-//! Of the earlier requests that sent the longest such list, the parent is the last whose answer
-//! the request continues ([`Trace::continues`]), else the last. A request that sends a list an
-//! earlier one sent is a retry of it if that one failed, and a repeat of it if it was answered.
+//! once, by its digest. A request whose list extends another's, item for item the same
+//! ([`read::unmarked`]), is that one's child, so the requests of a caller make a forest: each
+//! tree is a thread, named by its first root's request. Of the earlier requests that sent the
+//! longest such list, the parent is the last whose answer the request continues
+//! ([`Trace::continues`]), else the last. A request that sends a list an earlier one sent is a
+//! retry of it if that one failed, and a repeat of it if it was answered.
 //! The forest is that of the requests in their order, whatever the order of their answers. A step
 //! shows what its request added past its parent's list, less what only sends back its parent's
 //! answer, and its answer, as `route::read` reads any API's; a turn starts at a step that adds
@@ -30,6 +31,7 @@ use route::read::{self, Item};
 use runtime::{KeptPart, KeptRequest, Record};
 use schema::ir::Api;
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 
 use super::json::cut;
 
@@ -131,6 +133,9 @@ fn nanos(value: &Value) -> Option<u64> {
 /// digest or, as the record keeps it as sent, by its JSON.
 struct Part {
     digest: Option<String>,
+    /// Of a conversation's item, the first part that sends the same item ([`read::unmarked`]); of
+    /// a field, itself.
+    same: u32,
     /// The names of its tools, if it is a body's `tools`.
     tools: Option<Vec<String>>,
     /// Its entries, or why its item can't be read.
@@ -249,8 +254,10 @@ pub(super) struct Trace {
     keys: BTreeMap<(Option<String>, String), u32>,
     /// The forest's nodes: each holds the steps whose list ends there, by the order placed.
     nodes: Vec<Vec<usize>>,
-    /// Each node's child by the part that leads to it.
+    /// Each node's child by the item that leads to it, as its first part ([`Part::same`]).
     edges: BTreeMap<(usize, u32), usize>,
+    /// Each conversation's item's first part, by the SHA-256 of its unmarked JSON.
+    unmarked: BTreeMap<[u8; 32], u32>,
     tools: Vec<Tools>,
     tools_of: BTreeMap<u32, usize>,
     /// Each call's output and each output's call, by their addresses.
@@ -275,6 +282,7 @@ impl Trace {
             keys: BTreeMap::new(),
             nodes: vec![Vec::new()],
             edges: BTreeMap::new(),
+            unmarked: BTreeMap::new(),
             tools: Vec::new(),
             tools_of: BTreeMap::new(),
             pairs: BTreeMap::new(),
@@ -458,7 +466,8 @@ impl Trace {
                 above = Some((node, depth));
             }
             let nodes = &mut self.nodes;
-            node = *self.edges.entry((node, part)).or_insert_with(|| {
+            let same = self.parts[part as usize].same;
+            node = *self.edges.entry((node, same)).or_insert_with(|| {
                 nodes.push(Vec::new());
                 nodes.len() - 1
             });
@@ -687,6 +696,15 @@ impl Trace {
             }
             KeptPart::Sent(value) => (None, Ok(value)),
         };
+        let index = u32::try_from(self.parts.len()).unwrap_or(u32::MAX);
+        let same = match (field, &value) {
+            (None, Ok(item)) => {
+                let unmarked = read::unmarked(api, item).to_string();
+                let digest = Sha256::digest(unmarked.as_bytes()).into();
+                *self.unmarked.entry(digest).or_insert(index)
+            }
+            _ => index,
+        };
         let is_tools = field == Some(read::tools_field(api));
         let tools = is_tools.then(|| match &value {
             Ok(tools) => read::config(api, &json!({ "tools": tools })).tools,
@@ -704,10 +722,10 @@ impl Trace {
         });
         self.parts.push(Part {
             digest,
+            same,
             tools,
             entries,
         });
-        let index = u32::try_from(self.parts.len() - 1).unwrap_or(u32::MAX);
         self.keys.insert(key, index);
         index
     }

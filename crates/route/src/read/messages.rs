@@ -8,13 +8,14 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{Config, Dialect, Item, Streamed, config_of, joined, string, text};
 
 pub(super) const DIALECT: Dialect = Dialect {
     output,
     item,
+    unmarked,
     items,
     body,
     stream,
@@ -59,6 +60,33 @@ fn item(message: &Value) -> Vec<Item> {
             json: message.clone(),
         }],
     }
+}
+
+// A `cache_control` mark ends the prefix that one request has the cache keep, and says nothing of
+// the message. A text is short for one text block, as which a client writes it to hold a mark and
+// which it sends again as the text, unmarked, in its next request:
+// https://platform.claude.com/docs/en/build-with-claude/prompt-caching and, for the shorthand,
+// https://platform.claude.com/docs/en/api/messages/create
+fn unmarked(message: &Value) -> Value {
+    let mut message = message.clone();
+    let Some(Value::Array(blocks)) = message.get_mut("content") else {
+        return message;
+    };
+    for block in blocks.iter_mut() {
+        if let Value::Object(block) = block {
+            block.remove("cache_control");
+        }
+    }
+    let text = match &blocks[..] {
+        [Value::Object(only)] if only.len() == 2 && only.get("type") == Some(&json!("text")) => {
+            only.get("text").and_then(Value::as_str).map(str::to_owned)
+        }
+        _ => None,
+    };
+    if let Some(text) = text {
+        message["content"] = Value::String(text);
+    }
+    message
 }
 
 /// The text `content` as `role` said it; a role not known gives `json`, the message or block, as
