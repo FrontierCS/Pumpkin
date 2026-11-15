@@ -39,7 +39,7 @@ pub(super) fn record_json(byte: u64, line: &[u8]) -> Value {
 
 /// `value` with each string longer than [`STRING_CUT_BYTES`] cut there, at a character's start,
 /// and the bytes it holds in all said after it.
-fn cut(value: Value) -> Value {
+pub(super) fn cut(value: Value) -> Value {
     match value {
         Value::String(text) if text.len() > STRING_CUT_BYTES => {
             let at = text.floor_char_boundary(STRING_CUT_BYTES);
@@ -254,9 +254,10 @@ fn model_json(model: &ModelUse) -> Value {
 
 /// The lanes of the run's sandboxes, of the record in `dir`, as its summary orders them: the
 /// agent's, then each judge call's and lease's, by when the core began it, a lease under the call
-/// that holds it; each with what the summary says of it, and each caller's with its model
-/// answers: `"answers": {"count", "failed"}`, how many, and `"answered"` and `"failed"`, a time of
-/// each of [`LANE_TICKS`] spans of the run so far that holds one ([`ticks`]).
+/// that holds it; each with what the summary says of it, and each caller's with its `caller`,
+/// as a trace names it (`agent`, `job-<n>`), and its model answers: `"answers": {"count",
+/// "failed"}`, how many, and `"answered"` and `"failed"`, a time of each of [`LANE_TICKS`] spans
+/// of the run so far that holds one ([`ticks`]).
 fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let now = progress.end.unwrap_or(progress.last);
     let span = now.as_secs_f64().max(1.0) / f64::from(LANE_TICKS);
@@ -283,6 +284,7 @@ fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     };
     let mut agent = json!({
         "lane": "agent",
+        "caller": "agent",
         "kind": "agent",
         "sandbox": sandbox(&progress.agent.sandbox),
         "said": progress::agent_line(progress),
@@ -292,6 +294,7 @@ fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         let lane = format!("job {}", call.job);
         let mut lane_json = json!({
             "lane": lane,
+            "caller": format!("job-{}", call.job),
             "kind": "judge",
             "role": call.role,
             "grant": call.grant,

@@ -100,6 +100,15 @@ impl Response {
         Self { status, ..self }
     }
 
+    /// The bytes `body`, of the type `content_type`, as a record keeps them.
+    pub(super) fn bytes(content_type: &'static str, body: Vec<u8>) -> Self {
+        Self {
+            status: "200 OK",
+            content_type,
+            body,
+        }
+    }
+
     /// A file of the page's, of the type `content_type`.
     pub(super) fn file(content_type: &'static str, body: &[u8]) -> Self {
         Self {

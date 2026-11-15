@@ -29,6 +29,7 @@ mod http;
 mod json;
 mod page;
 mod talk;
+mod trace;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
@@ -88,6 +89,8 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
         held: BTreeMap::new(),
         log_epochs: BTreeMap::new(),
         reads: 0,
+        made: 0,
+        trace: Vec::new(),
     };
     match serve(&listener, &mut view)? {}
 }
@@ -113,6 +116,11 @@ struct View {
     log_epochs: BTreeMap<String, u64>,
     /// How many requests have read a held run, which orders them by the last read.
     reads: u64,
+    /// How many folds of a run the view has made ([`Held::made`]).
+    made: u64,
+    /// The traces of runs' callers read last, the last read last, at most
+    /// [`trace::TRACE_PASSES`] ([`trace::Trace`]).
+    trace: Vec<trace::Trace>,
 }
 
 /// The list's row of a run that has ended, or is lost, kept as the module's doc says.
@@ -145,12 +153,16 @@ struct Held {
     log_epoch: u64,
     /// The request that read it last ([`View::reads`]).
     read: u64,
+    /// The model exchanges its log names.
+    exchanges: trace::Exchanges,
+    /// Which of the view's folds of a run it is ([`View::made`]).
+    made: u64,
 }
 
 impl Held {
     /// The run of `record`, of whose log the view found `log_epoch` starts over before, with
-    /// nothing of its log taken.
-    fn new(record: Record, log_epoch: u64) -> Result<Self, String> {
+    /// nothing of its log taken, as the view's fold `made`.
+    fn new(record: Record, log_epoch: u64, made: u64) -> Result<Self, String> {
         let fold = record.fold();
         Ok(Self {
             readout: fold.readout()?,
@@ -163,6 +175,8 @@ impl Held {
             ending: None,
             log_epoch,
             read: 0,
+            exchanges: trace::Exchanges::default(),
+            made,
         })
     }
 
@@ -201,6 +215,7 @@ impl Held {
             talk,
             lines,
             recent,
+            exchanges,
             ..
         } = self;
         let started_over = fold.take_each(|line| {
@@ -209,8 +224,11 @@ impl Held {
                 recent.pop_front();
             }
             recent.push_back((line.byte, line.bytes.to_vec()));
-            if let (Some(talk), Ok(record)) = (talk.as_mut(), serde_json::from_slice(line.bytes)) {
-                talk.take(&record);
+            if let Ok(record) = serde_json::from_slice(line.bytes) {
+                if let Some(talk) = talk.as_mut() {
+                    talk.take(&record);
+                }
+                exchanges.take(line.byte, &record);
             }
         })?;
         if let Some(started_over) = started_over {
@@ -218,7 +236,7 @@ impl Held {
             // What was derived of the log before is not of this one.
             let record = Record::open(self.record.dir())?;
             let ending = self.ending.take();
-            *self = Self::new(record, self.log_epoch + 1)?;
+            *self = Self::new(record, self.log_epoch + 1, self.made)?;
             self.ending = ending;
             return self.take();
         }
@@ -349,6 +367,10 @@ enum Asked {
     Cancelling {
         id: RunTag,
     },
+    Trace {
+        id: RunTag,
+        asked: trace::Asked,
+    },
 }
 
 /// A failure to answer: no such run, or one that can't be read.
@@ -400,6 +422,11 @@ fn route(request: &Request, view: &mut View) -> Response {
         Asked::Log { id, at, log_epoch } => view.log_json(&id, at, log_epoch),
         Asked::Cancel { id } => return view.cancel(&id),
         Asked::Cancelling { id } => return view.cancels.said(&id),
+        Asked::Trace { id, asked } => match view.trace(&id, asked) {
+            Ok(trace::Answer::Json(json)) => Ok(json),
+            Ok(trace::Answer::Bytes(bytes)) => return bytes,
+            Err(failed) => Err(failed),
+        },
     };
     view.drop_ended();
     match answered {
@@ -454,6 +481,10 @@ fn asked(request: &Request) -> Result<Asked, Response> {
         }),
         ["", _, "cancel"] => Ok(Asked::Cancel { id: id()? }),
         ["", _, "cancelling"] => Ok(Asked::Cancelling { id: id()? }),
+        ["", _, "trace" | "exchange" | "item" | "diff", ..] => Ok(Asked::Trace {
+            id: id()?,
+            asked: trace::asked(&parts[2..], request)?,
+        }),
         _ => Err(not_found()),
     }
 }
@@ -631,11 +662,13 @@ impl View {
     /// look fails, as what a take that failed part-way leaves can't be trusted.
     fn looked(&mut self, id: &str, record: Option<Record>) -> Result<&mut Held, String> {
         let log_epoch = self.log_epochs.get(id).copied().unwrap_or(0);
+        let made = self.made + 1;
         let mut held = match (self.held.remove(id), record) {
             (Some(held), _) => held,
-            (None, Some(record)) => Held::new(record, log_epoch)?,
-            (None, None) => Held::new(Record::open(&self.runs.join(id))?, log_epoch)?,
+            (None, Some(record)) => Held::new(record, log_epoch, made)?,
+            (None, None) => Held::new(Record::open(&self.runs.join(id))?, log_epoch, made)?,
         };
+        self.made = self.made.max(held.made);
         held.look()?;
         if held.log_epoch != log_epoch {
             self.log_epochs.insert(id.to_owned(), held.log_epoch);

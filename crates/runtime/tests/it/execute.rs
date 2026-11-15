@@ -314,7 +314,8 @@ enum Also {
     Usage,
     /// Each model exchange that the record keeps, as kept ([`kept_exchanges`]).
     Exchanges,
-    /// What rebuilding model request 0 gives once the first item it names is changed.
+    /// What rebuilding model request 0 gives once the first item it names is changed, and what
+    /// reading it gives once the log names its files outside the record.
     ChangedItem,
 }
 
@@ -523,7 +524,30 @@ fn changed_item(record: &Path) -> String {
     )
     .unwrap();
     let refused = Record::open(record).unwrap().model_request(0).unwrap_err();
-    format!("request 0 rebuilt once an item is changed: {refused}")
+    let mut said = format!("request 0 rebuilt once an item is changed: {refused}");
+    // A log that names kept files outside the record, as damage would.
+    let log = fs::read_to_string(record.join("log.jsonl")).unwrap();
+    let log = (log.replace(r#""path":"model/0.request""#, r#""path":"/etc/hostname""#)).replace(
+        r#""path":"model/0.response""#,
+        r#""path":"model/../../0.response""#,
+    );
+    fs::write(record.join("log.jsonl"), &log).unwrap();
+    let opened = Record::open(record).unwrap();
+    let kept = (log.lines())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|line| line["event"]["kind"] == "model_answered")
+        .map(|line| line["event"]["kept"].clone())
+        .unwrap();
+    let refused = [
+        opened.model_request(0).unwrap_err(),
+        opened.kept_request(&kept["request"]).unwrap_err(),
+        opened.model_response(0, &kept["response"]).unwrap_err(),
+        opened.kept_request(&json!("model/0.request")).unwrap_err(),
+    ];
+    for refused in refused {
+        let _ = write!(said, "\nrequest 0 read from a damaged log: {refused}");
+    }
+    said
 }
 
 /// The records of the run log in `record`, a run's, each as JSON; none for a run that failed
@@ -2848,10 +2872,15 @@ fn model_request_rebuilt_from_changed_item() {
         SANDBOXD,
         &[Also::ChangedItem],
     );
-    let rebuilt = shown
-        .lines()
-        .find(|line| line.starts_with("request 0 rebuilt"));
-    expect!["request 0 rebuilt once an item is changed: model request 0: the record's items don't give back the body it sent: the rebuilt body's SHA-256 is 0207f9d9601a5a39e4cbae9cd1c4b88395f59014a0005b7116f7042d26b20920, where the run log names 8d6175ce51c5e9942c5037737b41cabe7120f8a38f746b122528340427199599"].assert_eq(rebuilt.unwrap());
+    let rebuilt: Vec<&str> = (shown.lines())
+        .filter(|line| line.starts_with("request 0 "))
+        .collect();
+    expect![[r#"
+        request 0 rebuilt once an item is changed: model request 0: the record's items don't give back the body it sent: the rebuilt body's SHA-256 is 0207f9d9601a5a39e4cbae9cd1c4b88395f59014a0005b7116f7042d26b20920, where the run log names 8d6175ce51c5e9942c5037737b41cabe7120f8a38f746b122528340427199599
+        request 0 read from a damaged log: the run log names the kept file `/etc/hostname`: expected a path below the record
+        request 0 read from a damaged log: the run log names the kept file `/etc/hostname`: expected a path below the record
+        request 0 read from a damaged log: the run log names the kept file `model/../../0.response`: expected a path below the record
+        request 0 read from a damaged log: the run log's `kept.request` is "model/0.request": expected an object"#]].assert_eq(&rebuilt.join("\n"));
 }
 
 #[test]

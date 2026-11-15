@@ -57,6 +57,7 @@ pub use log::{
 };
 use log::{Entry, Log, ModelAnswer};
 use model::{Exchange, Served};
+pub use model::{KeptPart, KeptRequest};
 pub use record::{
     BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
 };

@@ -183,6 +183,13 @@ pub fn config(api: Api, body: &Value) -> Config {
     (dialect(api).config)(body.as_object().unwrap_or(&empty))
 }
 
+/// The field of a request's body, as `api` writes it, that holds its list of tools.
+pub fn tools_field(api: Api) -> &'static str {
+    match api {
+        Api::Responses | Api::Chat => "tools",
+    }
+}
+
 /// The text of `content`: a string, or its parts' text.
 fn text(content: &Value) -> String {
     match content {
