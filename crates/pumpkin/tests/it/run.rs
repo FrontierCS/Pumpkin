@@ -548,10 +548,10 @@ fn usage() {
               pumpkin.toml, the machine's configuration, which every `pumpkin run` and
               `pumpkin build` reads: the file that --config names,
               $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
-              Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
-              and any other key is refused. [controller] takes the place of [docker],
-              [providers.<name>.<kind>] and [gateway] on a machine whose runs go to the
-              person's controller.
+              Every key is required, but those of [gateway], the [upstreams.<name>] tables,
+              [publish] and its `since`, and any other key is refused. [controller] takes the
+              place of [docker], [providers.<name>.<kind>] and [gateway] on a machine whose
+              runs go to the person's controller.
 
               Example, of a machine whose runs go to EC2 and Modal:
                 [docker]
@@ -695,6 +695,16 @@ fn usage() {
 
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
+
+              [publish], on the controller, which deploy/aws writes into its settings: where
+              each run's job publishes the runs, as `pumpkin controller publish --help` says;
+              without it, nothing is published:
+                bucket        The S3 bucket of the public page.
+                distribution  The ID of the CloudFront distribution that serves the bucket.
+                address       The page's address, which each job's log names.
+                since         An instant, as a TOML offset date-time, such as
+                              2026-11-15T00:00:00Z, unquoted: a run that started before it is
+                              not published; absent, every run is.
 
               [controller], the person's controller, which deploy/aws makes, and to which
               `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
@@ -1557,7 +1567,7 @@ fn configurations() {
                |
             11 | [placement.agent]
                |  ^^^^^^^^^
-            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`
+            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`, `publish`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/placed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config podman.toml
             exit status: Some(1)

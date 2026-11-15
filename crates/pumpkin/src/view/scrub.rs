@@ -22,14 +22,14 @@ const FOUND_MIN_BYTES: usize = 8;
 /// Values that an export replaces, each with its stand-in, the longest first, so that a value
 /// that holds another is replaced whole.
 #[derive(Clone, Default)]
-pub(super) struct Scrub {
+pub(crate) struct Scrub {
     replaced: Vec<(String, String)>,
 }
 
 impl Scrub {
     /// What names this machine: its home, which becomes `~`, and its user, which becomes
     /// `<user>`, as the environment's `HOME` and `USER` name them.
-    pub(super) fn of_machine() -> Self {
+    pub(crate) fn of_machine() -> Self {
         let mut scrub = Self::default();
         if let Some(home) = std::env::var_os("HOME").and_then(|home| home.into_string().ok()) {
             scrub.found(&home, "~");
@@ -42,7 +42,7 @@ impl Scrub {
 
     /// Replaces `value` with `stand_in` too, and its form that a search matches in
     /// ([`searchable`]), unless an earlier value is the same.
-    pub(super) fn replace(&mut self, value: &str, stand_in: &str) {
+    pub(crate) fn replace(&mut self, value: &str, stand_in: &str) {
         let searched = searchable(value);
         if searched != value {
             self.replace_exactly(&searched, stand_in);

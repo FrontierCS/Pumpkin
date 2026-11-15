@@ -44,6 +44,7 @@ mod export;
 mod fmt;
 mod lock;
 mod ls;
+mod publish;
 mod reap;
 mod run;
 mod view;

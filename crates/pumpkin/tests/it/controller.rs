@@ -958,6 +958,108 @@ fn job_publish_wait() {
     );
 }
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the job's command line and the snapshot"
+)]
+fn job_publish_fails() {
+    let scratch = Scratch::new("controller-job-publish-fails");
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let publish = "[publish]\nbucket = \"pumpkin-alice-public\"\ndistribution = \"E2STANDIN\"\n\
+                   address = \"https://runs.example\"\nsince = 2026-11-01T00:00:00Z\n";
+    write_parameter(
+        &scratch,
+        &format!(
+            "{}\n[providers.local.docker]\n{publish}",
+            docker_table("default")
+        ),
+    );
+    scratch.write_sandboxd(&format!("home/.pumpkin/{PINNED}/bin/sandboxd"));
+    scratch.write_task("built", &workflow(&image('0'), &["true"]));
+    scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
+    let run = id_ago(0, "0ad00021");
+    send(&scratch, &run, UPSTREAMS, false);
+    let mut job = on_controller(
+        &scratch,
+        &[
+            "controller",
+            "job",
+            &run,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--tree",
+            EMPTY_TREE,
+            "--",
+            "run",
+            "built/task.star",
+        ],
+    );
+    let output = job.stdout(Stdio::null()).output().unwrap();
+    let mut lines = vec![format!(
+        "the run's job: exit status {:?}",
+        output.status.code()
+    )];
+    // Once while the run is live, if it still is, and once as it has ended.
+    let mut said: Vec<String> = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| match line.split_once("upload 1 of ") {
+            Some((before, after)) => {
+                let rest = after.split_once(' ').map_or("", |(_, rest)| rest);
+                format!("{before}upload 1 of <n> {rest}")
+            }
+            None => line.to_owned(),
+        })
+        .collect();
+    said.dedup();
+    lines.extend(said);
+    let mut noted = noted(&scratch);
+    noted.dedup_by(|call, last| call.contains(" s3 ") && last.contains(" s3 "));
+    lines.extend(
+        noted
+            .into_iter()
+            .map(|call| match call.split_once("/public/") {
+                Some((before, _)) if call.contains(" s3 ") => format!("{before}/public/…"),
+                _ => call,
+            }),
+    );
+    let record = scratch.0.join(format!("home/.pumpkin/runs/{run}"));
+    let ended = record.join("outcome.json").exists();
+    lines.push(format!("the run ended: {ended}"));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(run.as_str(), "<run>")],
+        &expect![[r#"
+        the run's job: exit status Some(0)
+        pumpkin: building an image in pumpkin/built
+        pumpkin: built an image in pumpkin/built
+        pumpkin: run <run> started
+        pumpkin: to stop it: pumpkin cancel <run>
+        pumpkin: publishing the runs at https://runs.example every 60 s while the run is live
+        pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports; the next publish uploads what this one didn't
+        aws --version
+        aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+        curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
+        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
+        df --block-size=1 --output=size,avail -- /
+        df --block-size=1 --output=size,avail -- /
+        df --block-size=1 --output=size,avail -- /
+        df --block-size=1 --output=size,avail -- /
+        curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
+        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
+        aws --version
+        aws --no-cli-pager --output json --region us-west-1 s3 sync <scratch>/home/.pumpkin/public/…
+        the run ended: true"#]],
+    );
+}
+
 // Root's runtime directory, as the boot's unit has it; no prune, as a job that a client started as
 // the controller came up may hold an image that no IR names yet.
 #[test]

@@ -4,8 +4,9 @@
 //! provider's kind, and holding that kind's own settings ([`Kind`]), whose classes of sandbox a
 //! run's roles are placed in; the addresses where the gateway meets the sandboxes that dial it
 //! over a network, in `[gateway]`; and the model upstreams that a workflow's model route may
-//! reach, each a table of its own, `[upstreams.<name>]`. [`Config`] and the types it holds say
-//! what each key means; every key is required, but for `gateway`'s, `upstreams` and
+//! reach, each a table of its own, `[upstreams.<name>]`; and, on a controller, where its runs'
+//! jobs publish the runs, in `[publish]`. [`Config`] and the types it holds say what each key
+//! means; every key is required, but for `gateway`'s, `upstreams`, `publish`, `publish.since` and
 //! `docker.cpus`, and any other refused. A machine whose runs go to the person's controller has
 //! `[controller]` instead of `[docker]`, `[providers]` and `[gateway]`, beside its upstreams
 //! ([`Client`]), so where its runs go has one home.
@@ -29,6 +30,8 @@ pub(crate) struct Config {
     pub(crate) providers: Providers<Kind>,
     pub(crate) gateway: Gateway,
     pub(crate) upstreams: Upstreams,
+    /// Where a run's job publishes the runs, if anywhere.
+    pub(crate) publish: Option<crate::publish::Settings>,
 }
 
 /// The configuration of a machine whose runs go to the person's controller, which `run` and
@@ -57,6 +60,7 @@ struct Tables {
     #[serde(default)]
     upstreams: Upstreams,
     controller: Option<Controller>,
+    publish: Option<crate::publish::Settings>,
 }
 
 /// The person's controller, which `deploy/aws` made, and to which the machine's runs go.
@@ -399,6 +403,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         gateway,
         mut upstreams,
         controller,
+        publish,
     } = parsed
         .map_err(|error| error.to_string().trim_end().to_owned())
         .context(path.display())?;
@@ -412,6 +417,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
             ("`[docker]`", docker.is_some()),
             ("`[providers]`", providers.is_some()),
             ("`[gateway]`", gateway.is_some()),
+            ("`[publish]`", publish.is_some()),
         ]
         .into_iter()
         .filter_map(|(table, given)| given.then_some(table))
@@ -457,6 +463,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         providers,
         gateway: gateway.unwrap_or_default(),
         upstreams,
+        publish,
     }))
 }
 

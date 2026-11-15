@@ -40,7 +40,7 @@ use stdx::process::Environment;
 use crate::controller::bounded;
 use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
-use crate::{cli, say, star};
+use crate::{cli, publish, say, star};
 
 /// The directory of the runs' jobs, below the home.
 pub(crate) const JOBS: &str = "jobs";
@@ -126,7 +126,8 @@ const IMDS_SECONDS: u64 = 10;
 /// Runs the job that `job` asks for: makes its tree in the working directory ([`materialize`]),
 /// points [`CURRENT`] at this `pumpkin`, writes the job's configuration ([`assemble`]), prunes,
 /// builds its task's images ([`build_first`]), then runs its command with it, a run to its end,
-/// which finds each image by its tag; returns the exit status of its command.
+/// which finds each image by its tag, publishing the runs meanwhile if the configuration has
+/// `[publish]` ([`publish::until_ended`]); returns the exit status of its command.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
@@ -150,7 +151,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     // So that a client that follows the run has it followed by the `pumpkin` it sent the job
     // with, as `current-pumpkin` may be another job's by then.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
-    let assembled = assemble(&Cli::connect(region)?, &parameter, &sent)?;
+    let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
     let path = dir.join("pumpkin.toml");
     fs::write(&path, assembled).context(path.display())?;
     let Some(config) = path.to_str().map(str::to_owned) else {
@@ -174,10 +175,15 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             };
             // Only one who follows the run reads the job's log.
             let exit = crate::start(&id, run, crate::Reader::Follower)?;
-            // The run's end is the job's, so that the unit lasts as long as the run.
+            // The run's end is the job's, so that the unit lasts as long as the run, and its
+            // last publish is of the run ended.
             if exit == ExitCode::SUCCESS {
                 let runs = crate::default_runs()?;
-                Record::open(&Path::new(&runs).join(id.as_str()))?.wait(|| {})?;
+                let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
+                match crate::config::read(&path)?.publish {
+                    Some(settings) => publish::until_ended(&record, settings, &runs, region)?,
+                    None => drop(record.wait(|| {})?),
+                }
             }
             exit
         }
@@ -523,7 +529,7 @@ fn take_modal(
 
 /// The instance's private and public IPv4 addresses, as the instance metadata service serves
 /// them, `local-ipv4` and `public-ipv4`, under an `IMDSv2` token, through `curl`.
-fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
+pub(crate) fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
     // Long enough for the two reads that follow.
     let ttl = "X-aws-ec2-metadata-token-ttl-seconds: 60";
     let token = curl(&[

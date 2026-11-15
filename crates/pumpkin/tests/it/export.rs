@@ -16,7 +16,7 @@ use super::view::{Model, Piped, answered, said, started, user};
 use super::{Scratch, Step, check, judged, judged_log, lease_places, logged, write_run};
 
 /// The run that [`write_exported`] writes.
-const EXPORTED: &str = "20261110-170000-00000012";
+pub(super) const EXPORTED: &str = "20261110-170000-00000012";
 
 /// A run whose `provider.json` routes a role through an API this build doesn't know, so that
 /// the view refuses its `run.json` and the export leaves it out.
@@ -31,7 +31,12 @@ const UNREADABLE: &str = "20261110-180000-00000013";
     clippy::too_many_lines,
     reason = "most of it is the record's exchanges"
 )]
-fn write_exported(scratch: &Scratch, ended: bool, asked: &str, reports: &Value) -> Option<File> {
+pub(super) fn write_exported(
+    scratch: &Scratch,
+    ended: bool,
+    asked: &str,
+    reports: &Value,
+) -> Option<File> {
     let mut model = Model::new(&scratch.0.join("runs").join(EXPORTED));
     let rest = || json!({ "model": "glm-5.3", "stream": false });
     let tools = ("tools", json!([{ "type": "function", "name": "exec" }]));
@@ -110,7 +115,7 @@ fn write_exported(scratch: &Scratch, ended: bool, asked: &str, reports: &Value) 
 }
 
 /// Two providers' reports that name no account.
-fn reports() -> Value {
+pub(super) fn reports() -> Value {
     json!({ "aws": {}, "modal": {} })
 }
 
@@ -146,7 +151,7 @@ fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 
 /// Each file of the export in `dir`, by its key, as it holds it: the page's and `robots.txt`
 /// as they are, every other inflated.
-fn exported(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+pub(super) fn exported(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = files(dir);
     for (key, bytes) in &mut files {
         if key.starts_with("runs") {
