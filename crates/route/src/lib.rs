@@ -20,11 +20,16 @@ pub mod read;
 mod upstream;
 mod usage;
 
-pub use closure::Route;
+pub use closure::{Headers, MAX_DROPPED_HEADERS, Route};
 pub use upstream::{Answer, Key, Serving, Upstream, UpstreamUrl, serve};
 
 /// Where [`serve`] keeps a model exchange as it passes, for the run's record.
 pub trait Keep {
+    /// The names of the request headers that the route left behind as the request went
+    /// upstream, those of them that an entry could list ([`Headers`]): sorted, each once, and at
+    /// most [`MAX_DROPPED_HEADERS`]. Called once, before [`Keep::request`], for a request that
+    /// goes upstream.
+    fn dropped_headers(&self, names: &[String]);
     /// The request's body as it went upstream, with the fields of its API that a record may keep
     /// apart, if it is one the route read; or, if it never went upstream, as its client sent it.
     fn request(&self, body: &[u8], apart: Option<Apart>);

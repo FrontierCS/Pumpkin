@@ -19,7 +19,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use expect_test::{Expect, expect};
 use provider::{Provider, Ready};
-use route::{Key, Serving, UpstreamUrl};
+use route::{Headers, Key, Serving, UpstreamUrl};
 use runtime::{Record, Recorded, Run, System, new_id};
 use schema::ir::{self, Api, ModelName, Name};
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
@@ -205,6 +205,7 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
         url,
         key,
         models: models.collect(),
+        headers: Headers::default(),
     }
 }
 
@@ -401,6 +402,8 @@ fn reads_model_answers() {
                 cached: None,
                 reasoning: None,
             },
+            dropped_headers: {},
+            more_dropped_headers: false,
         }"#]]
     .assert_eq(&format!("{:#?}", progress.model));
 }

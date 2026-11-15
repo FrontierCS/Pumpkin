@@ -929,7 +929,7 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
                  <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
                  <t> final judge job 0 on local/container, started after <t>, ran <t>: 1
                         model: 1 request, all answered 200; no response reported its tokens; of 1 good answer, by the median, <t> to the end
-              model: 2 requests, all answered 200; no response reported its tokens; of 2 good answers, by the median, <t> to the end
+              model: 2 requests, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 2 good answers, by the median, <t> to the end
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
             pumpkin: run <id> finished with a score of 1, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
@@ -1841,7 +1841,7 @@ fn runs_on_docker() {
                  <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
                  <t> final judge job 0 on local/container, started after <t>, ran <t>: 1
                         model: 1 request, all answered 200; no response reported its tokens; of 1 good answer, by the median, <t> to the end
-              model: 2 requests, all answered 200; no response reported its tokens; of 2 good answers, by the median, <t> to the end
+              model: 2 requests, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 2 good answers, by the median, <t> to the end
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
             pumpkin: run <id> finished with a score of 1, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
@@ -1849,7 +1849,7 @@ fn runs_on_docker() {
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local","report":null}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local","report":null}
             provider.json routes: {"agent":[{"api":"responses","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra"}},"upstream":"provider"}],"final_judge":[{"api":"chat","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra"}},"upstream":"provider"}]}
-            the run log records: {"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":57,"body_sha256":"8e1b803c11e5437c46a8ea56e92d591b284778ce8209d56a347f8c8fdc0ca260","bytes":57,"path":"model/0.request"},"response":{"bytes":116,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"provider","upstream_status":200}
+            the run log records: {"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":57,"body_sha256":"8e1b803c11e5437c46a8ea56e92d591b284778ce8209d56a347f8c8fdc0ca260","bytes":57,"dropped_headers":["user-agent"],"path":"model/0.request"},"response":{"bytes":116,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"provider","upstream_status":200}
             the run log records: {"answer":{"kind":"forwarded"},"api":"chat","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":77,"body_sha256":"018fa791e56a2db8c8c065da57294d744c30e14181cf2fdbfd272d3e8f009efd","bytes":117,"items":{"count":1,"field":"messages"},"path":"model/1.request"},"response":{"bytes":143,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"provider","upstream_status":200}
             the agent's answer: data: POST /v1/responses HTTP/1.1 Some("Bearer sk-test") {"input":"hi","model":"vendor/gpt-6-astra","store":false}\n\n
             the final judge's answer: data: POST /v1/chat/completions HTTP/1.1 Some("Bearer sk-test") {"messages":[{"content":"grade","role":"user"}],"model":"vendor/gpt-6-astra"}\n\n

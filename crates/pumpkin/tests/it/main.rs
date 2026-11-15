@@ -708,6 +708,7 @@ fn judged_log() -> Vec<Value> {
         "kind": "model_answered", "caller": "job-4", "request": 3, "answer": { "kind": "forwarded" },
         "upstream_status": 200, "failed": { "code": "rate_limit_exceeded" },
         "first_token_ns": "1013000000000",
+        "kept": { "request": { "dropped_headers": ["x-stainless-lang", "x-title"] } },
     });
     vec![
         logged(5, json!({ "kind": "agent_started" }), none()),

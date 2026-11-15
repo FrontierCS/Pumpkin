@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use docker::CpuList;
 use engine::ContextName;
 use gateway::GatewayAddress;
-use route::{Key, Serving, UpstreamUrl};
+use route::{Headers, Key, Serving, UpstreamUrl};
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
@@ -240,7 +240,12 @@ impl Upstreams {
 
     /// How a run serves `entry`, an entry of a route, as [`Upstreams::serving`] says.
     fn serves(&self, entry: &ApiRoute) -> Result<Serving, String> {
-        let ApiRoute { api, models } = entry;
+        let ApiRoute {
+            api,
+            models,
+            request_headers,
+            response_headers,
+        } = entry;
         let serves = |upstream: &Upstream| {
             let served =
                 |model: &ModelName| upstream.models.iter().any(|served| served.name == *model);
@@ -277,6 +282,10 @@ impl Upstreams {
             url: UpstreamUrl::try_from(endpoint(url, *api))?,
             key: Key::read(key_file)?,
             models: models.collect(),
+            headers: Headers {
+                request: request_headers.clone(),
+                response: response_headers.clone(),
+            },
         })
     }
 }

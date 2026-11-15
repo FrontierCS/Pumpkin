@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod values;
 
 pub use values::{
-    AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, Image, JsonPointer, Mode,
-    ModelName, Models, Name, Returns, RolePath, Sha256Digest, WorkflowName,
+    AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
+    Mode, ModelName, Models, Name, Returns, RolePath, Sha256Digest, WorkflowName,
 };
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
@@ -337,6 +337,14 @@ pub struct ApiRoute {
     pub api: Api,
     /// The models that requests may name.
     pub models: Models,
+    /// The request headers that the route passes upstream as sent, besides the API's own: those
+    /// a client's product adds to it. Any other request header stays behind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_headers: Vec<HeaderName>,
+    /// The response headers that the route passes back as the upstream sent them, besides the
+    /// API's own. Any other response header stays behind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_headers: Vec<HeaderName>,
 }
 
 /// An API of model providers', in which a role's code writes its model requests. It shows as

@@ -16,48 +16,8 @@ use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderValue, Uri};
 
 use super::Keep;
-use super::closure::{Closed, Refusal, Route, Status, refusal};
+use super::closure::{Closed, Headers, Refusal, Route, Status, refusal};
 use super::usage::{Failure, Scan, Usage};
-
-/// The response headers that reach the client, besides the rate-limit headers that
-/// [`RATE_LIMIT_SUFFIXES`] gives.
-// Each is one that the runs' harness reads from a response: the model that answered, the
-// request's ids, its credits and why a limit was reached, when to try again, and an error's
-// details. Any other stays behind: one that names the account or the project that the
-// deployment's key belongs to, which are not the agent's to know, and those that frame the body
-// on the upstream's connection, since the session carries it in frames of its own.
-const RESPONSE_HEADERS: [&str; 19] = [
-    "content-type",
-    "openai-model",
-    "x-reasoning-included",
-    "x-request-id",
-    "x-models-etag",
-    "x-codex-turn-state",
-    "x-codex-safety-buffering-enabled",
-    "x-codex-safety-buffering-faster-model",
-    "x-codex-credits-has-credits",
-    "x-codex-credits-unlimited",
-    "x-codex-credits-balance",
-    "x-codex-promo-message",
-    "x-codex-rate-limit-reached-type",
-    "x-codex-active-limit",
-    "x-oai-request-id",
-    "cf-ray",
-    "x-openai-authorization-error",
-    "x-error-json",
-    "retry-after",
-];
-
-/// The ends of the rate-limit headers that reach the client: `x-<limit><end>`, for any limit.
-const RATE_LIMIT_SUFFIXES: [&str; 7] = [
-    "-primary-used-percent",
-    "-primary-window-minutes",
-    "-primary-reset-at",
-    "-secondary-used-percent",
-    "-secondary-window-minutes",
-    "-secondary-reset-at",
-    "-limit-name",
-];
 
 /// How long the upstream may take to resolve the provider's host name.
 // Resolving the name and connecting to it (`CONNECT_TIMEOUT`) are the waits that `IDLE_TIMEOUT`
@@ -154,6 +114,8 @@ pub struct Serving {
     /// The name that the upstream takes for each model it serves, by the name that a route
     /// allows.
     pub models: BTreeMap<ModelName, ModelName>,
+    /// The headers that the entry passes besides its API's own.
+    pub headers: Headers,
 }
 
 impl fmt::Debug for Serving {
@@ -165,12 +127,14 @@ impl fmt::Debug for Serving {
             url,
             key: _,
             models,
+            headers,
         } = self;
         (f.debug_struct("Serving")
             .field("name", name)
             .field("api", api))
         .field("url", url)
         .field("models", models)
+        .field("headers", headers)
         .finish_non_exhaustive()
     }
 }
@@ -279,7 +243,7 @@ impl Upstream {
     }
 
     /// Sends `closed` upstream and streams the response back to `client` by its deadline, with
-    /// only the headers a harness reads, keeping both bodies ([`Keep`]), giving up at it or
+    /// only the headers its entry passes back, keeping both bodies ([`Keep`]), giving up at it or
     /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
     /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
     /// the key or the request is refused, and else the response, cut short if it breaks off.
@@ -287,11 +251,12 @@ impl Upstream {
     /// a frame or the deadline passes.
     pub(crate) fn forward(
         &self,
-        closed: &Closed,
+        closed: &Closed<'_>,
         client: Client<'_>,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
+        client.keep.dropped_headers(closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
         let call = self.agent.post(self.url.clone()).config();
         let call = call.timeout_global(bound(client.by)).build();
@@ -592,10 +557,10 @@ fn coded(headers: &HeaderMap) -> bool {
 
 /// The response headers that reach the client, those that it reads whose values are text, with
 /// the model that answered named as `closed`'s client named it ([`Closed::named`]).
-fn returned(headers: &HeaderMap, closed: &Closed) -> Vec<(String, String)> {
+fn returned(headers: &HeaderMap, closed: &Closed<'_>) -> Vec<(String, String)> {
     headers
         .iter()
-        .filter(|(name, _)| reaches_client(name.as_str()))
+        .filter(|(name, _)| closed.route().returns(name.as_str()))
         .filter_map(|(name, value)| {
             let value = value.to_str().ok()?;
             let value = if name == "openai-model" {
@@ -606,14 +571,4 @@ fn returned(headers: &HeaderMap, closed: &Closed) -> Vec<(String, String)> {
             Some((name.as_str().to_owned(), value.to_owned()))
         })
         .collect()
-}
-
-/// Whether `name`, a response header in lowercase, reaches the client.
-fn reaches_client(name: &str) -> bool {
-    RESPONSE_HEADERS.contains(&name)
-        || RATE_LIMIT_SUFFIXES.iter().any(|suffix| {
-            name.strip_prefix("x-")
-                .and_then(|name| name.strip_suffix(suffix))
-                .is_some_and(|limit| !limit.is_empty())
-        })
 }

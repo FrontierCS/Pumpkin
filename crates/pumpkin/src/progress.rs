@@ -954,6 +954,13 @@ fn model(model: &runtime::ModelUse) -> String {
     if let Some(failed) = failed_upstream(model) {
         let _ = write!(line, "; {failed}");
     }
+    if !model.dropped_headers.is_empty() {
+        let dropped: Vec<&str> = model.dropped_headers.iter().map(String::as_str).collect();
+        let _ = write!(line, "; dropped request headers: {}", dropped.join(", "));
+        if model.more_dropped_headers {
+            line.push_str(", and more");
+        }
+    }
     let runtime::Tokens {
         reported,
         input,

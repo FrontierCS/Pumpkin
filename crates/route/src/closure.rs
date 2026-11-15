@@ -3,8 +3,8 @@
 //! An entry of the Responses API admits a request that:
 //!
 //! - is `POST /responses`, the one endpoint through which a harness samples its model;
-//! - passes on only the headers that the harness sends (`RESPONSES_HEADERS`), each with a value
-//!   that holds no control character but tab, and leaves every other behind;
+//! - passes on only the API's own headers (`RESPONSES_HEADERS`) and those its entry lists, each
+//!   with a value that holds no control character but tab, and leaves every other behind;
 //! - holds a JSON object that sets `store` to `false` and refers to no state kept on the
 //!   provider's side, such as by `previous_response_id` or `file_id`;
 //! - names a model the route allows, and no `access_programs` but `null`;
@@ -12,10 +12,11 @@
 //! - holds no URL but inline data (`URL_FIELDS`).
 //!
 //! An entry of the Chat Completions API admits a request that is `POST /v1/chat/completions`,
-//! passes on only `CHAT_HEADERS`, stores nothing on the provider's side (no `store` but `false`
-//! or `null`), names a model the route allows and no `web_search_options` but `null`, declares
-//! and chooses only `function` and `custom` tools, and holds no URL but inline data and no
-//! `file_id`, `container_id` or `comparison_response_id` anywhere.
+//! passes on only `CHAT_HEADERS` and those its entry lists, stores nothing on the provider's side
+//! (no `store` but `false` or `null`), names a model the route allows and no
+//! `web_search_options` but `null`, declares and chooses only `function` and `custom` tools, and
+//! holds no URL but inline data and no `file_id`, `container_id` or `comparison_response_id`
+//! anywhere.
 //!
 //! The rules refuse the forms they name and pass every other field. They read the body's JSON
 //! fields, never the text of its context, and the body that goes upstream is the one they read,
@@ -36,33 +37,24 @@ use super::upstream::Answer;
 use super::{read, usage};
 use crate::Apart;
 
-// Each is one the harness the runs use sends, and describes its client, its session, or the form
-// in which its requests are written. Any other could reach more of the provider than the models
-// the route allows, under the deployment's key: a credential of the agent's own, or a header that
-// picks the account, the project, a model or a feature. An unlisted header stays behind without a
-// refusal, so the list names each header whole, and passes none for sharing a prefix with one.
-//
-// Two name a form of the request rather than describe its client: `x-codex-beta-features` names
-// the form of compaction the harness's requests use, and `x-openai-internal-codex-responses-lite`
-// the form that lists the tools in an `additional_tools` input item rather than in `tools`. Both
-// pass as sent, since the harness writes its requests in the forms they name, and the rules read
-// a body in any form: they find every list of tools wherever it sits.
-const RESPONSES_HEADERS: [&str; 10] = [
-    "content-type",
-    "accept",
-    "originator",
-    "user-agent",
-    "session-id",
-    "thread-id",
-    "x-codex-beta-features",
-    "x-codex-window-id",
-    "x-codex-turn-metadata",
-    "x-openai-internal-codex-responses-lite",
-];
+// The request headers of each API's own: the form of the request and of its answer. A client's
+// product adds its own, which its entry lists ([`Headers`]). Any other could reach more of the
+// provider than the models the route allows, under the deployment's key: a credential of the
+// agent's own, or a header that picks the account, the project, a model or a feature. An unlisted
+// header stays behind without a refusal, so a list names each header whole, and passes none for
+// sharing a prefix with one.
+const RESPONSES_HEADERS: [&str; 2] = ["content-type", "accept"];
 
-// Each says what client it is, or the form of its request and its answer. Those by which a
-// client names itself further, such as an SDK's `x-stainless-*`, the provider needs none of.
+// Those by which a client names itself further, such as an SDK's `x-stainless-*`, the provider
+// needs none of.
 const CHAT_HEADERS: [&str; 3] = ["content-type", "accept", "user-agent"];
+
+// The response headers of each API's own: the form of the body, the provider's id for the
+// request, and when to try again. Any other stays behind unless the entry lists it: one that
+// names the account or the project that the deployment's key belongs to, which are not the
+// agent's to know, and those that frame the body on the upstream's connection, since the session
+// carries it in frames of its own.
+const RESPONSE_HEADERS: [&str; 3] = ["content-type", "x-request-id", "retry-after"];
 
 /// The fields that refer to state kept on the provider's side.
 const STATE_FIELDS: [&str; 4] = [
@@ -75,6 +67,11 @@ const STATE_FIELDS: [&str; 4] = [
 /// The fields whose URL the provider would fetch.
 const URL_FIELDS: [&str; 4] = ["url", "image_url", "file_url", "audio_url"];
 
+/// The most names of request headers left behind that [`Keep::dropped_headers`](crate::Keep) is
+/// given for a request, and that a run's readout holds for all of them.
+// A client sends a few dozen headers at most; the names are for a person to read.
+pub const MAX_DROPPED_HEADERS: usize = 32;
+
 /// The most bytes of a value the client chose, such as a path or a model's name, that
 /// [`shown`] keeps.
 const MAX_SHOWN_BYTES: usize = 256;
@@ -83,7 +80,10 @@ const MAX_SHOWN_BYTES: usize = 256;
 #[derive(Debug)]
 struct Rules {
     target: &'static str,
+    /// The request headers of the API's own.
     headers: &'static [&'static str],
+    /// The response headers of the API's own.
+    response_headers: &'static [&'static str],
     /// The fields of a request's body that a record may keep apart.
     apart: Apart,
     /// Where a response's usage gives its tokens.
@@ -104,6 +104,7 @@ type Tool = fn(&Value) -> Result<(), Refusal>;
 const RESPONSES: Rules = Rules {
     target: "/responses",
     headers: &RESPONSES_HEADERS,
+    response_headers: &RESPONSE_HEADERS,
     apart: Apart {
         conversation: "input",
         whole: &["tools", "instructions"],
@@ -118,6 +119,7 @@ const RESPONSES: Rules = Rules {
 const CHAT: Rules = Rules {
     target: "/v1/chat/completions",
     headers: &CHAT_HEADERS,
+    response_headers: &RESPONSE_HEADERS,
     apart: Apart {
         conversation: "messages",
         whole: &["tools"],
@@ -135,18 +137,34 @@ pub struct Route {
     rules: &'static Rules,
     /// Each model that requests may name, with the name that its upstream takes for it.
     models: BTreeMap<ModelName, ModelName>,
+    /// The request headers that pass upstream: the API's own and the entry's.
+    request_headers: Vec<HeaderName>,
+    /// The response headers that reach the client, in lowercase: the API's own and the entry's.
+    response_headers: Vec<String>,
+}
+
+/// The headers that a client's product adds to its API's own, which a route's entry passes as
+/// sent, as the entry of the IR lists them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Headers {
+    /// The request headers that go upstream.
+    pub request: Vec<schema::ir::HeaderName>,
+    /// The response headers that reach the client.
+    pub response: Vec<schema::ir::HeaderName>,
 }
 
 /// A model request that keeps the route closed, ready to go upstream. Only [`Route::close`]
 /// makes one.
 #[derive(Debug)]
-pub(crate) struct Closed {
+pub(crate) struct Closed<'r> {
     headers: Vec<(HeaderName, HeaderValue)>,
+    /// The names of the headers left behind that an entry could list.
+    dropped_headers: Vec<String>,
     body: Vec<u8>,
     /// The model that the request named, and the name that its upstream takes for it, which
     /// `body` names.
     model: (ModelName, ModelName),
-    rules: &'static Rules,
+    route: &'r Route,
 }
 
 /// Why the route answers a model request with an error: a rule broken, the route's end, or an
@@ -174,13 +192,35 @@ pub(super) enum Status {
 
 impl Route {
     /// The entry for `api` that allows each model that `models` keys, which goes upstream under
-    /// the name that it maps the model to.
-    pub fn new(api: Api, models: BTreeMap<ModelName, ModelName>) -> Self {
+    /// the name that it maps the model to, and passes the headers of `api`'s own and `headers`.
+    pub fn new(api: Api, models: BTreeMap<ModelName, ModelName>, headers: &Headers) -> Self {
         let rules = match api {
             Api::Responses => &RESPONSES,
             Api::Chat => &CHAT,
         };
-        Self { rules, models }
+        let Headers { request, response } = headers;
+        let joined = |own: &'static [&'static str], listed: &[schema::ir::HeaderName]| {
+            let mut joined: Vec<String> = own.iter().map(|&name| name.to_owned()).collect();
+            joined.extend(listed.iter().map(|name| name.as_str().to_owned()));
+            joined.sort_unstable();
+            joined.dedup();
+            joined
+        };
+        let request_headers = joined(rules.headers, request).into_iter().map(|name| {
+            HeaderName::try_from(name)
+                .unwrap_or_else(|_| unreachable!("a lowercase token is an HTTP header's name"))
+        });
+        Self {
+            rules,
+            models,
+            request_headers: request_headers.collect(),
+            response_headers: joined(rules.response_headers, response),
+        }
+    }
+
+    /// Whether `name`, a response header in lowercase, reaches the client.
+    pub(crate) fn returns(&self, name: &str) -> bool {
+        self.response_headers.iter().any(|listed| listed == name)
     }
 
     /// Whether `request` is to its API's endpoint, which [`Route::close`] then takes.
@@ -191,7 +231,7 @@ impl Route {
     /// Parses `request`, which [`Route::takes`], into one that keeps the route closed, naming its
     /// model as its upstream takes it. Refuses a request that breaks a rule of
     /// [the route's docs](crate).
-    pub(crate) fn close(&self, request: &ModelRequest) -> Result<Closed, Refusal> {
+    pub(crate) fn close(&self, request: &ModelRequest) -> Result<Closed<'_>, Refusal> {
         let ModelRequest {
             method,
             path,
@@ -203,7 +243,8 @@ impl Route {
             return Err(refusal(Status::MethodNotAllowed, message));
         }
         let rules = self.rules;
-        let headers = passed(rules.headers, headers)?;
+        let dropped_headers = self.dropped(headers);
+        let headers = passed(&self.request_headers, headers)?;
         let mut body: Map<String, Value> = serde_json::from_slice(body).map_err(|error| {
             let error = error.to_string();
             bad(format!(
@@ -225,10 +266,32 @@ impl Route {
         let model = (model.clone(), upstream_name.clone());
         Ok(Closed {
             headers,
+            dropped_headers,
             body,
             model,
-            rules,
+            route: self,
         })
+    }
+
+    /// The names of `headers` that the entry leaves behind, as [`Closed::dropped_headers`] has
+    /// them.
+    fn dropped(&self, headers: &[(String, String)]) -> Vec<String> {
+        let mut dropped: Vec<String> = (headers.iter())
+            .map(|(name, _)| name)
+            .filter(|name| {
+                !self
+                    .request_headers
+                    .iter()
+                    .any(|listed| listed == name.as_str())
+            })
+            // One that no entry may list, such as `authorization`, the route always leaves behind.
+            .filter(|name| schema::ir::HeaderName::try_from((*name).clone()).is_ok())
+            .cloned()
+            .collect();
+        dropped.sort_unstable();
+        dropped.dedup();
+        dropped.truncate(MAX_DROPPED_HEADERS);
+        dropped
     }
 
     /// The model that `body` names, with the name that the upstream takes for it, refusing a
@@ -253,7 +316,18 @@ impl Route {
     }
 }
 
-impl Closed {
+impl Closed<'_> {
+    /// The route's entry that closed it.
+    pub(crate) fn route(&self) -> &Route {
+        self.route
+    }
+
+    /// The names of the request's headers that the route leaves behind, those an entry could
+    /// list: sorted, each once, and at most `MAX_DROPPED_HEADERS`.
+    pub(crate) fn dropped_headers(&self) -> &[String] {
+        &self.dropped_headers
+    }
+
     pub(crate) fn headers(&self) -> &[(HeaderName, HeaderValue)] {
         &self.headers
     }
@@ -265,15 +339,15 @@ impl Closed {
 
     /// The fields of its body that its API's client sends again on each request.
     pub(crate) fn apart(&self) -> Apart {
-        self.rules.apart
+        self.route.rules.apart
     }
 
     pub(crate) fn usage(&self) -> usage::Fields {
-        self.rules.usage
+        self.route.rules.usage
     }
 
     pub(crate) fn output(&self) -> usage::Output {
-        read::dialect(self.rules.api).output
+        read::dialect(self.route.rules.api).output
     }
 
     /// `answered`, the model that a response says answered the request, as the request named
@@ -430,20 +504,20 @@ fn shown(text: &str) -> Cow<'_, str> {
 // HTTP's grammar lets a value hold no control character but tab. A line break in a value would
 // end the header early, and could slip upstream a header that the list keeps behind.
 fn passed(
-    listed: &[&'static str],
+    listed: &[HeaderName],
     headers: &[(String, String)],
 ) -> Result<Vec<(HeaderName, HeaderValue)>, Refusal> {
     headers
         .iter()
         .filter_map(|(name, value)| {
-            let listed = listed.iter().copied().find(|listed| listed == name)?;
+            let listed = listed.iter().find(|listed| listed.as_str() == name)?;
             let value = HeaderValue::from_str(value).map_err(|_| {
                 bad(format!(
                     "the header `{name}` holds a control character: send values without any but \
                      tab"
                 ))
             });
-            Some(value.map(|value| (HeaderName::from_static(listed), value)))
+            Some(value.map(|value| (listed.clone(), value)))
         })
         .collect()
 }

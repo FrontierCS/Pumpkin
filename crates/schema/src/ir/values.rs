@@ -101,6 +101,19 @@ checked_string!(
 );
 
 checked_string!(
+    /// The name of an HTTP header that a model route's entry passes: 1 to 64 lowercase characters
+    /// of an HTTP token (RFC 9110).
+    ///
+    /// None names a header that carries a credential, picks an account, signs a request, frames a
+    /// message or sets its coding, which the route passes for no workflow. The refusal covers the
+    /// three APIs' own headers and HTTP's framing; the headers that a gateway in front of a
+    /// provider gives meaning to are the operator's to keep off, since no list here can name
+    /// every gateway's.
+    HeaderName,
+    check_header_name
+);
+
+checked_string!(
     /// A JSON pointer (RFC 6901): empty for the whole document, or `/`-prefixed reference
     /// tokens, in which `~0` stands for `~` and `~1` for `/`. Every `~` starts one of those
     /// escapes.
@@ -423,6 +436,59 @@ fn check_model_name(name: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// The most bytes a [`HeaderName`] holds, as many as a [`Name`].
+const MAX_HEADER_NAME_BYTES: usize = 64;
+
+fn check_header_name(name: &str) -> Result<(), String> {
+    // RFC 9110's `tchar`, letters in lowercase, as the gateway names a request's headers and the
+    // HTTP client a response's.
+    let token = |char: char| {
+        char.is_ascii_lowercase() || char.is_ascii_digit() || "!#$%&'*+-.^_`|~".contains(char)
+    };
+    if name.is_empty() || name.len() > MAX_HEADER_NAME_BYTES || !name.chars().all(token) {
+        return Err(format!(
+            "`{}` is not a header name: use 1 to 64 characters from a-z, 0-9 and \
+             ``!#$%&'*+-.^_`|~``",
+            name.escape_debug()
+        ));
+    }
+    let why = match name {
+        // The host's key is the route's one credential, and the account it belongs to the
+        // deployment's: an agent's own would reach more of the provider than the workflow allows.
+        "authorization"
+        | "proxy-authorization"
+        | "x-api-key"
+        | "api-key"
+        | "x-goog-api-key"
+        | "x-goog-user-project"
+        | "ocp-apim-subscription-key"
+        | "cookie"
+        | "set-cookie"
+        | "openai-organization"
+        | "openai-project"
+        | "anthropic-organization-id" => {
+            "carries a credential or picks an account, which are the host's alone"
+        }
+        // AWS's SigV4 signs the request in `x-amz-` headers and carries a session's token in
+        // one: an agent's own would sign as another principal.
+        _ if name.starts_with("x-amz-") => {
+            "signs the request or carries a session's token, which are the host's alone"
+        }
+        // Each hop frames its own message: the session carries the body in frames of its own, and
+        // the HTTP client writes the upstream's request.
+        "host" | "content-length" | "transfer-encoding" | "connection" | "keep-alive"
+        | "proxy-connection" | "te" | "trailer" | "upgrade" | "proxy-authenticate" => {
+            "frames the message on one hop, which the route does for each"
+        }
+        // The route asks for the body uncoded, and refuses a coded one, so that it can read it.
+        "accept-encoding" | "content-encoding" => {
+            "sets the body's coding, which the route keeps to `identity`"
+        }
+        _ => return Ok(()),
+    };
+    Err(format!("`{name}` {why}: list another header"))
 }
 
 checked_string!(

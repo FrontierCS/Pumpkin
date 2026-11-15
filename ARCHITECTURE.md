@@ -163,8 +163,9 @@ that the layer's inputs are that recipe alone.
 **Architecture Invariant:** it holds files and nothing else, so that what a library function gives
 rests on the language alone. It depends on no crate; its tests do.
 
-**Architecture Invariant:** a harness is known only here. No other crate's code names one, but
-`route`'s lists of the headers that a request and a response may carry, which name Codex's.
+**Architecture Invariant:** a harness is known only here. No other crate's code names one: the
+headers a harness's requests and responses carry beyond its API's own are data its route entry
+lists.
 
 ### `crates/tls`
 
@@ -218,7 +219,11 @@ items (`Item`), and takes a stream's first output where `serve` does, by the sam
 
 **Architecture Invariant:** the route stays closed. A request reaches the models that its workflow
 allows and nothing else of the model provider's: none of the state it keeps, the tools it runs or
-the URLs it fetches. `serve` sends upstream only the body that a `Route` admitted.
+the URLs it fetches. `serve` sends upstream only the body that a `Route` admitted, and only the
+headers of its API's own and those its entry lists, of which `schema` refuses any that carries a
+credential, picks an account, signs a request or frames a message. The refusal covers the three
+APIs' own headers and HTTP's framing; the headers that a gateway in front of a provider gives
+meaning to are the operator's to keep off, since no list here can name every gateway's.
 
 **Architecture Invariant:** it holds all that reaches a model provider, so the HTTP client, `ureq`,
 is in this crate's manifest alone. It knows no run: the runtime depends on it, never the reverse.
@@ -476,7 +481,8 @@ A judge's evidence and a lease's transfers stay where the workflow puts them: of
 leaves, an op reply carries only the fields of its result that its `ResultSpec` returns, so only
 the operator sees the rest, in the record; and a lease's transfer moves trees between its
 holder's sandbox and its runner alone, through the host.
-The key never reaches the record either, as `Keep` is handed bodies and never headers.
+The key never reaches the record either, as `Keep` is handed bodies and the names of headers
+left behind, never a header's value.
 
 On the operator's machine, the driver reads the configuration and each key file itself, so no key
 crosses argv, the environment or a pipe; a machine sends its keys to the controller only on a

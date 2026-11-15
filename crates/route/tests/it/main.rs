@@ -8,6 +8,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener};
@@ -18,8 +19,8 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
-use route::{Apart, Keep, Key, Route, Upstream, UpstreamUrl};
-use schema::ir::{Api, ModelName, Name};
+use route::{Apart, Headers, Keep, Key, Route, Upstream, UpstreamUrl};
+use schema::ir::{Api, HeaderName, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox, frame};
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -37,6 +38,56 @@ type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
 fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
     let model = |name: &str| ModelName::try_from(name.to_owned()).unwrap();
     names.map(|name| (model(name), model(name))).into()
+}
+
+/// The headers that the Responses API's entry lists, as Codex's library lists them; the Chat
+/// Completions entry lists none.
+fn listed(api: Api) -> Headers {
+    let names = |names: &[&str]| {
+        (names.iter())
+            .map(|name| HeaderName::try_from((*name).to_owned()).unwrap())
+            .collect()
+    };
+    match api {
+        Api::Responses => Headers {
+            request: names(&[
+                "originator",
+                "user-agent",
+                "session-id",
+                "thread-id",
+                "x-codex-beta-features",
+                "x-codex-window-id",
+                "x-codex-turn-metadata",
+                "x-openai-internal-codex-responses-lite",
+            ]),
+            response: names(&[
+                "openai-model",
+                "x-reasoning-included",
+                "x-models-etag",
+                "x-codex-turn-state",
+                "x-codex-safety-buffering-enabled",
+                "x-codex-safety-buffering-faster-model",
+                "x-codex-credits-has-credits",
+                "x-codex-credits-unlimited",
+                "x-codex-credits-balance",
+                "x-codex-promo-message",
+                "x-codex-rate-limit-reached-type",
+                "x-codex-active-limit",
+                "x-oai-request-id",
+                "cf-ray",
+                "x-openai-authorization-error",
+                "x-error-json",
+                "x-codex-primary-used-percent",
+                "x-codex-primary-window-minutes",
+                "x-codex-primary-reset-at",
+                "x-codex-secondary-used-percent",
+                "x-codex-secondary-window-minutes",
+                "x-codex-secondary-reset-at",
+                "x-codex-limit-name",
+            ]),
+        },
+        Api::Chat => Headers::default(),
+    }
 }
 
 /// Sends each case's request over a session, as a sandbox whose route allows `m-large` and
@@ -71,7 +122,7 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     fs::write(&key, "sk-test-0123\n").unwrap();
     let entry = |api, path: &str| {
         let url = UpstreamUrl::try_from(format!("http://{address}/v1/{path}")).unwrap();
-        let route = Route::new(api, models(["m-large", "m-small"]));
+        let route = Route::new(api, models(["m-large", "m-small"]), &listed(api));
         (route, Upstream::new(&url, &Key::read(&key).unwrap()))
     };
     let entries = [
@@ -93,12 +144,13 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
             let mut forwarded = false;
             let by = Deadline::after(HUNG);
             let answered = |_, _| {};
+            let dropped = Dropped::default();
             route::serve(
                 &entries,
                 incoming,
                 true,
                 by,
-                &Ignored,
+                &dropped,
                 || forwarded = true,
                 answered,
             );
@@ -109,7 +161,8 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
                 } else {
                     format!("the body {}", String::from_utf8_lossy(&body))
                 };
-                format!("went upstream, as {line} with {headers:?} and {body}")
+                let dropped = dropped.0.take();
+                format!("went upstream, as {line} with {headers:?} and {body}, leaving {dropped:?}")
             })
         })
         .collect();
@@ -124,9 +177,15 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     fs::remove_dir_all(dir).unwrap();
 }
 
-struct Ignored;
+/// Keeps of an exchange only the names of the headers that the route left behind.
+#[derive(Default)]
+struct Dropped(RefCell<Vec<String>>);
 
-impl Keep for Ignored {
+impl Keep for Dropped {
+    fn dropped_headers(&self, names: &[String]) {
+        *self.0.borrow_mut() = names.to_vec();
+    }
+
     fn request(&self, _: &[u8], _: Option<Apart>) {}
 
     fn response(&self, _: &[u8]) {}
@@ -361,6 +420,10 @@ fn at(method: &'static str, path: &str) -> Request {
 )]
 fn closure() {
     let twice = br#"{"model":"m-small","store":true,"store":false,"input":[]}"#;
+    // More unlisted names than the log keeps, one of them twice.
+    let (method, path, mut many, body) = post(|_| {});
+    many.push(("x-client-request-id".to_owned(), "c-2".to_owned()));
+    many.extend((0..40).map(|index| (format!("x-n{index:02}"), "v".to_owned())));
     check(
         &[
             ("the harness's", post(|_| {})),
@@ -520,14 +583,15 @@ fn closure() {
                 "a header value with a NUL",
                 with_header("x-codex-window-id", "w-1\0"),
             ),
+            ("many unlisted headers", (method, path, many, body)),
             ("compaction", at("POST", "/responses/compact")),
             ("a long path", at("POST", &format!("/{}", "a".repeat(300)))),
             ("models", at("GET", "/models")),
             ("another method", at("GET", "/responses")),
         ],
         &expect![[r#"
-            the harness's: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] and the body as sent
-            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/3.5.1"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}
+            the harness's: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-client-request-id", "x-codex-routing-hint"]
+            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/3.5.1"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}, leaving []
             not JSON: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the body is not a JSON object (EOF while parsing an object at line 1 column 1): send one","param":null,"type":"invalid_request_error"}}
             no store: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
             stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
@@ -556,6 +620,7 @@ fn closure() {
             audio by URL: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`audio_url` holds a URL the provider would fetch, which the route refuses: send the content inline, as a `data:` URL","param":null,"type":"invalid_request_error"}}
             a header value with a line break: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the header `x-codex-window-id` holds a control character: send values without any but tab","param":null,"type":"invalid_request_error"}}
             a header value with a NUL: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the header `x-codex-window-id` holds a control character: send values without any but tab","param":null,"type":"invalid_request_error"}}
+            many unlisted headers: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-client-request-id", "x-codex-routing-hint", "x-n00", "x-n01", "x-n02", "x-n03", "x-n04", "x-n05", "x-n06", "x-n07", "x-n08", "x-n09", "x-n10", "x-n11", "x-n12", "x-n13", "x-n14", "x-n15", "x-n16", "x-n17", "x-n18", "x-n19", "x-n20", "x-n21", "x-n22", "x-n23", "x-n24", "x-n25", "x-n26", "x-n27", "x-n28", "x-n29"]
             compaction: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/responses/compact` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
             a long path: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
             models: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/models` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
@@ -608,8 +673,8 @@ fn chat_closure() {
             }),
         ],
         &expect![[r#"
-            the client's: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent
-            not stored: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "369"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent
+            the client's: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-stainless-lang"]
+            not stored: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "369"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-stainless-lang"]
             stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: leave it out, or set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
             another model: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large` or `m-small`","param":null,"type":"invalid_request_error"}}
             web search: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`web_search_options` has the provider search the web, which the route refuses: leave it out","param":null,"type":"invalid_request_error"}}
