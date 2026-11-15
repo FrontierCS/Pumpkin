@@ -4,6 +4,7 @@
 // query.
 
 import { byId, fill, h, key, route, setKeys } from "./h.js";
+import { keyOf } from "./key.js";
 import { runsView } from "./list.js";
 import { runView } from "./run.js";
 import { traceView } from "./trace.js";
@@ -17,12 +18,15 @@ function render() {
     const caller = route().query.get("caller") || "agent";
     const sep = () => h("span", { class: "sep" }, "›");
     fill(where, h("a", { href: "#/", title: "All runs" }, "Runs"), sep(), h("a", { href: "#/run/" + encodeURIComponent(parts[1]), class: "id", title: "The run" }, parts[1]), sep(), h("span", { class: "id" }, caller.replace("-", " ")));
+    keyOf("trace");
     traceView(parts[1]);
   } else if (parts[0] === "run" && parts[1]) {
     fill(where, h("a", { href: "#/", title: "All runs" }, "Runs"), h("span", { class: "sep" }, "›"), h("span", { class: "id" }, parts[1]));
+    keyOf("run");
     runView(parts[1]);
   } else {
     fill(where, h("span", {}, "Runs"));
+    keyOf("list");
     runsView();
   }
 }

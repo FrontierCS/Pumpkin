@@ -10,7 +10,8 @@
 <script type="module" src="/app.js"></script>
 </head>
 <body>
-<header class="bar"><a href="#/" class="home" title="All runs">Pumpkin</a><nav id="where" class="crumbs"></nav><span id="follow" class="follow"></span><select id="scheme" class="scheme" title="The page's colours: the browser's setting, light or dark"></select></header>
+<header class="bar"><a href="#/" class="home" title="All runs">Pumpkin</a><nav id="where" class="crumbs"></nav><span id="follow" class="follow"></span><button id="colour-key-button" class="colour-key-button" type="button" aria-expanded="false" aria-controls="colour-key" title="What each colour on this page means">Colour key</button><select id="scheme" class="scheme" title="The page's colours: the browser's setting, light or dark"></select></header>
+<div id="colour-key" class="colour-key" role="dialog" aria-label="Colour key" tabindex="-1" hidden></div>
 <main id="app"><p class="empty">Loading…</p></main>
 </body>
 </html>

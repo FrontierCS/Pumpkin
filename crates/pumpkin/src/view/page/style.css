@@ -76,7 +76,20 @@ input:hover, select:hover { border-color: var(--edge); }
 .crumbs .id { color: var(--text); }
 .follow { margin-left: auto; display: flex; align-items: center; gap: var(--s2); color: var(--dim); white-space: nowrap; }
 .follow .mark { margin: 0; }
-.bar .scheme { flex: none; height: var(--control); }
+.bar .scheme, .bar .colour-key-button { flex: none; height: var(--control); }
+
+/* The colour key, under the top bar at its right: each colour's swatch and its meaning. */
+.colour-key { position: fixed; z-index: 3; top: calc(var(--bar) - var(--s1)); right: var(--s4); max-height: calc(100vh - var(--bar) - var(--s4)); overflow: auto; padding: var(--s3) var(--s4); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); box-shadow: var(--pop); color: var(--text-2); }
+.colour-key:focus-visible { outline: 2px solid var(--focus); }
+.colour-key h4 { margin: var(--s3) 0 var(--s1); font-size: var(--fs); font-weight: 600; color: var(--text); }
+.colour-key section:first-child h4 { margin-top: 0; }
+.colour-key ul { margin: 0; padding: 0; list-style: none; }
+.colour-key li { display: flex; align-items: center; gap: var(--s2); line-height: var(--lh); }
+.colour-key .swatch { flex: none; width: 24px; display: inline-block; }
+.colour-key .sw-box { width: 10px; height: 10px; margin: 0 7px; border-radius: 2px; }
+.colour-key .sw-bar { height: 10px; border-radius: 2px; }
+.colour-key .sw-tick { width: 2px; height: 14px; margin: 0 11px; }
+.colour-key .sw-ink { font-family: var(--mono); font-size: var(--fs-mono); font-weight: 600; text-align: center; }
 main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: var(--s3) var(--s4); gap: var(--s2); overflow: auto; }
 
 /* The runs: a dark rule under the head, hairlines between rows, numbers right-aligned. */
