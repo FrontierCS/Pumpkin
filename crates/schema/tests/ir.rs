@@ -967,6 +967,7 @@ fn agent_files() {
             fixture_with(&path, json!("/pumpkin/in/command.stdin")),
             fixture_with(&path, json!("/.pumpkin/bin/sandboxctl")),
             fixture_with(&path, json!("/harness")),
+            fixture_with(&path, json!("/harness/codex/config.toml")),
             broken,
         ],
         &expect![[r#"
@@ -978,7 +979,8 @@ fn agent_files() {
             `/` holds the whole sandbox: name a path below it
             `/pumpkin/in/command.stdin` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
             `/.pumpkin/bin/sandboxctl` is in `/.pumpkin`, which holds Pumpkin's own files: name a path outside it
-            `/harness` is in `/harness`, which holds Pumpkin's own files: name a path outside it
+            parsed
+            parsed
             /roles/0/runtime/agent/dirs/1/path: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once
             /roles/0/runtime/agent/dirs/2/path: `/workspace/b/d` is below `/workspace/b`, the file at /roles/0/runtime/agent/files/1: put it in a directory
             /roles/0/runtime/agent/files/0/path: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once"#]],

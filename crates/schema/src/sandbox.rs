@@ -21,8 +21,8 @@
 //! Every provider presents [`pumpkin_dir()`] as [`pumpkin_subdirs()`] says, within
 //! [`PUMPKIN_BYTES`]. A role that makes ops has `sandboxctl` at [`SANDBOXCTL_PATH`], served at
 //! [`CONTROL_SOCKET`]; any other's sandbox is passive. A role with a model route has the model
-//! endpoint at [`MODEL_PORT`], and an agent's image its harness below [`harness_dir()`]. A
-//! workflow puts nothing there ([`RolePath`](crate::ir::RolePath)).
+//! endpoint at [`MODEL_PORT`]. A workflow puts nothing in the directories that hold Pumpkin's
+//! own files ([`RolePath`](crate::ir::RolePath)).
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -227,22 +227,12 @@ pub const SANDBOXCTL_PATH: &str = "/.pumpkin/bin/sandboxctl";
 /// there, below [`pumpkin_dir()`], and `sandboxctl` connects there.
 pub const CONTROL_SOCKET: &str = "/pumpkin/sandboxctl/socket";
 
-/// The directory that holds an agent's harness, `/harness`, which a task's images leave out.
-///
-/// A harness of Pumpkin's standard library is added to a task's agent image in a directory of its
-/// own below this one, named for the harness and its version.
-pub fn harness_dir() -> AbsolutePath {
-    const { AbsolutePath::from_static("/harness") }
-}
-
-/// The directories of a sandbox that hold Pumpkin's own files: [`pumpkin_dir()`]; `/.pumpkin`,
-/// where providers present `sandboxd`, and `sandboxctl` at [`SANDBOXCTL_PATH`]; and
-/// [`harness_dir()`].
-pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 3] {
+/// The directories of a sandbox that hold Pumpkin's own files: [`pumpkin_dir()`], and
+/// `/.pumpkin`, where providers present `sandboxd`, and `sandboxctl` at [`SANDBOXCTL_PATH`].
+pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 2] {
     [
         pumpkin_dir(),
         const { AbsolutePath::from_static("/.pumpkin") },
-        harness_dir(),
     ]
 }
 
