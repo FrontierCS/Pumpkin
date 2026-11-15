@@ -24,7 +24,9 @@ macro_rules! files {
 
 /// Each file of the library, by its path below the library's root, such as
 /// `harness/codex/codex.star`, sorted by the paths' bytes.
-pub const FILES: [(&str, &[u8]); 4] = files![
+pub const FILES: [(&str, &[u8]); 6] = files![
+    "harness/claude_code/claude_code.star",
+    "harness/claude_code/layer/Dockerfile",
     "harness/codex/LICENSE",
     "harness/codex/catalog.star",
     "harness/codex/codex.star",

@@ -3,17 +3,13 @@
 //! arguments it refuses.
 
 use std::fmt::Write as _;
-use std::num::NonZeroUsize;
-use std::thread;
 
 use expect_test::expect;
-use lang::{Args, Bounds, Declared, Label, Loader, Recipe, Root};
-use schema::ir::{self, AgentRuntime, EnvVar, ModelName};
-use schema::workflow::Workflow;
+use lang::Args;
+use schema::ir;
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
-use super::{check, file};
+use super::{check, evaluated, layer, route, show};
 
 /// A task's entry that gives `codex()` each of its arguments from an `--arg` of its name, and
 /// builds its agent on the image of `//images/Dockerfile`, which the judge runs on too.
@@ -225,37 +221,13 @@ fn roles() {
         assert_eq!(runtime.stdin.as_deref(), Some(prompt.as_str()));
         assert_eq!(runtime.deadline_seconds.to_string(), *deadline);
         assert_eq!(runtime.finalize_grace_seconds.to_string(), *grace);
-        let route = agent.egress.model.as_ref().unwrap();
-        let route: Vec<String> = (route.as_slice().iter())
-            .map(|entry| {
-                let models: Vec<ModelName> = entry.models.clone().into();
-                let models: Vec<String> = models.into_iter().map(String::from).collect();
-                format!("{} {}", entry.api, models.join(" "))
-            })
-            .collect();
         let _ = writeln!(shown, "{model} {effort} {tools} {workspace}:");
-        shown.push_str(&show(runtime));
-        let _ = writeln!(shown, "route: {}", route.join(", "));
+        shown.push_str(&show(runtime, excerpt));
+        shown.push_str(&route(agent));
         // The layer and the configuration's whole text, once: the cases' configurations differ
         // only in the lines that name a model.
         if index == 0 {
-            for entry in agent.egress.model.as_ref().unwrap().as_slice() {
-                let names = |names: &[ir::HeaderName]| {
-                    let names: Vec<&str> = names.iter().map(ir::HeaderName::as_str).collect();
-                    names.join(" ")
-                };
-                let _ = writeln!(shown, "request headers: {}", names(&entry.request_headers));
-                let _ = writeln!(
-                    shown,
-                    "response headers: {}",
-                    names(&entry.response_headers)
-                );
-            }
-            let [_, (layer, recipe)] = <[_; 2]>::try_from(images).unwrap();
-            let _ = writeln!(shown, "image: {layer}");
-            for line in recipe {
-                let _ = writeln!(shown, "  {line}");
-            }
+            shown.push_str(&layer(agent, images));
             let config = &runtime.files[0];
             let _ = write!(shown, "{} in full:\n{}", config.path, config.content);
         }
@@ -702,123 +674,20 @@ fn refusals() {
     );
 }
 
-/// The workflow that `entry` gives, given `args`, its images standing as IDs of their number,
-/// with what each image's build is, as `shown` has it; or the problems of its evaluation.
-fn evaluated(entry: &str, args: &Args) -> Result<(Workflow, Vec<Shown>), String> {
-    let mut loader = Bundled(entry);
-    let label = Label::parse("//task.star").unwrap();
-    // As `pumpkin` evaluates, on a stack of the size `lang` asks.
-    let thread = thread::Builder::new().stack_size(lang::STACK_BYTES);
-    thread::scope(|scope| {
-        let evaluation = thread.spawn_scoped(scope, || {
-            let plan = lang::evaluate(&label, &mut loader, args, Bounds::WORKFLOW);
-            let plan = plan.map_err(|problems| problems.to_string())?;
-            plan.check(checked_recipe)
-                .map_err(|problems| problems.to_string())?;
-            let mut images = Vec::new();
-            let built = plan.build(NonZeroUsize::MIN, |ready| {
-                (ready.into_iter())
-                    .map(|(index, declared)| {
-                        images.push(shown(&declared));
-                        let number = index + 1;
-                        let image = ir::Image::try_from(format!("sha256:{number:064x}")).unwrap();
-                        (index, Ok(Built { number, image }))
-                    })
-                    .collect()
-            });
-            let built = built.unwrap_or_else(|problems| panic!("{problems}"));
-            Ok((built, images))
-        });
-        evaluation.unwrap().join().unwrap()
-    })
-}
-
-/// The problems `recipe::check` finds in a library's recipe, given `contexts`; a task's passes.
-fn checked_recipe(declared: &Recipe, contexts: &[&str]) -> Vec<String> {
-    if declared.context.root() == Root::Task {
-        return Vec::new();
+/// What `file` holds: a model catalog by its models' slugs, how many fields each has, and the
+/// fields that set how Codex sends its tools; another file by its lines that name a model.
+fn excerpt(file: &ir::File) -> String {
+    if file.path.as_str().ends_with("/model-catalog.json") {
+        return catalog(&file.content);
     }
-    let given = recipe::Given {
-        target: declared.target.clone(),
-        args: declared.args.clone(),
-        contexts: contexts
-            .iter()
-            .map(|name| ((*name).to_owned(), ()))
-            .collect(),
-    };
-    let path = format!("{}/{}", declared.context.path(), declared.recipe);
-    Vec::from_iter(recipe::check(&path, file(&path).as_bytes(), &given).err())
-}
-
-/// What an image's build is, as [`shown`] has it.
-type Shown = (String, Vec<String>);
-
-/// What `declared` builds, as a line, and its recipe's lines but its comments and blank ones,
-/// each image by its number.
-fn shown(declared: &Declared<'_, Built>) -> Shown {
-    let Declared { recipe, contexts } = declared;
-    let text = match recipe.context.root() {
-        Root::Task => String::new(),
-        Root::Library => file(&format!("{}/{}", recipe.context.path(), recipe.recipe)),
-    };
-    let lines = (text.lines())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned);
-    let contexts: Vec<String> = (contexts.iter())
-        .map(|(name, built)| format!(", image {} as {name}", built.number))
-        .collect();
-    let line = format!(
-        "{}'s {}{}, in {}",
-        recipe.context,
-        recipe.recipe,
-        contexts.concat(),
-        recipe.repository
-    );
-    (line, lines.collect())
-}
-
-/// `runtime` but its standard input and its times, a line for each part; each file by its mode,
-/// path and digest, with its lines that name a model, and a model catalog by its models' slugs,
-/// how many fields each has, and the fields that set how Codex sends its tools.
-fn show(runtime: &AgentRuntime) -> String {
-    let AgentRuntime {
-        command,
-        dirs,
-        files,
-        stdin: _,
-        deadline_seconds: _,
-        finalize_grace_seconds: _,
-    } = runtime;
-    let argv: Vec<String> = command.argv.clone().into();
-    let env: Vec<EnvVar> = command.env.clone().into();
-    let env: Vec<String> = env.into_iter().map(String::from).collect();
-    let mut shown = format!(
-        "argv: {}\nenv: {}\ncwd: {}\n",
-        argv.join(" "),
-        env.join(" "),
-        command.cwd,
-    );
-    for dir in dirs {
-        let _ = writeln!(shown, "dir {} {}", dir.mode, dir.path);
-    }
-    for file in files {
-        let mut digest = String::new();
-        for byte in Sha256::digest(file.content.as_bytes()) {
-            let _ = write!(digest, "{byte:02x}");
-        }
-        let _ = writeln!(shown, "file {} {}, sha256 {digest}:", file.mode, file.path);
-        if file.path.as_str().ends_with("/model-catalog.json") {
-            shown.push_str(&catalog(&file.content));
-        } else {
-            for line in (file.content.lines()).filter(|line| line.starts_with("model")) {
-                let _ = writeln!(shown, "  {line}");
-            }
-        }
+    let mut shown = String::new();
+    for line in (file.content.lines()).filter(|line| line.starts_with("model")) {
+        let _ = writeln!(shown, "  {line}");
     }
     shown
 }
 
-/// The catalog `text` holds, as [`show`] shows it.
+/// The catalog `text` holds, as [`excerpt`] shows it.
 fn catalog(text: &str) -> String {
     let catalog: Value = serde_json::from_str(text).unwrap();
     let fields = [
@@ -837,29 +706,4 @@ fn catalog(text: &str) -> String {
         }
     }
     shown
-}
-
-/// Reads the entry, `//task.star`, from its text, and the standard library's files from the
-/// bundle.
-struct Bundled<'e>(&'e str);
-
-impl Loader for Bundled<'_> {
-    fn load(&mut self, label: &Label) -> Result<String, String> {
-        match label.root() {
-            Root::Task if label.path() == "task.star" => Ok(self.0.to_owned()),
-            Root::Task => Err(format!("the test holds no `{label}`")),
-            Root::Library => Ok(file(label.path())),
-        }
-    }
-}
-
-struct Built {
-    number: usize,
-    image: ir::Image,
-}
-
-impl AsRef<ir::Image> for Built {
-    fn as_ref(&self) -> &ir::Image {
-        &self.image
-    }
 }
