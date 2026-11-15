@@ -381,8 +381,10 @@ sandboxes left, or fails.
 The command line and the controller's own side. `cli` parses the command line, `config` reads the
 machine's configuration (`Config`, or `Client` for a machine whose runs go to a controller), `star`
 reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
-starts the driver process. `controller` reaches the controller over the connections that a
-workspace's commands share (`Reached`), over which its `send` sends a run's or a build's job, its
+starts the driver process. `run` starts a run and drives it in that process, `ending` follows a
+run and says how it ended, and `reaping` stops runs and removes what they left. `controller`
+reaches the controller over the connections that a workspace's commands share (`Reached`), over
+which its `send` sends a run's or a build's job, its
 `copy` copies an ended run's record back, its `listing` lists the runs there for `ls`, its
 `viewing` carries `view`'s requests to the view there (`Viewing`), and its `commands` follow,
 stop and reap them; `manifest`
