@@ -1,8 +1,5 @@
-//! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
-//! record of its run, whose `outcome.json` it prints. `fmt` runs the formatter beside `pumpkin`,
-//! which `cargo xtask ci` puts beside the tests' own. The tests on Docker are ignored, and write
-//! the context they reach ([`test_support::docker_context`]) into the configuration that they
-//! give `run` and `build`.
+//! The `pumpkin` command, run as an operator runs it. The tests on Docker are ignored: `cargo xtask
+//! live docker` runs them.
 
 #![expect(
     clippy::unwrap_used,
@@ -52,13 +49,14 @@ mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
-/// What the final judge of the runs on Docker does: scores the payload by its size.
+// The final judge's command in the runs on Docker: it scores the payload by its size.
 const SCORE: &str = r#"printf '{"raw_score": %s}' \
     $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"#;
 
-/// The directory test `name` runs `pumpkin` in, empty but for its workspace's `.pumpkin/bin`,
-/// which holds the `pumpkin` it runs ([`Scratch::pumpkin`]). Dropping it removes it, unless the
-/// test failed, when it shows where it is.
+/// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
+///
+/// Field `0` is its canonical path. A test that panics leaves the directory and prints where it
+/// is.
 struct Scratch(PathBuf, TempDir);
 
 impl Scratch {
@@ -67,33 +65,24 @@ impl Scratch {
             .prefix(&format!("pumpkin-{name}-"))
             .tempdir()
             .unwrap();
-        // `run` refuses a runs directory below one that its group may write, which the umask, or
-        // a setgid temporary directory, could make this one, and names records by their
-        // canonical path.
+        // `run` refuses a runs directory below one that its group may write, which the umask, or a
+        // setgid temporary directory, could make this one.
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
         let scratch = Self(fs::canonicalize(dir.path()).unwrap(), dir);
         install(&scratch, ".pumpkin/bin");
         scratch
     }
 
-    /// Writes `contents` into the directory's file `name`, making its directory if need be.
     fn write(&self, name: &str, contents: &(impl Display + ?Sized)) {
         let path = self.0.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents.to_string()).unwrap();
     }
 
-    /// Writes into the directory the task `name`, whose entry is `<name>/task.star`: the workflow
-    /// `ir` gives, but for its images, which every role takes from the recipe `<name>/Dockerfile`
-    /// (`busybox` with a world-writable `/workspace`), but a role whose image is [`RUNNER`], from
-    /// `<name>/runner/Dockerfile` (`busybox` with a world-writable `/work`); and the marker
-    /// `PUMPKIN.star`, which makes the directory the root of its tasks.
     fn write_task(&self, name: &str, ir: &Value) {
         self.write_task_in("", name, ir);
     }
 
-    /// Writes the task `name` as [`write_task`](Self::write_task) does, in the directory `root`,
-    /// the root of its tasks.
     fn write_task_in(&self, root: &str, name: &str, ir: &Value) {
         let at = |file: &str| {
             let dir = Path::new(root).join(name).join(file);
@@ -121,8 +110,6 @@ impl Scratch {
         self.write(&at("task.star"), &task);
     }
 
-    /// Writes `contents` into the directory's file `name`, which every user may execute, making
-    /// its directory if need be.
     fn write_executable(&self, name: &str, contents: &[u8]) {
         let path = self.0.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -130,17 +117,14 @@ impl Scratch {
         fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// Writes into the directory's file `name` a stand-in for a static `sandboxd`, which only a
-    /// provider that starts no sandbox takes: the header of a 64-bit ELF executable with no
-    /// program headers, which every user may execute.
+    /// Writes an executable of only the header that `pumpkin run` checks of a `sandboxd`: it
+    /// can't run.
     fn write_sandboxd(&self, name: &str) {
         let mut header = [0; 64];
         header[..5].copy_from_slice(b"\x7fELF\x02");
         self.write_executable(name, &header);
     }
 
-    /// `pumpkin` with `args`, to run in the directory, as its workspace's `.pumpkin/bin` holds
-    /// it.
     fn pumpkin(&self, args: &[&str]) -> Command {
         self.program(self.0.join(".pumpkin/bin/pumpkin"), args)
     }
@@ -161,8 +145,6 @@ impl Drop for Scratch {
     }
 }
 
-/// `value`, JSON, as the workflow language writes it, with each role's image as `IMAGE`, the
-/// recipe's image.
 fn starlark(value: &Value) -> String {
     match value {
         Value::Null => "None".to_owned(),
@@ -193,15 +175,10 @@ fn starlark(value: &Value) -> String {
     }
 }
 
-/// The image that a role of a task that [`Scratch::write_task`] writes runs in place of the task's
-/// one, `IMAGE`: one of its own, `RUNNER`, as a runner needs, which no judge's image may be.
 const RUNNER: &str = "runner";
 
-/// A command whose end [`check`] shows: one for it to run, or one that a test ran itself, to act
-/// on it as it ran, and showed as [`report`] does, with what it found.
 enum Step {
     Run(Command),
-    /// A `pumpkin run` on the real engine, as [`with_room`] runs it.
     OnEngine(Command),
     Ran(String),
 }
@@ -212,12 +189,11 @@ impl From<Command> for Step {
     }
 }
 
-/// Runs each of `steps` that a test didn't run itself, `pumpkin` in `scratch`, and checks what
-/// became of each: its exit status; what it says on its standard error, but for the warning of
-/// a rootful engine, shown only if it doesn't match `rootful`, whether the engine the commands
-/// reach runs as root; and if it names a run's record, the record's files, its `outcome.json`
-/// and whether it printed that, and else what it printed, if anything. Each shows
-/// `scratch` as `<scratch>`, a run's id as `<id>`, and each of `shown` as its name.
+/// Runs each step, replaces the scratch directory's path and each of `shown`'s values by its
+/// name, and compares what the steps print with `expect`.
+///
+/// A line about the engine's warning that it runs as root appears only where the warning's
+/// presence differs from `rootful`.
 fn check(
     scratch: &Scratch,
     steps: impl IntoIterator<Item = impl Into<Step>>,
@@ -243,9 +219,8 @@ fn check(
     expect.assert_eq(&text);
 }
 
-/// What `command`, a `pumpkin run` on the real engine, printed once the engine had room for its
-/// run: one refused only for the cores that other runs hold, as other tests' runs on the engine
-/// may, is run again every second, for 10 minutes at most.
+/// Runs `command` again for up to ten minutes while it fails only because other runs hold the
+/// machine's CPUs.
 fn with_room(command: &mut Command) -> Output {
     let room = Instant::now() + Duration::from_mins(10);
     loop {
@@ -261,27 +236,25 @@ fn with_room(command: &mut Command) -> Output {
     }
 }
 
+/// Runs `command` and describes what it did as `check` shows a step, finding its run record
+/// under `dir`.
 fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
     let invoked = invocation(&command);
     let output = command.output().unwrap();
     report(invoked, &output, dir, rootful)
 }
 
-/// `command` as a shell line, with the environment it sets, and its program as `pumpkin` if it
-/// is the `pumpkin` that the tests run.
 fn invocation(command: &Command) -> String {
     let set = command.get_envs().map(|(name, value)| match value {
         Some(value) => format!("{}={} ", name.display(), value.display()),
         None => format!("env --unset={} ", name.display()),
     });
-    // An argument that isn't UTF-8 shows with U+FFFD for each byte that isn't.
     let args = command.get_args().map(|arg| match arg.to_string_lossy() {
         arg if arg.is_empty() => Cow::Borrowed("''"),
         arg => arg,
     });
     let set: String = set.collect();
     let program = command.get_program().to_string_lossy();
-    // As `Scratch::pumpkin` runs it, or one that a `./pumpkin` built in its workspace.
     let program = if program.contains("/.pumpkin/") && program.ends_with("/bin/pumpkin") {
         Cow::Borrowed("pumpkin")
     } else {
@@ -334,9 +307,8 @@ fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String
     lines.join("\n").replace(id, "<id>")
 }
 
-/// `said`, lines of `pumpkin`'s standard error, with the times of a run's summary and of its
-/// milestones, which a run on the stand-ins takes as it goes, as `<t>`: each word of their lines
-/// that is a time or a span.
+/// The lines of `said` with each duration and clock time in a run's summary and its milestones
+/// replaced by `<t>`.
 fn steady(said: &[&str]) -> Vec<String> {
     let timed = |word: &str| {
         let word = word.trim_end_matches([',', ';', ':']);
@@ -356,7 +328,7 @@ fn steady(said: &[&str]) -> Vec<String> {
         let first =
             line.starts_with("pumpkin: run ") && line.ends_with(':') && line.contains(" ran ");
         summary = first || (summary && line.starts_with("  "));
-        // A milestone, said as `wait` follows a run, starts with its time.
+        // A milestone, which `wait` says as it follows a run, starts with its time.
         let milestone = (line.strip_prefix("pumpkin:"))
             .and_then(|rest| rest.split_whitespace().next())
             .is_some_and(|word| timed(word) && word.contains(':'));
@@ -376,8 +348,7 @@ fn steady(said: &[&str]) -> Vec<String> {
     lines.collect()
 }
 
-/// `outcome`, an `outcome.json`, with the times of its usage, which a run on the stand-ins takes
-/// as it goes, as `<ns>`, and what its sandboxes cost by them as `<usd>`.
+/// `outcome` with the durations and prices of its usage, which differ between runs, replaced.
 fn steady_outcome(mut outcome: Value) -> Value {
     if let Some(usage) = outcome.get_mut("usage") {
         usage["ran_ns"] = "<ns>".into();
@@ -394,8 +365,6 @@ fn steady_outcome(mut outcome: Value) -> Value {
     outcome
 }
 
-/// The id and the record of the run that `stderr`, `pumpkin`'s, says it records, or, of a run on
-/// a controller, that it copied here, if it does.
 fn record(stderr: &str) -> Option<(&str, &str)> {
     (stderr.lines()).find_map(|line| {
         let line = line.strip_prefix("pumpkin: ")?;
@@ -409,11 +378,6 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// The files of `record`, a run's, each `sandbox.json` it holds, the model
-/// routes that `provider.json` holds, if a role has one, its run log's record of how each model
-/// request was answered, if it has a run log, what the agent's `out` and the first job's evidence
-/// held of a model's answer, if anything, what the driver wrote to `driver.log`, if anything, its
-/// `outcome.json`, and whether `stdout` is that.
 fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
@@ -448,7 +412,6 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
             lines.push(format!("{whose} answer: {}", answer.replace('\n', "\\n")));
         }
     }
-    // A record whose `driver.log` was removed shows that in its files.
     let said = fs::read_to_string(record.join("driver.log")).unwrap_or_default();
     if !said.is_empty() {
         lines.push(format!("driver.log: {}", said.replace('\n', "\\n")));
@@ -458,8 +421,6 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     lines
 }
 
-/// What `record`, a run's, keeps of its sandboxes, as [`test_support::sandboxes`] shows it, with
-/// each container's ID, which Docker makes anew each run, as `<container>`.
 fn sandboxes(record: &Path) -> Vec<String> {
     let container = |line: String| {
         let Some((before, after)) = line.split_once(r#""id":""#) else {
@@ -477,7 +438,7 @@ fn sandboxes(record: &Path) -> Vec<String> {
     lines.map(container).collect()
 }
 
-/// What `look` returns once it returns something, tried every 100 ms for a minute.
+/// Calls `look` every 100 ms until it returns a value, and panics if none comes in a minute.
 fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
     for _ in 0..600 {
         if let Some(found) = look() {
@@ -488,8 +449,10 @@ fn poll<T>(mut look: impl FnMut() -> Option<T>) -> T {
     panic!("nothing came in a minute");
 }
 
-/// How `child` ended, waited for a minute at most, and what it printed: its standard output,
-/// and `said` and then the rest of its standard error, from `stderr`.
+/// Waits for `child` to exit and collects its output, with what it said to `stderr` after
+/// `said`.
+///
+/// The caller has already taken `child`'s standard error and left its standard output piped.
 fn ended(mut child: Child, mut stderr: impl Read, mut said: String) -> Output {
     let status = poll(|| child.try_wait().unwrap());
     stderr.read_to_string(&mut said).unwrap();
@@ -502,15 +465,14 @@ fn ended(mut child: Child, mut stderr: impl Read, mut said: String) -> Output {
     }
 }
 
-/// Whether the process `pid` runs: a zombie has ended.
+/// Whether process `pid` runs: a zombie has ended.
 fn alive(pid: i64) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z "))
 }
 
-/// `ran`, what `ls` printed, with the times that turn on the clock as `<t>`: how long the phase
-/// of a live run, whose id starts with `ids`, and each of its sandboxes, on the lines under it,
-/// have gone on, since its last model answer, how long its model requests have been in flight,
-/// and when the live runs end.
+/// The listing `ran` with each time that moves between runs replaced by `<t>`.
+///
+/// A row is a line that starts with `ids`.
 fn masked(ran: &str, ids: &str) -> String {
     let lines = ran.lines().map(|line| {
         let mut line = line.to_owned();
@@ -540,12 +502,7 @@ fn masked(ran: &str, ids: &str) -> String {
     lines.collect::<Vec<String>>().join("\n")
 }
 
-/// The IR of the task, `example/lease`, of the runs whose records the tests of `ls` and `wait`
-/// write ([`write_run`]), as `ir.json` holds it: an agent, `solver`, with a model route and a
-/// deadline of 30 minutes, which may call the train judge, `trainer`, which may lease a `box`,
-/// and lease a `gpu` runner for a minute and a `cpu` runner for 30; and the final judge,
-/// `scorer`, with a model route. `trainer`, `scorer` and `gpu` each need an
-/// `NVIDIA A100-SXM4-80GB`.
+/// A workflow whose agent holds leases and runs judges, matching `judged_log`.
 fn lease_task() -> Value {
     let gpu = json!({ "gpu": { "count": 1, "model": "NVIDIA A100-SXM4-80GB" } });
     let lease = |name: &str, seconds: u64| json!({ "lease": { "name": name, "role": name, "instance_seconds": seconds } });
@@ -572,7 +529,6 @@ fn lease_task() -> Value {
     })
 }
 
-/// What [`lease_places`] gives prices to: tokens and sandboxes, one of them, or nothing.
 #[derive(Clone, Copy)]
 enum Prices {
     Both,
@@ -581,12 +537,7 @@ enum Prices {
     Nothing,
 }
 
-/// Where a run of [`lease_task`] places its roles, as `provider.json` holds it: the agent and the
-/// `cpu` runner on `aws/judge`, which starts within 2 minutes, the `box` on `aws/box`, and the
-/// judges and the `gpu` runner on `modal/a100_80`, which starts within 30; at $0.3672 an hour on
-/// `aws/judge` and $2.5 on `modal/a100_80` if `prices` covers sandboxes, and never on `aws/box`.
-/// The agent's route serves `model-a`, priced if `prices` covers tokens, and the final judge's
-/// `model-b`, never priced.
+/// Where `lease_task`'s roles run, with the prices that `prices` names.
 fn lease_places(prices: Prices) -> Value {
     let (sandboxes, tokens) = match prices {
         Prices::Both => (true, true),
@@ -629,8 +580,6 @@ fn lease_places(prices: Prices) -> Value {
     })
 }
 
-/// A record of a run log, of `event` and the core's `actions`, written `seconds` after the run
-/// started; [`write_run`] numbers it.
 fn logged(seconds: u64, event: Value, actions: Value) -> Value {
     let mut record = json!({ "at_ns": (seconds * 1_000_000_000).to_string() });
     record["event"] = event;
@@ -638,8 +587,6 @@ fn logged(seconds: u64, event: Value, actions: Value) -> Value {
     record
 }
 
-/// The `outcome.json` of a run of [`lease_task`] whose final judge scored `returned`, what it
-/// returned, as `score`, after the agent exited 0.
 fn judged(score: f64, returned: Value) -> Value {
     let mut outcome = json!({
         "state": "finished",
@@ -651,15 +598,8 @@ fn judged(score: f64, returned: Value) -> Value {
     outcome
 }
 
-/// The log of a run of [`lease_task`] that went the whole way, but its start, by the second since
-/// the run started: the agent's three model requests of `model-a`, each from its start, two
-/// reporting their tokens, one its cache's writes too, and their first token's time; four train
-/// judge calls, one scored, whose call leases a box that a file is put into and a script runs in,
-/// one never started, one stopped and one timed out, with no score; three leases of the agent's,
-/// a `gpu` runner whose sandbox sees the GPU its role needs, closed by the agent, a `cpu` runner
-/// whose command times out, closed as the work phase ends, and a `gpu` runner whose sandbox sees
-/// another GPU, which expires; and the final judge's score, 49.36, after a model request of
-/// `model-b` whose stream begins, states a rate limit and reports its tokens.
+/// The log of a run of `lease_task`, with every kind of lease, judge and model request that `ls`
+/// and `wait` show.
 #[expect(clippy::too_many_lines, reason = "one line for each record")]
 fn judged_log() -> Vec<Value> {
     let none = || json!([]);
@@ -824,7 +764,7 @@ fn judged_log() -> Vec<Value> {
     ]
 }
 
-/// The records of `log` written by `seconds` after the run started.
+/// The records of `log` written within `seconds` of the run's start.
 fn cut(log: &[Value], seconds: u64) -> Vec<Value> {
     let written = |record: &&Value| {
         let at: u64 = record["at_ns"].as_str().unwrap().parse().unwrap();
@@ -833,10 +773,11 @@ fn cut(log: &[Value], seconds: u64) -> Vec<Value> {
     log.iter().filter(written).cloned().collect()
 }
 
-/// Writes the record `id` in `scratch`'s `runs`, as [`write_record`] does, with `outcome`, of a
-/// run of [`lease_task`] on `places` that started `started` after the Unix epoch, with a hard
-/// end two hours on, whose log holds its start, then `log`, each record numbered in turn, and a
-/// `sandbox.json` for each sandbox that the log says started, deleted; returns its directory.
+/// Writes the record of run `id`, started at `started` since the Unix epoch, with `log` after
+/// its `run_started`, and returns the run's directory.
+///
+/// The run has a `driver.pid` that no process locks, and an `outcome.json` only if `outcome` is
+/// given.
 fn write_run(
     scratch: &Scratch,
     id: &str,
@@ -875,13 +816,11 @@ fn write_run(
     dir
 }
 
-/// When the run `id` started, since the Unix epoch: `seconds` after it was asked for.
+/// The time `seconds` after the one that `id` names, as a Unix time.
 fn asked(id: &str, seconds: u64) -> Duration {
     runtime::minted(id).unwrap() + Duration::from_secs(seconds)
 }
 
-/// Writes the record `id` in `scratch`'s `runs`, as `pumpkin run --runs runs` leaves it, with
-/// `driver.pid` unless `pid` is false, and `outcome` as its `outcome.json`, if it has one.
 fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) {
     let args = [
         "--runs".to_owned(),
@@ -900,18 +839,14 @@ fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) 
     }
 }
 
-/// Writes the record `id` in `scratch`'s `runs` as [`write_record`] does, with `outcome`, of a
-/// run on provider `local`, of the Docker context `gone`, and a stand-in `docker` in `scratch`'s
-/// `bin` that has no such context, which says so as Docker's command line does; returns a `PATH`
-/// that finds it.
+/// `write_on` with a `docker` that says it has no context `gone`, as Docker's command line does.
 fn write_gone(scratch: &Scratch, id: &str, outcome: Option<Value>) -> String {
     let docker = "#!/bin/sh\necho 'context \"gone\": context not found' >&2\nexit 1\n";
     write_on(scratch, id, "gone", outcome, docker)
 }
 
-/// Writes the record `id` in `scratch`'s `runs` as [`write_record`] does, with `outcome`, of a
-/// run on provider `local`, of the Docker context `context`, and `docker`, a script, as the
-/// stand-in `docker` in `scratch`'s `bin`; returns a `PATH` that finds it.
+/// Writes the record of run `id` that ran on the Docker context `context`, with `docker` as the
+/// `docker` that `PATH` finds, and returns that `PATH`.
 fn write_on(
     scratch: &Scratch,
     id: &str,
@@ -927,8 +862,8 @@ fn write_on(
     format!("{}:/usr/bin:/bin", scratch.0.join("bin").display())
 }
 
-/// Builds the images of the task `task`, which `write_task` wrote, on the engine that `config`
-/// names, so that a `run` of it after finds them by their tags and says nothing of building them.
+/// Builds the images of `task` on the engine that `config` names, so that a `run` of it after
+/// finds them by their tags and says nothing of building them.
 fn build_first(scratch: &Scratch, task: &str, config: &str) {
     let entry = format!("{task}/task.star");
     let built = scratch
@@ -938,9 +873,8 @@ fn build_first(scratch: &Scratch, task: &str, config: &str) {
     assert!(built.status.success(), "{built:?}");
 }
 
-/// The fixture's workflow, without the agent's model route, with `argv` as the agent's command,
-/// the final judge as [`SCORE`] says, and every role running `image` with a small machine's
-/// share.
+/// The fixture's workflow with `argv` as the agent's command and no model route, every role
+/// running `image` with a small share of a machine.
 fn workflow(image: &str, argv: &[&str]) -> Value {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     ir["roles"][0].as_object_mut().unwrap().remove("egress");
@@ -956,20 +890,18 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     ir
 }
 
-/// How many CPUs the machine has online, all of which the Docker provider gives sandboxes.
+/// The number of CPUs, hardware threads included, that the machine has online.
 fn machine_cpus() -> u64 {
     cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online").unwrap()).len() as u64
 }
 
-/// How many cores the machine's online CPUs are on, each CPU's core by the CPUs it shares it
-/// with.
+/// The number of cores that the machine has online, each counted once for its hardware threads.
 fn machine_cores() -> u64 {
     let online = cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online").unwrap());
     let cores: BTreeSet<BTreeSet<u32>> = online.into_iter().map(siblings).collect();
     cores.len() as u64
 }
 
-/// The CPUs that `text`, as the kernel writes a list of them, names.
 fn cpu_list(text: &str) -> BTreeSet<u32> {
     let ranges = text.trim().split(',').filter(|range| !range.is_empty());
     ranges
@@ -980,14 +912,13 @@ fn cpu_list(text: &str) -> BTreeSet<u32> {
         .collect()
 }
 
-/// The CPUs that share a core with `cpu`, `cpu` among them.
 fn siblings(cpu: u32) -> BTreeSet<u32> {
     let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
     cpu_list(&fs::read_to_string(path).unwrap())
 }
 
-/// Sends the signal `name`, as `kill --signal` takes it, to `target`: a process ID, or a process
-/// group's, negated; whether there was one to signal.
+/// Sends the signal `name` to `target`, a process ID or a process group's negated, and returns
+/// whether it was delivered.
 fn signal(name: &str, target: i64) -> bool {
     let kill = stdx::process::command("kill", Environment::Inherited)
         .args(["--signal", name, "--", &target.to_string()])
@@ -995,16 +926,12 @@ fn signal(name: &str, target: i64) -> bool {
     kill.unwrap().success()
 }
 
-/// The table of a configuration that names `context` as the one that reaches the engine.
 fn docker_table(context: &str) -> String {
     format!("[docker]\ncontext = \"{context}\"\n")
 }
 
-/// The table of a configuration's one provider, `local`, of kind `docker`, in whose one class
-/// each role of [`workflow`]'s fits.
 const LOCAL: &str = "[providers.local.docker]\n";
 
-/// The table of a provider, `aws`, of kind `ec2`, whose settings name an envelope.
 const EC2: &str = r#"[providers.aws.ec2]
 region = "us-west-1"
 classes = { agent = { template = "lt-0aaaaaaaaaaaaaaaa", version = 7, vcpus = 32, memory_mib = 262144 }, judge = { template = "lt-0bbbbbbbbbbbbbbbb", version = 2, vcpus = 8, memory_mib = 16384 } }
@@ -1012,8 +939,6 @@ repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
 timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
 "#;
 
-/// The table of a provider, `gpus`, of kind `modal`, whose settings name a workspace and a
-/// repository, and its one class, `h100`.
 const MODAL: &str = r#"[providers.gpus.modal]
 profile = "pumpkin"
 dials_from = "203.0.113.7"
@@ -1021,71 +946,56 @@ images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:a
 classes = { h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 17179869184, startup_seconds = 1800 } }
 "#;
 
-/// Makes `scratch`'s directory `dir`, and links `pumpkin` there; returns the link's path.
 fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let dir = scratch.0.join(dir);
     fs::create_dir_all(&dir).unwrap();
     // A link, which writes nothing where a copy would write the whole executable; `pumpkin` finds
     // its workspace by the path it runs from, this one.
     fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
-    // The formatter that `PUMPKIN_BUILDIFIER` names, as `cargo xtask ci` and `cargo xtask
-    // mutants` set it, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin` that
-    // runs.
+    // The formatter that `cargo xtask ci` names, which `pumpkin fmt` and `pumpkin check` run from
+    // beside the `pumpkin` that runs.
     if let Some(buildifier) = std::env::var_os("PUMPKIN_BUILDIFIER") {
         fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
     }
     dir.join("pumpkin")
 }
 
-/// The engine of the Docker context `context`, as `scratch`'s `pumpkin` reaches it.
 fn engine(scratch: &Scratch, context: &str) -> Engine {
     let context = ContextName::try_from(context.to_owned()).unwrap();
     Engine::connect(context, &scratch.0.join(".pumpkin/docker")).unwrap()
 }
 
-/// The containers of the Docker context `context`, as a reap reaches them.
 fn containers(context: &str) -> Reached {
     Docker::reach(ContextName::try_from(context.to_owned()).unwrap()).unwrap()
 }
 
-/// A configuration of the context `context` alone, which places the fixture's roles as
-/// [`LOCAL`] does.
 fn machine(context: &str) -> String {
     format!("{}\n{LOCAL}", docker_table(context))
 }
 
-/// What a recipe holds that the stand-in `docker` builds ([`StandIn`]).
+// What a recipe holds that the stand-in `docker` builds.
 const BUILDS: &str = "# The stand-in builds this recipe.";
 
-/// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
-/// on a host of 8 GiB of memory, and keeps its images in the containerd image store.
+// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
+// on a host of 8 GiB of memory, and keeps its images in the containerd image store.
 const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"CPUSet":true,"PidsLimit":true,"DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"MemTotal":8589934592}"#;
 
-/// What `docker image inspect` prints of the stand-in's engine's image: a manifest for its
-/// platform, `linux/amd64`.
 const IMAGE: &str = r#"{"Os":"linux","Architecture":"amd64","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}}"#;
 
-/// A stand-in `docker` in a scratch directory, for the `pumpkin run`s that [`run`](Self::run)
-/// makes: an engine whose one image is that of the task `stand-in`, ID all zeros, which lacks the
-/// task `lacking`'s, ID all ones, and fails to build the task `unbuilt`'s; others are those that
-/// the directory's `images` lists, by ID, size and tags. It builds a recipe that holds [`BUILDS`]
-/// as the image of ID all twos, tagged as it is then asked; creates and lists no container; notes
-/// each image removal and cache prune in `docker.pruned`; and leaves `docker.ran` once run. It
-/// holds the driver at each command that [`hold`](Self::hold) names, such as `create`, until
-/// [`release`](Self::release) or the driver's end; dropping it releases them all.
+/// A stand-in for `docker` in the scratch directory, with the tasks `stand-in`, `lacking` and
+/// `unbuilt`.
+///
+/// Its answers hold the calls of one command, such as `image`, between `hold` and `release`.
+/// The stand-in's CPU ledger lives outside the scratch directory, and dropping it removes that.
 struct StandIn<'a> {
     scratch: &'a Scratch,
 }
 
 impl<'a> StandIn<'a> {
-    /// The stand-in for an engine that [`INFO`] and [`IMAGE`] describe.
     fn new(scratch: &'a Scratch) -> Self {
         Self::with(scratch, INFO, IMAGE)
     }
 
-    /// The stand-in for an engine of which `docker info` prints `info`, with the scratch
-    /// directory's name as its ID ([`ledger`]), and `docker image inspect` prints `image` of its
-    /// image.
     #[expect(clippy::too_many_lines, reason = "most of it is the stand-in's script")]
     fn with(scratch: &'a Scratch, info: &str, image: &str) -> Self {
         let id = scratch.0.file_name().unwrap().to_str().unwrap();
@@ -1166,25 +1076,19 @@ esac
         Self { scratch }
     }
 
-    /// Holds the driver at `command` from now on.
     fn hold(&self, command: &str) {
         self.scratch.write(&format!("hold-{command}"), "");
     }
 
-    /// The driver's process ID, once the stand-in holds it at `command`.
     fn held(&self, command: &str) -> i64 {
         let at = self.scratch.0.join(format!("at-{command}"));
         poll(|| fs::read_to_string(&at).ok()?.trim().parse().ok())
     }
 
-    /// Lets the driver go on from `command`.
     fn release(&self, command: &str) {
         let _ = fs::remove_file(self.scratch.0.join(format!("hold-{command}")));
     }
 
-    /// `pumpkin run` of the task whose entry is `entry`, and `rest`, against the stand-in, in a
-    /// process group of its own, so that a signal to the group misses the test. Fails the test if
-    /// it ignores or blocks SIGINT or SIGTERM, which `run` would inherit.
     fn run(&self, entry: &str, rest: &[&str]) -> Command {
         signals_at_default();
         let mut run = (self.scratch).pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
@@ -1197,8 +1101,7 @@ esac
     }
 }
 
-/// `command`, in a process group of its own, started by a shell that runs `setup`, such as
-/// `umask 002`, then executes `command` in its place, which so inherits what `setup` set.
+/// `command` run by a shell after `setup`, in a process group of its own.
 fn through_shell(command: &Command, setup: &str) -> Command {
     let mut shell = stdx::process::command("/bin/sh", Environment::Inherited);
     shell.args(["-c", &format!("{setup} && exec \"$@\""), "sh"]);
@@ -1216,8 +1119,7 @@ fn through_shell(command: &Command, setup: &str) -> Command {
     shell
 }
 
-/// Fails the test if its thread ignores or blocks SIGINT or SIGTERM: the tests stand for a
-/// terminal's foreground job, whose signals are neither, and a child inherits both.
+/// Panics if this thread ignores or blocks `SIGINT` or `SIGTERM`, which a child would inherit.
 fn signals_at_default() {
     let status = fs::read_to_string("/proc/thread-self/status").unwrap();
     let mask = |field: &str| {
@@ -1247,8 +1149,9 @@ impl Drop for StandIn<'_> {
     }
 }
 
-/// The ledger of the CPUs that runs on the stand-in's engine, of `scratch`, hold: an engine of
-/// its own, so that the stand-in's runs never wait for others.
+/// The directory of the CPU ledger that `StandIn`'s engine uses, which is named by its ID.
+///
+/// The engine is the scratch directory's own, so that the stand-in's runs never wait for others.
 fn ledger(scratch: &Scratch) -> PathBuf {
     Path::new("/var/tmp/pumpkin-cpus").join(scratch.0.file_name().unwrap())
 }
