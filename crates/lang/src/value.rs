@@ -1,17 +1,14 @@
-//! Values, and the spans of source that make them.
+//! The values an evaluation makes, each with the span of the code that made it, and the budget
+//! that bounds their bytes.
 //!
-//! Every [`Value`] holds the [`Span`] that made it: a literal its own, the result of an operation
-//! the operation's, and a value a builtin returns the call's. A value bound to a name keeps its
-//! span wherever the name takes it, as does a value a function is given or returns, so a problem
-//! with a value is reported where it was written.
+//! Every [`Value`] holds the [`Span`] that made it, and keeps it wherever the value goes, so that
+//! a problem with a value is reported where the value was written. Values never change once made,
+//! so they are shared, not copied, and the specification's freezing (spec.md, "Freezing a value")
+//! can't be observed.
 //!
-//! Values never change once made, since the language has no operation that changes one: so they
-//! are shared, not copied, and the specification's freezing (spec.md, "Freezing a value") can't
-//! be observed.
-//!
-//! A list, a tuple, a dict or a function nests at most `MAX_NESTING` deep, which [`Nested::new`]
-//! and [`Function::new`] hold it to where it is made, so that no walk over a value, its drop
-//! included, can overflow the stack.
+//! A string, list, tuple, dict or function is made only through a constructor that charges the
+//! `Budget` and checks its nesting against `MAX_NESTING`, so that no value outgrows the budget,
+//! and no walk over a value, its drop included, can overflow the stack.
 
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
@@ -37,7 +34,7 @@ impl FileId {
     pub(crate) const ENTRY: Self = Self(0);
 }
 
-/// A range of a file's text, in bytes, each end on a character's boundary.
+/// A range of one file's text, in bytes, each end on a character's boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Span {
     pub(crate) file: FileId,
@@ -46,7 +43,7 @@ pub(crate) struct Span {
 }
 
 impl Span {
-    /// The span from this one's start to `last`'s end, in the same file.
+    /// The span from the start of `self` to the end of `last`, which is in the same file.
     pub(crate) fn to(self, last: Self) -> Self {
         Self {
             end: last.end,
@@ -65,16 +62,14 @@ pub(crate) struct Value {
 pub(crate) enum Kind {
     None,
     Bool(bool),
-    /// The specification's integers are unbounded; these refuse what overflows 64 bits.
+    /// 64 bits, where the specification's ints are unbounded.
     Int(i64),
     Str(Text),
     List(Nested<Value>),
     Tuple(Nested<Value>),
     Dict(Dict),
-    /// A function a `def` made.
     Function(Rc<Function>),
     Builtin(Builtin),
-    /// An image, which the IR names by its ID once built.
     Image(ImageId),
     Module(Module),
 }
@@ -83,13 +78,8 @@ pub(crate) enum Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ImageId(pub(crate) usize);
 
-/// The bytes the values an evaluation has made take, never given back as values are dropped,
-/// and the most they may.
-/// The only constructors of a string, a list, a tuple, a dict and a function, [`Text::new`],
-/// [`Nested::new`] and [`Function::new`], count what each makes: a string its length, a list's
-/// or a tuple's element, or a function's default, `Value::BYTES`, a dict's entry `Entry::BYTES`.
-/// Not counted: a string literal, which shares its file's text ([`Text::literal`]), and what
-/// Pumpkin's functions plan, which is no value.
+/// The bytes that an evaluation's values may take in all. Each value is charged once, when it is
+/// made, and nothing is refunded when it is dropped.
 pub(crate) struct Budget {
     used: Cell<usize>,
     max: usize,
@@ -103,15 +93,14 @@ impl Budget {
         }
     }
 
-    /// Counts `bytes` more, of a value made at `at`, refused if the count passes the most.
     fn charge(&self, bytes: usize, at: Span) -> Result<(), Fault> {
         self.fits(bytes, at)?;
         self.used.set(self.used.get() + bytes);
         Ok(())
     }
 
-    /// Refuses `bytes` more, of a value to be made at `at`, if they would pass the most: so
-    /// that a value that may outgrow what makes it, as `replace`'s, is refused before it is made.
+    /// Checks that `bytes` more fit, and charges none. A caller about to build a large value
+    /// calls it first, so that the budget refuses before the allocation.
     pub(crate) fn fits(&self, bytes: usize, at: Span) -> Result<(), Fault> {
         if bytes <= self.max - self.used.get() {
             return Ok(());
@@ -125,18 +114,17 @@ impl Budget {
     }
 }
 
-/// A string's text, made by [`Text::new`] or shared.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Text(Rc<str>);
 
 impl Text {
-    /// `text`, as the string made at `at`, counted in `budget`.
     pub(crate) fn new(text: &str, at: Span, budget: &Budget) -> Result<Self, Fault> {
         budget.charge(text.len(), at)?;
         Ok(Self(text.into()))
     }
 
-    /// The text of a string literal, shared with its file's syntax.
+    /// Shares the text of a literal in the syntax tree, which the file's size already bounds, so
+    /// it charges nothing.
     pub(crate) fn literal(text: &Rc<str>) -> Self {
         Self(Rc::clone(text))
     }
@@ -150,28 +138,23 @@ impl Deref for Text {
     }
 }
 
-/// The elements of a list, a tuple or a dict, which nest at most `MAX_NESTING` deep, it
-/// counted.
+/// The elements of a list, tuple or dict, shared between clones, which charge nothing. `depth`
+/// is one more than the deepest element's.
 #[derive(Clone)]
 pub(crate) struct Nested<T> {
     elements: Rc<[T]>,
-    /// One more than its deepest element's.
     depth: usize,
 }
 
-/// What a [`Nested`] holds: a value, or a dict's entry, which nests as deep as its value.
 pub(crate) trait Element {
-    /// The bytes [`Budget`] counts for it, at least what the assertion beside its implementation
-    /// names.
+    /// What one element costs the budget: an estimate of its bytes on the heap, at least what
+    /// the assertions below count.
     const BYTES: usize;
 
-    /// How deep it nests: 0 for what holds no value.
     fn depth(&self) -> usize;
 }
 
 impl<T: Element> Nested<T> {
-    /// `elements`, as those of the list, the tuple or the dict made at `at`, counted in
-    /// `budget`, refused if one nests `MAX_NESTING` deep already.
     pub(crate) fn new(elements: Vec<T>, at: Span, budget: &Budget) -> Result<Self, Fault> {
         budget.charge(elements.len() * T::BYTES, at)?;
         let depth = deeper(elements.iter().map(Element::depth), at)?;
@@ -180,8 +163,6 @@ impl<T: Element> Nested<T> {
     }
 }
 
-/// One more than the deepest of `depths`, of what the value made at `at` holds, refused past
-/// `MAX_NESTING`.
 fn deeper(depths: impl Iterator<Item = usize>, at: Span) -> Result<usize, Fault> {
     let depth = 1 + depths.max().unwrap_or(0);
     if depth <= MAX_NESTING {
@@ -195,7 +176,6 @@ fn deeper(depths: impl Iterator<Item = usize>, at: Span) -> Result<usize, Fault>
 }
 
 impl<T: Clone + Element> Nested<T> {
-    /// This one's elements, then `other`'s, made at `at`, counted in `budget`.
     pub(crate) fn concat(&self, other: &Self, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let elements = self.elements.iter().chain(other.elements.iter());
         Self::new(elements.cloned().collect(), at, budget)
@@ -211,7 +191,6 @@ impl<T> Deref for Nested<T> {
 }
 
 impl Element for Value {
-    // What a value takes, and the counts of a string, which an element may be.
     const BYTES: usize = 80;
 
     fn depth(&self) -> usize {
@@ -231,9 +210,6 @@ impl Element for Value {
 }
 
 impl Element for Entry {
-    // What an entry takes, the counts of a string, which its value may be, and its key and place
-    // in the dict's index; and an estimate, not a bound, of its share of the index tree's nodes,
-    // which the assertion below leaves out.
     const BYTES: usize = 160;
 
     fn depth(&self) -> usize {
@@ -241,7 +217,9 @@ impl Element for Entry {
     }
 }
 
-/// The bytes of the counts an [`Rc`] keeps beside what it holds, such as a string's text.
+// What the assertions count of an element: its own bytes, its `Rc`'s strong and weak counts and,
+// for a dict entry, its key and place in the index. An entry's `BYTES` also covers its share of
+// the index tree's nodes, which no assertion can count.
 const RC_COUNTS_BYTES: usize = 2 * size_of::<usize>();
 
 const _: () = assert!(size_of::<Value>() + RC_COUNTS_BYTES <= <Value as Element>::BYTES);
@@ -249,18 +227,15 @@ const _: () = assert!(
     size_of::<Entry>() + RC_COUNTS_BYTES + size_of::<(Key, usize)>() <= <Entry as Element>::BYTES
 );
 
-/// A dict's entries, in the order their keys were first given, no two keys equal.
+/// A dict in insertion order. `index` gives each key's place in `entries`.
 #[derive(Clone)]
 pub(crate) struct Dict {
     entries: Nested<Entry>,
-    /// Each key's place in `entries`.
     index: Rc<BTreeMap<Key, usize>>,
 }
 
 impl Dict {
-    /// The dict of `entries`, made at `at`: each key at the place where it is first given, with
-    /// the value, and the key's span, of the last entry that gives it. A value that nests
-    /// `MAX_NESTING` deep already is refused.
+    /// A key that repeats keeps its first place and its last value.
     pub(crate) fn new(entries: Vec<Entry>, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let (entries, index) = merged(entries);
         let entries = Nested::new(entries, at, budget)?;
@@ -272,15 +247,14 @@ impl Dict {
         self.index.get(key).map(|&place| &self.entries[place])
     }
 
-    /// This dict's entries, then `other`'s, whose values replace this one's for the keys that
-    /// both have (spec.md, "Dictionaries"), made at `at`, counted in `budget`.
+    /// The entries of `self`, then those of `other`, where a key in both keeps its place in
+    /// `self` and its value in `other`.
     pub(crate) fn union(&self, other: &Self, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let entries = self.entries.iter().chain(other.entries.iter()).cloned();
         Self::new(entries.collect(), at, budget)
     }
 }
 
-/// `entries`, each key once, at its first place, with its last entry, and each key's place.
 fn merged(entries: Vec<Entry>) -> (Vec<Entry>, BTreeMap<Key, usize>) {
     let mut index = BTreeMap::new();
     let mut merged: Vec<Entry> = Vec::with_capacity(entries.len());
@@ -303,7 +277,6 @@ impl Deref for Dict {
     }
 }
 
-/// A dict's entry: its key, with the span that made it, and its value.
 #[derive(Clone)]
 pub(crate) struct Entry {
     pub(crate) key: Key,
@@ -312,7 +285,6 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    /// The key, as a value made where the key was.
     pub(crate) fn key_value(&self) -> Value {
         let kind = match &self.key {
             Key::Int(int) => Kind::Int(*int),
@@ -325,15 +297,14 @@ impl Entry {
     }
 }
 
-/// A dict's key, which the subset holds to a string or an int, where the specification takes
-/// any hashable value (spec.md, "Dictionaries").
+/// A dict's key, which the subset holds to a string or an int, where the specification takes any
+/// hashable value (spec.md, "Dictionaries").
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Key {
     Int(i64),
     Str(Text),
 }
 
-/// Whether Starlark hashes `value`, which a dict's key must be.
 fn hashable(value: &Value) -> bool {
     match &value.kind {
         Kind::Tuple(items) => items.iter().all(hashable),
@@ -348,16 +319,12 @@ fn hashable(value: &Value) -> bool {
 }
 
 impl Key {
-    /// The key that `value` is, if it is a string or an int; else the message that refuses it: a
-    /// refusal of a value that the specification takes, a hashable one, and else Starlark's own
-    /// error.
     pub(crate) fn of(value: &Value) -> Result<Self, String> {
         let what = value.kind.describe();
         let instead = "key a dict with strings or ints";
         match &value.kind {
             Kind::Int(int) => Ok(Self::Int(*int)),
             Kind::Str(text) => Ok(Self::Str(text.clone())),
-            // Starlark hashes a tuple only if it hashes each of its elements.
             Kind::Tuple(items) if !items.iter().all(hashable) => Err(format!(
                 "a tuple that holds an unhashable value can't be a dict's key: {instead}"
             )),
@@ -370,7 +337,6 @@ impl Key {
         }
     }
 
-    /// The key as a literal that makes it, for a message, a string [`quote`]d.
     pub(crate) fn literal(&self) -> String {
         match self {
             Self::Int(int) => format!("{int}"),
@@ -379,19 +345,16 @@ impl Key {
     }
 }
 
-/// A function that a `def` made, which nests one level deeper than its deepest default.
+/// A function made by a `def`, with the module whose globals it reads and the values of its
+/// parameters' defaults, `None` for a parameter without one.
 pub(crate) struct Function {
     pub(crate) def: Rc<Def>,
-    /// The file whose top level the body's names resolve in.
     pub(crate) module: FileId,
-    /// Each parameter's default, in order, if it has one.
     pub(crate) defaults: Vec<Option<Value>>,
     depth: usize,
 }
 
 impl Function {
-    /// The function that `def`, run at `module`'s top level, makes, with `defaults`, counted in
-    /// `budget`, refused if a default nests `MAX_NESTING` deep already.
     pub(crate) fn new(
         def: Rc<Def>,
         module: FileId,
@@ -410,23 +373,18 @@ impl Function {
     }
 }
 
-/// A function the language provides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Builtin {
     Universal(Universal),
     Pumpkin(Pumpkin),
 }
 
-/// A module the language provides, whose functions a call names as the module's methods, as
-/// `json.encode(…)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Module {
     Json,
 }
 
 impl Value {
-    /// Whether the value is true as a condition (spec.md, "Booleans"): all but `None`, `False`,
-    /// `0`, and empty strings, lists, tuples and dicts.
     pub(crate) fn truth(&self) -> bool {
         match &self.kind {
             Kind::None => false,
@@ -439,8 +397,6 @@ impl Value {
         }
     }
 
-    /// Whether the value equals `other`, as `==` has it (spec.md, "Comparisons"): two values of
-    /// one kind with equal contents, a list never equalling a tuple, and a function only itself.
     pub(crate) fn equals(&self, other: &Self) -> bool {
         match (&self.kind, &other.kind) {
             (Kind::None, Kind::None) => true,
@@ -458,9 +414,9 @@ impl Value {
                             .is_some_and(|other| other.value.equals(&entry.value))
                     })
             }
+            // A `def` runs once, and so makes one function, which equals only itself.
             (Kind::Function(left), Kind::Function(right)) => Rc::ptr_eq(&left.def, &right.def),
             (Kind::Builtin(left), Kind::Builtin(right)) => left == right,
-            // Equal declarations are one image.
             (Kind::Image(left), Kind::Image(right)) => left == right,
             (Kind::Module(left), Kind::Module(right)) => left == right,
             (
@@ -480,8 +436,8 @@ impl Value {
         }
     }
 
-    /// The value, for a message: `None`, a bool or an int as its literal, a string [`quote`]d,
-    /// any other as its kind.
+    /// How a message names this value: `None`, a bool, an int or a string by its literal, any
+    /// other by its type.
     pub(crate) fn shown(&self) -> String {
         match &self.kind {
             Kind::None => String::from("`None`"),
@@ -501,7 +457,6 @@ impl Value {
 }
 
 impl Kind {
-    /// What kind of value this is, for a message: "an int", "a dict".
     pub(crate) fn describe(&self) -> &'static str {
         match self {
             Self::None => "`None`",
@@ -518,11 +473,9 @@ impl Kind {
     }
 }
 
-/// How many characters of a string a message shows, at most.
-// So that a message stays short, however long the strings it shows.
+// So that a long string can't bury the rest of a message.
 const SHOWN: usize = 60;
 
-/// `text`, for a message: whole, or its first `SHOWN` characters, then `…`.
 fn cut(text: &str) -> Cow<'_, str> {
     match text.char_indices().nth(SHOWN) {
         Some((end, _)) => Cow::Owned(format!("{}…", &text[..end])),
@@ -530,9 +483,9 @@ fn cut(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// `text`, for a message, `cut`, with each `"`, `\`, control character, line or paragraph
-/// separator and character of Unicode's `Bidi_Control` property written as the language's
-/// escape in a string literal in double quotes, or, where it has none, as `<U+XXXX>`.
+/// Makes `text` safe to put in a message: cut to `SHOWN` characters, with quotes, backslashes,
+/// control characters, line and paragraph separators and bidirectional controls written as the
+/// language's escape in a double-quoted string, or as `<U+XXXX>` where it has none.
 pub(crate) fn escape(text: &str) -> String {
     let mut escaped = String::new();
     for char in cut(text).chars() {
@@ -544,9 +497,9 @@ pub(crate) fn escape(text: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\t' => escaped.push_str("\\t"),
             '\r' => escaped.push_str("\\r"),
-            // A renderer may break a message's line at U+2028 or U+2029, the line and paragraph
-            // separators, as at a newline, and a bidi control reorders how the text around it
-            // reads. The language escapes an ASCII one in octal, and no other.
+            // A renderer may break a line of a message at U+2028 or U+2029, as at a newline, and a
+            // bidirectional control reorders the text around it. The language has an escape for
+            // an ASCII character alone, in octal.
             char if char.is_control()
                 || matches!(
                     char,
@@ -569,7 +522,6 @@ pub(crate) fn escape(text: &str) -> String {
     escaped
 }
 
-/// `text`, for a message, as a Starlark string literal in double quotes, [`escape`]d.
 pub(crate) fn quote(text: &str) -> String {
     format!("\"{}\"", escape(text))
 }

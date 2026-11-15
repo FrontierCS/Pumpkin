@@ -1,13 +1,13 @@
-//! What `json.encode` and `json.decode` make: the module of Bazel's and starlark-go's Starlark
-//! (<https://bazel.build/rules/lib/core/json>), which converts a value to the text of RFC 8259's
-//! JSON and back, but for what the subset refuses: a float, which it lacks, an int past 64 bits,
-//! an object that gives a key twice, and a string with a lone surrogate, which a Rust string
-//! can't hold.
+//! The `json` module's `encode` and `decode`, between the language's values and the text of RFC
+//! 8259's JSON, as the module of Bazel's and starlark-go's Starlark has them
+//! (<https://bazel.build/rules/lib/core/json>), but for what the subset refuses: a float, which
+//! it lacks, an int past 64 bits, an object that gives a key twice, and a string with a lone
+//! surrogate, which a Rust string can't hold.
 //!
-//! Both are pure, and keep to the evaluation's bounds: what each will hold, `encode`'s text as it
-//! grows and `decode`'s values and the elements of the arrays and objects it has open, is asked
-//! of the byte budget before it is made, and `decode` refuses an array or an object nested deeper
-//! than a value may be, `MAX_NESTING`, before it reads further.
+//! Both keep to the evaluation's bounds, and ask the byte budget for what they will hold before
+//! they make it: `encode`'s text as it grows, `decode`'s values and the elements of the arrays
+//! and objects it has open. `decode` refuses an array or an object nested deeper than a value
+//! may be, `MAX_NESTING`, before it reads further.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -20,18 +20,12 @@ use crate::builtins::{Call, origin};
 use crate::problem::{Fault, refusal};
 use crate::value::{Budget, Dict, Element, Entry, Key, Kind, Nested, Span, Text, Value, escape};
 
-/// The compact JSON text of `argument`, its value and the span of the expression that gives it:
-/// `None` as `null`, a bool as `true` or `false`, an int in decimal, a string as [`quote`]
-/// writes it, a list or a tuple as an array, and a dict as an object, its keys sorted by their
-/// bytes.
-///
-/// # Errors
-///
-/// A dict keyed by an int, a function, an image or a module in the value; or a text that would
-/// pass what `budget` has left.
-// Sorted as starlark-go's `json.encode` sorts them. Bazel's sorts by UTF-16 code units, which
-// orders a key's character from U+10000 before one from U+E000 to U+FFFF, where bytes order it
-// after; the two implementations differ there, and this follows starlark-go:
+/// The compact JSON text of `argument`'s value, whose dicts' keys are in sorted order, so that
+/// equal values give equal text. A value with no JSON form, and a dict with a key but a string,
+/// are refused.
+// Keys sort by their bytes, as starlark-go's `json.encode` sorts them. Bazel's sorts by UTF-16
+// code units, which orders a key's character from U+10000 before one from U+E000 to U+FFFF,
+// where bytes order it after, so the two implementations differ there:
 // https://github.com/google/starlark-go/blob/4f4267fb140d1e8b91c9bce55cee2f809e8840dd/lib/json/json.go#L163-L186
 // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/lib/json/Json.java#L150-L159
 pub(crate) fn encode(argument: &(Span, Value), budget: &Budget) -> Result<String, Fault> {
@@ -40,7 +34,6 @@ pub(crate) fn encode(argument: &(Span, Value), budget: &Budget) -> Result<String
     Ok(text)
 }
 
-/// Writes `value`, of the argument at `at`, at the end of `text`.
 fn write(text: &mut String, value: &Value, at: Span, budget: &Budget) -> Result<(), Fault> {
     match &value.kind {
         Kind::None => push(text, "null", at, budget)?,
@@ -100,26 +93,23 @@ fn write(text: &mut String, value: &Value, at: Span, budget: &Budget) -> Result<
     Ok(())
 }
 
-/// Writes `piece` at the end of `text`, refused if the text would pass what `budget` has left.
-// Values that share their elements can write a text far longer than they take, so each piece is
-// asked of the budget before it is written.
+// Values that share their elements can write a text far longer than they take, and the budget
+// counts the text only once it is a value, so each piece is asked of the budget before it is
+// written.
 fn push(text: &mut String, piece: &str, at: Span, budget: &Budget) -> Result<(), Fault> {
     budget.fits(text.len() + piece.len(), at)?;
     text.push_str(piece);
     Ok(())
 }
 
-/// Writes `string` at the end of `text` as a JSON string, refused if the text would pass what
-/// `budget` has left: `"` and `\` escaped, `\b`, `\f`, `\n`, `\r` and `\t` for those
-/// characters, `\u00XX` for every other one below U+0020 and for U+007F, and every other
-/// character as it is. So the text is also a TOML basic string, which may hold no raw U+007F.
 // As Bazel's `appendQuoted` escapes, and starlark-go's `encode`, which in a string that is not
-// all printable ASCII also escapes `<`, `>`, `&`, U+2028 and U+2029, as Go's `json.Marshal` does;
-// but for U+007F, which Bazel writes raw and starlark-go as `\x7f`, which is no JSON. Both write
-// U+0080 to U+009F raw, as this does:
+// all printable ASCII also escapes `<`, `>`, `&`, U+2028 and U+2029, as Go's `json.Marshal`
+// does; but for U+007F, which Bazel writes raw and starlark-go as `\x7f`, which is no JSON.
+// Escaping U+007F makes the text also a TOML basic string, which may hold no raw U+007F:
 // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/lib/json/Json.java#L233-L287
 // https://github.com/google/starlark-go/blob/4f4267fb140d1e8b91c9bce55cee2f809e8840dd/lib/json/json.go#L100-L111
 fn quote(text: &mut String, string: &str, at: Span, budget: &Budget) -> Result<(), Fault> {
+    // The bytes the escaped string takes, so that the budget refuses before anything is written.
     let escaped = |char: char| match char {
         '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
         '\0'..='\u{1f}' | '\u{7f}' => 6,
@@ -148,15 +138,9 @@ fn quote(text: &mut String, string: &str, at: Span, budget: &Budget) -> Result<(
     Ok(())
 }
 
-/// The value that `text`, the string `argument` gives `call`, denotes: `null` as `None`, `true`
-/// and `false` as bools, an integer as an int, a string as a string, an array as a list, and an
-/// object as a dict, its keys in the order the text gives them; each value made at the call.
-///
-/// # Errors
-///
-/// A text that is no JSON, or that the module doc says the subset refuses, at the first byte
-/// that shows it; an array or an object nested deeper than `MAX_NESTING`; or values that pass
-/// the budget.
+/// The value that the JSON `text` holds, each of whose parts has the span of the call. `text` is
+/// the call's `argument`, which a message names. An int outside 64 bits, a float and an object
+/// that repeats a key are refused.
 // After starlark-go's `decode`, which reads the text as this does, byte by byte:
 // https://github.com/google/starlark-go/blob/4f4267fb140d1e8b91c9bce55cee2f809e8840dd/lib/json/json.go#L316-L556
 pub(crate) fn decode(
@@ -181,19 +165,19 @@ pub(crate) fn decode(
 
 struct Decoder<'d> {
     text: &'d str,
-    /// The byte of `text` to read next.
     offset: usize,
-    /// How many of the arrays and objects that hold the value being read are open.
+    /// How many arrays and objects are open.
     depth: usize,
-    /// The bytes of the elements read into the arrays and objects open, which the budget counts
-    /// only once each closes.
+    /// The bytes of the elements read so far into the arrays and objects that are open. The
+    /// budget counts them only when their array or object is made, so each element is checked
+    /// against those of all the open ones together, and a text that would make too much is
+    /// refused before it is read through.
     pending_bytes: usize,
     argument: &'d (Span, Value),
     call: &'d Call<'d>,
 }
 
 impl Decoder<'_> {
-    /// Skips JSON's white space, and tells whether any text is left.
     fn skip_space(&mut self) -> bool {
         let rest = &self.text.as_bytes()[self.offset..];
         let text = rest
@@ -203,7 +187,6 @@ impl Decoder<'_> {
         text.is_some()
     }
 
-    /// The character after white space, which is not read, if any is left.
     fn peek(&mut self) -> Option<char> {
         self.skip_space();
         self.text[self.offset..].chars().next()
@@ -241,7 +224,6 @@ impl Decoder<'_> {
         }
     }
 
-    /// Reads the `[` or `{` that is next, refused if it would nest past `MAX_NESTING`.
     fn open(&mut self) -> Result<(), Fault> {
         self.depth += 1;
         if self.depth > MAX_NESTING {
@@ -256,9 +238,6 @@ impl Decoder<'_> {
         Ok(())
     }
 
-    /// Counts `bytes` more of an element to be read into an array or an object open, refused if
-    /// they and those of every element pending would pass what the budget has left.
-    // So that all the arrays and objects open together, and not each alone, keep to the budget.
     fn pend(&mut self, bytes: usize) -> Result<(), Fault> {
         self.call
             .budget
@@ -267,13 +246,11 @@ impl Decoder<'_> {
         Ok(())
     }
 
-    /// Reads the `]` or `}` that closes what `open` read last.
     fn close(&mut self) {
         self.depth -= 1;
         self.offset += 1;
     }
 
-    /// Reads `,` and tells whether more follows, or reads `close` and tells that none does.
     fn more(&mut self, close: char, expected: &str) -> Result<bool, Fault> {
         match self.peek() {
             Some(',') => {
@@ -302,6 +279,7 @@ impl Decoder<'_> {
                 }
             }
         }
+        // `Nested::new` charges the items from here.
         self.pending_bytes -= items.len() * <Value as Element>::BYTES;
         Ok(Kind::List(Nested::new(
             items,
@@ -324,7 +302,8 @@ impl Decoder<'_> {
                 let key_offset = self.offset;
                 let key = self.string()?;
                 if !keys.insert(key.clone()) {
-                    // Bazel's and starlark-go's `json.decode` keep the last value given.
+                    // Bazel's and starlark-go's `json.decode` keep the last value given; the
+                    // subset refuses the object instead of choosing.
                     let message = refusal(
                         format_args!(
                             "`json.decode` of an object that gives its key `\"{}\"` a second \
@@ -351,6 +330,7 @@ impl Decoder<'_> {
                 }
             }
         }
+        // `Dict::new` charges the entries from here.
         self.pending_bytes -= entries.len() * <Entry as Element>::BYTES;
         Ok(Kind::Dict(Dict::new(
             entries,
@@ -359,7 +339,6 @@ impl Decoder<'_> {
         )?))
     }
 
-    /// Reads the string whose `"` is next.
     fn string(&mut self) -> Result<Text, Fault> {
         self.offset += 1;
         let mut string = String::new();
@@ -385,7 +364,6 @@ impl Decoder<'_> {
         }
     }
 
-    /// Reads the escape whose `\` is next, and gives the character it denotes.
     fn escaped(&mut self) -> Result<char, Fault> {
         let start = self.offset;
         let escape = self.text[start + 1..].chars().next();
@@ -408,8 +386,6 @@ impl Decoder<'_> {
         Ok(char)
     }
 
-    /// Reads the `\uXXXX` escape that is next, and the one after it if they make a surrogate pair,
-    /// and gives the character they denote.
     fn unicode(&mut self) -> Result<char, Fault> {
         let start = self.offset;
         let first = self.code_unit()?;
@@ -434,7 +410,6 @@ impl Decoder<'_> {
         Ok(char)
     }
 
-    /// Reads the `\uXXXX` escape that is next, and gives its UTF-16 code unit.
     fn code_unit(&mut self) -> Result<u16, Fault> {
         let start = self.offset + 2;
         let rest = &self.text.as_bytes()[start..];
@@ -453,7 +428,6 @@ impl Decoder<'_> {
         Ok(unit)
     }
 
-    /// The refusal of the lone surrogate whose escape starts at `start`.
     fn lone(&self, start: usize) -> Fault {
         let message = refusal(
             format_args!(
@@ -465,12 +439,11 @@ impl Decoder<'_> {
         self.fault(message)
     }
 
-    /// Reads the number that is next, which the subset reads only as an int: `-` or none, then
-    /// `0`, or a digit from `1` and any more.
     fn int(&mut self) -> Result<i64, Fault> {
         let start = self.offset;
         let rest = &self.text[start..];
-        // As starlark-go's `decode` scans a number before it checks it.
+        // As starlark-go's `decode` scans a number before it checks it, so that a float is named
+        // as one.
         let number = rest
             .find(|char: char| !matches!(char, '0'..='9' | '-' | '+' | '.' | 'e' | 'E'))
             .map_or(rest, |end| &rest[..end]);
@@ -504,7 +477,6 @@ impl Decoder<'_> {
         Err(self.fault(message))
     }
 
-    /// The error of the character next, or of the text's end, where `expected` is.
     fn unexpected(&self, expected: &str) -> Fault {
         let found = match self.text[self.offset..].chars().next() {
             Some(char) => {
@@ -522,7 +494,6 @@ impl Decoder<'_> {
         self.fault(message)
     }
 
-    /// The fault, saying `message`, of the text that the call's argument gives.
     fn fault(&self, message: String) -> Fault {
         let (at, text) = self.argument;
         origin(Fault::new(*at, message), "the text", text)
