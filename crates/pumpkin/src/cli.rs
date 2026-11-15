@@ -124,7 +124,8 @@ On the controller: `job` runs a job of the controller target, which `pumpkin
 run` and `pumpkin build` start there in a unit of its own; `boot` reaps what lost
 runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
 and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
-ending from its copy of the record.")]
+ending from its copy of the record; `view` answers, on its standard input and
+output, `pumpkin view` on a client, which shows the controller's runs.")]
     #[command(after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -177,6 +178,8 @@ writes.")]
         #[arg(help = "The run's id.")]
         id: RunTag,
     },
+    #[command(about = "Answer a client's view of the runs, on the standard input and output")]
+    View,
 }
 
 /// What a command line asks for.
@@ -199,6 +202,8 @@ pub(crate) enum Command {
     Follow(RunTag),
     /// `pumpkin controller cancel`, a client's cancel of a run.
     CancelFor(Cancel),
+    /// `pumpkin controller view`, a client's view of the runs.
+    ViewFor,
     /// Help, or the version, for the standard output.
     Print(String),
 }
@@ -1126,6 +1131,9 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Cancel(cancel),
         } => Command::CancelFor(cancel),
         Parsed::Controller {
+            action: Action::View,
+        } => Command::ViewFor,
+        Parsed::Controller {
             action:
                 Action::Job {
                     id,
@@ -1163,6 +1171,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Boot
         | Command::Follow(_)
         | Command::CancelFor(_)
+        | Command::ViewFor
         | Command::Print(_) => {
             let problem = "the job's command is neither `run` nor `build`: give one";
             let controller = cli.find_subcommand_mut("controller");

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead as _, BufReader, Read as _, Write as IoWrite};
 use std::net::TcpStream;
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use expect_test::expect;
@@ -28,7 +28,11 @@ struct Served {
 
 impl Served {
     fn start(scratch: &Scratch) -> Self {
-        let mut command = scratch.pumpkin(&["view", "--runs", "runs"]);
+        Self::of(scratch.pumpkin(&["view", "--runs", "runs"]))
+    }
+
+    /// The view that `command`, a `pumpkin view`, serves.
+    fn of(mut command: Command) -> Self {
         command.stdout(Stdio::null()).stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let mut said = String::new();
@@ -95,6 +99,29 @@ impl Served {
         (head, answer[at + 4..].to_vec())
     }
 
+    /// The answer to a `GET` of `target`, which accepts deflate if `deflate`, as the head and the
+    /// body of a reply of `pumpkin controller view`.
+    fn as_frame(&self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
+        let accepts: &[(&str, &str)] = if deflate {
+            &[("Accept-Encoding", "deflate")]
+        } else {
+            &[]
+        };
+        let (head, body) = self.exchange_bytes("GET", target, accepts);
+        let header = |name: &str| {
+            let value = head.lines().find_map(|line| line.strip_prefix(name));
+            value.map(str::to_owned)
+        };
+        let status = head.lines().next().unwrap();
+        let answered = json!({
+            "status": status.strip_prefix("HTTP/1.1 ").unwrap(),
+            "content_type": header("Content-Type: ").unwrap(),
+            "deflated": header("Content-Encoding: ").as_deref() == Some("deflate"),
+            "body_bytes": body.len(),
+        });
+        (answered, body)
+    }
+
     fn get(&self, path: &str) -> Value {
         let (status, body) = self.get_with(path, &[]);
         assert_eq!(status, "HTTP/1.1 200 OK", "{path}: {body}");
@@ -136,15 +163,18 @@ fn fields(value: &Value, lines: &[&str]) -> String {
     text
 }
 
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the requests and their snapshot"
-)]
-fn serves_runs() {
-    let scratch = Scratch::new("serves-runs");
+/// The run that ended, of those [`write_served`] writes.
+const SERVED_ENDED: &str = "20261110-090000-0000000a";
+
+/// The run that is live, of those [`write_served`] writes.
+const SERVED_LIVE: &str = "20261110-110000-0000000c";
+
+/// Writes into `scratch`'s `runs` a run of each kind that the list shows: one that ended, one
+/// that is lost, one that is live, whose driver's lock it returns, held, one with no log, two
+/// that used no tokens that anyone counted, and a directory that holds no record.
+fn write_served(scratch: &Scratch) -> File {
     let priced = lease_places(true);
-    let ended = "20261110-090000-0000000a";
+    let ended = SERVED_ENDED;
     let mut outcome = judged(49.36, json!({ "raw_score": 49.36 }));
     outcome["usage"] = json!({
         "ran_ns": "1100000000000", "model_requests": 4,
@@ -155,7 +185,7 @@ fn serves_runs() {
         "usd": 0.11,
     });
     let dir = write_run(
-        &scratch,
+        scratch,
         ended,
         asked(ended, 30),
         &judged_log(),
@@ -168,17 +198,17 @@ fn serves_runs() {
     fs::write(dir.join("provider.json"), routed.to_string()).unwrap();
     let lost = "20261110-100000-0000000b";
     write_run(
-        &scratch,
+        scratch,
         lost,
         asked(lost, 30),
         &cut(&judged_log(), 130),
         None,
         &priced,
     );
-    let live = "20261110-110000-0000000c";
+    let live = SERVED_LIVE;
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let dir = write_run(
-        &scratch,
+        scratch,
         live,
         since.checked_sub(Duration::from_secs(200)).unwrap(),
         &cut(&judged_log(), 130),
@@ -187,7 +217,7 @@ fn serves_runs() {
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
-    write_record(&scratch, "20261110-120000-0000000d", true, None);
+    write_record(scratch, "20261110-120000-0000000d", true, None);
     // A run whose agent made no model request used no tokens; one whose requests none of the
     // responses reported their tokens for used some that no one counted.
     for (id, requests) in [
@@ -203,9 +233,21 @@ fn serves_runs() {
             "ran_ns": "60000000000", "model_requests": requests,
             "tokens": { "responses": 0, "input": 0, "output": 0 }, "sandboxes": [],
         });
-        write_record(&scratch, id, true, Some(outcome));
+        write_record(scratch, id, true, Some(outcome));
     }
     fs::create_dir_all(scratch.0.join("runs/20261110-130000-0000000e")).unwrap();
+    driver
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the requests and their snapshot"
+)]
+fn serves_runs() {
+    let scratch = Scratch::new("serves-runs");
+    let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
+    let driver = write_served(&scratch);
     let served = Served::start(&scratch);
     let mut steps = vec![format!(
         "pumpkin view --runs runs\n{}",
@@ -350,6 +392,143 @@ fn serves_runs() {
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
             {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8220: expected 0, or a byte that an answer gave"}"#]],
+    );
+}
+
+/// `pumpkin controller view` of the runs in `scratch`'s default runs directory, asked over its
+/// standard input.
+struct Piped {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Piped {
+    fn start(scratch: &Scratch) -> Self {
+        let mut command = scratch.pumpkin(&["controller", "view"]);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        Self {
+            stdin: child.stdin.take().unwrap(),
+            stdout: BufReader::new(child.stdout.take().unwrap()),
+            child,
+        }
+    }
+
+    /// The reply to a request of `target`, deflated if `deflate`: its head, then its body.
+    fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
+        let asking = json!({ "target": target, "deflate": deflate });
+        writeln!(self.stdin, "{asking}").unwrap();
+        let mut head = String::new();
+        self.stdout.read_line(&mut head).unwrap();
+        let head: Value = serde_json::from_str(&head).unwrap();
+        let mut body = vec![0; usize::try_from(head["body_bytes"].as_u64().unwrap()).unwrap()];
+        self.stdout.read_exact(&mut body).unwrap();
+        (head, body)
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the requests and their snapshot"
+)]
+fn answers_over_a_pipe() {
+    let scratch = Scratch::new("answers-over-a-pipe");
+    let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
+    let driver = write_served(&scratch);
+    fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
+    let mut view = scratch.pumpkin(&["view"]);
+    view.env("HOME", scratch.0.join("home"));
+    let served = Served::of(view);
+    let mut piped = Piped::start(&scratch);
+    let mut said = Vec::new();
+    // The live run's row and page say how long ago things were, which can change between two
+    // asks, so they are read through the pipe alone, below.
+    let targets = [
+        format!("/api/runs?before={live}"),
+        format!("/api/runs/{ended}/log?at=0"),
+        format!("/api/runs/{ended}/trace/agent/steps"),
+        "/api/runs/run-1".to_owned(),
+        format!("/api/runs/{ended}/since?log=7"),
+        "/api/nothing".to_owned(),
+    ];
+    for target in &targets {
+        for deflate in [false, true] {
+            let reply = piped.ask(target, deflate);
+            assert_eq!(reply, served.as_frame(target, deflate), "{target}");
+            if !deflate {
+                said.push(format!("{target}: {}", reply.0["status"].as_str().unwrap()));
+            }
+        }
+    }
+    // A run's reply, which holds no command to run it again, as it would name the controller's
+    // paths.
+    for (target, run) in [
+        (format!("/api/runs/{ended}"), ""),
+        (format!("/api/runs/{ended}/since?log=0"), "/run"),
+    ] {
+        let mut answered: Value = serde_json::from_str(&served.get_with(&target, &[]).1).unwrap();
+        let again = answered
+            .pointer_mut(run)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("again");
+        let (head, body) = piped.ask(&target, false);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            answered,
+            "{target}"
+        );
+        said.push(format!(
+            "{target}: {}, as `pumpkin view` answers but for its `again`, {}",
+            head["status"].as_str().unwrap(),
+            again.unwrap()
+        ));
+    }
+    let (_, cancel) = piped.ask(&format!("/api/runs/{live}/cancel"), false);
+    said.push(format!("cancel: {}", String::from_utf8(cancel).unwrap()));
+    let (_, first) = piped.ask(&format!("/api/runs/{live}/since?log=0"), false);
+    let first: Value = serde_json::from_slice(&first).unwrap();
+    let end = first["end"].as_u64().unwrap();
+    let mut next = judged_log()[cut(&judged_log(), 130).len()].clone();
+    next["seq"] = json!(1 + cut(&judged_log(), 130).len());
+    let log_path = scratch.0.join(format!(".pumpkin/runs/{live}/log.jsonl"));
+    let mut log = OpenOptions::new().append(true).open(&log_path).unwrap();
+    writeln!(log, "{next}").unwrap();
+    let (_, grown) = piped.ask(&format!("/api/runs/{live}/since?log={end}"), false);
+    let grown: Value = serde_json::from_slice(&grown).unwrap();
+    let records = grown["records"].as_array().unwrap();
+    assert_eq!(records[0]["byte"], end);
+    said.push(format!(
+        "the live run, after a line more: live {}, {} record, from where the last poll ended",
+        grown["live"],
+        records.len(),
+    ));
+    drop(piped.stdin);
+    said.push(format!(
+        "once its standard input ends: {}",
+        piped.child.wait().unwrap()
+    ));
+    drop(driver);
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[(ended, "<ended>"), (live, "<live>")],
+        &expect![[r#"
+            /api/runs?before=<live>: 200 OK
+            /api/runs/<ended>/log?at=0: 200 OK
+            /api/runs/<ended>/trace/agent/steps: 200 OK
+            /api/runs/run-1: 404 Not Found
+            /api/runs/<ended>/since?log=7: 400 Bad Request
+            /api/nothing: 404 Not Found
+            /api/runs/<ended>: 200 OK, as `pumpkin view` answers but for its `again`, {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
+            /api/runs/<ended>/since?log=0: 200 OK, as `pumpkin view` answers but for its `again`, {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
+            cancel: {"error":"the view on a controller answers no cancel: cancel run <live> from the page that `pumpkin view` serves, or run: pumpkin cancel <live>"}
+            the live run, after a line more: live true, 1 record, from where the last poll ended
+            once its standard input ends: exit status: 0"#]],
     );
 }
 
