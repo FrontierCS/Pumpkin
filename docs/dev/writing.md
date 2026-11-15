@@ -38,3 +38,127 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
 - SKETCH, in the pull request of a design whose cost grows with its input, what it costs in
   network, disk, memory and CPU, each by bandwidth and latency, before building it; then
   measure the claims the choice rests on
+
+## Examples
+
+Some of the rules above, each with a case from this repository: what was written, then what
+replaced it, in the form of
+[rust-analyzer's](https://github.com/rust-lang/rust-analyzer/blob/55effabb762bbd0a21c5af530ea447bd6772881d/docs/book/src/contributing/style.md)
+style guide.
+
+### WRITE a doc only where the name, the type and the signature leave a caller room …
+
+```rust
+// BAD
+/// Whether `holder` holds a lease that hasn't ended.
+pub(super) fn holds(&self, holder: Caller) -> bool {
+
+// GOOD
+pub(super) fn holds(&self, holder: Caller) -> bool {
+```
+
+**Rationale:** a private item's reader has its body below; a doc there is one more text that a
+change to the body must keep true.
+
+### WRITE a doc as the contract …
+
+```rust
+// BAD
+/// The most the container's log may hold, in bytes, in one file. The log is kept on the
+/// host's disk, outside the container's other limits, so it is capped whatever writes there, …
+const LOG_BYTES: u64 = 1 << 20;
+
+// GOOD
+/// The most the container's log may hold, in bytes, in one file.
+// The log is kept on the host's disk, outside the container's other limits, so it is capped …
+const LOG_BYTES: u64 = 1 << 20;
+```
+
+**Rationale:** an editor shows the doc wherever the item is used, so the reasoning buries what a
+user needs; at the line, it reaches the one who changes the number.
+
+### KEEP a comment to the code it sits by …
+
+```rust
+// BAD
+// A run that has ended has no lease ready: the work phase's end closes the agent's and
+// its calls', and the run ends only once the score's call's have ended.
+
+// GOOD
+// A run that has ended has no lease ready: the work phase's end closes every lease, and
+// the run ends only once the final job's have ended.
+```
+
+**Rationale:** a list of who reaches a condition is true until another caller reaches it, and
+nothing fails when it stops being true; the condition holds as long as the code does.
+
+### WRITE each rule once, at its home …
+
+BAD, in `pumpkin help config`, then in `deploy/aws/README.md`:
+
+> They run `aws`, AWS CLI v2, with the Session Manager plugin, and `ssh`, `rsync`, `tar`,
+> `ssh-keygen` and `git`, from PATH; …
+
+> The person's machine, Linux on x86-64, needs AWS CLI v2, the Session Manager plugin, `ssh`,
+> `rsync`, `tar` and `git`.
+
+GOOD, in the README:
+
+> … `pumpkin help config` says what each does, and which programs the person's machine, Linux on
+> x86-64, needs.
+
+**Rationale:** the two lists disagreed, `ssh-keygen` in the help alone, and a reader of either
+can't tell which is right; a change to the programs must find every copy.
+
+### WRITE a why as a `//` at the line it explains …
+
+```rust
+// BAD
+// An SSM session carries about 0.73 MB of what `ssh` writes a second, so zlib's
+// ratio is a gain in speed: measured through a controller, a task's datasets went
+// 2.1x as fast, and a tree of 7,267 source files 1.9x. …
+"Compression=yes",
+
+// GOOD
+// An SSM session carries under 1 MB a second, far less than zlib compresses in one,
+// so what compression saves in bytes it saves in time. …
+"Compression=yes",
+```
+
+**Rationale:** a measurement holds for one run, and a reader can't check it or tell when it
+stopped holding; the bound the reasoning needs stays true, and the measurement goes in the pull
+request, with what was measured.
+
+### WRITE a module doc for the module's model …
+
+```rust
+// BAD
+//! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
+//! operator names ([`ContextName`]), which nothing in the environment overrides, and reports it
+//! ([`Report`]). It builds images ([`Engine::build`]), writes a recipe's fetch stage
+//! ([`Engine::lock`]), says which of its images a prune removes ([`prune`]), loads the image of a
+//! `sandboxd` ([`Engine::load_sandboxd`]) and pushes ([`Pusher::push`]); …
+
+// GOOD
+//! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
+//! operator names ([`ContextName`]), which nothing in the environment overrides. Outside the
+//! engine, it writes only in the directory it is given. …
+```
+
+**Rationale:** rustdoc lists a module's items below its doc; a tour says them again, goes stale
+with each item added or renamed, and crowds out the model, which no list shows.
+
+### NEVER write history or hedges
+
+```rust
+// BAD
+// Each start is attempted once (a failed start isn't retried today), which is why the hard
+// end counts one startup per start. …
+
+// GOOD
+// Each start is attempted once (a failed start isn't retried), which is why the hard
+// end counts one startup per start. …
+```
+
+**Rationale:** "today" tells a reader nothing of the code, and makes them ask whether a change is
+planned, and when.
