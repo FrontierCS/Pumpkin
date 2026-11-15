@@ -1,10 +1,7 @@
 //! The EC2 provider: a sandbox for a role as a container on an EC2 instance of its own.
 //!
 //! [`Ec2::connect`] reaches the [envelope](#the-envelope) and reports it before anything starts.
-//! As a [`Provider`], it pushes what its sandboxes pull to the envelope's repositories, from the
-//! operator's Docker engine; launches each sandbox's instance; and finds a run's instances,
-//! terminates them and reads what they printed, keeping to the run's own by the tag that carries
-//! its run.
+//! It keeps to a run's own instances by the tag that carries its run.
 //!
 //! # The envelope
 //!
@@ -12,8 +9,7 @@
 //! sandboxes' security group and instance profile, an image repository for each kind of image a
 //! sandbox pulls, a launch template for each instance class, which fixes its AMI and instance
 //! type, and the sandboxes' timer, a schedule group and a role that terminates their instances
-//! (`Timer`). What it made is the provider's [`Settings`]. The provider runs `aws` in the
-//! settings' region, as [`aws::Cli`] runs it, and pushes as [`aws::Cli::publish`] does.
+//! (`Timer`). What it made is the provider's [`Settings`].
 //!
 //! The provider relies on the envelope, and checks none of this on AWS: each launch template, at
 //! the version the settings name, boots an AMI for `x86_64`, the only architecture `sandboxd` is
@@ -47,10 +43,8 @@ mod launch;
 /// by the create's deadline alone, so a start asked with less than this ahead is still tried.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(600 + 300 + 300 + 240 + 180 + 120).unwrap();
 
-/// The thousandths of a CPU in a CPU, the unit of a CPU limit ([`ir::MILLIS_PER_CPU`]).
 const MILLIS_PER_CPU: NonZeroU64 = NonZeroU64::new(ir::MILLIS_PER_CPU).unwrap();
 
-/// The bytes in a MiB, the unit of a class's memory.
 const MIB: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
 
 /// The envelope's settings, which only deserialization makes, from a table such as this, in TOML,
@@ -175,8 +169,8 @@ struct TemplateId(String);
 /// each [`Provider`] call return within a bound: a create's `aws` commands at its deadline
 /// ([`Create::by`]), which bounds too its wait for the run's list to find the instance, which gives
 /// up 200 s after the launch; a delete's wait for its instances to be terminated 10 min after the
-/// terminations; any other `aws` command 10 min after it starts; and a publish's `docker` commands
-/// as [`engine::Engine`] bounds them, a push 2 h after it starts and any other 2 min.
+/// terminations; any other `aws` command as [`aws::Bound::Call`] bounds it; and a publish's
+/// `docker` commands as [`engine::Engine`] bounds them.
 #[derive(Debug)]
 pub struct Ec2<'e> {
     reached: Reached,
@@ -188,7 +182,6 @@ pub struct Ec2<'e> {
     timer_role: RoleArn,
     /// What [`Provider::ready`] gives: the report as JSON, and the classes of sandbox.
     ready: Ready,
-    /// The directory on this machine that [`connect`](Self::connect) was given.
     dir: PathBuf,
 }
 
@@ -196,12 +189,8 @@ impl<'e> Ec2<'e> {
     /// Reaches the envelope that `settings` name, with `pusher`, the Docker engine that the
     /// provider publishes from, and reports it: the command line's version, whose credentials it
     /// uses, the classes and the timer, and the repositories, with their URIs. It writes in `dir`,
-    /// made once a launch needs it, each launch's user data, while `aws` reads it.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `aws` doesn't run, hangs or fails; if AWS refuses a call, saying what AWS reports,
-    /// or answers in JSON of another form; or if AWS describes no repository the settings name.
+    /// made once a launch needs it, each launch's user data, while `aws` reads it. It fails if AWS
+    /// describes no repository that the settings name.
     pub fn connect(settings: &Settings, pusher: Pusher<'e>, dir: &Path) -> Result<Self, String> {
         let Settings {
             region,
@@ -249,11 +238,6 @@ impl Ec2<'_> {
     /// Reaches the envelope that `settings` name for a sweep of a run's instances alone: nothing
     /// of the envelope is checked, only that AWS answers to the command line's credentials, in
     /// the settings' region, as [`connect`](Self::connect) has it answer.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `aws` doesn't run, hangs or fails, or if AWS refuses to say whose the
-    /// credentials are, saying what AWS reports.
     pub fn reach(settings: &Settings) -> Result<Reached, String> {
         let cli = Cli::connect(settings.region.clone())?;
         let Identity { .. } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
@@ -347,7 +331,7 @@ struct Report {
     classes: BTreeMap<Name, InstanceClass>,
     repositories: Repositories<Repository>,
     timer: Timer,
-    /// The Docker engine that the provider pushes through, as the Docker provider reports it.
+    /// The Docker engine that the provider pushes through.
     docker: engine::Report,
 }
 

@@ -86,7 +86,6 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// The fixture for test `name`.
     fn new(name: &str) -> Self {
         let tag = |suffix: &str| format!("pk-{}-{name}{suffix}", std::process::id());
         let tag = |suffix: &str| RunTag::try_from(tag(suffix)).unwrap();
@@ -268,8 +267,6 @@ impl Drop for Fixture {
     }
 }
 
-/// The engine the tests reach Docker through, by the context `PUMPKIN_DOCKER_CONTEXT` names,
-/// or `default`, or why it can't be reached.
 fn reached() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
     ENGINE.get_or_init(|| {
@@ -278,41 +275,33 @@ fn reached() -> &'static Result<Engine, String> {
     })
 }
 
-/// The provider on the engine, or why either can't be reached.
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
     PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, None))
 }
 
-/// The directory of what the tests' engine writes on this machine, which every run of the tests
-/// shares, as a machine's runs share their workspace's.
+// Shared by every run of the tests, as a machine's runs share their workspace's.
 fn engine_dir() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("docker")
 }
 
-/// The engine the tests reach Docker through.
 fn engine() -> &'static Engine {
     reached().as_ref().unwrap()
 }
 
-/// The provider on the engine, as the runtime holds one: what the tests start sandboxes through.
 fn provider() -> &'static Docker<'static> {
     connected().as_ref().unwrap()
 }
 
-/// The deadline of a start that begins now, by the startup that the provider's one class
-/// declares.
 fn startup() -> Deadline {
     Deadline::after(declared_startup())
 }
 
-/// The startup that the provider's one class declares.
 fn declared_startup() -> Duration {
     let class = provider().ready().classes.values().next().unwrap();
     Duration::from_secs(class.startup_seconds.get())
 }
 
-/// The IDs of the sandboxes a list found.
 fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
     (listed.into_iter())
         .map(|Listed { id, ended: _ }| id)
@@ -346,7 +335,6 @@ fn containers(run: &RunTag, format: &str) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
-/// Prints the logs of the run's containers, for a test that failed.
 fn show_logs(run: &RunTag) -> Result<(), String> {
     for id in containers(run, "{{.ID}}")? {
         let logs = docker().args(["logs", &id]).output();
@@ -389,7 +377,6 @@ fn unpulled() -> Image {
     Image::try_from(format!("sha256:{}", "0".repeat(64))).unwrap()
 }
 
-/// Runs `scenario` against a new fixture, and checks what it reported against `expect`.
 fn check(name: &str, scenario: impl FnOnce(&Fixture) -> Vec<String>, expect: &Expect) {
     let fixture = Fixture::new(name);
     expect.assert_eq(&scenario(&fixture).join("\n"));
@@ -450,7 +437,6 @@ fn serve(sandbox: &mut Started, process: Process, payload: &[u8]) -> (ExitStatus
     }
 }
 
-/// Collects the sandbox's `dir` into the fixture's directory and returns the files' contents.
 fn collect(fixture: &Fixture, sandbox: &mut Started, dir: &str) -> Vec<String> {
     let into = fixture.dir.path().join(format!("collected-{dir}"));
     let limits = Limits {
@@ -509,9 +495,8 @@ fn processes(sandbox: &Started, done: impl Fn(&str) -> bool) -> String {
     }
 }
 
-// What a judge does: reads its payload, writes a result and evidence, and exits, leaving
-// processes behind that freezing kills: one orphaned to `sandboxd`, and one in a session of
-// its own, outside its command's process group.
+// A judge exits leaving processes that freezing kills: one orphaned to `sandboxd`, and one in a
+// session of its own, outside its command's process group.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn judge() {
@@ -559,10 +544,6 @@ fn judge() {
     );
 }
 
-// What the role's code can reach, seen from inside the container, which was created to serve
-// neither ops nor the model endpoint, whether the container's users map to the host's as the
-// engine's report says, and, seen from the host, the container's log, which `sandboxd` alone
-// writes, and what `docker create` pinned that the daemon or the image would otherwise decide.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn confinement() {
@@ -639,11 +620,8 @@ fn confinement() {
     );
 }
 
-// Each run's containers run on cores of its own: the roles of a run that run at once get whole
-// cores that no other's share, each instance of a role that runs several at once its own, and
-// another run's are apart from all of them; each container sees only its own CPUs. A run that
-// needs more CPUs than the others leave is refused, naming those that hold them, as is one that
-// needs more than the machine has.
+// Each run's containers run on whole cores of their own, apart from every other run's, and see
+// only those; a run that needs more than the others leave is refused, naming those that hold them.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
@@ -839,7 +817,6 @@ fn volumes() {
     );
 }
 
-/// The name of the anonymous volume Docker made for the sandbox's `/volume`.
 fn volume(sandbox: &Started) -> String {
     let format = r#"{{range .Mounts}}{{if eq .Destination "/volume"}}{{.Name}}{{end}}{{end}}"#;
     let inspect = ["inspect", "--format", format, sandbox.id()];
@@ -850,7 +827,6 @@ fn volume(sandbox: &Started) -> String {
     name
 }
 
-// The suite every provider passes ([`test_support::suite`]), on Docker ([`Platform`]).
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn suite() {
@@ -895,11 +871,8 @@ impl Subject for Platform {
     }
 }
 
-// A create whose `docker create` hangs after the engine has made its container, as when the
-// engine's answer never comes, fails once its deadline has passed, and the run's list finds the
-// container it left: this test binary, run again with a stand-in `docker` first on its `PATH`
-// that runs Docker's `create`, then hangs, and passes every other command to Docker's, makes
-// the create.
+// A create whose `docker create` hangs after the engine has made its container fails once its
+// deadline has passed, and the run's list finds the container it left.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn hung_create() {
@@ -959,9 +932,6 @@ fn hung_create() {
     );
 }
 
-// A `sandboxd` that doesn't exist is named, and one whose path isn't UTF-8, which the engine's
-// API can't carry, is refused; a container that Docker creates but can't start is removed; an
-// image the engine doesn't have is refused, not pulled.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn failed_start() {
@@ -998,9 +968,8 @@ fn failed_start() {
 }
 
 /// `message`, with the fixture's directory as `<dir>`, the tests' context as `<context>`, and
-/// `…` for what varies between runs or hosts in a failed `docker start`: the container's ID, and
-/// what Docker reports, which comes from the container runtime, and varies with the runtime and
-/// its version.
+/// `…` for what a failed `docker start` reports, which varies with the container runtime and its
+/// version.
 fn redact(fixture: &Fixture, message: &str) -> String {
     let context = format!("context `{}`", engine().report().context.as_str());
     let message = (message.replace(&fixture.dir.path().display().to_string(), "<dir>"))
@@ -1058,11 +1027,8 @@ fn mute_sandboxd(dir: &Path) -> PathBuf {
 const CTL: &str = r#"
     ctl() { out=$(/.pumpkin/bin/sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
 
-// Commands in a sandbox that serves ops make them through `sandboxctl`, which a stand-in for
-// the session's owner answers ([`reply`]), and the gateway refuses a payload over the limit
-// the sandbox was started with. `sandboxd` made the control socket's directory closed to all
-// but the role's user, and `sandboxctl` is read-only, so writing it fails the last command.
-// The sandbox, created to serve ops but not the model endpoint, has no TCP listener.
+// `sandboxd` closes the control socket's directory to all but the role's user, and `sandboxctl`
+// is read-only, so writing it fails the last command.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
@@ -1190,11 +1156,8 @@ fn ops() {
     );
 }
 
-// Calls that `sandboxctl` or `sandboxd` refuse before an op opens, each failing its caller
-// alone, so that the session serves the next call: among them one with `/proc/1/mem`, the
-// memory of `sandboxd`, which can't open it, being non-dumpable. And a second `sandboxd`,
-// with a session of its own, is refused the control socket's directory, since the first made
-// it.
+// A refused call fails its caller alone, so that the session serves the next; `/proc/1/mem`
+// can't be opened, as `sandboxd` is non-dumpable.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn refused_calls() {
@@ -1272,11 +1235,8 @@ fn refused_calls() {
     );
 }
 
-// Callers whose ops arrive while one is in flight wait their turns, and each is carried once
-// the op before it is answered. A caller that has left when its turn comes is dropped, its op
-// unsent; one that leaves after its op was sent has it carried out. A payload's file is read
-// in its caller's turn, so one replaced by a symbolic link while its caller waits is refused,
-// as `sandboxd` opens no link.
+// A payload's file is read in its caller's turn, so one replaced by a symbolic link while its
+// caller waits is refused, as `sandboxd` opens no link.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn turns() {
@@ -1351,18 +1311,8 @@ fn turns() {
     );
 }
 
-// A harness's requests to the model endpoint of a sandbox created to serve both it and ops, from
-// inside the sandbox, which has no network but loopback, and the test, as the session's owner,
-// responding ([`respond`]). The endpoint listens on the loopback alone. Of eight requests at once,
-// a full flight is held while the one past it is refused (503); then the flight is answered. A
-// body far larger than its client's buffers arrives whole, though the client sends a byte past its
-// request and reads only once `sandboxd` has stopped writing. Then a request is streamed whole,
-// one cut short, one refused by the owner, and one ended without a head; one of HTTP/1.9 answered
-// 204, then cut short, and one answered 103, an interim status, get nothing, and one of `HEAD` a
-// head alone, though the owner sends data for each; and a chunked body, two lengths that differ, a
-// length with a sign, a chunked body with a length, one over the protocol's bound, HTTP/1.0, of
-// `HEAD` with a head alone and of `POST` with a body, and a head over the endpoint's bound are
-// refused before they reach the session.
+// A full flight of requests is held while the one past it is refused (503); what the protocol
+// or the endpoint's bound forbids is refused before it reaches the session.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn model_endpoint() {
@@ -1576,8 +1526,9 @@ fn payload() -> Vec<u8> {
 
 /// Answers `arrival`, an op, as a stand-in for the session's owner: one over the limit with its
 /// refusal; ops with no grants; a judge call with job 1; a submission as stored, or accepted if
-/// final; and the status of job 1, which completed and scored, of job 5, which did not, of job 2, which errored, or else a refusal.
-/// Returns what it asked, saying whether its payload is `payload`.
+/// final; and the status of job 1, which completed and scored, of job 5, which did not, of job 2,
+/// which errored, or else a refusal. Returns what it asked, saying whether its payload is
+/// `payload`.
 fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
         Arrival::Op(incoming) => incoming,
@@ -1722,8 +1673,8 @@ fn leased(lease: u64) -> OpReply {
     })
 }
 
-/// The status of job `job`, with `remaining`: job 1 completed and scored, job 5 completed and unscored, job 2 errored, and any other is
-/// refused.
+/// The status of job `job`, with `remaining`: job 1 completed and scored, job 5 completed and
+/// unscored, job 2 errored, and any other is refused.
 fn status(job: u64, remaining: Remaining) -> OpReply {
     let state = match job {
         1 => {

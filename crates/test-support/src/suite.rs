@@ -1,9 +1,8 @@
-//! The conformance suite every [`Provider`] passes, through the trait alone: one [`check`].
+//! The contract of [`Provider`] as checks through the trait alone: one [`check`].
 //!
-//! Its outcomes are the same for every provider that keeps the trait's contracts, and each
-//! provider's own test binary runs it on a [`Subject`] of its own. What every provider shares
-//! is tested here; a provider's own tests cover only what its platform adds, and the tests of
-//! `sandboxd` that need a real sandbox, which run on Docker.
+//! Its outcomes are the same for every provider that keeps the trait's contracts. A provider's
+//! tests run it on a [`Subject`] of its own where the provider can be run in a test. What every
+//! provider shares is tested here; a provider's own tests cover only what its platform adds.
 //!
 //! Where a contract lets providers differ, as [`Sweep::list`](provider::Sweep::list)'s lets one
 //! leave out an ended sandbox that it has freed itself, the suite shows what the contract fixes,
@@ -40,10 +39,6 @@ pub trait Subject {
     /// A new instance of the provider, connected to the platform as a run connects. The suite
     /// makes each call on an instance of its own, as [`Provider`]'s rule on its instances
     /// allows.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the platform can't be reached.
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String>;
 
     /// What the suite publishes, which may need a file in `dir`, a directory the suite removes.
@@ -332,7 +327,8 @@ fn stalls(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Ve
 }
 
 /// A create whose `sandboxd` can't run, which fails at once or makes a sandbox that ends: by its
-/// startup, the run's list finds whatever it left that the platform holds ([`Creator::create`](provider::Creator::create)).
+/// startup, the run's list finds whatever it left that the platform holds
+/// ([`Creator::create`](provider::Creator::create)).
 fn fails(suite: &mut Suite<'_>, image: &ImageRef, broken: &SandboxdRef) -> Vec<String> {
     let startup = suite.startup();
     // A provider may return from a create before its sandbox starts, so only what the create
@@ -683,7 +679,6 @@ impl<'a> Suite<'a> {
         sorted(named)
     }
 
-    /// The role of the sandbox `id` names, if the suite created one.
     fn role(&self, id: &SandboxId) -> Option<&'static str> {
         (self.made.iter())
             .find(|(made, _, _)| made == id)
@@ -758,14 +753,12 @@ fn suite_role(role: &str) -> Role {
     }
 }
 
-/// The time `after` from now.
 fn from_now(after: Duration) -> UnixTime {
     UnixTime::of(SystemTime::now())
         .unwrap()
         .saturating_add(after)
 }
 
-/// `names`, sorted.
 fn sorted(names: impl Iterator<Item = String>) -> Vec<String> {
     let mut names: Vec<String> = names.collect();
     names.sort();
@@ -788,7 +781,6 @@ impl Drop for Suite<'_> {
     }
 }
 
-/// The ids of the sandboxes a list found.
 fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
     (listed.into_iter())
         .map(|Listed { id, ended: _ }| id)

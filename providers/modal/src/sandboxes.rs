@@ -1,14 +1,15 @@
 //! A role's sandbox on Modal, as [`Modal`]'s implementation of `Provider` publishes what it runs,
-//! creates it, lists, reads and deletes it: in Pumpkin's one App, which holds every run's
-//! sandboxes, tagged with its run, by which its run's list finds it, and which every call on a
-//! sandbox that names one checks;
-//! its `sandboxd`, attached from this host, which Modal's own first process there, `dumb-init`,
-//! starts as root, and which becomes the role's user before it serves (`--user`), listening behind
-//! Modal's TLS tunnel, which takes connections from the settings' `dials_from` address alone; with
-//! no connection out, though Modal's resolver still answers its DNS queries; under gVisor, with its
-//! class's GPU, if any, and its role's CPU and memory as both its request and its limit; and ended
-//! by Modal at its run's hard end, if nothing ends it first. Its report names its App, its image's
-//! id and digest, its `sandboxd` and its GPU.
+//! creates it, lists, reads and deletes it.
+//!
+//! Every run's sandboxes are in Pumpkin's one App, each tagged with its run, by which its run's
+//! list finds it, and which every call on a sandbox that names one checks. Its `sandboxd`,
+//! attached from this host, is started as root by Modal's own first process there, `dumb-init`,
+//! and becomes the role's user before it serves (`--user`), listening behind Modal's TLS
+//! tunnel, which takes connections from the settings' `dials_from` address alone. The sandbox has
+//! no connection out, though Modal's resolver still answers its DNS queries; it runs under gVisor
+//! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
+//! and Modal ends it at its run's hard end, if nothing ends it first. Its report names its App,
+//! its image's id and digest, its `sandboxd` and its GPU.
 
 use std::collections::BTreeMap;
 use std::fs;

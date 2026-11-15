@@ -1,7 +1,6 @@
-//! [`Engine::lock`], which writes a recipe's fetch stage ([`FetchStage`]) afresh from what its
-//! [`Resolver`] prints, run online, as the image's user, in a container of the image that the
-//! recipe builds up to the step that reads the stage, with the inputs of the recipe's own build:
-//! context, args and named contexts. The apt resolver is the script `lock/apt.sh`.
+//! [`Engine::lock`], which runs a recipe's [`Resolver`] online, as the image's user, in a
+//! container of the image that the recipe builds up to the step that reads its fetch stage
+//! ([`FetchStage`]). The apt resolver is the script `lock/apt.sh`.
 
 use std::time::Duration;
 
@@ -16,7 +15,6 @@ const REPOSITORY: &str = "pumpkin/lock";
 /// The apt resolver ([`Resolver::Apt`]): it prints a pin, `<sha256> <url> <path>`, for each file.
 const APT: &str = include_str!("lock/apt.sh");
 
-/// How long a resolver may run before it is killed.
 // A resolver reads an archive's indexes and its packages' metadata, tens of megabytes from a
 // server that may be slow, as a dated snapshot is, and fetches no package: this is sized only to
 // turn one that hangs into a failure.
@@ -27,11 +25,6 @@ impl Engine {
     /// prints, as [`FetchStage`] says, in the image of the recipe up to the step that
     /// reads the stage, built with `context` and `given`'s args and named contexts, as the
     /// recipe's own build is given them.
-    ///
-    /// # Errors
-    ///
-    /// Fails if that image can't be built, as [`Engine::build`] fails; if the resolver fails, or
-    /// hasn't ended by its bound, `LOCK_TIMEOUT`; or as [`FetchStage::written`] fails.
     pub fn lock(
         &self,
         stage: &FetchStage,

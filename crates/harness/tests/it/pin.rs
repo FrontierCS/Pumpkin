@@ -108,7 +108,6 @@ fn checks() {
     );
 }
 
-/// The file a pin keeps at `path` with `mode`.
 const fn file(path: &'static str, mode: Mode) -> PinnedFile {
     PinnedFile { path, mode }
 }

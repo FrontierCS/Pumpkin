@@ -137,8 +137,8 @@ impl Cpus {
     ///
     /// # Errors
     ///
-    /// Fails if the engine's ID can't name a directory, if the kernel's lists can't be read, if
-    /// none is online, or if `given` names a CPU that isn't.
+    /// Fails if the engine's ID can't name a directory, if none is online, or if `given` names a
+    /// CPU that isn't.
     pub(crate) fn of_machine(engine: &str, given: Option<&CpuList>) -> Result<Self, String> {
         let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | '_');
         if engine.is_empty() || !engine.chars().all(named) {
@@ -192,10 +192,6 @@ impl Cpus {
 }
 
 /// The flags that every CPU of the machine has, as the kernel lists each CPU's in `/proc/cpuinfo`.
-///
-/// # Errors
-///
-/// Fails if `/proc/cpuinfo` can't be read, lists no CPU's flags, or lists a flag that isn't one.
 pub(crate) fn flags() -> Result<BTreeSet<CpuFlag>, String> {
     let text = fs::read_to_string(CPUINFO).context(CPUINFO)?;
     let lines = text.lines().filter_map(|line| line.split_once(':'));
@@ -335,11 +331,8 @@ fn needs(phases: &[Vec<Role>]) -> String {
     needs.join(", ")
 }
 
-/// The share of instance `instance` of role `role` of `run`, whose entry the ledger holds.
-///
-/// # Errors
-///
-/// Fails if the run holds no CPUs, or none for the instance, or its entry can't be read.
+/// The share of instance `instance` of role `role` of `run`, whose entry the ledger holds. It
+/// fails if the run holds no CPUs, or none for the instance.
 pub(crate) fn share(
     cpus: &Cpus,
     run: &RunTag,
@@ -458,7 +451,6 @@ fn entry_path(ledger: &Path, run: &RunTag) -> PathBuf {
     ledger.join(format!("{}.json", run.as_str()))
 }
 
-/// The entry at `path`, whose text is `text`.
 fn parse_entry(path: &Path, text: &str) -> Result<EntryJson, String> {
     serde_json::from_str(text).map_err(|error| {
         format!(

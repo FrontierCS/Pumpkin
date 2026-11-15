@@ -1,11 +1,8 @@
 //! The Modal provider: a sandbox for a role as a sandbox in a Modal workspace.
 //!
-//! [`Modal::connect`] reaches the workspace that a profile of Modal's configuration reaches, and
-//! the ECR repository that the provider imports images from, and reports both before anything
-//! starts. As a [`Provider`], it publishes a role's image as Modal imports it from that repository
-//! (`Images`), so no AWS credential of the operator's reaches Modal; and it creates, lists, reads
-//! and deletes sandboxes as `sandboxes` says, keeping to a run's own by the tag that carries its
-//! run.
+//! A role's image reaches Modal as Modal imports it from an ECR repository (`Images`), so no AWS
+//! credential of the operator's reaches Modal. The provider keeps to a run's own sandboxes by the
+//! tag that carries its run.
 //!
 //! The provider reaches Modal only through its helper (`helper`), a Python program on Modal's
 //! SDK, run once for each call, which reaches the workspace with the profile's token, from Modal's
@@ -187,7 +184,8 @@ impl TryFrom<ClassTable> for SandboxClass {
 /// Each call returns within a bound, as its helper's call is killed if it hasn't ended in time
 /// (`helper`): a create's at the create's deadline ([`Create::by`]), a delete's 10 min after it
 /// starts, which waits for each sandbox to finish, and any other at the bound the helper's module
-/// says; and `aws` and `docker` are bounded as [`aws::Cli`] and [`engine::Engine`] bound them.
+/// says; and `aws` and `docker` are bounded as [`aws::Bound::Call`] and [`engine::Engine`] bound
+/// them.
 #[derive(Debug)]
 pub struct Modal<'e> {
     reached: Reached,
@@ -229,12 +227,8 @@ impl<'e> Modal<'e> {
     /// Reaches the workspace that `settings`' profile reaches, through the helper at `script`,
     /// whose lock is beside it, and the settings' repository, with `pusher`, the engine it
     /// publishes from, and reports them: the workspace's name, the versions of Modal's SDK, Python
-    /// and `aws`, and the repository. It writes in `dir` what `uv` fetches.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the helper or `aws` doesn't run, hangs or fails; if Modal refuses a call, as for a
-    /// profile its configuration lacks; or if AWS describes no such repository.
+    /// and `aws`, and the repository. It writes in `dir` what `uv` fetches. It fails if Modal's
+    /// configuration lacks the profile, or AWS describes no such repository.
     pub fn connect(
         settings: &Settings,
         script: &Path,
@@ -297,12 +291,8 @@ impl<'e> Modal<'e> {
     /// Reaches the workspace that `settings`' profile reaches, in Modal's configuration file
     /// `config` if given, else theirs, through the helper at `script`, writing in `dir` as
     /// [`connect`](Self::connect) does, for a sweep of a run's sandboxes alone: nothing else of
-    /// the settings is reached, and nothing is reported.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `config` is relative, or as [`connect`](Self::connect) fails to reach the
-    /// workspace, as with a profile that Modal's configuration lacks.
+    /// the settings is reached, and nothing is reported. It fails if `config` is relative, or the
+    /// configuration lacks the profile.
     pub fn reach(
         settings: &Settings,
         config: Option<&Path>,
@@ -342,7 +332,7 @@ impl Provider for Modal<'_> {
     }
 
     // Each sandbox has resources of its own, which no other run shares, so a run holds nothing
-    // beforehand, as on EC2.
+    // beforehand.
     fn reserve(&self, _run: &RunTag, _phases: &[Vec<Role>]) -> Result<Reservation, String> {
         Ok(Reservation::new(()))
     }
@@ -351,11 +341,8 @@ impl Provider for Modal<'_> {
     /// for `sandboxd`'s platform, checked first; it is pushed to the repository unless held there
     /// ([`aws::Cli::publish`]), and Modal imports it from there by its digest, at every publish,
     /// without its entrypoint. Its reference is its id in Modal and the digest, `im-…@sha256:…`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the engine lacks the image, or has it for another platform; if the push fails; or
-    /// if the helper fails, or Modal can't import the image, as one its role may not pull.
+    /// It fails if the engine lacks the image or has it for another platform, or if Modal can't
+    /// import it, as one its role may not pull.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
         // Modal runs `sandboxd`'s platform alone.
         let runs = "Modal runs sandboxes on";

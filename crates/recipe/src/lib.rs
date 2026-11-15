@@ -1,4 +1,4 @@
-//! Image recipes, Dockerfiles, which a harness writes and a provider builds.
+//! Image recipes, Dockerfiles, and the check of what their builds fetch.
 //!
 //! An image's tag names what it is built from only where its recipe pins all that its build
 //! fetches, so [`check`] refuses a recipe that may have Docker fetch:
@@ -59,10 +59,8 @@ const INERT: [&str; 12] = [
 
 /// Checks `text`, the recipe named `name`, of a build given `given`, as the [crate] doc says.
 ///
-/// # Errors
-///
-/// Fails, naming `name`, if `text` isn't UTF-8, or on the first thing the check refuses, with
-/// the line its instruction starts on if it is in `text`.
+/// Fails, naming `name`, on a `text` that isn't UTF-8, or at the first thing the check refuses,
+/// with the line its instruction starts on if it is in `text`.
 pub fn check<B>(name: &str, text: &[u8], given: &Given<B>) -> Result<(), String> {
     let at = |error: String| format!("{name}: {error}");
     let text =
@@ -95,10 +93,6 @@ pub fn check<B>(name: &str, text: &[u8], given: &Given<B>) -> Result<(), String>
 
 /// Fails unless `source`, an `ADD` source, is plain: it holds no `%`, `?` or `#`, and doesn't end
 /// in `.git`, in any case, so no Docker from 25.0 on takes it for a Git repository's URL.
-///
-/// # Errors
-///
-/// Fails, saying why, if `source` isn't plain.
 pub fn check_source(source: &str) -> Result<(), String> {
     if git_like(source) {
         return Err(format!(
@@ -162,11 +156,8 @@ impl<B> Default for Given<B> {
 pub struct Stage(String);
 
 impl Stage {
-    /// The stage that `name` names in any case, lowercased.
-    ///
-    /// # Errors
-    ///
-    /// Fails, as [`Stage`]'s check does, unless `name`, lowercased, is a stage's name.
+    /// The stage that `name` names in any case, lowercased, refusing a `name` that isn't a
+    /// stage's name once lowercased.
     pub fn in_any_case(name: &str) -> Result<Self, String> {
         Self::try_from(name.to_ascii_lowercase())
     }
@@ -611,12 +602,9 @@ fn from(words: &str, named: &Named<'_>) -> Result<Option<String>, String> {
 }
 
 /// The value of the build argument that `image`, a `FROM`'s, names, if it names one, as
-/// `$<name>` or `${<name>}`, the whole word, which Docker expands to its value.
-///
-/// # Errors
-///
-/// Fails if no `ARG` before the first `FROM` declares it, so that Docker would expand it to
-/// another value, or if the build isn't given it.
+/// `$<name>` or `${<name>}`, the whole word, which Docker expands to its value. It refuses a name
+/// that no `ARG` before the first `FROM` declares, so that Docker would expand it to another
+/// value, and one that the build isn't given.
 fn expanded<'n>(image: &str, named: &'n Named<'_>) -> Result<Option<&'n str>, String> {
     let braced = image
         .strip_prefix("${")

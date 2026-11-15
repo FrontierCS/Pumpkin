@@ -9,12 +9,10 @@ use engine::prune::{self, Cached, Disk, Held};
 use expect_test::{Expect, expect};
 use schema::ir::Image;
 
-/// An image's ID, of 64 of `digit`, a hexadecimal digit.
 fn image(digit: char) -> Image {
     Image::try_from(format!("sha256:{}", digit.to_string().repeat(64))).unwrap()
 }
 
-/// The tag of the image of `digit`, as a build tags it.
 fn tag(digit: char) -> String {
     format!("pumpkin/task:{}", digit.to_string().repeat(64))
 }
@@ -32,9 +30,6 @@ type Case<'a> = (
     bool,
 );
 
-/// Checks what a prune removes in each of `cases`, by its images' digits, least recently used
-/// first, what it then prunes the build cache to leave free, and whether a build is refused,
-/// against `expect`.
 fn check(cases: &[Case<'_>], untagged: char, expect: &Expect) {
     let mut lines = Vec::new();
     for &(name, (size_bytes, free_bytes), images, by_id, by_tag, building) in cases {
@@ -86,9 +81,6 @@ fn check(cases: &[Case<'_>], untagged: char, expect: &Expect) {
     expect.assert_eq(&lines.join("\n"));
 }
 
-// A disk at the high mark, past it, at the refusal mark and past it, whose images were used or
-// never, live or not, and held or not, by ID or by tag, one untagged, while a build is under
-// way or not, of sizes of which the low mark takes some or more than there are.
 #[test]
 #[expect(
     clippy::too_many_lines,

@@ -88,7 +88,6 @@ pub enum Tools {
 impl Tools {
     const ALL: [Self; 2] = [Self::Native, Self::Functions];
 
-    /// The word that names it.
     fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -185,7 +184,6 @@ pub struct Workspace {
     /// `TMPDIR`, `.tmp` in the workspace, beside the home: Codex refuses to make its helpers'
     /// links in a home below its temporary directory.
     tmp: RolePath,
-    /// `config.toml` in the home.
     config: RolePath,
     /// The model catalog in the home: the model's carried entry, which [`Tools::Functions`]
     /// needs, and which [`Tools::Native`] takes unchanged if the crate carries it.
@@ -212,11 +210,8 @@ impl TryFrom<AbsolutePath> for Workspace {
 ///
 /// Codex reads `prompt` on its standard input, in `workspace`, on `model` at `effort`, and sends
 /// its tools as `tools` says; the runtime holds Codex's files, readable by the agent's user
-/// alone, a command that ends with Codex's turn, and the deadline and grace.
-///
-/// # Errors
-///
-/// If `tools` is [`Tools::Functions`] and the crate carries no catalog entry for `model`.
+/// alone, a command that ends with Codex's turn, and the deadline and grace. It refuses `tools`
+/// of [`Tools::Functions`] for a `model` that the crate carries no catalog entry for.
 pub fn runtime(
     workspace: Workspace,
     model: &ModelName,
@@ -362,7 +357,6 @@ fn function_catalog(model: &ModelName) -> Result<String, String> {
     Ok(catalog_of(&entry))
 }
 
-/// A Codex catalog that lists `entry` alone.
 fn catalog_of(entry: &Value) -> String {
     json!({ "models": [entry] }).to_string()
 }
@@ -395,7 +389,6 @@ fn carried(model: &ModelName) -> Result<Value, String> {
     Err(slugs.join(" or "))
 }
 
-/// `path` in `workspace`.
 fn below(workspace: &AbsolutePath, path: &str) -> Result<RolePath, String> {
     RolePath::try_from(format!(
         "{}/{path}",
