@@ -19,6 +19,7 @@ bucket of the account, so no laptop can lose it.
 | the controller: an on-demand `m7i.4xlarge` on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, a 1000 GiB encrypted gp3 root at 6000 IOPS and 500 MiB/s, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive; the user `pumpkin`, lingering; an `sshd` setting that ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session, and one that reaps at boot | builds with the containerd image store; jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
+| with `public_page`: a private bucket `pumpkin-<name>-public-…` that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
 
 `ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
 of its envelope is that crate's module doc, "The envelope".
@@ -106,6 +107,54 @@ us-west-2; stopped, about $110 a month for its volume at us-east-1's rates, more
 regions; beside ECR's storage. A new Ubuntu release or a new cloud-init reaches it only by
 `terraform apply -replace=aws_instance.controller`, once no run is live: its volume, and the
 records on it, go with it.
+
+## The public page
+
+A read-only page of the controller's runs, for a team that knows its address: CloudFront serves it
+over HTTPS from a private bucket, at the distribution's own `https://<id>.cloudfront.net/`, with
+no login and kept out of search engines. The controller's jobs upload the runs, live and ended.
+
+Three variables, in `terraform.tfvars`, off by default:
+
+- `public_page = true` makes the bucket, its distribution, and the controller role's policy
+  `publish`, which lists the bucket and uploads to it, and nothing else: no read and no delete.
+  `terraform output -raw public_page` is the address, and `public_bucket` the bucket.
+- `publish_from_jobs = true`, which needs `public_page`, adds the `[publish]` table to the
+  controller's settings, so that each job publishes. Set it once the controller runs a Pumpkin
+  that knows the table: an older one refuses the settings that hold it.
+- `publish_since = "2026-11-15T00:00:00Z"`, which needs `publish_from_jobs`, keeps the runs that
+  started before that instant off the page.
+
+Then subscribe the distribution to CloudFront's free flat-rate plan, in the console: past the
+always-free 1 TB and 10 million requests a month, pay-as-you-go charges about $85 a TB, which a
+downloader set on it could run up, and the free plan charges none, slowing the page instead (its
+[terms](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/flat-rate-pricing-plan.html)).
+
+The page costs about $2 a month to keep, estimated for 150 runs a month of 2 hours each, at
+us-east-1's rates: S3's uploads, about 360,000 a month, $1.80, and its lists, $0.40; the files,
+about 0.3 GB, a cent; CloudFront, nothing within its free tier. The first publish uploads the
+controller's older runs, about $0.60 once.
+
+To take a run down by hand, with administrator credentials: take it out of the list, which the
+bucket holds deflated in zlib's format, as `Content-Encoding: deflate`, remove its prefix, and
+invalidate it, so that no edge serves it from its cache. The next publish uploads it again while
+the controller holds its record.
+
+```sh
+aws s3 cp s3://<bucket>/runs.json runs.json.z
+python3 -c 'import sys, zlib; sys.stdout.buffer.write(zlib.decompress(open(sys.argv[1], "rb").read()))' runs.json.z > runs.json
+python3 -c 'import json, sys; d = json.load(open(sys.argv[1], "rb")); d["runs"] = [r for r in d["runs"] if r["id"] != sys.argv[2]]; open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False, separators=(",", ":")))' runs.json <id>
+python3 -c 'import sys, zlib; sys.stdout.buffer.write(zlib.compress(open(sys.argv[1], "rb").read()))' runs.json > runs.json.z
+aws s3 cp runs.json.z s3://<bucket>/runs.json --content-encoding deflate \
+    --content-type application/json --cache-control 'public, max-age=30'
+aws s3 rm s3://<bucket>/runs/<id>/ --recursive
+aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='<host of public_page>'].Id" --output text
+aws cloudfront create-invalidation --distribution-id <distribution> --paths '/runs/<id>/*' /runs.json
+```
+
+To take the page down, set `public_page` and `publish_from_jobs` to `false`, remove
+`publish_since`, and apply: the apply empties and deletes the bucket, whose files are copies of
+the controller's records.
 
 ## Teardown
 
