@@ -40,7 +40,7 @@
 }
 :root[data-scheme="light"] { color-scheme: light; }
 :root[data-scheme="dark"] { color-scheme: dark; }
-@font-face { font-family: "Hanken Grotesk"; src: url("/hanken-grotesk.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Hanken Grotesk"; src: url("hanken-grotesk.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text-2); font: 400 var(--fs)/var(--lh) var(--sans); display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
