@@ -13,8 +13,8 @@ use stdx::Context;
 
 use super::Direction;
 use super::logged::{self, Collected, Line};
-use crate::record;
 use crate::sandbox::SandboxName;
+use crate::{TokenPrices, record};
 
 /// Where a role's sandboxes are: a provider of the run's, and a class it offers, as
 /// `provider.json` names them.
@@ -52,6 +52,9 @@ pub struct Progress {
     /// The price of each class of the run's providers that declared one, in dollars an hour, by
     /// its place, as `provider.json` records it.
     pub prices: BTreeMap<Place, f64>,
+    /// The prices of the tokens of each model of the run's routes that has them, by the route's
+    /// name for it, as `provider.json` records them.
+    pub token_prices: BTreeMap<String, TokenPrices>,
 }
 
 /// What [`Record::progress`](crate::Record::progress), or a [`LogFold`], reads of a run's log.
@@ -327,6 +330,8 @@ pub struct ModelUse {
     pub first_tokens: Vec<Duration>,
     /// The tokens of those whose responses reported their usage, summed.
     pub tokens: Tokens,
+    /// Those tokens, of the answers whose lines name their model, by the route's name for it.
+    pub by_model: BTreeMap<String, Tokens>,
     /// The names of the request headers that the route left behind, of any of them: the first
     /// [`route::MAX_DROPPED_HEADERS`] by name.
     pub dropped_headers: BTreeSet<String>,
@@ -393,6 +398,7 @@ pub(super) fn readout(
         work_end,
         end,
         prices: roles.prices.clone(),
+        token_prices: roles.token_prices.clone(),
     };
     // Each sandbox's `sandbox.json` is rewritten as the run deletes it, and a judge call's
     // standard error and evidence are collected as it ends, so they are read now.
@@ -463,6 +469,7 @@ pub(super) struct Roles {
     startups: BTreeMap<Place, Duration>,
     /// Each class's price, in dollars an hour, by its place, if its provider declared one.
     prices: BTreeMap<Place, f64>,
+    token_prices: BTreeMap<String, TokenPrices>,
 }
 
 impl Roles {
@@ -510,6 +517,14 @@ impl Roles {
                 }
             }
         }
+        // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
+        let entries = provided["routes"].as_object().into_iter().flatten();
+        let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
+        let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
+        let token_prices = models.filter_map(|(model, served)| {
+            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
+            Some((model.clone(), prices))
+        });
         Self {
             agent_role: agent_role.to_owned(),
             routed: !agent["egress"]["model"].is_null(),
@@ -521,6 +536,7 @@ impl Roles {
                 .map(Duration::from_secs),
             startups,
             prices,
+            token_prices: token_prices.collect(),
         }
     }
 
@@ -698,6 +714,7 @@ impl Reading {
             logged::Event::ModelAnswered {
                 caller,
                 request,
+                model,
                 first_token_ns,
                 upstream_status,
                 answer,
@@ -707,6 +724,7 @@ impl Reading {
             } => {
                 let answered = Answered {
                     request: *request,
+                    model: model.as_deref(),
                     dropped_headers: &kept.request.dropped_headers,
                     first_token: *first_token_ns,
                     upstream_status: *upstream_status,
@@ -885,11 +903,13 @@ impl Reading {
     }
 }
 
-/// A model request's answer, as its `model_answered` says: its number, when its stream's output
-/// began, if it did, its upstream's status, if a response came, how the route answered it, the
-/// code of the failure it stated, if it stated one, and the tokens it reported, if it did.
+/// A model request's answer, as its `model_answered` says: its number, the model it went to, if
+/// the line names it, when its stream's output began, if it did, its upstream's status, if a
+/// response came, how the route answered it, the code of the failure it stated, if it stated one,
+/// and the tokens it reported, if it did.
 struct Answered<'e> {
     request: u64,
+    model: Option<&'e str>,
     /// The names of its request's headers that the route left behind.
     dropped_headers: &'e [String],
     first_token: Option<Duration>,
@@ -904,6 +924,7 @@ impl ModelUse {
     fn take(&mut self, at: Duration, answered: &Answered<'_>) {
         let Answered {
             request,
+            model,
             dropped_headers,
             first_token,
             upstream_status,
@@ -945,19 +966,28 @@ impl ModelUse {
         };
         *self.answers.entry(answer).or_default() += 1;
         if let Some(usage) = usage {
-            let tokens = &mut self.tokens;
-            tokens.reported += 1;
-            tokens.input += usage.input_tokens;
-            tokens.output += usage.output_tokens;
-            if let Some(cached) = usage.cached_tokens {
-                *tokens.cached.get_or_insert(0) += cached;
+            self.tokens.add(usage);
+            if let Some(model) = model {
+                let tokens = self.by_model.entry((*model).to_owned()).or_default();
+                tokens.add(usage);
             }
-            if let Some(written) = usage.cache_write_tokens {
-                *tokens.cache_write.get_or_insert(0) += written;
-            }
-            if let Some(reasoning) = usage.reasoning_tokens {
-                *tokens.reasoning.get_or_insert(0) += reasoning;
-            }
+        }
+    }
+}
+
+impl Tokens {
+    fn add(&mut self, usage: &logged::Usage) {
+        self.reported += 1;
+        self.input += usage.input_tokens;
+        self.output += usage.output_tokens;
+        if let Some(cached) = usage.cached_tokens {
+            *self.cached.get_or_insert(0) += cached;
+        }
+        if let Some(written) = usage.cache_write_tokens {
+            *self.cache_write.get_or_insert(0) += written;
+        }
+        if let Some(reasoning) = usage.reasoning_tokens {
+            *self.reasoning.get_or_insert(0) += reasoning;
         }
     }
 }

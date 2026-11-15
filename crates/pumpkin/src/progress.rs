@@ -18,6 +18,10 @@ use stdx::Utc;
 
 use crate::next;
 
+mod cost;
+
+pub(crate) use cost::usd;
+
 /// How long a phase may go on past its bound before `ls` says that it is a bug: the core acts at
 /// the bound, and its act is logged at once, but the run's log is read over a connection and
 /// clocks differ by seconds.
@@ -230,8 +234,8 @@ struct Totals {
     unscored: usize,
     /// When the last of the live runs ends at the latest.
     ends: Option<UnixTime>,
-    /// What the runs' sandboxes cost, in dollars, at their classes' prices, and whether some
-    /// lasted in a class without one.
+    /// What the runs cost, in dollars, at the prices that their records keep, and whether they
+    /// cost more, by what has no price.
     usd: Option<f64>,
     unpriced: bool,
 }
@@ -252,10 +256,10 @@ impl Totals {
             let ends = progress.started.saturating_add(progress.hard_end);
             self.ends = self.ends.max(Some(ends));
         }
-        match cost(progress) {
-            Some((usd, unpriced)) => {
-                *self.usd.get_or_insert(0.0) += usd;
-                self.unpriced |= unpriced;
+        match progress.cost() {
+            Some(cost) => {
+                *self.usd.get_or_insert(0.0) += cost.usd();
+                self.unpriced |= cost.unpriced();
             }
             None => self.unpriced = true,
         }
@@ -275,7 +279,7 @@ impl Totals {
         if let Some(usd) = self.usd {
             let _ = write!(line, "; ${usd:.2} so far");
             if self.unpriced {
-                line.push_str(", and more in classes without a price");
+                line.push_str(", and more without a price");
             }
         }
         if let Some(ends) = self.ends {
@@ -284,12 +288,6 @@ impl Totals {
         }
         line
     }
-}
-
-/// What the sandboxes of the run whose log says `progress` cost, in dollars, at their classes'
-/// prices, and whether some lasted in a class without one; `None` if no class has a price.
-fn cost(progress: &Progress) -> Option<(f64, bool)> {
-    (!progress.prices.is_empty()).then(|| progress.usd())
 }
 
 /// The line of `ls` of `listed`, run `id`, at `now`.
@@ -342,9 +340,9 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
         Listed::Run(run) => run,
     };
     let task = run.task.as_deref().unwrap_or("-");
-    let usd = match run.progress.as_ref().map(cost) {
-        None | Some(None) => "-".to_owned(),
-        Some(Some((usd, unpriced))) => self::usd(usd, unpriced),
+    let usd = match run.progress.as_ref().and_then(Progress::cost) {
+        None => "-".to_owned(),
+        Some(cost) => usd(cost.usd(), cost.unpriced()),
     };
     let Some(ending) = &run.ending else {
         let Some(progress) = &run.progress else {
@@ -382,13 +380,6 @@ fn score(ending: &Ending) -> String {
         | Ending::Interrupted(_)
         | Ending::Lost => "-".to_owned(),
     }
-}
-
-/// The cost column of a run whose sandboxes cost `usd`, in dollars, and more if some were
-/// `unpriced`, as `$1.20+`.
-pub(crate) fn usd(usd: f64, unpriced: bool) -> String {
-    let more = if unpriced { "+" } else { "" };
-    format!("${usd:.2}{more}")
 }
 
 /// The lines of `ls` under the line of `listed`, run `id`, at `now`, each ending in a newline:
@@ -735,9 +726,9 @@ pub(crate) fn column_span(span: Duration) -> String {
 /// without a score, where the record holds its standard error and evidence, and each lease, with
 /// how long its runner lived and was charged for, and busy, its commands and how it ended, in the
 /// order the core began them, under a call its own model requests; the run's model requests, how
-/// they were answered, the tokens reported and how long the good ones took ([`timed`]); each
-/// place's sandboxes, how long they lasted, and how many were deleted; and the parts of its log
-/// that can't be read ([`unread`]), alone of a run whose log records no start; `None` if none.
+/// they were answered, their tokens and cost, and how long the good ones took ([`timed`]); each
+/// place's sandboxes, how long they lasted, and how many were deleted; the run's cost; the parts
+/// of its log that can't be read ([`unread`]), alone if its log records no start; `None` if none.
 pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
     Ok(summary_of(record, &record.progress()?))
 }
@@ -765,12 +756,16 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         agent_line(progress)
     );
     let now = progress.end.unwrap_or(progress.last);
+    let cost = progress.cost();
+    // Only a run that has a cost says what its tokens cost.
+    let prices = cost.is_some().then_some(&progress.token_prices);
     let calls = (progress.calls.iter()).map(|call| {
         let asked = call.sandbox.asked;
         let mut line = called(call, record.dir());
         // Its own model requests, under it, as its leases are.
         if call.model.requests > 0 {
-            let _ = write!(line, "\n{:>9}   model: {}", "", model(&call.model));
+            let model = model(&call.model, prices);
+            let _ = write!(line, "\n{:>9}   model: {model}", "");
         }
         ((asked, asked), line)
     });
@@ -789,9 +784,13 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
     }
     // A run whose roles have no route made no model request.
     if progress.agent.routed || progress.model.requests > 0 {
-        let _ = writeln!(summary, "  model: {}", model(&progress.model));
+        let model = model(&progress.model, prices);
+        let _ = writeln!(summary, "  model: {model}");
     }
     let _ = writeln!(summary, "  sandboxes: {}", sandboxes(progress));
+    if let Some(cost) = &cost {
+        let _ = writeln!(summary, "  cost: {}", cost::line(cost));
+    }
     if let Some(unread) = unread {
         let _ = writeln!(summary, "  {unread}");
     }
@@ -1011,7 +1010,10 @@ fn exited(status: ExitStatus) -> String {
     }
 }
 
-fn model(model: &runtime::ModelUse) -> String {
+fn model(
+    model: &runtime::ModelUse,
+    prices: Option<&BTreeMap<String, runtime::TokenPrices>>,
+) -> String {
     let requests = crate::counted(
         usize::try_from(model.requests).unwrap_or(usize::MAX),
         "request",
@@ -1063,6 +1065,9 @@ fn model(model: &runtime::ModelUse) -> String {
     if *reported < model.requests {
         let responses = crate::counted(*reported, "response");
         let _ = write!(line, ", as {responses} reported them");
+    }
+    if let Some(prices) = prices {
+        line.push_str(&cost::tokens(model, prices));
     }
     line.push_str(&timed(model));
     line

@@ -13,7 +13,7 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::view::{Model, Piped, answered, said, started, user};
-use super::{Scratch, Step, check, judged, judged_log, lease_places, logged, write_run};
+use super::{Prices, Scratch, Step, check, judged, judged_log, lease_places, logged, write_run};
 
 /// The run that [`write_exported`] writes.
 pub(super) const EXPORTED: &str = "20261110-170000-00000012";
@@ -100,7 +100,7 @@ pub(super) fn write_exported(
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let outcome = ended.then(|| judged(49.36, json!({ "raw_score": 49.36 })));
     let started = since.checked_sub(Duration::from_secs(1100)).unwrap();
-    let mut places = lease_places(true);
+    let mut places = lease_places(Prices::Both);
     for (provider, report) in reports.as_object().unwrap() {
         places["providers"][provider]["report"] = report.clone();
     }
@@ -406,7 +406,7 @@ fn exports_what_the_view_answers() {
 )]
 fn rewrites_what_a_live_run_changed() {
     let scratch = Scratch::new("rewrites-what-a-live-run-changed");
-    let mut unreadable = lease_places(true);
+    let mut unreadable = lease_places(Prices::Both);
     unreadable["routes"] =
         json!({ "solver": [{ "api": "realtime", "upstream": "zai", "models": {} }] });
     let started_at = super::asked(UNREADABLE, 0);

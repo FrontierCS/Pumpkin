@@ -544,7 +544,8 @@ fn masked(ran: &str, ids: &str) -> String {
 /// write ([`write_run`]), as `ir.json` holds it: an agent, `solver`, with a model route and a
 /// deadline of 30 minutes, which may call the train judge, `trainer`, which may lease a `box`,
 /// and lease a `gpu` runner for a minute and a `cpu` runner for 30; and the final judge,
-/// `scorer`. `trainer`, `scorer` and `gpu` each need an `NVIDIA A100-SXM4-80GB`.
+/// `scorer`, with a model route. `trainer`, `scorer` and `gpu` each need an
+/// `NVIDIA A100-SXM4-80GB`.
 fn lease_task() -> Value {
     let gpu = json!({ "gpu": { "count": 1, "model": "NVIDIA A100-SXM4-80GB" } });
     let lease = |name: &str, seconds: u64| json!({ "lease": { "name": name, "role": name, "instance_seconds": seconds } });
@@ -563,7 +564,7 @@ fn lease_task() -> Value {
                 ],
             },
             { "name": "trainer", "needs": gpu, "grants": [lease("box", 60)] },
-            { "name": "scorer", "needs": gpu },
+            { "name": "scorer", "needs": gpu, "egress": { "model": {} } },
             { "name": "gpu", "needs": gpu },
             { "name": "cpu" },
             { "name": "box" },
@@ -571,19 +572,43 @@ fn lease_task() -> Value {
     })
 }
 
+/// What [`lease_places`] gives prices to: tokens and sandboxes, one of them, or nothing.
+#[derive(Clone, Copy)]
+enum Prices {
+    Both,
+    Tokens,
+    Sandboxes,
+    Nothing,
+}
+
 /// Where a run of [`lease_task`] places its roles, as `provider.json` holds it: the agent and the
 /// `cpu` runner on `aws/judge`, which starts within 2 minutes, the `box` on `aws/box`, and the
 /// judges and the `gpu` runner on `modal/a100_80`, which starts within 30; at $0.3672 an hour on
-/// `aws/judge` and $2.5 on `modal/a100_80` if `priced`, and never on `aws/box`.
-fn lease_places(priced: bool) -> Value {
+/// `aws/judge` and $2.5 on `modal/a100_80` if `prices` covers sandboxes, and never on `aws/box`.
+/// The agent's route serves `model-a`, priced if `prices` covers tokens, and the final judge's
+/// `model-b`, never priced.
+fn lease_places(prices: Prices) -> Value {
+    let (sandboxes, tokens) = match prices {
+        Prices::Both => (true, true),
+        Prices::Tokens => (false, true),
+        Prices::Sandboxes => (true, false),
+        Prices::Nothing => (false, false),
+    };
     let place = |provider: &str, class: &str| json!({ "provider": provider, "class": class });
     let class = |startup_seconds: u64, usd_per_hour: f64| {
         let mut class = json!({ "startup_seconds": startup_seconds });
-        if priced {
+        if sandboxes {
             class["usd_per_hour"] = json!(usd_per_hour);
         }
         class
     };
+    let mut model_a = json!({ "upstream_name": "vendor/model-a" });
+    if tokens {
+        // High enough that the fixture's few tokens cost cents.
+        model_a["usd_per_mtok"] =
+            json!({ "input": 300.0, "cached": 30.0, "cache_write": 375.0, "output": 1500.0 });
+    }
+    let route = |model: &str, served: Value| json!([{ "api": "responses", "upstream": "gateway", "models": { model: served } }]);
     json!({
         "roles": {
             "solver": place("aws", "judge"),
@@ -596,6 +621,10 @@ fn lease_places(priced: bool) -> Value {
         "providers": {
             "aws": { "classes": { "judge": class(120, 0.3672), "box": { "startup_seconds": 60 } } },
             "modal": { "classes": { "a100_80": class(1800, 2.5) } },
+        },
+        "routes": {
+            "solver": route("model-a", model_a),
+            "scorer": route("model-b", json!({ "upstream_name": "vendor/model-b" })),
         },
     })
 }
@@ -623,14 +652,14 @@ fn judged(score: f64, returned: Value) -> Value {
 }
 
 /// The log of a run of [`lease_task`] that went the whole way, but its start, by the second since
-/// the run started: the agent's three model requests, each from its start, two reporting their
-/// tokens, one its cache's writes too, and their first token's time; four train judge calls, one
-/// scored, whose call leases a box that a file is put into and a script runs in, one never started,
-/// one stopped and one timed out, with no score; three leases of the agent's, a `gpu` runner whose
-/// sandbox sees the GPU its role needs, closed by the agent, a `cpu` runner whose command times
-/// out, closed as the work phase ends, and a `gpu` runner whose sandbox sees another GPU, which
-/// expires; and the final judge's score, 49.36, after a model request whose stream begins and
-/// states a rate limit.
+/// the run started: the agent's three model requests of `model-a`, each from its start, two
+/// reporting their tokens, one its cache's writes too, and their first token's time; four train
+/// judge calls, one scored, whose call leases a box that a file is put into and a script runs in,
+/// one never started, one stopped and one timed out, with no score; three leases of the agent's,
+/// a `gpu` runner whose sandbox sees the GPU its role needs, closed by the agent, a `cpu` runner
+/// whose command times out, closed as the work phase ends, and a `gpu` runner whose sandbox sees
+/// another GPU, which expires; and the final judge's score, 49.36, after a model request of
+/// `model-b` whose stream begins, states a rate limit and reports its tokens.
 #[expect(clippy::too_many_lines, reason = "one line for each record")]
 fn judged_log() -> Vec<Value> {
     let none = || json!([]);
@@ -638,7 +667,7 @@ fn judged_log() -> Vec<Value> {
     let started = |request: u64| json!({ "kind": "model_request_started", "caller": "agent", "request": request });
     let answered = |request: u64, usage: Value, first_token_ns: Option<&str>| {
         let mut answered = json!({
-            "kind": "model_answered", "caller": "agent", "request": request,
+            "kind": "model_answered", "caller": "agent", "request": request, "model": "model-a",
             "answer": { "kind": "forwarded" }, "upstream_status": 200, "usage": usage,
         });
         if let Some(first_token_ns) = first_token_ns {
@@ -718,8 +747,10 @@ fn judged_log() -> Vec<Value> {
     let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
     let judge_started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
     let judge_answered = json!({
-        "kind": "model_answered", "caller": "job-4", "request": 3, "answer": { "kind": "forwarded" },
-        "upstream_status": 200, "failed": { "code": "rate_limit_exceeded" },
+        "kind": "model_answered", "caller": "job-4", "request": 3, "model": "model-b",
+        "answer": { "kind": "forwarded" }, "upstream_status": 200,
+        "failed": { "code": "rate_limit_exceeded" },
+        "usage": { "input_tokens": 500, "output_tokens": 50 },
         "first_token_ns": "1013000000000",
         "kept": { "request": { "dropped_headers": ["x-stainless-lang", "x-title"] } },
     });

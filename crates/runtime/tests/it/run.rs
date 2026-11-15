@@ -412,6 +412,7 @@ fn reads_model_answers() {
                 ),
                 reasoning: None,
             },
+            by_model: {},
             dropped_headers: {},
             more_dropped_headers: false,
         }"#]]

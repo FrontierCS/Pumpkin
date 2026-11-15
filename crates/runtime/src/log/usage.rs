@@ -4,8 +4,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::progress::{Place, Progress, Sandbox, Tokens};
+use super::progress::{ModelUse, Place, Progress, Sandbox, Tokens};
 use super::{logged, nanos};
+use crate::TokenPrices;
 
 impl Progress {
     /// Each sandbox of the run: the agent's, each judge call's, and each lease's.
@@ -56,16 +57,88 @@ impl Progress {
         sandboxes
     }
 
-    /// What the run's sandboxes cost, in dollars, at their classes' prices, and whether some
-    /// lasted in a class without one, which the sum leaves out.
-    pub fn usd(&self) -> (f64, bool) {
+    /// What the run's sandboxes cost, in dollars, at their classes' prices, `None` if none
+    /// lasted in a class with one, and whether some lasted in a class without one, which the sum
+    /// leaves out.
+    fn usd(&self) -> (Option<f64>, bool) {
         let sandboxes = self.sandboxes();
-        // From 0, as `sum` of no `f64` is -0.
-        let usd = (sandboxes.values().filter_map(PlaceUse::usd)).fold(0.0, |usd, each| usd + each);
+        let mut usd = None;
+        for each in sandboxes.values().filter_map(PlaceUse::usd) {
+            *usd.get_or_insert(0.0) += each;
+        }
         (
             usd,
             sandboxes.values().any(|used| used.usd_per_hour.is_none()),
         )
+    }
+
+    /// What the run cost so far, at the prices that its record keeps; `None` if nothing of it
+    /// has a price: no model whose tokens have a cost, no sandbox in a class with a price.
+    pub fn cost(&self) -> Option<Cost> {
+        let (tokens, unpriced_models) = self.model.usd(&self.token_prices);
+        let (sandboxes, unpriced_classes) = self.usd();
+        let priced = match (tokens, sandboxes) {
+            (Some(tokens), Some(sandboxes)) => Priced::Both { tokens, sandboxes },
+            (Some(tokens), None) => Priced::Tokens(tokens),
+            (None, Some(sandboxes)) => Priced::Sandboxes(sandboxes),
+            (None, None) => return None,
+        };
+        Some(Cost {
+            priced,
+            unpriced_models,
+            unpriced_classes,
+        })
+    }
+}
+
+impl ModelUse {
+    /// What the tokens of these requests cost, in dollars, at `prices`, each model's by the
+    /// route's name for it, `None` if no model's tokens have a cost at them
+    /// ([`TokenPrices::usd`]), and the models whose tokens have none, which the sum leaves out.
+    pub fn usd(&self, prices: &BTreeMap<String, TokenPrices>) -> (Option<f64>, Vec<String>) {
+        let mut usd = None;
+        let mut unpriced = Vec::new();
+        for (model, tokens) in &self.by_model {
+            match prices.get(model).and_then(|prices| prices.usd(tokens)) {
+                Some(cost) => *usd.get_or_insert(0.0) += cost,
+                None => unpriced.push(model.clone()),
+            }
+        }
+        (usd, unpriced)
+    }
+}
+
+/// What a run cost, in dollars, at the prices that its record keeps.
+///
+/// Each sum leaves out what has no price: the models whose tokens have no cost at them, and the
+/// sandboxes that lasted in a class without a price, if some did.
+#[derive(Debug)]
+pub struct Cost {
+    pub priced: Priced,
+    pub unpriced_models: Vec<String>,
+    pub unpriced_classes: bool,
+}
+
+/// The parts of a run's cost that have a price, in dollars: its tokens, its sandboxes, or both.
+#[derive(Debug)]
+pub enum Priced {
+    Both { tokens: f64, sandboxes: f64 },
+    Tokens(f64),
+    Sandboxes(f64),
+}
+
+impl Cost {
+    /// The whole of what has a price.
+    pub fn usd(&self) -> f64 {
+        match self.priced {
+            Priced::Both { tokens, sandboxes } => tokens + sandboxes,
+            Priced::Tokens(usd) | Priced::Sandboxes(usd) => usd,
+        }
+    }
+
+    /// Whether the run cost more than [`Cost::usd`], by what has no price.
+    pub fn unpriced(&self) -> bool {
+        !self.unpriced_models.is_empty() || self.unpriced_classes
     }
 }
 
@@ -94,15 +167,15 @@ impl PlaceUse {
     }
 }
 
-/// What a run used, as its `outcome.json` records it: `{"ran_ns": r, "model_requests": m,
-/// "tokens": t, "calls": [c, ...], "sandboxes": [s, ...], "usd": d}`: when its log last
-/// wrote, the model requests its routes answered and the tokens they reported, `{"responses": n,
-/// "input": i, "output": o}` with `"cached"`, `"cache_write"` and `"reasoning"` where given;
-/// each judge call's share, if it made model requests, `{"job": j, "grant": g, "model_requests":
-/// m, "tokens": t}`;
-/// each place's sandboxes, `{"provider": p, "class": c, "count": n, "lasted_ns": l}`, with
-/// `"charged_ns"` and `"busy_ns"` for leases' ([`PlaceUse::charged`]), `"undeleted"`, and
-/// `"usd_per_hour"` and `"usd"` for a priced class ([`Progress::sandboxes`]); and their cost.
+/// What a run used, as its `outcome.json` records it: `{"ran_ns": r, "model_requests": m, "tokens":
+/// t, "calls": [c, ...], "sandboxes": [s, ...], "usd": d, "unpriced_models": [u, ...]}`: when its
+/// log last wrote, the model requests its routes answered and the tokens they reported,
+/// `{"responses": n, "input": i, "output": o}` with `"cached"`, `"cache_write"` and `"reasoning"`
+/// where given; each judge call's share, if it made model requests, `{"job": j, "grant": g,
+/// "model_requests": m, "tokens": t}`; each place's sandboxes, `{"provider": p, "class": c,
+/// "count": n, "lasted_ns": l}`, with `"charged_ns"` and `"busy_ns"` for leases'
+/// ([`PlaceUse::charged`]), `"undeleted"`, and `"usd_per_hour"` and `"usd"` for a priced class;
+/// and the run's cost ([`Progress::cost`]) and its unpriced models, if something has a price.
 pub(crate) fn usage_of(progress: &Progress) -> Value {
     let sandboxes = progress.sandboxes().into_iter().map(|(place, used)| {
         let mut sandboxes = json!({
@@ -144,8 +217,11 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
     if !calls.is_empty() {
         usage["calls"] = json!(calls);
     }
-    if !progress.prices.is_empty() {
-        usage["usd"] = json!(progress.usd().0);
+    if let Some(cost) = progress.cost() {
+        usage["usd"] = json!(cost.usd());
+        if !cost.unpriced_models.is_empty() {
+            usage["unpriced_models"] = json!(cost.unpriced_models);
+        }
     }
     usage
 }
@@ -157,8 +233,9 @@ pub struct Used {
     pub ran: Duration,
     pub model_requests: u64,
     pub tokens: Tokens,
-    /// What its sandboxes cost, in dollars, if a class of its providers declared a price, and
-    /// whether some lasted in a class without one, which the sum leaves out.
+    /// What it cost, its tokens and its sandboxes, in dollars, if something of it had a price
+    /// ([`Progress::cost`]), and whether it cost more, by what has no price, which the sum leaves
+    /// out.
     pub usd: Option<f64>,
     pub unpriced: bool,
 }
@@ -173,6 +250,8 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
         tokens: Counted,
         sandboxes: Vec<Placed>,
         usd: Option<f64>,
+        #[serde(default)]
+        unpriced_models: Vec<String>,
     }
     #[derive(Deserialize)]
     struct Counted {
@@ -193,6 +272,7 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
         tokens,
         sandboxes,
         usd,
+        unpriced_models,
     } = Usage::deserialize(usage).map_err(|error| error.to_string())?;
     let Counted {
         responses,
@@ -214,7 +294,8 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
             reasoning,
         },
         usd,
-        unpriced: sandboxes.iter().any(|placed| placed.usd_per_hour.is_none()),
+        unpriced: !unpriced_models.is_empty()
+            || sandboxes.iter().any(|placed| placed.usd_per_hour.is_none()),
     })
 }
 

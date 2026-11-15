@@ -9,8 +9,8 @@ use schema::sandbox::RESULT_MAX_DEPTH;
 use serde_json::{Value, json};
 
 use super::{
-    Scratch, Step, asked, check, cut, invocation, judged, judged_log, lease_places, logged, ran,
-    report, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, invocation, judged, judged_log, lease_places, logged,
+    ran, report, write_record, write_run,
 };
 
 #[test]
@@ -605,7 +605,7 @@ fn summarizes() {
     // left its standard error.
     let whole = "20261110-100000-0000000a";
     let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
-    let priced = lease_places(true);
+    let priced = lease_places(Prices::Both);
     write_run(
         &scratch,
         whole,
@@ -668,7 +668,7 @@ fn summarizes() {
         "state": "finished", "score": null,
         "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
     });
-    let unpriced = lease_places(false);
+    let unpriced = lease_places(Prices::Nothing);
     write_run(
         &scratch,
         late,
@@ -677,50 +677,88 @@ fn summarizes() {
         Some(unscored),
         &unpriced,
     );
-    let steps = [whole, late].map(|id| {
-        // What it said, as these runs' times are their records'.
+    // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing.
+    let others = [
+        ("20261110-120000-0000000c", Prices::Tokens),
+        ("20261110-120000-0000000d", Prices::Sandboxes),
+        ("20261110-120000-0000000e", Prices::Nothing),
+    ];
+    for (id, prices) in others {
+        let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+        let places = lease_places(prices);
+        write_run(
+            &scratch,
+            id,
+            asked(id, 30),
+            &judged_log(),
+            Some(outcome),
+            &places,
+        );
+    }
+    // What it said, as these runs' times are their records'.
+    let wait = |id: &str| {
         let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
         let invoked = invocation(&wait);
         let output = wait.output().unwrap();
         let said = String::from_utf8(output.stderr).unwrap();
         let status = output.status.code();
-        Step::Ran(format!(
-            "{invoked}\nexit status: {status:?}\n{}",
-            said.trim_end()
-        ))
-    });
+        format!("{invoked}\nexit status: {status:?}\n{}", said.trim_end())
+    };
+    let mut steps: Vec<Step> = [whole, late].map(|id| Step::Ran(wait(id))).into();
+    // Of those, the command and the lines that say a cost.
+    for (id, _) in others {
+        let said = wait(id);
+        let mut lines = said.lines();
+        let costs = lines
+            .next()
+            .into_iter()
+            .chain(lines.filter(|line| line.contains("model:") || line.contains("cost:")));
+        steps.push(Step::Ran(costs.collect::<Vec<&str>>().join("\n")));
+    }
     check(
         &scratch,
         steps,
         false,
         &[],
         &expect![[r#"
-        $ pumpkin wait --runs runs 20261110-100000-0000000a
-        exit status: Some(0)
-        pumpkin: run 20261110-100000-0000000a started 30s after it was asked for, and ran 18m20s:
-             0:00 agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40
-             0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: 49.53
-             0:50   box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; closed as its call ended
-             2:00 gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder
-             2:00 cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended
-             3:20 train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
-             5:00 train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped); its standard error jobs/2/log/command.stderr
-             6:40 train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {"exit_status":1,"stderr_tail":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)
-             8:20 gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
-            16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36
-                    model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; no response reported its tokens
-          model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-          sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
-        pumpkin: run 20261110-100000-0000000a finished with a score of 49.36, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-        $ pumpkin wait --runs runs 20261110-110000-0000000b
-        exit status: Some(3)
-        pumpkin: run 20261110-110000-0000000b started 1m30s after it was asked for, and ran 30m06s:
-             0:00 agent on aws/judge, started at 0:05; the work phase ended at 30:05
-          model: 5 requests, answered 4 200, 1 refused; 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; dropped request headers: x-a, x-h00, x-h01, x-h02, x-h03, x-h04, x-h05, x-h06, x-h07, x-h08, x-h09, x-h10, x-h11, x-h12, x-h13, x-h14, x-h15, x-h16, x-h17, x-h18, x-h19, x-h20, x-h21, x-h22, x-h23, x-h24, x-h25, x-h26, x-h27, x-h28, x-h29, x-h30, and more; no response reported its tokens
-          sandboxes: 1 on aws/judge, 30m06s in all, 1 created, all deleted
-        pumpkin: run 20261110-110000-0000000b finished without a score: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
+            $ pumpkin wait --runs runs 20261110-100000-0000000a
+            exit status: Some(0)
+            pumpkin: run 20261110-100000-0000000a started 30s after it was asked for, and ran 18m20s:
+                 0:00 agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40
+                 0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: 49.53
+                 0:50   box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; closed as its call ended
+                 2:00 gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder
+                 2:00 cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended
+                 3:20 train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
+                 5:00 train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped); its standard error jobs/2/log/command.stderr
+                 6:40 train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {"exit_status":1,"stderr_tail":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)
+                 8:20 gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
+                16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
+              cost: $1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price
+            pumpkin: run 20261110-100000-0000000a finished with a score of 49.36, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
+            $ pumpkin wait --runs runs 20261110-110000-0000000b
+            exit status: Some(3)
+            pumpkin: run 20261110-110000-0000000b started 1m30s after it was asked for, and ran 30m06s:
+                 0:00 agent on aws/judge, started at 0:05; the work phase ended at 30:05
+              model: 5 requests, answered 4 200, 1 refused; 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; dropped request headers: x-a, x-h00, x-h01, x-h02, x-h03, x-h04, x-h05, x-h06, x-h07, x-h08, x-h09, x-h10, x-h11, x-h12, x-h13, x-h14, x-h15, x-h16, x-h17, x-h18, x-h19, x-h20, x-h21, x-h22, x-h23, x-h24, x-h25, x-h26, x-h27, x-h28, x-h29, x-h30, and more; no response reported its tokens
+              sandboxes: 1 on aws/judge, 30m06s in all, 1 created, all deleted
+            pumpkin: run 20261110-110000-0000000b finished without a score: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
+            $ pumpkin wait --runs runs 20261110-120000-0000000c
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              cost: $0.66 for tokens, and more for sandboxes, which lack a price
+            $ pumpkin wait --runs runs 20261110-120000-0000000d
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; model-a's and model-b's tokens lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              cost: $0.44 for sandboxes, and more for tokens, which lack a price
+            $ pumpkin wait --runs runs 20261110-120000-0000000e
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end"#]],
     );
 }
 
@@ -730,7 +768,7 @@ fn summarizes() {
 fn follows_milestones() {
     let scratch = Scratch::new("follows-milestones");
     let id = "20261110-100000-0000000a";
-    let priced = lease_places(true);
+    let priced = lease_places(Prices::Both);
     let mut log = judged_log();
     log.push(logged(
         1,
@@ -806,7 +844,14 @@ fn follows_milestones() {
 fn follower_without_its_client() {
     let scratch = Scratch::new("follower-without-its-client");
     let id = "20261110-100000-0000000b";
-    let dir = write_run(&scratch, id, asked(id, 30), &[], None, &lease_places(false));
+    let dir = write_run(
+        &scratch,
+        id,
+        asked(id, 30),
+        &[],
+        None,
+        &lease_places(Prices::Nothing),
+    );
     fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
     let dir = scratch
         .0
@@ -871,7 +916,7 @@ fn reads_the_deepest_result_and_a_log_cut_short() {
         asked(id, 0),
         &log,
         outcome,
-        &lease_places(false),
+        &lease_places(Prices::Nothing),
     );
     let mut log = File::options()
         .append(true)
@@ -932,7 +977,7 @@ fn summarizes_an_interrupted_run() {
         deleted(80, "agent"),
     ]);
     let outcome = json!({ "signal": "SIGTERM", "state": "interrupted" });
-    let priced = lease_places(true);
+    let priced = lease_places(Prices::Both);
     write_run(&scratch, id, asked(id, 0), &log, Some(outcome), &priced);
     let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
     let invoked = invocation(&wait);
@@ -949,15 +994,16 @@ fn summarizes_an_interrupted_run() {
         false,
         &[],
         &expect![[r#"
-        $ pumpkin wait --runs runs 20261113-123335-5ea1ea5f
-        exit status: Some(1)
-        pumpkin: run 20261113-123335-5ea1ea5f started 0s after it was asked for, and ran 1m20s:
-             0:00 agent on aws/judge, started at 0:05
-             0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 26s: deleted as the run stopped
-             0:50   box lease 0 of job 0 on aws/box, 21s: charged 16s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; deleted as the run stopped
-          model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-          sandboxes: 1 on aws/box, 21s in all, leases charged 16s, 5s of it busy, 1 created, all deleted; 1 on aws/judge, 1m20s in all, $0.01 at $0.3672 an hour, 1 created, all deleted; 1 on modal/a100_80, 32s in all, $0.02 at $2.5 an hour, 1 created, all deleted
-        pumpkin: run 20261113-123335-5ea1ea5f was interrupted by SIGTERM; its record is <scratch>/runs/20261113-123335-5ea1ea5f
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
+            $ pumpkin wait --runs runs 20261113-123335-5ea1ea5f
+            exit status: Some(1)
+            pumpkin: run 20261113-123335-5ea1ea5f started 0s after it was asked for, and ran 1m20s:
+                 0:00 agent on aws/judge, started at 0:05
+                 0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 26s: deleted as the run stopped
+                 0:50   box lease 0 of job 0 on aws/box, 21s: charged 16s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; deleted as the run stopped
+              model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.66 at the models' prices; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              sandboxes: 1 on aws/box, 21s in all, leases charged 16s, 5s of it busy, 1 created, all deleted; 1 on aws/judge, 1m20s in all, $0.01 at $0.3672 an hour, 1 created, all deleted; 1 on modal/a100_80, 32s in all, $0.02 at $2.5 an hour, 1 created, all deleted
+              cost: $0.69, $0.66 of it for tokens and $0.03 for sandboxes, and more without a price
+            pumpkin: run 20261113-123335-5ea1ea5f was interrupted by SIGTERM; its record is <scratch>/runs/20261113-123335-5ea1ea5f
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }

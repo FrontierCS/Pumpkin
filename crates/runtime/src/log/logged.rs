@@ -166,10 +166,12 @@ pub(super) enum Event {
         request: u64,
     },
     /// How a route answered a model request of `caller`'s, if the line names it, numbered
-    /// `request` in the run, and when its stream's output began, if the line says.
+    /// `request` in the run, to `model`, as the route names it, if the line names one, and when
+    /// its stream's output began, if the line says.
     ModelAnswered {
         caller: Option<Caller>,
         request: u64,
+        model: Option<String>,
         #[serde(default, deserialize_with = "optional_nanos")]
         first_token_ns: Option<Duration>,
         upstream_status: Option<u16>,
