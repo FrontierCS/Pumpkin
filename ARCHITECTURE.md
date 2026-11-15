@@ -541,7 +541,10 @@ item and each field its API keeps whole, such as the list of tools, once by its 
 answer as the upstream sent it. `pumpkin ls`, `wait` and a run's
 ending read only the record, through `Record` and its `Readout`, so whatever ran the run, a
 machine shows it the same way; a controller's ended runs are copied into the machine's runs
-directory.
+directory. `ls` keeps a copy of what it reads of each run that was live on a controller, whose log
+is only ever a prefix of the controller's that ends at a line's end. A run's record is never
+replaced (run ids are unique, and a record's directory is made once), so the copy's length alone
+says what the controller has yet to send, and each listing sends only that.
 
 ### Configuration
 
