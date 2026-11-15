@@ -398,6 +398,39 @@ fn architecture() {
 }
 
 #[test]
+fn test_data() {
+    use Standing::{Deleted, Ignored, Tracked, Untracked};
+    let file = |path| (path, "data\n".to_owned(), Tracked);
+    check(
+        "test-data",
+        &[
+            file("crates/a/tests/it/main.rs"),
+            file("crates/a/tests/it/records/outcome.json"),
+            file("crates/a/tests/fixtures/README.md"),
+            ("crates/a/tests/new.txt", "data\n".to_owned(), Untracked),
+            (
+                "crates/a/tests/ignored/kept.json",
+                "data\n".to_owned(),
+                Ignored,
+            ),
+            ("crates/a/tests/gone.json", "data\n".to_owned(), Deleted),
+            file("crates/a/src/tests.json"),
+            file("crates/a/tests.json"),
+            file("crates/lang/tests/conformance/suite/LICENSE"),
+            file("crates/lang/tests/conformance/suite/list.star"),
+            file("crates/lang/tests/fixtures/lib/parts.star"),
+            file("crates/lang/tests/fixtures/lib/parts.json"),
+        ],
+        tidy,
+        &expect![[r#"
+            crates/a/tests/new.txt: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
+            crates/a/tests/fixtures/README.md: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
+            crates/a/tests/it/records/outcome.json: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
+            crates/lang/tests/fixtures/lib/parts.json: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it"#]],
+    );
+}
+
+#[test]
 fn diff() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let again = "cargo xtask mutants --in-diff HEAD";

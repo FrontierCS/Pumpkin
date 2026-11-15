@@ -1,3 +1,23 @@
 [profile.default]
-# So that a hung test fails ci instead of holding it.
+# A test still running at 5 s is killed and fails ci: a test that hangs, or one far slower than
+# it was. Every test not named below ends within about 3 s, as a bound it waits for on the real
+# clock is a whole second, so 5 s leaves room for a busy machine.
+slow-timeout = { period = "5s", terminate-after = 1 }
+
+# The shared provider suite waits a second, its `soon()`, for each wait that nothing can end
+# sooner, for each of its three subjects.
+[[profile.default.overrides]]
+filter = 'package(runtime) & test(=conformance::suite)'
+slow-timeout = { period = "15s", terminate-after = 1 }
+
+# Each waits about 4 s on the real clock for bounds the IR states in whole seconds, each at the
+# least that keeps the case apart: `watches_each_provider` a 4 s startup that must outlast a
+# second start at a 2 s one, and `judge_stalls` a 2 s deadline, then a 1 s startup and timeout.
+[[profile.default.overrides]]
+filter = 'package(runtime) & (test(=execute::watches_each_provider) | test(=execute::judge_stalls))'
+slow-timeout = { period = "10s", terminate-after = 1 }
+
+# The tests that need a Docker engine, which `cargo xtask live docker` runs: they build and run
+# images, and take a minute or more.
+[profile.live]
 slow-timeout = { period = "60s", terminate-after = 5 }
