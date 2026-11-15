@@ -76,6 +76,7 @@ pub(crate) enum Kind {
     Builtin(Builtin),
     /// An image, which the IR names by its ID once built.
     Image(ImageId),
+    Module(Module),
 }
 
 /// An image that `image()` or `codex()` declares, by its place among its evaluation's.
@@ -220,7 +221,8 @@ impl Element for Value {
             | Kind::Int(_)
             | Kind::Str(_)
             | Kind::Builtin(_)
-            | Kind::Image(_) => 0,
+            | Kind::Image(_)
+            | Kind::Module(_) => 0,
             Kind::List(elements) | Kind::Tuple(elements) => elements.depth,
             Kind::Dict(dict) => dict.entries.depth,
             Kind::Function(function) => function.depth,
@@ -335,7 +337,7 @@ pub(crate) enum Key {
 fn hashable(value: &Value) -> bool {
     match &value.kind {
         Kind::Tuple(items) => items.iter().all(hashable),
-        Kind::List(_) | Kind::Dict(_) | Kind::Image(_) => false,
+        Kind::List(_) | Kind::Dict(_) | Kind::Image(_) | Kind::Module(_) => false,
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
@@ -362,7 +364,7 @@ impl Key {
             Kind::None | Kind::Bool(_) | Kind::Tuple(_) | Kind::Function(_) | Kind::Builtin(_) => {
                 Err(refusal(format_args!("{what} as a dict's key"), instead))
             }
-            Kind::List(_) | Kind::Dict(_) | Kind::Image(_) => {
+            Kind::List(_) | Kind::Dict(_) | Kind::Image(_) | Kind::Module(_) => {
                 Err(format!("{what} can't be a dict's key: {instead}"))
             }
         }
@@ -415,6 +417,13 @@ pub(crate) enum Builtin {
     Pumpkin(Pumpkin),
 }
 
+/// A module the language provides, whose functions a call names as the module's methods, as
+/// `json.encode(…)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Module {
+    Json,
+}
+
 impl Value {
     /// Whether the value is true as a condition (spec.md, "Booleans"): all but `None`, `False`,
     /// `0`, and empty strings, lists, tuples and dicts.
@@ -426,7 +435,7 @@ impl Value {
             Kind::Str(text) => !text.is_empty(),
             Kind::List(items) | Kind::Tuple(items) => !items.is_empty(),
             Kind::Dict(dict) => !dict.is_empty(),
-            Kind::Function(_) | Kind::Builtin(_) | Kind::Image(_) => true,
+            Kind::Function(_) | Kind::Builtin(_) | Kind::Image(_) | Kind::Module(_) => true,
         }
     }
 
@@ -453,6 +462,7 @@ impl Value {
             (Kind::Builtin(left), Kind::Builtin(right)) => left == right,
             // Equal declarations are one image.
             (Kind::Image(left), Kind::Image(right)) => left == right,
+            (Kind::Module(left), Kind::Module(right)) => left == right,
             (
                 Kind::None
                 | Kind::Bool(_)
@@ -463,7 +473,8 @@ impl Value {
                 | Kind::Dict(_)
                 | Kind::Function(_)
                 | Kind::Builtin(_)
-                | Kind::Image(_),
+                | Kind::Image(_)
+                | Kind::Module(_),
                 _,
             ) => false,
         }
@@ -483,7 +494,8 @@ impl Value {
             | Kind::Dict(_)
             | Kind::Function(_)
             | Kind::Builtin(_)
-            | Kind::Image(_) => String::from(self.kind.describe()),
+            | Kind::Image(_)
+            | Kind::Module(_) => String::from(self.kind.describe()),
         }
     }
 }
@@ -501,6 +513,7 @@ impl Kind {
             Self::Dict(_) => "a dict",
             Self::Function(_) | Self::Builtin(_) => "a function",
             Self::Image(_) => "an image",
+            Self::Module(Module::Json) => "the module `json`",
         }
     }
 }

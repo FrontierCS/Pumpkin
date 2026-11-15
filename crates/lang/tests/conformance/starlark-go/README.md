@@ -9,6 +9,9 @@ Mirrored from starlark-go, at commit `4f4267fb140d1e8b91c9bce55cee2f809e8840dd`,
 The files are unchanged. Left out, as they test no part of the specification:
 - `starlark/benchmark.star`, which holds benchmarks, not tests;
 - `starlark/paths.star`, a library the tests don't load;
-- `starlark/json.star`, `math.star`, `time.star`, `proto.star` and `module.star`, and the
-  `proto/` data, which test modules of starlark-go's own;
+- `starlark/math.star`, `time.star`, `proto.star` and `module.star`, and the `proto/` data,
+  which test modules of starlark-go's own;
+- `starlark/json.star`, which tests the `json` module: the file is one chunk, which the subset
+  refuses whole as it parses, for its floats and `lambda`s, so `lang`'s own `json` test takes each
+  of its cases that holds no float nor anything else the subset leaves out;
 - `syntax/scan.star`, the input of the scanner's and the parser's own tests.

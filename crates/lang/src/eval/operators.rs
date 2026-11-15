@@ -112,7 +112,8 @@ fn contains(symbol: &str, at: Span, operands: (&Value, &Value)) -> Result<bool, 
         | Kind::Int(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => {
+        | Kind::Image(_)
+        | Kind::Module(_) => {
             let message = format!(
                 "`{symbol}` can't look in {}: give it a list, a tuple, a dict or a string to look \
                  in",
@@ -287,7 +288,8 @@ pub(super) fn index(object: &Value, key: &Value, at: Span) -> Result<Value, Faul
         | Kind::Int(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => {
+        | Kind::Image(_)
+        | Kind::Module(_) => {
             format!(
                 "{} can't be indexed: index a list, a tuple or a dict",
                 object.kind.describe()
@@ -307,7 +309,8 @@ pub(super) fn elements(items: &Value, at: Span) -> Result<Vec<Value>, Fault> {
         | Kind::Int(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => {
+        | Kind::Image(_)
+        | Kind::Module(_) => {
             format!(
                 "{} can't be iterated over: give a list, a tuple or a dict",
                 items.kind.describe()

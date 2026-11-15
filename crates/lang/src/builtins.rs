@@ -16,6 +16,9 @@
 //!
 //! Each takes its arguments by position, as the specification has it, but `format`, which takes
 //! keyword ones too.
+//!
+//! `json` is the module of Bazel's and starlark-go's Starlark, with its functions `encode` and
+//! `decode`, as [`crate::json`] has them, and without `encode_indent` and `indent`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,11 +27,11 @@ use core::fmt;
 use core::num::IntErrorKind;
 
 use crate::problem::{self, Fault, list, refusal};
-use crate::pumpkin;
 use crate::syntax::{Def, Name, is_name};
 use crate::value::{
-    Budget, Builtin, Dict, Element, Entry, Key, Kind, Nested, Span, Text, Value, escape,
+    Budget, Builtin, Dict, Element, Entry, Key, Kind, Module, Nested, Span, Text, Value, escape,
 };
+use crate::{json, pumpkin};
 
 /// The value that `name` names in every file that doesn't bind it.
 pub(crate) fn predeclared(name: &str) -> Option<Kind> {
@@ -36,6 +39,7 @@ pub(crate) fn predeclared(name: &str) -> Option<Kind> {
         "None" => Some(Kind::None),
         "True" => Some(Kind::Bool(true)),
         "False" => Some(Kind::Bool(false)),
+        "json" => Some(Kind::Module(Module::Json)),
         _ => match (Universal::ALL.into_iter()).find(|universal| universal.name() == name) {
             Some(universal) => Some(Kind::Builtin(Builtin::Universal(universal))),
             None => pumpkin::predeclared(name),
@@ -239,7 +243,8 @@ impl Universal {
                 | Kind::Int(_)
                 | Kind::Function(_)
                 | Kind::Builtin(_)
-                | Kind::Image(_) => {
+                | Kind::Image(_)
+                | Kind::Module(_) => {
                     return Err(rejected(name, argument, "a list, a tuple or a dict"));
                 }
             },
@@ -378,7 +383,8 @@ fn text(function: &str, argument: &(Span, Value)) -> Result<String, Fault> {
         | Kind::Dict(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => Err(narrowed(function, argument, "an int or a string")),
+        | Kind::Image(_)
+        | Kind::Module(_) => Err(narrowed(function, argument, "an int or a string")),
     }
 }
 
@@ -394,7 +400,8 @@ fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
         | Kind::Dict(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => {
+        | Kind::Image(_)
+        | Kind::Module(_) => {
             return Err(rejected(
                 "int",
                 argument,
@@ -431,7 +438,8 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => {
+        | Kind::Image(_)
+        | Kind::Module(_) => {
             return Err(rejected("sorted", argument, "a list, a tuple or a dict"));
         }
     };
@@ -478,6 +486,14 @@ const STRING_METHODS: [(&str, StringMethod); 6] = [
     ("split", split),
     ("startswith", starts_with),
 ];
+
+/// What a call of a function of a module gives.
+type ModuleMethod = fn(&Call<'_>) -> Result<Value, Fault>;
+
+const JSON_METHODS: [(&str, ModuleMethod); 2] = [("decode", decode), ("encode", encode)];
+
+/// The functions of Bazel's and starlark-go's `json` module that the subset leaves out.
+const JSON_LEFT_OUT: [&str; 2] = ["encode_indent", "indent"];
 
 /// Starlark's methods that would change a dict, and a list.
 const DICT_CHANGING: [&str; 5] = ["clear", "pop", "popitem", "setdefault", "update"];
@@ -550,6 +566,15 @@ pub(crate) fn method(
                 return Err(changes(name, "list", "make a new list with `+`"));
             }
             (Vec::new(), &LIST_LEFT_OUT)
+        }
+        Kind::Module(Module::Json) => {
+            if let Some((_, run)) = JSON_METHODS.iter().find(|(has, _)| *has == method) {
+                return run(call);
+            }
+            (
+                JSON_METHODS.iter().map(|(has, _)| *has).collect(),
+                &JSON_LEFT_OUT,
+            )
         }
         Kind::None
         | Kind::Bool(_)
@@ -649,6 +674,27 @@ fn get(name: &str, dict: &Dict, call: &Call<'_>) -> Result<Value, Fault> {
     })
 }
 
+fn encode(call: &Call<'_>) -> Result<Value, Fault> {
+    let [argument] = positional::<1>("json.encode", Takes::exactly(1), call)?;
+    let text = json::encode(argument, call.budget)?;
+    Ok(Value {
+        kind: Kind::Str(Text::new(&text, call.at, call.budget)?),
+        span: call.at,
+    })
+}
+
+fn decode(call: &Call<'_>) -> Result<Value, Fault> {
+    let starlark = Takes {
+        min: 1,
+        max: 2,
+        keywords: &["default"],
+    };
+    let name = "json.decode";
+    let [argument] = positional::<1>(name, starlark, call)?;
+    let text = text_of(name, argument)?;
+    json::decode(text, argument, call)
+}
+
 fn format(_: &str, text: &str, receiver: &(Span, Value), call: &Call<'_>) -> Result<Kind, Fault> {
     let text = format_text(text, receiver, call)?;
     Ok(Kind::Str(Text::new(&text, call.at, call.budget)?))
@@ -669,7 +715,8 @@ fn join(name: &str, separator: &str, _: &(Span, Value), call: &Call<'_>) -> Resu
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => return Err(rejected(name, argument, "a list or a tuple of strings")),
+        | Kind::Image(_)
+        | Kind::Module(_) => return Err(rejected(name, argument, "a list or a tuple of strings")),
     };
     let mut parts = Vec::with_capacity(items.len());
     for item in items.iter() {

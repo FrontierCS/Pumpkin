@@ -303,7 +303,8 @@ impl Type {
             | Kind::Dict(_)
             | Kind::Function(_)
             | Kind::Builtin(Builtin::Pumpkin(_))
-            | Kind::Image(_) => None,
+            | Kind::Image(_)
+            | Kind::Module(_) => None,
         };
         kind.ok_or_else(|| {
             let message = format!(
