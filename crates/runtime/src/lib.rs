@@ -1,16 +1,13 @@
-//! Pumpkin's host side, the runtime: runs a workflow on the [`Provider`]s its roles are placed
-//! on, as the [core](decision) decides, and keeps the run's record. A role with a model route
-//! reaches its model through [`route`], which the runtime serves.
+//! A run's driver: it turns what happens in a run into events for the decision core, and the
+//! core's actions into acts on the run's providers. A role's model requests are answered on
+//! threads of their own, until the core stops allowing their caller's.
 //!
-//! [`Run::prepare`] begins the record of a placed workflow, and [`Run::execute`] runs it to its
-//! outcome, or until a signal interrupts it ([`Stopped::Interrupted`]), one thread driving the core
-//! as [`Core`] says, while each child of the run, a judge call or a lease, runs on a thread of its
-//! own. Between the core's ticks, the driving thread waits on one inbox of the run's [`Host`],
-//! into which the agent's session hands what it reads, and each child's thread its reports, ops
-//! and model requests among them, which the loop answers. Each model request is answered on a
-//! thread of its own, until the core stops allowing its caller's
-//! ([`Core::model_requests_allowed`]), which ends the route's exchanges. The record's files and the
-//! run log's records, and when each is written, are laid out in the `record` and `log` modules.
+//! One thread takes every input through a single inbox: the agent's session's arrivals, the
+//! reports of each judge call's and lease's own thread, and the log entries of the model
+//! threads. It gives each to the core as an [`Event`], records the event with the actions the
+//! core returned, and only then performs them. The core reads no clock, so each event carries
+//! the time since the run started, and a [`Event::Tick`] comes once the core's next act is due.
+//! The record's layout belongs to `record` and `log`, and the start of every sandbox to `sandbox`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -66,22 +63,21 @@ pub use record::{
 use record::{Lock, Payloads};
 use sandbox::{Published, Sandboxes, Which};
 
-/// The longest the loop waits on its inbox before it looks for an interruption again.
-// A stop that comes a twentieth of a second late goes unnoticed by the person who asked for it,
-// and the loop wakes for it at most 20 times a second.
+// The longest the loop waits on its inbox before it looks for a signal: a stop that comes this
+// late goes unnoticed by the person who asked for it, and the loop wakes for it at most 20 times a
+// second.
 const LOOK: Duration = Duration::from_millis(50);
 
-/// What a run's record keeps of how the run was made.
+/// What a run's record holds beyond its workflow: the arguments that started the run, and what
+/// each model's tokens cost.
 #[derive(Clone, Copy)]
 pub struct Recorded<'a> {
-    /// The arguments of the `pumpkin run` that started the run.
     pub args: &'a [String],
-    /// The price of each model that has one, by the name that a route allows.
     pub prices: &'a BTreeMap<ModelName, TokenPrices>,
 }
 
-/// A run, prepared on its host, `H`: its workflow placed, on the providers its roles are placed
-/// on, and its record begun.
+/// A run whose providers have reserved room for it and whose record exists, ready to
+/// [`execute`](Run::execute).
 pub struct Run<'r, H> {
     host: &'r H,
     placed: Placed,
@@ -90,23 +86,19 @@ pub struct Run<'r, H> {
     prices: &'r BTreeMap<ModelName, TokenPrices>,
     id: RunTag,
     dir: PathBuf,
-    /// Held until `outcome.json` is written: see [`Lock`].
     lock: Lock,
-    /// What each provider holds for the run, held until the run's end has deleted what each
-    /// lists of it.
     reserved: ByProvider<Reservation>,
 }
 
 impl<'r, H: Host> Run<'r, H> {
-    /// Makes the record of `placed`'s run in `runs`, made if need be, on `host`, named by `id`
-    /// ([`new_id`]), once each of `providers`, those its roles are placed on, has reserved what
-    /// they need until the run's end ([`Provider::reserve`]); keeps what was `recorded`, and
-    /// serves each role's route as `servings` do.
+    /// Reserves room on each provider, then begins the record under `runs`, so that a run that
+    /// doesn't fit leaves no record. `servings` are the upstreams that serve each role's model
+    /// route.
     ///
     /// # Errors
     ///
-    /// Fails, before any record is made, if a route has no serving or a provider can't reserve;
-    /// or if `runs` isn't safe from other users, or `id` is taken.
+    /// Fails, before any record is made, if a role's route has no serving, a provider can't
+    /// reserve, `runs` isn't safe from other users, or `id` is taken.
     pub fn prepare(
         host: &'r H,
         placed: Placed,
@@ -138,25 +130,23 @@ impl<'r, H: Host> Run<'r, H> {
         })
     }
 
-    /// The run's id, which names its record, and is the run tag its sandboxes carry.
     pub fn id(&self) -> &str {
         self.id.as_str()
     }
 
-    /// The run's record.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// Runs the workflow on its roles' providers, with the static `sandboxd` in each sandbox,
-    /// calling `started` once that is published; a private provider's sandboxes meet the gateway
-    /// at `private`, a listening one's through `dialer`. Records its end in `outcome.json`, and
-    /// deletes what each provider lists of it.
+    /// Runs the workflow to its outcome and writes `outcome.json`, whichever way it ends, before it
+    /// releases each provider's reservation and the record's lock. The run ends with none of its
+    /// sandboxes left, or fails. `started` is called once, when the run can start its first
+    /// sandbox and before its clock starts.
     ///
     /// # Errors
     ///
-    /// Stops once a signal comes ([`Stopped::Interrupted`]); fails if `started` fails, past its
-    /// hard end ([`lasts`]), or if a model provider's refusal or failure could change the score.
+    /// Stops once a signal comes. Fails if `started` fails, if the run is still going at its hard
+    /// end, or if a model provider's refusal or failure could have changed the score.
     pub fn execute(
         self,
         sandboxd: &Path,
@@ -165,7 +155,7 @@ impl<'r, H: Host> Run<'r, H> {
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let outcome = self.run_on(sandboxd, (private, dialer), started);
-        // What the run used, as its log, synced, says; none if the run never began its log.
+        // None if the run never began its log.
         let (outcome, usage) = match log::progress(&self.dir) {
             Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
             Err(error) => (failed_also(outcome, Err(error)), None),
@@ -185,7 +175,8 @@ impl<'r, H: Host> Run<'r, H> {
             recorded["usage"] = usage;
         }
         let written = record::write_json(self.host, &self.dir, "outcome.json", &recorded);
-        // Before the lock, which `wait` follows, so that a run that `wait` saw end holds nothing.
+        // Released before the lock, which `pumpkin wait` follows, so that a run it saw end holds
+        // nothing.
         drop(self.reserved);
         drop(self.lock);
         failed_also(outcome, written)
@@ -246,9 +237,8 @@ impl<'r, H: Host> Run<'r, H> {
             held: None,
         };
         let outcome = runtime.drive(unix);
-        // What a sandbox did with a route whose key the provider refused before a finalize
-        // locked the selection, or whose provider failed the agent's last request as it exited,
-        // is the deployment's failure, not a result of the agent's to score.
+        // A refused key, or a model provider's failure of the agent's last request, is the
+        // deployment's failure, not a result of the agent's to score.
         let keyed = runtime.routes_held(&outcome);
         let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
         let outcome = failed_also(outcome, runtime.settle());
@@ -264,7 +254,6 @@ impl<'r, H: Host> Run<'r, H> {
     }
 }
 
-/// `outcome`, failed also for `then`'s error, if it has one: both reasons are kept.
 fn failed_also<T, E: Failure>(outcome: Result<T, E>, then: Result<(), String>) -> Result<T, E> {
     match (outcome, then) {
         (outcome, Ok(())) => outcome,
@@ -273,9 +262,7 @@ fn failed_also<T, E: Failure>(outcome: Result<T, E>, then: Result<(), String>) -
     }
 }
 
-/// Why something stopped, which a later failure joins ([`failed_also`]).
 trait Failure: From<String> {
-    /// Why it stopped, failed also for `error`.
     fn and(self, error: &str) -> Self;
 }
 
@@ -294,6 +281,8 @@ impl Failure for Stopped {
     }
 }
 
+// Whether the core took the op that this answers: the record keeps the payload of such an op
+// alone.
 fn accepts(reply: &OpReply) -> bool {
     match reply {
         OpReply::Judge(_) | OpReply::Submit(_) => true,
@@ -305,7 +294,7 @@ fn accepts(reply: &OpReply) -> bool {
     }
 }
 
-/// Whether `actions` accept the agent's final submission, which locks the selection.
+// Whether the actions answer a submission as accepted for good.
 fn finalizes(actions: &[Action]) -> bool {
     actions.iter().any(|action| {
         matches!(
@@ -321,12 +310,8 @@ fn finalizes(actions: &[Action]) -> bool {
     })
 }
 
-/// An op, awaiting the core's reply.
 enum Unanswered {
-    /// An op that carries no payload: `ops`, `status`, or a lease op.
     Query(IncomingOp),
-    /// A judge call or a submission, with its payload, taken out of the op, and the payload's
-    /// reference.
     Call {
         incoming: IncomingOp,
         payload: Vec<u8>,
@@ -335,7 +320,6 @@ enum Unanswered {
 }
 
 impl Unanswered {
-    /// The op, its payload, if it carried one, dropped.
     fn into_incoming(self) -> IncomingOp {
         match self {
             Self::Query(incoming) | Self::Call { incoming, .. } => incoming,
@@ -343,30 +327,22 @@ impl Unanswered {
     }
 }
 
-/// A judge call, as the loop reaches it.
+// A judge call: its thread's orders, and what the run knows of its judge.
 struct Called {
-    /// A sender into its inbox, through which the core's stop, and its replies to the call's
-    /// ops, reach it.
     orders: Sender<Message<OpReply>>,
-    /// When what it left is to be collected by, since the run started, which its leases' are too.
+    // By when what the call left is collected, as a time since the run started; its leases' too.
     collect: Duration,
-    /// The trees of its sandbox, which its last op came with, until a transfer it asked for takes
-    /// them.
+    // The trees of the call's sandbox that its last op came with; a transfer takes them.
     trees: Option<Trees>,
-    /// Its judge's role, whose model route, if it has one, the call is served once its command
-    /// starts.
+    // The judge's role, whose model route serves once the call's command starts.
     judge: RoleId,
 }
 
-/// Who answers an op the core is to reply to.
 enum Asked {
-    /// The loop, on the agent's session.
     Agent(Unanswered),
-    /// The thread of the job's call, which holds the op, once the reply reaches it.
     Job(JobId),
 }
 
-/// What `incoming`, an op, asks the core, and the op, to answer once the core replies.
 #[expect(clippy::too_many_lines, reason = "one arm per op")]
 fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
     // The request takes the op's fields, and what stays of the op only answers it.
@@ -445,71 +421,44 @@ fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
     (request, unanswered)
 }
 
-/// The state of a run as it is driven on its host, `H`.
 struct Runtime<'r, H: Host> {
-    /// The run's workflow, placed, which says how long each role's sandboxes take to start.
     placed: &'r Placed,
     routes: &'r ByRole<Vec<Serving>>,
-    /// The model route of each sandbox that the run serves one, by its caller: the agent's, and
-    /// each call's of a judge with a route, each shared with its model requests' threads.
+    // The model routes of the callers whose roles have one.
     served: BTreeMap<Caller, Arc<Served>>,
     dir: &'r Path,
-    /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
     sandboxes: &'r Sandboxes<'r, H>,
     clock: H::Clock,
-    /// The run's hard end, as each of its sandboxes' creates takes it
-    /// ([`Create::hard_end`](provider::Create::hard_end)).
     unix_hard_end: UnixTime,
     log: Log<'r, H>,
     payloads: Payloads<'r, H>,
     agent: Option<Agent>,
-    /// Each op the core is to answer, by the number the runtime gave it: at most one of each
-    /// sandbox's, whose session hands out an op only once the one before it has been answered.
+    // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
+    // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
-    /// The number the next op takes, counting from 0.
     next_op: u64,
-    /// The number the next model request takes, counting from 0.
     next_model_request: u64,
-    /// The callers whose routes' keys no model provider had refused when the core accepted the
-    /// agent's final submission, which locks the selection, if it did ([`Runtime::routes_held`]).
+    // The callers whose routes had no key refused when a submission was accepted for good.
     held_at_lock: BTreeSet<Caller>,
     jobs: BTreeMap<JobId, Called>,
-    /// A sender into each lease's inbox, by lease, through which the core's orders reach it.
     leases: BTreeMap<LeaseId, Sender<Message<lease::Order>>>,
-    /// Events that performing actions produced, to feed the core next.
+    // Events known already, which the loop gives the core before it waits on its inbox.
     pending: VecDeque<(Duration, Event)>,
-    /// What reaches the loop ([`Input`]), which it waits on until the core's next tick.
     inbox: <H::Clock as Clock>::Inbox<Input>,
-    /// What the loop took from the inbox once the core's tick was due, which reached the host at
-    /// or after the tick's time, and so goes to the core after the tick.
+    // What the loop took from the inbox once the core's tick was due, which reached the host at or
+    // after the tick's time, and so goes to the core after the tick.
     held: Option<Input>,
 }
 
-/// What reaches the loop through its inbox: what the core decides on, each at the time it reached
-/// the host ([`Input::reached`]), however long the loop takes to get to it, and what the run log
-/// alone takes, which the loop writes as it gets to it.
 enum Input {
-    /// What the agent's session's reader handed over ([`Registration::accept`]), when it did: at
-    /// most the op in flight, as the session holds one, the model requests in flight, its
-    /// command's exit, as it runs one command, and its end.
-    ///
-    /// [`Registration::accept`]: gateway::Registration::accept
     Agent(Duration, Arrival),
-    /// A child's report, from its thread, or from the loop for a child whose thread didn't
-    /// start: a judge call's command's start and end, a lease's readiness and its commands'
-    /// ends, and its last report.
     Child(Report),
-    /// A record for the run log alone, from the thread that observed it: a note, such as a
-    /// child's or one on a model request from the thread that answers it; how a route answered a
-    /// model request ([`Exchange::kept`]); the GPUs a sandbox saw; or a sandbox's delete.
     Logged(Entry),
 }
 
 impl Input {
-    /// When it reached the host, as a time since the run started, if the core decides on it by
-    /// that time: what the agent's session handed over, and a child's event, op or model request;
-    /// not what is for the run log alone, or a child's sandbox that couldn't be deleted, which
-    /// fails the run.
+    // None for what the core doesn't decide on by time: log entries, and a child's sandbox that
+    // couldn't be deleted, which fails the run.
     fn reached(&self) -> Option<Duration> {
         match self {
             Self::Agent(at, _)
@@ -526,19 +475,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.placed.workflow()
     }
 
-    /// Drives the run from its start, `unix` after the Unix epoch, until the core finishes or
-    /// abandons it, or a signal interrupts it, and waits for its judge calls' threads, stopping
-    /// those still running; then, once the core has ended, gives it what is left in the inbox
-    /// ([`Runtime::drain`]), and else logs what the run log alone takes of it
-    /// ([`Runtime::settle`]).
     fn drive(&mut self, unix: UnixTime) -> Result<Outcome, Stopped> {
         let (mut core, actions) = Core::start(self.placed);
         self.log
             .start(self.workflow(), unix, self.hard_end(), &actions)?;
         self.serve(Caller::Agent, self.workflow().agent().role);
-        // Judge calls' threads borrow the run's workflow and sandboxes, and the scope ends once
-        // each has, so that no sandbox starts after the run's end, and the drain takes all they
-        // reported. A stop waits so for a child whose provider's create is under way, which
+        // The threads of judge calls borrow the run's workflow and sandboxes, and the scope ends
+        // once each has, so that no sandbox starts after the run's end, and the drain takes all
+        // they reported. A stop waits so for a child whose provider's create is under way, which
         // nothing cuts short but its own deadline: a sandbox that a create made after the sweep's
         // list would outlive the run, until its hard end, so the create's return, and the start's
         // delete of what it made, come before the sweep.
@@ -553,7 +497,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 end => end,
             };
             self.stop_children();
-            // Each route ended once the core stopped allowing its model requests, unless the run
+            // Each route is ended once the core stops allowing its model requests, unless the run
             // ended first: this ends them then. The scope's end still waits on their exchanges,
             // within the upstreams' bounds and the responses' deadlines.
             self.end_routes(None);
@@ -561,17 +505,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         });
         // Only the core's end drains the inbox into the core: after a failure of the runtime's
         // own, such as a record it couldn't write, or an interruption, the core may still be
-        // taking ops, and would decide on ones that nothing acts on; the run log still takes
-        // what the run's children noted and deleted as they stopped.
+        // taking ops, and would decide on ones that nothing acts on; the run log still takes what
+        // the run's children noted and deleted as they stopped.
         match end {
             Ok(end) => failed_also(end.map_err(Stopped::Failed), self.drain(&mut core)),
             Err(stopped) => failed_also(Err(stopped), self.settle()),
         }
     }
 
-    /// Performs `actions`, the core's, then feeds the core each event and performs what it
-    /// decides, until it ends the run: returns how, with its outcome or why it has none. Each
-    /// judge call runs on a thread of `scope`.
     fn turns<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -583,14 +524,15 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 return Ok(end);
             }
             let (at, event) = self.next_event(scope, core)?;
+            // The decision is recorded below, before it is carried out at the top of the next turn.
             actions = core.handle(at, event.clone());
             // A call's route is open from its command's start, as the agent's is from the run's.
             if let Event::JudgeStarted { job } = event {
                 let judge = self.call(job).judge;
                 self.serve(Caller::Job(job), judge);
             }
-            // The keys' refusals are read as the core locks the selection, before the record of
-            // it is written, so that a refusal heard after the lock leaves the run to be scored.
+            // The keys' refusals are read as the core locks the selection, before the record of it
+            // is written, so that a refusal heard after the lock leaves the run to be scored.
             if finalizes(&actions) {
                 let held = self
                     .served
@@ -600,22 +542,21 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             self.log.event(self.workflow(), at, &event, &actions)?;
             // A route ends as the core stops allowing its model requests, the agent's at the work
-            // phase's end, a call's at its command's, before the core's actions are performed:
-            // its exchanges in flight then end while the agent's teardown, if the actions hold
-            // it, still needs the agent's session. The event that first stops the agent's ends
-            // the work phase or the run, so its record lists the agent's teardown or the run's
-            // abandon, and is synced before the route ends too.
+            // phase's end, a call's at its command's, before the core's actions are performed: its
+            // exchanges in flight then end while the agent's teardown, if the actions hold it,
+            // still needs the agent's session. The event that first stops the agent's ends the work
+            // phase or the run, so its record lists the agent's teardown or the run's abandon, and
+            // is synced before the route ends too.
             self.end_routes(Some((core, at)));
         }
     }
 
-    /// The run's hard end, since it started, as the core has it.
     fn hard_end(&self) -> Duration {
         lasts(self.placed)
     }
 
-    /// When the agent's teardown is to end, since the run started: the hard end, less the final
-    /// judge's startup and timeout, so that the final judge still has both.
+    // When the agent's teardown must have ended, as a time since the run started: the hard end
+    // less what the final judge, the run's last sandbox, may take to start and to run.
     fn teardown_end(&self) -> Duration {
         let score = self.workflow().score();
         let startup = self.placed.startup(score.slot.judge().role());
@@ -623,12 +564,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.hard_end().saturating_sub(final_judge)
     }
 
-    /// Waits for the next event: one that performing an action produced; else what arrives in the
-    /// inbox before the core's tick is due, and else the tick then. Once the tick is due, what
-    /// reached the host before its time comes before it, and the tick before what reached the host
-    /// at or after it. The wait ends at the tick's time, which arrivals the core doesn't wait on,
-    /// handled as they come, don't move. Model requests are answered on threads of `scope`. Stops,
-    /// with nothing more taken, once a signal has come.
     fn next_event<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -655,11 +590,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             };
             // Once the tick's time has come, what reaches the host is stamped at or after it, so
             // taking what came first ends, however much the agent sends that the core doesn't
-            // wait on. What reached the host before that time is in the inbox by then, but for an
-            // input whose sender was preempted between stamping and sending it, which may come
-            // after the tick, an event then counting at the tick's time, as the core's clock
-            // doesn't go back. Each due tick ends a phase or the run, so the input held goes on
-            // after it.
+            // wait on. What reached the host before that time is in the inbox by then, but for
+            // an input whose sender was preempted between stamping and sending it, which may
+            // come after the tick, an event then counting at the tick's time, as the core's
+            // clock doesn't go back. Each due tick ends a phase or the run, so the input held
+            // goes on after it.
             if input.reached().is_some_and(|reached| reached >= due) {
                 self.held = Some(input);
                 return Ok((self.clock.now(), Event::Tick));
@@ -670,11 +605,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// The event that `input` brings the core, if the core waits on it, at the time it reached
-    /// the host ([`Input::reached`]). The core learns of none of these: an op whose payload the
-    /// gateway refused, which is refused by the core's next act ([`Core::phase_due`]) and
-    /// goes to the run log; a model request, answered on a thread of `scope`
-    /// ([`Runtime::model_request`]); and what is for the run log alone ([`Input::Logged`]).
     fn arrived<'s>(
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
@@ -686,9 +616,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             Input::Child(report) => return self.report(scope, core, report),
             Input::Logged(entry) => return self.log.entry(entry).map(|()| None),
         };
-        // Ops are taken as usual even once the agent's session has closed: the core has ended
-        // the work phase, or the run, by then, so it refuses each, and the run log notes that
-        // the answer wasn't sent.
+        // Ops are taken as usual even once the agent's session has closed: the core has ended the
+        // work phase, or the run, by then, so it refuses each, and the run log notes that the
+        // answer wasn't sent.
         let event = match arrival {
             Arrival::Op(incoming) => {
                 let (request, unanswered) = request(incoming);
@@ -698,11 +628,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 self.refuse(refused, core.phase_due())?;
                 None
             }
-            // With no agent, the core waits on neither. The loop tears the agent down in the
-            // batch that hears of its end, or of its command's failed start, so whatever of the
+            // With no agent, the core waits on neither. The loop tears the agent down in the batch
+            // that hears of its end, or of its command's failed start, so whatever of the
             // session's it takes after that batch comes here, such as its command's exit as the
             // teardown's freeze kills it, its end as the teardown drops it, or the exit of a
-            // command whose start failed at its deadline just as the sandbox said it started. So
+            // command whose start failed at its deadline as the sandbox said it started. So
             // does the end of a session that the start path dropped after its set-up failed.
             Arrival::Exited { process, status } => {
                 (self.agent.as_mut()).and_then(|agent| agent.exited(process, status))
@@ -718,11 +648,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(event.map(|event| (at, event)))
     }
 
-    /// Takes `incoming`, a model request of `caller`'s that reached the host at `at`, under the
-    /// next number, and answers it on a thread of `scope` as the caller's route serves it
-    /// ([`Served::serve`]), refused unless the core allows the caller's model requests then. One
-    /// taken once the run's threads have ended, with no `scope`, is dropped unanswered, since the
-    /// caller's session has ended by then ([`Runtime::drain`]).
     fn model_request<'s>(
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
@@ -741,6 +666,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                  breaks the protocol otherwise, which ends the session"
             )
         };
+        // `scope` is none once the run has ended, and no thread starts then.
         let Some(scope) = scope else {
             drop(incoming);
             let note = format!("model request {number} wasn't answered: the run has ended");
@@ -758,17 +684,16 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let reports = self.inbox.sender();
         let clock = self.clock.clone();
         let exchange = Exchange::new(self.dir, number, clock.clone());
-        // A request stays in flight until its thread writes its response's end, the thread's
-        // last step, so the session's bound on the requests in flight,
-        // `MAX_MODEL_REQUESTS_IN_FLIGHT`, bounds these threads too, but for those writing that
-        // end.
+        // A request stays in flight until its thread writes its response's end, the thread's last
+        // step, so the session's bound on the requests in flight, `MAX_MODEL_REQUESTS_IN_FLIGHT`,
+        // bounds these threads too, but for those writing that end.
         let spawned = thread::Builder::new()
             .name(format!("model-{number}"))
             .spawn_scoped(scope, move || {
-                // The loop's inbox outlives every request's thread, which the run's end waits
-                // for. Both reports come before the answer's end, and so before what the caller
-                // does next. Each time is read here, as it happens, since the loop writes the
-                // record later, by however long it is busy.
+                // The loop's inbox outlives every request's thread, which the run's end waits for.
+                // Both reports come before the answer's end, and so before what the caller does
+                // next. Each time is read here, as it happens, since the loop writes the record
+                // later, by however long it is busy.
                 let forwarding = || {
                     let started = Entry::ModelRequestStarted((caller, number), clock.now());
                     let _ = reports.send(Input::Logged(started));
@@ -808,9 +733,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// The event that `report`, a child's, brings the core, if it has one, at the time the
-    /// child's thread observed it; a model request is answered as [`Runtime::model_request`]
-    /// says. A sandbox that couldn't be deleted fails the run.
     fn report<'s>(
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
@@ -837,9 +759,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Gives the core `request`, an op that `asked` answers: the event of its arrival, under the
-    /// next number. An agent's payload is stored only once the core accepts it
-    /// ([`Runtime::reply`]).
     fn op(&mut self, asked: Asked, request: Request) -> Event {
         let op = OpId(self.next_op);
         self.next_op += 1;
@@ -855,22 +774,18 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Refuses `refused`, an op of the agent's whose payload the gateway refused, by `by`, a time
-    /// since the run started, and records it in the run log.
     fn refuse(&mut self, refused: RefusedOp, by: Duration) -> Result<(), String> {
         self.log.refused(&refused)?;
         let what = "the refusal of an op whose payload was over the agent's limit";
         self.answer(what, by, |agent, by| agent.refuse(refused, by))
     }
 
-    /// Takes the input held behind the last tick, if there is one, and what is left in the inbox,
-    /// once the core has finished or abandoned the run, and every judge call's thread has ended,
-    /// as the loop does ([`Runtime::arrived`]): the core refuses each op, as it does every op
-    /// after its end, and the run log notes that the refusal wasn't sent.
+    // Takes what the threads sent before they ended, so that each op that still arrived is
+    // refused by the core and recorded.
     fn drain(&mut self, core: &mut Core<'_>) -> Result<(), String> {
         // Its teardown has dropped the agent's session, unless the run was abandoned first, and
         // this drops it then, its sandbox left to the sweep: either way, its reader has handed
-        // over all it will by now.
+        // over all it will.
         self.agent = None;
         while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
             let Some((at, event)) = self.arrived(None, core, input)? else {
@@ -905,8 +820,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(())
     }
 
-    /// Performs the core's actions, in order, starting judge calls on threads of `scope`, and
-    /// returns how the run ended, if one of them ended it: with its outcome, or why it has none.
     fn perform<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -967,10 +880,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 }
                 Action::CloseLease { lease } => self.send_lease(lease, Message::Stop),
                 Action::TearDownAgent => self.tear_down_agent()?,
+                // Only a reply can follow `Finish` or `Abandon` in its batch: the refusal of an op
+                // taken at the hard end, by which its answer was due, so `answer` notes it unsent,
+                // and the op ends with the agent's sandbox, which the run's end deletes.
                 Action::Finish { outcome } => end = Some(Ok(outcome)),
-                // Only a reply can follow it in its batch: the refusal of an op taken at the hard
-                // end, by which its answer was due, so `answer` notes it unsent, and the op ends
-                // with the agent's sandbox, which the run's end deletes.
                 Action::Abandon => {
                     end = Some(Err(format!(
                         "the run was still going at its hard end, {} s after it started: \
@@ -984,7 +897,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(end)
     }
 
-    /// Starts the agent's sandbox and its command, whose report is the next event.
     fn start_agent(&mut self) {
         // From the run's start, where the core counts the agent's startup from: a start past it
         // would silently shorten the agent's deadline, so it fails.
@@ -999,9 +911,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.pending.push_back((self.clock.now(), event));
     }
 
-    /// Answers op `op` with `reply`, the agent's by `by`, a time since the run started, and a
-    /// call's through its thread. An op the core accepted has its payload stored first, since a
-    /// judge call reads it, now or in the final phase; a refused op's bytes are never written.
     fn reply(&mut self, op: OpId, reply: OpReply, by: Duration) -> Result<(), String> {
         // A type tying the reply to its op would carry the gateway's `IncomingOp` through the
         // core, which does no I/O.
@@ -1028,6 +937,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 payload,
                 reference,
             } => {
+                // Stored before the reply goes, since a judge call reads it, in the work phase or
+                // the final one; a refused op's bytes are never written.
                 if accepts(&reply) {
                     self.payloads.store(&payload, &reference)?;
                 }
@@ -1038,9 +949,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.answer(&what, by, |agent, by| agent.reply(incoming, reply, by))
     }
 
-    /// Sends an answer to an op of the agent's, `what`, by `by`, a time since the run started,
-    /// with `write`, unless `by` has passed or the agent's sandbox is gone. The run log notes an
-    /// answer that isn't sent, or fails.
     fn answer(
         &mut self,
         what: &str,
@@ -1048,12 +956,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         write: impl FnOnce(&mut Agent, Deadline) -> io::Result<()>,
     ) -> Result<(), String> {
         let sent = match &mut self.agent {
-            // A write past `by` would end the session, which the agent's teardown still needs,
-            // for a delay of the host's own, such as hashing the payload, the log's sync or
-            // storing the payload. The op stays in flight, which wedges the agent's ops, but
-            // only until the core's next act: while the agent works, `by` is the end of the work
-            // phase (`Core::tick_due`), so that act tears the agent down; after `Abandon`, the
-            // run's end drops it.
+            // A write past `by` would end the session, which the agent's teardown still needs, for
+            // a delay of the host's own, such as hashing the payload, the log's sync or storing the
+            // payload. The op stays in flight, which wedges the agent's ops, but only until the
+            // core's next act: while the agent works, `by` is the end of the work phase
+            // (`Core::tick_due`), so that act tears the agent down; after `Abandon`, the run's end
+            // drops it.
             Some(_) if self.clock.now() >= by => Err(format!(
                 "{what} wasn't sent: it was due by the core's next act, which has come"
             )),
@@ -1069,9 +977,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Starts job `job`, a judge call of `call` on `payload` whose command runs for at most
-    /// `timeout`, on a thread of `scope`'s, which reports to the loop ([`judge::run`]). The job
-    /// fails, with nothing started, if the thread doesn't start.
     fn start_judge<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -1103,10 +1008,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(())
     }
 
-    /// Opens lease `lease` of grant `grant` for `holder`, as instance `instance` of its runner,
-    /// whose start is given up at `start_by` at the latest, its holder's end, on a thread of
-    /// `scope`'s, which reports to the loop ([`lease::run`]). The lease fails, with nothing
-    /// started, if the thread doesn't start.
     fn start_lease<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -1117,8 +1018,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let runner_id = self.workflow().lease_grant(grant).runner;
         let runner = self.workflow().runner(runner_id);
         let (start, collect) = match holder {
-            // A lease of the agent's ends with the work phase, which ends by the core's next end
-            // of a phase, and what it left is collected by the agent's teardown's end, as a judge
+            // A lease of the agent's ends with the work phase, which ends by the core's next end of
+            // a phase, and what it left is collected by the agent's teardown's end, as a judge
             // call's is.
             Caller::Agent => (core.phase_due(), self.teardown_end()),
             // A call's ends with the call's command, and what it left is collected by when the
@@ -1128,6 +1029,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 (collect, collect)
             }
         };
+        // A sandbox's start ends by when the lease must start and by the core's `start_by`.
         let startup = (self.clock.now())
             .saturating_add(self.placed.startup(runner_id.role()))
             .min(start)
@@ -1165,8 +1067,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         call
     }
 
-    /// The trees of `holder`'s sandbox, for a transfer of lease `lease`'s, which an op of the
-    /// holder's asked for.
     fn holder_trees(&mut self, lease: LeaseId, holder: Caller) -> Trees {
         let trees = match holder {
             // The core takes the agent's ops only while the agent works, its sandbox started.
@@ -1200,10 +1100,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let _ = orders.send(message);
     }
 
-    /// Starts `which`, a child of the run whose steps are due by `deadlines`, on a thread of
-    /// `scope`'s that runs `run` on it, in a directory of its own in the record, and returns the
-    /// sender into its inbox. The child fails ([`Which::failed`]), with nothing started, if the
-    /// thread doesn't start.
     fn start_child<'s, O: Send + 'static>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -1240,15 +1136,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(sender)
     }
 
-    /// By when the steps of a judge call of `call`, whose command runs for at most `timeout`,
-    /// starting now, are to be done.
     fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
         let judge = self.workflow().call_slot(call).judge().role();
         let startup = self.clock.now().saturating_add(self.placed.startup(judge));
         match call {
-            // A call of the agent's ends with the work phase, which ends by the core's next act
-            // of its own, and what it left is collected by the agent's teardown's end, which
-            // leaves the final judge its share of the hard end.
+            // A call of the agent's ends with the work phase, which ends by the core's next act of
+            // its own, and what it left is collected by the agent's teardown's end, which leaves
+            // the final judge its share of the hard end.
             JudgeCall::Grant(_) => {
                 let start = startup.min(core.phase_due());
                 Deadlines {
@@ -1270,17 +1164,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Serves `caller`'s sandbox, of role `role`, a route of its own, if the role has one, with
-    /// upstreams of its own ([`Served::new`]).
     fn serve(&mut self, caller: Caller, role: RoleId) {
         if let Some(served) = Served::new(self.routes.get(role)) {
             self.served.insert(caller, Arc::new(served));
         }
     }
 
-    /// Ends each model route whose model requests `core` no longer allows at `at`, or every
-    /// route for `None`, with its every exchange in flight and every later one
-    /// ([`Served::end`]). Ending one again does nothing.
     fn end_routes(&self, allowing: Option<(&Core<'_>, Duration)>) {
         for (caller, served) in &self.served {
             if allowing.is_none_or(|(core, at)| !core.model_requests_allowed(*caller, at)) {
@@ -1289,15 +1178,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Checks that no model provider failed a route of the run's as the deployment's fault, not a
-    /// result of the agent's to score: that none refused a route's key, but one heard after the
-    /// selection was locked on a route that served before it ([`Runtime::held_at_lock`]), and
-    /// that none failed the agent's last request, if it exited with no submission finalized in a
-    /// run that ended with `outcome` ([`Served::failed_last`]). Fails, naming the upstream and the
-    /// route, if one did.
+    // Fails the run for a route whose upstream refused its key, unless the refusal came after the
+    // selection was locked on a route that served before it, and for a failure of the agent's last
+    // request.
     fn routes_held(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
         // A refusal heard after the lock can't change the score: the agent's or a call's whose
-        // answer the agent can no longer act on. The score's call starts after the lock, so a
+        // answer the agent can't act on. The score's call starts after the lock, so a
         // refusal on its route always fails the run.
         for (caller, served) in &self.served {
             if let Some(name) = served.key_refused_by()
@@ -1319,10 +1205,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Stops every child's thread that still runs, a judge call's or a lease's, as the run's end
-    /// does.
     fn stop_children(&self) {
-        // A child whose thread has ended has nothing left to stop.
         for call in self.jobs.values() {
             let _ = call.orders.send(Message::Stop);
         }
@@ -1331,9 +1214,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed, and
-    /// logs the delete. A failure to write the record, or to delete the sandbox, is returned once
-    /// each has been tried, joined if more than one fails.
     fn tear_down_agent(&mut self) -> Result<(), String> {
         let Some(mut agent) = self.agent.take() else {
             let note = "the agent's sandbox never started: nothing was collected";
@@ -1345,29 +1225,22 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         failed_also(failed_also(collected, noted), deleted)
     }
 
-    /// Freezes the agent's sandbox and collects what it holds into the record's `agent`, by the
-    /// teardown's end, and notes in the run log what was collected and what failed.
     fn collect_agent(&mut self, agent: &mut Agent) -> Result<(), String> {
         // Its `sandbox.json` is there already, as the agent's create wrote it.
         let dir = self.dir.join("agent");
         fs::create_dir_all(&dir).context(dir.display())?;
         let by = deadline(&self.clock, self.teardown_end());
+
         let mut notes = agent.freeze_and_collect(&dir, by);
         let collected = record::collected(&dir);
         notes.push(format!("collected from the agent's sandbox: {collected}"));
         notes.iter().try_for_each(|note| self.log.note(note))
     }
 
-    /// Deletes every sandbox that each of the run's providers still lists of it.
     fn sweep(&self) -> Result<(), String> {
         self.sandboxes.sweep()
     }
 
-    /// Logs what is in the inbox for the run log alone ([`Input::Logged`]), once the core has
-    /// taken all it will: after a stop short of the core's end, what the run's children noted and
-    /// deleted as they stopped, whose events and ops the core no longer takes; after the sweep,
-    /// what it deleted. A child's sandbox that couldn't be deleted fails the run, once the rest
-    /// is logged.
     fn settle(&mut self) -> Result<(), String> {
         let mut failures = Vec::new();
         while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
