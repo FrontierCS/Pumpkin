@@ -227,6 +227,17 @@ impl View {
     ) -> Result<Answer, Failed> {
         let mut passes = std::mem::take(&mut self.trace);
         let answered = self.traced(id, asked, &mut passes);
+        // A live run's pass, if dropped, is made again at its page's next poll, which reads every
+        // exchange of its caller. A pass of a fold that the view dropped is made again anyway.
+        let ended = |pass: &Trace| {
+            let held = self.held.get(&pass.run);
+            !held.is_some_and(|held| held.made == pass.made && held.ending.is_none())
+        };
+        while passes.iter().filter(|pass| ended(pass)).count() > TRACE_PASSES
+            && let Some(oldest) = passes.iter().position(ended)
+        {
+            passes.remove(oldest);
+        }
         self.trace = passes;
         answered
     }
@@ -289,9 +300,6 @@ impl View {
         trace.extend(&held.record, &held.exchanges);
         let answer = trace.answer(held, asked);
         passes.push(trace);
-        if passes.len() > TRACE_PASSES {
-            passes.remove(0);
-        }
         answer.map(Answer::Json)
     }
 }
