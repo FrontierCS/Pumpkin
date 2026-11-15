@@ -139,26 +139,27 @@ def codex(
         *,
         model,
         effort,
-        tools,
         workspace,
         prompt,
         deadline_seconds,
-        finalize_grace_seconds):
+        finalize_grace_seconds,
+        tools):
     """An agent role's `image`, `runtime` and `egress`, for Codex on `model` at `effort`.
 
     Codex runs once, as `codex exec`, on the prompt it reads on its standard input, with its files
-    readable by the agent's user alone.
+    readable by the agent's user alone. It takes the arguments every harness takes, in the sense
+    `crates/library` gives them, and `tools`, its own.
 
     Args:
-      base: the agent's image, which `image()` makes, to which the image adds Codex.
-      model: the model's name, which the route names, and Codex's `model`.
-      effort: how hard the model reasons, Codex's `model_reasoning_effort`: one of `_EFFORTS`.
+      base: as every harness.
+      model: as every harness; Codex's `model`.
+      effort: as every harness; Codex's `model_reasoning_effort`: one of `_EFFORTS`.
+      workspace: as every harness; it holds Codex's temporary directory too.
+      prompt: as every harness; what Codex reads on its standard input, which may be empty.
+      deadline_seconds: as every harness.
+      finalize_grace_seconds: as every harness.
       tools: how Codex sends the model its tools: one of `_TOOLS`. `functions` needs `CATALOG` to
         carry the model's entry.
-      workspace: the absolute path Codex works in, which holds its home and temporary directory.
-      prompt: what Codex reads on its standard input.
-      deadline_seconds: how long the work phase may last, a positive int.
-      finalize_grace_seconds: how long Codex may keep running after a final submission.
 
     Returns:
       A dict of `image`, `base` with Codex added; `runtime`, the agent's runtime that runs it; and

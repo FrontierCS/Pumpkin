@@ -30,28 +30,27 @@ def qwen_code(
         prompt,
         deadline_seconds,
         finalize_grace_seconds,
+        max_output_tokens,
         context_tokens,
-        output_tokens,
         extra_body):
     """An agent role's `image`, `runtime` and `egress`, for Qwen Code on `model` at `effort`.
 
     Qwen Code runs once, as `qwen --prompt`, unattended, with its files readable by the agent's
-    user alone.
+    user alone. It takes the arguments every harness takes, `max_output_tokens` and
+    `context_tokens`, in the sense `crates/library` gives them, and `extra_body`, its own.
 
     Args:
-      base: the agent's image, which `image()` makes, to which the image adds Qwen Code and Node.
-      model: the model's name, which the route names, and the one model Qwen Code calls.
-      effort: how hard the model reasons, the request's `reasoning_effort`: one of `_EFFORTS`.
-      workspace: the absolute path Qwen Code works in, which holds its home.
-      prompt: the task Qwen Code works on, a string that is not empty.
-      deadline_seconds: how long the work phase may last, a positive int.
-      finalize_grace_seconds: how long Qwen Code may keep running after a final submission.
-      context_tokens: how many tokens the model's context window holds, a positive int, by
-        which Qwen Code decides when to compress the conversation.
-      output_tokens: how many tokens one of the model's answers may hold at most, a positive
-        int, the request's `max_tokens`.
+      base: as every harness; the image adds Node too.
+      model: as every harness.
+      effort: as every harness; the request's `reasoning_effort`: one of `_EFFORTS`.
+      workspace: as every harness.
+      prompt: as every harness; not empty.
+      deadline_seconds: as every harness.
+      finalize_grace_seconds: as every harness.
+      max_output_tokens: as every harness that takes it; the request's `max_tokens`.
+      context_tokens: as every harness that takes it.
       extra_body: the other fields each request's body holds, a dict, such as a sampling
-        temperature; `reasoning_effort` and `max_tokens` are the two above.
+        temperature; `effort` and `max_output_tokens` give `reasoning_effort` and `max_tokens`.
 
     Returns:
       A dict of `image`, `base` with Qwen Code added; `runtime`, the agent's runtime that runs
@@ -64,15 +63,15 @@ def qwen_code(
         fail("Qwen Code runs only on a prompt: give a string that is not empty")
     if context_tokens < 1:
         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
-    if output_tokens < 1:
-        fail("`{}` is not a number of tokens: give a positive int".format(output_tokens))
+    if max_output_tokens < 1:
+        fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
 
     # A normalized absolute path ends in `/` only if it is `/`. The home is not `.qwen`, where
     # Qwen Code looks for a project's own settings, skills and agents.
     home = ("" if workspace == "/" else workspace) + "/.qwen-home"
     tmp = home + "/tmp"
     state = home + "/qwen"
-    body = extra_body | {"reasoning_effort": effort, "max_tokens": output_tokens}
+    body = extra_body | {"reasoning_effort": effort, "max_tokens": max_output_tokens}
 
     # The settings, which, with the command and the environment, are those FrontierCS 2 runs Qwen
     # Code with, but for the usage statistics, the update check and the catalog
