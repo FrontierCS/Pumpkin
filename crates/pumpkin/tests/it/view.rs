@@ -801,6 +801,7 @@ fn serves_the_page() {
             /inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /nothing.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/nothing.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             / [("Host", "pumpkin.example")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}
             /app.js [("Host", "pumpkin.example:80")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example:80`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}"#]],
@@ -2010,5 +2011,154 @@ fn holds_the_traces_asked_last() {
             job-2 asked: its record read again: false
             agent asked: its record read again: true
             job-1 asked: its record read again: true"#]],
+    );
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the log of the ops")]
+fn times_a_callers_ops() {
+    let scratch = Scratch::new("times-ops");
+    let id = "20261110-220000-00000018";
+    let arrived = |seconds: u64, caller: &str, op: u64, request: Value, actions: Value| {
+        let event = json!({ "kind": "op_arrived", "caller": caller, "op": op, "request": request });
+        logged(seconds, event, actions)
+    };
+    let reply = |op: u64, reply: Value| json!({ "kind": "reply", "op": op, "reply": reply });
+    let ended = |seconds: u64, event: Value| logged(seconds, event, json!([]));
+    let judge = json!({ "kind": "judge", "grant": "train" });
+    let log = [
+        arrived(
+            1,
+            "agent",
+            0,
+            json!({ "kind": "status", "job": "0" }),
+            json!([]),
+        ),
+        // The first judge call waits for a slot: its job starts on a later line.
+        arrived(
+            2,
+            "agent",
+            1,
+            judge.clone(),
+            json!([reply(1, json!({ "kind": "judge", "job": 0 }))]),
+        ),
+        ended(3, json!({ "kind": "judge_started", "job": 0 })),
+        arrived(
+            4,
+            "agent",
+            2,
+            judge.clone(),
+            json!([reply(
+                2,
+                json!({ "kind": "refused", "message": "one call at a time" })
+            )]),
+        ),
+        arrived(
+            5,
+            "agent",
+            3,
+            json!({ "kind": "submit", "grant": "final" }),
+            json!([reply(3, json!({ "kind": "submit", "state": "stored" }))]),
+        ),
+        arrived(
+            6,
+            "job-1",
+            4,
+            json!({ "kind": "lease_run", "lease": 0 }),
+            json!([reply(4, json!({ "kind": "lease", "lease": 0 })),
+            { "kind": "run_command", "lease": 0, "command": 1 }]),
+        ),
+        arrived(
+            7,
+            "agent",
+            5,
+            json!({ "kind": "lease_put", "lease": 2 }),
+            json!([reply(5, json!({ "kind": "lease", "lease": 2 })),
+            { "kind": "transfer", "lease": 2, "transfer": 0 }]),
+        ),
+        ended(
+            8,
+            json!({ "kind": "transfer_ended", "lease": 2, "transfer": 0, "end": { "moved": { "bytes": 840, "entries": 3 } } }),
+        ),
+        arrived(
+            9,
+            "agent",
+            6,
+            json!({ "kind": "lease_run", "lease": 2 }),
+            json!([reply(6, json!({ "kind": "lease", "lease": 2 })),
+            { "kind": "run_command", "lease": 2, "command": 1 }]),
+        ),
+        // Job 1's command 1 on its lease 0 is not the agent's on lease 2.
+        ended(
+            10,
+            json!({ "kind": "command_ended", "lease": 0, "command": 1, "end": { "exited": { "code": 0 } } }),
+        ),
+        ended(
+            11,
+            json!({ "kind": "judge_collected", "job": 0, "result": { "score": 14 } }),
+        ),
+        ended(
+            12,
+            json!({ "kind": "command_ended", "lease": 2, "command": 1, "end": "timed_out" }),
+        ),
+        arrived(
+            13,
+            "agent",
+            7,
+            judge.clone(),
+            json!([reply(7, json!({ "kind": "judge", "job": 1 }))]),
+        ),
+        arrived(
+            14,
+            "agent",
+            8,
+            judge,
+            json!([reply(8, json!({ "kind": "judge", "job": 2 }))]),
+        ),
+        ended(
+            15,
+            json!({ "kind": "judge_failed", "job": 2, "reason": "the sandbox was lost" }),
+        ),
+        arrived(
+            16,
+            "agent",
+            9,
+            json!({ "kind": "lease_get", "lease": 2 }),
+            json!([reply(9, json!({ "kind": "lease", "lease": 2 })),
+            { "kind": "transfer", "lease": 2, "transfer": 1 }]),
+        ),
+        ended(
+            17,
+            json!({ "kind": "transfer_ended", "lease": 2, "transfer": 1, "end": { "moved": { "bytes": 96, "entries": 2 } } }),
+        ),
+    ];
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(&scratch, id, since, &log, None, &lease_places(true));
+    let served = Served::start(&scratch);
+    let said = ["agent", "job-1"].map(|caller| {
+        let reply = served.get(&format!("/api/runs/{id}/trace/{caller}/ops"));
+        format!("{caller}:\n{}", columns_text(&reply, "ops"))
+    });
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            agent:
+            end_ns="11000000000" failed=false kind="judge" name="train" op=1 result="score 14" start_ns="2000000000"
+            end_ns="4000000000" failed=true kind="judge" name="train" op=2 result="refused: one call at a time" start_ns="4000000000"
+            end_ns="5000000000" failed=false kind="submit" name="final" op=3 result="stored" start_ns="5000000000"
+            end_ns="8000000000" failed=false kind="lease_put" name="lease 2" op=5 result="moved 840 bytes, 3 entries" start_ns="7000000000"
+            end_ns="12000000000" failed=true kind="lease_run" name="lease 2" op=6 result="timed_out" start_ns="9000000000"
+            failed=false kind="judge" name="train" op=7 start_ns="13000000000"
+            end_ns="15000000000" failed=true kind="judge" name="train" op=8 result="failed: the sandbox was lost" start_ns="14000000000"
+            end_ns="17000000000" failed=false kind="lease_get" name="lease 2" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
+            caller: "agent"
+
+            job-1:
+            end_ns="10000000000" failed=false kind="lease_run" name="lease 0" op=4 result="exit 0" start_ns="6000000000"
+            caller: "job-1"
+        "#]],
     );
 }

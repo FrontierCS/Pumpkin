@@ -1,6 +1,7 @@
-// A caller's trace: its model exchanges as threads, steps and entries, in a ledger at left and
-// an inspector at right, with what is shown and selected in the address
-// (`#/run/<id>/trace?caller=agent&fold=steps&sel=12/out/1&q=…`), so that a link shows the same.
+// A caller's trace: its model exchanges as threads, steps and entries, in a timeline
+// ([`timeline.js`]) above a ledger at left and an inspector at right, with what is shown and
+// selected in the address (`#/run/<id>/trace?caller=agent&fold=steps&sel=12/out/1&q=…`), so
+// that a link shows the same.
 //
 // The steps are read whole, as columns, in one reply; the entries of the steps in view are read
 // in windows once the ledger's scroll pauses on them, a window that scrolls away before it comes
@@ -14,6 +15,7 @@ import { forgetExchanges, inspect } from "./inspector.js";
 import { drawRow, keyOf, layout, matches, stepFolded, threadFolded } from "./ledger.js";
 import { RowList } from "./rows.js";
 import { IN_FLIGHT, Steps } from "./steps.js";
+import { Timeline } from "./timeline.js";
 
 /**
  * @typedef {import("./steps.js").Entry} Entry
@@ -22,6 +24,7 @@ import { IN_FLIGHT, Steps } from "./steps.js";
  * @typedef {import("./ledger.js").Shape} Shape
  * @typedef {import("./ledger.js").Marks} Marks
  * @typedef {import("./inspector.js").Selected} Selected
+ * @typedef {import("./timeline.js").OpColumns} OpColumns
  * @typedef {{ at: string, request: number, index: number, kind: string, byte: number, context: [string, string, string] }} Hit
  * @typedef {{ controller: AbortController, requests: Set<number> }} Reading
  */
@@ -69,6 +72,8 @@ export async function traceView(id) {
     run: null,
     /** @type {Steps | null} */
     steps: null,
+    /** @type {OpColumns | null} the ops the run brokered for the caller */
+    ops: null,
     end: 0,
     epoch: 0,
     /** @type {Map<string, Map<number, Entry[]>>} the entries read, by the kind read ("" every kind), then request */
@@ -99,6 +104,17 @@ export async function traceView(id) {
   let shape = shapeOf();
   const { query } = route();
 
+  // The run's clock now, in seconds, while it is live, which a step in flight reaches to.
+  const now = () => {
+    const started = state.run?.times?.started_unix;
+    return state.run?.live && typeof started === "number" ? Date.now() / 1000 - started : null;
+  };
+  const timeline = new Timeline(
+    () => ({ steps: state.steps, ops: state.ops, thread: shape.thread, hits: state.marks?.steps ?? null, sel: route().query.get("sel"), now: now() }),
+    (request) => select(String(request), true),
+    () => focusRange(),
+  );
+
   const title = h("h2", { class: "title" }, caller.replace("-", " "));
   const within = h("p", { class: "within" });
   const callers = h("span", { class: "callers" });
@@ -122,6 +138,10 @@ export async function traceView(id) {
       const steps = /** @type {Steps} */ (state.steps);
       const node = drawRow(row, { steps, shape, byAt: state.byAt, marks: state.marks, started: state.run?.times?.started_unix ?? null, toggle });
       if (row.k === "thread" || row.k === "step") node.addEventListener("dblclick", () => toggle(row));
+      // Outside the timeline's range, a step's rows dim.
+      const range = timeline.range;
+      const request = row.k === "thread" ? null : steps.cols.request[row.s];
+      if (range && request !== null && (request < range.from || request > range.to)) node.classList.add("out");
       return node;
     },
     (row) => {
@@ -139,7 +159,7 @@ export async function traceView(id) {
     return kept;
   };
   widen(width);
-  show(title, within, tabs, toolbar, startedOver, split);
+  show(title, within, tabs, toolbar, startedOver, timeline.node, split);
 
   // ---- the inspector's width: dragged, stepped by arrows, reset by a double-click
 
@@ -312,6 +332,19 @@ export async function traceView(id) {
     const sel = route().query.get("sel");
     list.set(state.rows, sel ? state.rows.findIndex((row) => keyOf(steps, row) === sel) : -1, moved);
     drawBar();
+    timeline.draw();
+  };
+
+  // Dims the rows outside the timeline's range, and scrolls its first step into view.
+  const focusRange = () => {
+    const steps = state.steps;
+    const range = timeline.range;
+    list.paint(true);
+    if (!steps || !range) return;
+    const at = state.rows.findIndex((row) => row.k === "step" && steps.cols.request[row.s] >= range.from && steps.cols.request[row.s] <= range.to);
+    if (at < 0) return;
+    list.tail = false;
+    list.node.scrollTop = at * list.px - list.node.clientHeight / 3;
   };
 
   const drawBar = () => {
@@ -423,6 +456,8 @@ export async function traceView(id) {
       if (header >= 0) list.node.scrollTop = header * list.px - list.node.clientHeight / 3;
     } else list.select(index, scroll);
     if (key) list.tail = false;
+    if (key && !key.startsWith("t")) timeline.reveal(Number(key.split("/")[0]));
+    timeline.draw();
     drawInspector();
   };
 
@@ -454,6 +489,8 @@ export async function traceView(id) {
   threads.addEventListener("change", () => {
     setQuery({ thread: threads.value || null });
     shape = shapeOf();
+    timeline.reset();
+    timeline.take();
     list.node.scrollTop = 0;
     redraw();
     if (state.searched) runSearch(state.searched);
@@ -472,6 +509,7 @@ export async function traceView(id) {
       Object.assign(state, { hits: [], hitCount: 0, hitAt: -1, marks: null });
       found.textContent = "";
       list.paint(true);
+      timeline.draw();
       return;
     }
     found.textContent = "Searching…";
@@ -494,6 +532,7 @@ export async function traceView(id) {
     Object.assign(state, { hits: reply.hits, hitCount: reply.count, hitAt: -1, marks: { at: new Set(reply.hits.map((hit) => hit.at)), steps } });
     drawFound();
     list.paint(true);
+    timeline.draw();
     drawInspector();
   };
   const drawFound = () => {
@@ -556,6 +595,7 @@ export async function traceView(id) {
       else list.end();
       drawFollow();
     } else if (event.key === "Escape") {
+      if (timeline.clearRange()) return;
       if (route().query.get("sel")) select(null, false);
       else if (state.searched) (search.value = ""), runSearch("");
     }
@@ -567,7 +607,7 @@ export async function traceView(id) {
   // entry is dropped, as the new log's requests needn't be the old ones.
   const startOver = () => {
     for (const reading of state.reading) reading.controller.abort();
-    Object.assign(state, { steps: null, end: 0, epoch: 0, read: new Map(), byAt: new Map(), reading: [], stale: new Set(), windows: [], rows: [], waiting: null });
+    Object.assign(state, { steps: null, ops: null, end: 0, epoch: 0, read: new Map(), byAt: new Map(), reading: [], stale: new Set(), windows: [], rows: [], waiting: null });
     forgetExchanges();
     setQuery({ thread: null, ot: null, os: null, sel: null });
     shape = shapeOf();
@@ -580,11 +620,13 @@ export async function traceView(id) {
   };
   const read = async (/** @type {() => boolean} */ current) => {
     if (!state.steps) {
-      const [run, reply] = await Promise.all([state.run ? Promise.resolve(state.run) : get(base), /** @type {Promise<StepsReply>} */ (get(api + "/steps"))]);
+      const [run, reply, ops] = await Promise.all([state.run ? Promise.resolve(state.run) : get(base), /** @type {Promise<StepsReply>} */ (get(api + "/steps")), get(api + "/ops")]);
       if (!current()) return null;
       state.run = run;
       state.run.live = reply.live;
       state.steps = new Steps(reply);
+      state.ops = ops.ops;
+      timeline.take();
       Object.assign(state, { end: reply.end, epoch: reply.log_epoch });
       drawRun();
       drawThreads();
@@ -593,13 +635,15 @@ export async function traceView(id) {
       redraw();
       if (sel) select(sel, true);
       else drawInspector();
+      if (timeline.range && !sel) focusRange();
       if (state.searched || search.value) runSearch(search.value);
       return reply.live ? POLL_MS : null;
     }
-    /** @type {StepsReply} */
-    const reply = await get(api + "/steps?since=" + state.end + "&log_epoch=" + state.epoch);
+    /** @type {[StepsReply, { ops: OpColumns }]} */
+    const [reply, ops] = await Promise.all([get(api + "/steps?since=" + state.end + "&log_epoch=" + state.epoch), get(api + "/ops")]);
     if (!current()) return null;
     state.end = reply.end;
+    state.ops = ops.ops;
     const steps = state.steps;
     // The entries of the steps in flight are read again at each poll: their answers grow.
     const flying = steps.cols.request.filter((_, s) => steps.inFlight(s));
@@ -608,12 +652,15 @@ export async function traceView(id) {
       for (const request of requests) if ([...state.read.values()].some((read) => read.has(request))) state.stale.add(request);
     };
     if (!reply.steps.request.length) {
+      // Steps in flight and ops reach to now.
+      timeline.take();
       if (flying.length) forget(flying), redraw();
       if (!reply.live) await ended();
       return reply.live ? POLL_MS : null;
     }
     // A row that comes again has its entries read again.
     forget([...steps.merge(reply), ...flying]);
+    timeline.take();
     drawThreads();
     redraw();
     readInView();

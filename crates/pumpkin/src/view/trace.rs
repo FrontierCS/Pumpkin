@@ -20,8 +20,8 @@
 //! is in no thread until it is answered.
 //!
 //! Which request asks for what, and the answer it gets, is [`ask`]'s; the JSON forms of the
-//! answers, [`json`](mod@json)'s; a trace's statistics, [`stats`]'s; and the diff of two of its
-//! requests, [`diff`]'s.
+//! answers, [`json`](mod@json)'s; a trace's statistics, [`stats`]'s; the diff of two of its
+//! requests, [`diff`]'s; and the ops the run brokered for its caller, [`ops`]'s.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,9 +36,11 @@ use super::json::cut;
 mod ask;
 mod diff;
 mod json;
+mod ops;
 mod stats;
 
 pub(super) use ask::{Answer, Asked, asked};
+pub(super) use ops::Ops;
 
 /// The most traces that the view holds, those read last: a page shows one, and a person opens a
 /// few side by side.
