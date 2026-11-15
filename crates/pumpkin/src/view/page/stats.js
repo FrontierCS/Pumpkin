@@ -32,7 +32,7 @@ const callCount = (calls) => String(Object.values(calls || {}).reduce((sum, n) =
 /** @param {number | null} n */
 const number = (n) => (n === null ? "-" : n.toLocaleString("en-US"));
 
-// A step's cost is unknown if its model has no price, or its response reported no tokens.
+// A step's cost is unknown where its row has none.
 /** @param {number} unknown */
 const unknownCost = (unknown) => plural(unknown, "step") + " of unknown cost";
 
