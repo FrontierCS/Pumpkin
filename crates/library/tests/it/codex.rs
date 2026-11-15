@@ -32,8 +32,8 @@ Web search is disabled; use only local task files and tools.
 /// prompts, each effort, a model that needs escaping, and the root as the workspace.
 #[expect(clippy::too_many_lines, reason = "it is the cases")]
 fn cases() -> Vec<[&'static str; 7]> {
-    let greeting = "Write a greeting to the file `greeting`, then submit it with `sandboxctl \
-                    submit final greeting --finalize`.\n";
+    let greeting = "Write a greeting to the file `greeting`, then submit it with \
+                    `/.pumpkin/bin/sandboxctl submit final greeting --finalize`.\n";
     let fixture = "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n";
     let mut cases = vec![
         [

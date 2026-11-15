@@ -7,6 +7,7 @@ MODEL = arg("model", str)
 EFFORT = arg("effort", str, default = "high")
 
 IMAGE = image("Dockerfile")
+SANDBOXCTL = "/.pumpkin/bin/sandboxctl"
 
 agent = codex(
     IMAGE,
@@ -14,7 +15,7 @@ agent = codex(
     effort = EFFORT,
     tools = "native",
     workspace = "/workspace",
-    prompt = "Write a greeting to the file `greeting`, then submit it with `sandboxctl submit final greeting --finalize`.\n",
+    prompt = "Write a greeting to the file `greeting`, then submit it with `" + SANDBOXCTL + " submit final greeting --finalize`.\n",
     deadline_seconds = 1800,
     finalize_grace_seconds = 60,
 )
