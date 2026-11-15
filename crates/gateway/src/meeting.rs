@@ -1,11 +1,9 @@
-//! Where a sandbox meets the gateway, and the hello that opens its session there.
+//! How sandboxes meet the gateway.
 //!
-//! A sandbox meets the gateway where its [`Registration`] says: at a socket of its own, which
-//! only it can reach, in its run's [`Sockets`], or at its run's TCP address, a
-//! [`GrantListener`], where the grant its hello presents tells it apart; or the gateway dials it,
-//! at the endpoint its provider gives, through a [`Dialer`]. Either way, the registration
-//! accepts the [`Session`] the sandbox opens with its hello.
-
+//! A meeting issues one [`Registration`] for a sandbox about to start, and the registration's
+//! `accept` waits for that sandbox, reads its hello and opens its [`Session`]. Dropping a
+//! registration unspent withdraws what its meeting issued. What identifies a sandbox is how it
+//! meets, as [the sandbox protocol](schema::sandbox) says.
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, DirBuilder, File};
@@ -29,34 +27,33 @@ use stdx::Deadline;
 
 use crate::{Arrival, Connection, Session, Until, context, lock, passed};
 
-/// The directory that names each file this process holds open by its descriptor's number,
-/// through which a path resolves as through the file, a directory included.
+// Names each file this process holds open by its descriptor's number: a path through one resolves
+// as through the file, a directory included. A socket's path holds 107 bytes at most, which a deep
+// directory's may pass, while the path below a directory's descriptor is short wherever it is.
 const OPEN_FILES: &str = "/proc/self/fd";
 
 const RANDOM: &str = "/dev/urandom";
 
-/// How long a wait sleeps between its looks: a registration's accept for its sandbox, a hello's
-/// read for its bytes, and a [`GrantListener`] for a connection, or its own drop.
+// How long a wait sleeps between looks at its stop, its deadline and what it waits for.
 const POLL: Duration = Duration::from_millis(10);
 
-/// How long a [`Dialer`] waits before it dials a sandbox again, at first; each wait doubles the
-/// last, up to [`REDIAL_MOST`].
-// As gRPC's connection backoff starts (`doc/connection-backoff.md`, INITIAL_BACKOFF): a sandbox's
-// `sandboxd` listens seconds after its create, and the provider's edge may refuse a dial until
-// then.
+// A dial that fails is tried again after this wait, which doubles up to `REDIAL_MOST`. It starts
+// as gRPC's connection backoff does, at its INITIAL_BACKOFF of 1 s:
+// https://github.com/grpc/grpc/blob/785ff9afd6410c535a44690e7cca1f81228d8851/doc/connection-backoff.md#L36-L38
+// A sandbox's `sandboxd` listens seconds after its create, and the provider's edge may refuse a
+// dial until then.
 const REDIAL_FIRST: Duration = Duration::from_secs(1);
 
-/// The longest a [`Dialer`] waits before it dials a sandbox again.
 // Shorter than gRPC's 120 s, as a start's window is minutes, of which a wait spends little.
 const REDIAL_MOST: Duration = Duration::from_secs(15);
 
-/// The most connections whose hellos a [`GrantListener`] reads at once.
-// Each of a run's sandboxes dials once, and says hello as it connects, so a run needs far fewer.
+// Bounds the threads that connections hold before they have said who they are: the grant
+// listener's address is open to whatever can reach it, and each connection holds a thread until
+// its hello is read or its time is up. Each of a run's sandboxes dials once, and says hello as it
+// connects, so a run needs far fewer.
 const MAX_HELLOS: usize = 100;
 
-/// The directory of a run's sockets, which only this user may enter, where each sandbox gets a
-/// socket of its own, which only that sandbox can reach. Dropping it removes the directory and
-/// all it holds.
+/// Gives each sandbox a socket of its own below one directory, which dropping removes.
 #[derive(Debug)]
 pub struct Sockets {
     dir: PathBuf,
@@ -65,8 +62,7 @@ pub struct Sockets {
 impl Sockets {
     /// Makes `dir`, which must not exist yet, in a directory where no other user may rename
     /// entries: one who could would swap `dir` for a directory of their own, where the sockets
-    /// would then be issued. Its path may be of any length, as each socket is bound through its
-    /// directory's handle in `/proc/self/fd`.
+    /// would then be issued. Its path may be of any length.
     pub fn create(dir: PathBuf) -> io::Result<Self> {
         DirBuilder::new()
             .mode(0o700)
@@ -78,10 +74,9 @@ impl Sockets {
         Ok(Self { dir })
     }
 
-    /// Issues a sandbox its socket, in a new directory `name` within this one, where the sandbox
-    /// dials, as [`SocketDial`] says, and its registration accepts it. The socket takes the
-    /// first connection, whoever makes it, which identifies the sandbox, so show the directory to
-    /// that sandbox alone.
+    /// Makes the directory and the socket of the sandbox `name`, which is new, and returns where
+    /// the sandbox dials. The socket takes the first connection, whoever makes it, which identifies
+    /// the sandbox, so show the directory to that sandbox alone.
     pub fn issue(&self, name: &Name) -> io::Result<(SocketDial, Registration)> {
         // A name is one path component, neither `.` nor `..`, so each sandbox's directory is
         // directly within this one: none is outside it, and none holds another's.
@@ -89,8 +84,7 @@ impl Sockets {
         fs::create_dir(&dir).map_err(|error| context(dir.display(), &error))?;
         // Set, not left to the umask, which may take the traverse away. The sandbox's user isn't
         // this one, and may share its group: traversing is all it needs, to reach the socket it
-        // knows by name. The run's directory, 0700, keeps every other local user out, and the
-        // provider shows this one to its sandbox alone.
+        // knows by name. The run's directory, 0700, keeps every other local user out.
         let traverse = fs::Permissions::from_mode(0o711);
         fs::set_permissions(&dir, traverse).map_err(|error| {
             let what = format_args!("the mode of {} can't be set", dir.display());
@@ -106,8 +100,8 @@ impl Sockets {
 
 impl Drop for Sockets {
     fn drop(&mut self) {
-        // Each socket has gone with its registration by now, so this removes empty directories,
-        // which hold nothing a run needs: a failure to remove them is left unreported.
+        // Each socket has gone with its registration, so this removes empty directories, which hold
+        // nothing a run needs: a failure to remove them is left unreported.
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -116,9 +110,9 @@ impl Drop for Sockets {
 ///
 /// It is any address but an unspecified one, such as `0.0.0.0`, or `[::ffff:0.0.0.0]`, its
 /// IPv4-mapped form, which a listener binds but no sandbox can dial. The port is the one that the
-/// network admits sandboxes on, or 0, for one that the kernel picks from its ephemeral range as the
-/// listener binds, which the listener's dials then name: 0 suits the loopback, or a network that
-/// admits that range.
+/// network admits sandboxes on, or 0, for one that the kernel picks as the listener binds, which
+/// the listener's dials then name: 0 suits the loopback, or a network that admits the kernel's
+/// ephemeral range.
 #[derive(Debug)]
 pub struct GatewayAddress(SocketAddr);
 
@@ -136,49 +130,34 @@ impl TryFrom<SocketAddr> for GatewayAddress {
     }
 }
 
-/// One TCP address that every sandbox of a run dials, where the grant each one's hello presents
-/// tells them apart.
+/// Listens at one address that every sandbox of a run dials, and tells them apart by the grant each
+/// presents in its hello.
 ///
-/// [`issue`](Self::issue) issues a [`RegistrationGrant`] for a sandbox, whose [`Registration`]
-/// accepts its session. The listener refuses a hello of this version that presents no grant, one
-/// it doesn't await, or one presented already, saying which. Dropping it stops it taking
-/// connections.
-// Until a peer's hello presents a grant it awaits, the peer costs little: the listener reads at
-// most a hello's bytes from it, within its hello timeout of taking its connection, then closes the
-// connection untold; and it reads at most `MAX_HELLOS` hellos at once, closing a connection beyond
-// them as it takes it, unread and untold.
+/// It refuses a hello that presents no grant, one it doesn't await, or one presented already,
+/// saying which. Dropping it stops the listening; sessions already accepted live on.
+// A peer costs little until its hello presents a grant the listener awaits: at most a hello's
+// bytes, within its hello timeout, before the connection closes untold.
 #[derive(Debug)]
 pub struct GrantListener {
-    /// The address that the listener is bound to, which its sandboxes dial.
     gateway: SocketAddr,
-    // Shared with the thread that takes connections, the threads that read their hellos, and the
-    // registrations, which wait for the connections that present their grants.
     grants: Arc<Mutex<Grants>>,
-    /// The thread that takes connections, `Some` until the drop joins it.
     listening: Option<JoinHandle<()>>,
 }
 
-/// What a [`GrantListener`] awaits and reads.
 #[derive(Debug, Default)]
 struct Grants {
-    /// The grants whose registrations last, by the number each took at its issue.
     awaited: BTreeMap<u64, Awaited>,
-    /// The number the next grant takes.
     next: u64,
-    /// How many connections' hellos are being read.
     hellos: usize,
-    /// Whether the listener has dropped, which ends its taking connections.
     closed: bool,
 }
 
-/// A grant whose registration lasts, and the connection that presented it, once one has.
 #[derive(Debug)]
 struct Awaited {
     grant: RegistrationGrant,
     presented: Option<Met>,
 }
 
-/// A sandbox's connection, once its hello has been read, and the GPUs that the hello names.
 #[derive(Debug)]
 struct Met {
     connection: Connection,
@@ -186,9 +165,9 @@ struct Met {
 }
 
 impl GrantListener {
-    /// Listens at `address`, taking connections on a thread of its own until it drops, and gives
-    /// each `hello_timeout` from when it takes it to say its hello ([`HELLO_TIMEOUT`] is the
-    /// protocol's).
+    /// Binds `address`, and gives each connection `hello_timeout` to say its hello
+    /// ([`HELLO_TIMEOUT`] is the protocol's), from when it takes the connection. Where the port of
+    /// `address` is 0, the dials issued name the port that was bound.
     pub fn bind(address: &GatewayAddress, hello_timeout: Duration) -> io::Result<Self> {
         let GatewayAddress(address) = *address;
         let listener = TcpListener::bind(address).map_err(|error| {
@@ -197,11 +176,9 @@ impl GrantListener {
                 &error,
             )
         })?;
-        // As bound, with the port the kernel picked for port 0.
         let gateway = listener
             .local_addr()
             .map_err(|error| context("the grant listener's address can't be read", &error))?;
-        // Polled, so that the thread notices the listener's drop.
         listener
             .set_nonblocking(true)
             .map_err(|error| context("the grant listener can't be made non-blocking", &error))?;
@@ -218,9 +195,8 @@ impl GrantListener {
         })
     }
 
-    /// Issues a sandbox a grant, of random bytes from the kernel, as the [`TcpDial`] its
-    /// sandbox dials, and the registration that accepts the session the grant opens, as long as
-    /// the registration lasts.
+    /// Issues the grant of one sandbox, in the dial that gives it to the sandbox, and the
+    /// registration that waits for the sandbox to present it. The grant opens one session.
     pub fn issue(&self) -> io::Result<(TcpDial, Registration)> {
         let grant = random_grant()?;
         let mut grants = lock(&self.grants);
@@ -258,11 +234,8 @@ impl Drop for GrantListener {
     }
 }
 
-/// Takes connections on `listener` until its [`GrantListener`] drops, reading each one's hello,
-/// within `hello_timeout`, on a thread of its own, so that a silent peer holds up no other, unless
-/// [`MAX_HELLOS`] are being read already: it then closes the connection, unread and untold, as the
-/// peer may dial again.
 fn listen(listener: &TcpListener, grants: &Arc<Mutex<Grants>>, hello_timeout: Duration) {
+    // The listener doesn't block, so that `closed` is seen.
     while !lock(grants).closed {
         match listener.accept() {
             Ok((stream, _)) => admit(grants, stream, Deadline::after(hello_timeout)),
@@ -273,10 +246,9 @@ fn listen(listener: &TcpListener, grants: &Arc<Mutex<Grants>>, hello_timeout: Du
     }
 }
 
-/// Reads the hello of `stream` by `by` on a thread of its own, unless [`MAX_HELLOS`] are being
-/// read already or the thread doesn't start: the connection then closes, unread.
 fn admit(grants: &Arc<Mutex<Grants>>, stream: TcpStream, by: Deadline) {
     let mut locked = lock(grants);
+    // Past the bound the connection closes unread and untold: the peer may dial again.
     if locked.hellos >= MAX_HELLOS {
         return;
     }
@@ -292,9 +264,6 @@ fn admit(grants: &Arc<Mutex<Grants>>, stream: TcpStream, by: Deadline) {
     }
 }
 
-/// Reads the hello of `stream` by `by`, and hands its connection to the registration of the grant
-/// it presents, if that grant opens a session: any other peer is turned away. Frees the hello's
-/// place as it returns.
 fn register(grants: &Mutex<Grants>, stream: TcpStream, by: Deadline) {
     let set = stdx::net::set_options(&stream)
         .map_err(|error| context("the connection's TCP options can't be set", &error));
@@ -312,9 +281,6 @@ fn register(grants: &Mutex<Grants>, stream: TcpStream, by: Deadline) {
     lock(grants).hellos -= 1;
 }
 
-/// Hands `met`, whose hello presents `grant`, to the registration that awaits that grant, or
-/// gives back its connection with its refusal ([`refuse`]). A grant is found and taken under one
-/// lock, so no two connections take one.
 fn present(
     grants: &Mutex<Grants>,
     grant: Option<RegistrationGrant>,
@@ -326,9 +292,10 @@ fn present(
                        issued for the sandbox, at an address that several sandboxes share";
         return Err((met.connection, refused(message)));
     };
+    // A grant is found and taken under one lock, so no two connections take one.
     let mut locked = lock(grants);
-    // By the grants' `==`, which takes as long whichever bytes differ, as they hold no order
-    // that a map could look one up by.
+    // By the grants' `==`, which takes as long whichever bytes differ, as they hold no order that a
+    // map could look one up by.
     let awaited = (locked.awaited.values_mut()).find(|awaited| awaited.grant == grant);
     let message = match awaited {
         Some(Awaited {
@@ -360,10 +327,6 @@ fn present(
 /// a slow link, makes the accept wait, and only the deadline fails it, saying why the last dial
 /// failed. TLS that the client refuses, as a certificate it doesn't trust for the endpoint's name,
 /// and a hello that the gateway refuses, fail it at once.
-// Each dial waits within `HELLO_TIMEOUT` for its connection, its TLS and its hello, then the next
-// waits a second, then twice the last wait, at most `REDIAL_MOST`. A stop is heeded between a
-// dial's steps, its lookup of the name, which the resolver's own timeouts bound, each connection,
-// and its TLS, and as it waits for the hello.
 #[derive(Debug)]
 pub struct Dialer {
     client: tls::Client,
@@ -374,9 +337,9 @@ impl Dialer {
         Self { client }
     }
 
-    /// Issues a sandbox a grant, of random bytes from the kernel, as the [`Listening`] its
-    /// `sandboxd` listens for, and what makes, of the endpoint its create gives, the registration
-    /// that accepts its session.
+    /// Issues the grant of one sandbox, in the [`Listening`] that its `sandboxd` is given, and an
+    /// [`Unreached`] that takes the sandbox's endpoint, which the provider learns only by creating
+    /// the sandbox, and so after the grant is given.
     pub fn issue(&self) -> io::Result<(Listening, Unreached)> {
         let grant = random_grant()?;
         let unreached = Unreached {
@@ -387,7 +350,7 @@ impl Dialer {
     }
 }
 
-/// A grant that a [`Dialer`] issued, for a sandbox whose create is yet to give its endpoint.
+/// A grant issued for a sandbox whose endpoint isn't known yet.
 #[derive(Debug)]
 pub struct Unreached {
     client: tls::Client,
@@ -395,7 +358,7 @@ pub struct Unreached {
 }
 
 impl Unreached {
-    /// The registration that dials the sandbox at `endpoint`, and presents the grant there.
+    /// Registers the endpoint where the sandbox listens.
     pub fn at(self, endpoint: Endpoint) -> Registration {
         let Self { client, grant } = self;
         Registration {
@@ -408,7 +371,6 @@ impl Unreached {
     }
 }
 
-/// A [`Dialer`]'s registration of one sandbox: where it dials it, and the grant it presents.
 #[derive(Debug)]
 struct Dialed {
     client: tls::Client,
@@ -416,7 +378,6 @@ struct Dialed {
     endpoint: Endpoint,
 }
 
-/// What a stopped [`Dialed`] expected of its sandbox.
 const LISTENING: &str = "its sandboxd to listen there";
 
 impl Dialed {
@@ -424,8 +385,6 @@ impl Dialed {
         format!("the gateway reached the sandbox at {}", self.endpoint)
     }
 
-    /// Dials the sandbox until `by`, or until `stopped` returns true, as [`Dialer`] says, and
-    /// reads its hello: one that presents no grant, as the endpoint identifies the sandbox.
     fn connected(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         let endpoint = &self.endpoint;
         let late = |failed: &dyn fmt::Display| {
@@ -447,6 +406,8 @@ impl Dialed {
                     None => late(&"it passed before the first dial"),
                 });
             };
+            // A dial gets the hello timeout at most, so that one that hangs leaves time for
+            // another.
             match self.dial(Deadline::after(left.min(HELLO_TIMEOUT)), stopped) {
                 Ok(met) => return Ok(met),
                 Err(DialError::Again(error)) => failed = Some(error),
@@ -462,7 +423,6 @@ impl Dialed {
         }
     }
 
-    /// Dials the sandbox once, by `by`, and reads its hello, until then too.
     fn dial(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> Result<Met, DialError> {
         let endpoint = &self.endpoint;
         let stream = self.connect(by, stopped)?;
@@ -470,7 +430,8 @@ impl Dialed {
         let secured = self.client.connect(stream, endpoint.host(), by);
         let connection = match secured {
             Ok(stream) => Connection::Tls(stream),
-            // TLS that isn't what the client trusts, which another dial would meet again.
+            // TLS's own failures are `InvalidData`, a certificate that isn't the endpoint's among
+            // them: another dial would meet the same.
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 let what =
                     format_args!("the gateway can't trust the sandbox's endpoint {endpoint}");
@@ -489,12 +450,10 @@ impl Dialed {
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 Err(DialError::Never(refuse(&connection, by, error)))
             }
-            // A stop among them, which the next look heeds.
             Err(error) => Err(DialError::Again(error)),
         }
     }
 
-    /// The TCP connection to the endpoint, made by `by`, with its options set.
     fn connect(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> Result<TcpStream, DialError> {
         let endpoint = &self.endpoint;
         let dialing = format_args!("dialing {endpoint} failed");
@@ -528,15 +487,13 @@ impl Dialed {
     }
 }
 
-/// Why a [`Dialed`]'s dial failed.
+// `Again` where a later dial may succeed, as the sandbox may not listen yet; `Never` where it
+// can't.
 enum DialError {
-    /// Why this dial failed, which another may not.
     Again(io::Error),
-    /// Why the session can't open, which no other dial changes: the stop among them.
     Never(io::Error),
 }
 
-/// A grant of random bytes from the kernel.
 fn random_grant() -> io::Result<RegistrationGrant> {
     let mut bytes = [0; REGISTRATION_GRANT_BYTES];
     File::open(RANDOM)
@@ -553,9 +510,8 @@ fn random_grant() -> io::Result<RegistrationGrant> {
 
 /// Where one sandbox meets the gateway, and the accept of the session it opens there.
 ///
-/// The sandbox meets the gateway as it connects to its socket, as its hello presents its grant, or
-/// as the gateway dials it. Dropping the registration ends the meeting: it removes the socket, or
-/// ends the grant, closing any connection that presented it.
+/// Dropping the registration ends the meeting: it removes the socket, or ends the grant, closing
+/// any connection that presented it.
 #[derive(Debug)]
 pub struct Registration {
     meeting: Meeting,
@@ -569,15 +525,15 @@ enum Meeting {
 }
 
 impl Registration {
-    /// Waits until `by`, or until `stopped` returns true, for the sandbox to meet the gateway and
-    /// open the session with its [`Hello`], whose reader sends each [`Arrival`] on `arrivals` as
-    /// `wrap`, run on it, makes it; only [`Arrival::Exited`] names its session. It takes ops of at
-    /// most `ops` bytes, if given ([`Arrival::Refused`]), and model requests if `models`.
+    /// Waits for the sandbox to meet the gateway, accepts its hello, and returns its session.
     ///
-    /// # Errors
+    /// `ops` is the session's limit on an op's payload, none for a session that takes no ops, and
+    /// `models` whether it takes model requests. The session's reader thread sends each arrival, as
+    /// `wrap` makes it, to `arrivals`, and drops it once `arrivals`' receiver has gone.
     ///
-    /// `InvalidData` for a first frame that is no hello it takes, else `TimedOut` past `by`;
-    /// `Other` at once if `stopped` returns true as it waits; any kind if setting up fails.
+    /// `stopped` is asked while the call waits, and once it says yes the call fails. A sandbox that
+    /// has not met the gateway by `by` fails it with `TimedOut`, and a hello that is wrong, which
+    /// the sandbox is told of, with `InvalidData`.
     pub fn accept<T: Send + 'static>(
         self,
         by: Deadline,
@@ -590,15 +546,14 @@ impl Registration {
         let (Met { connection, gpus }, grant) = match self.meeting {
             Meeting::Socket(listener) => (listener.connected(by, &stopped)?, None),
             Meeting::Grant(granted) => (granted.presented(by, &stopped)?, None),
+            // A `sandboxd` that listens serves only a peer that answers its hello with its grant.
             Meeting::Dial(dialed) => (dialed.connected(by, &stopped)?, Some(dialed.grant)),
         };
         welcome(&connection, by, grant)?;
-        // Unbounded, so the reader never waits on its owner; the protocol bounds what each
-        // session leaves there: the op in flight, the model requests in flight, at most
-        // `MAX_MODEL_REQUESTS_IN_FLIGHT` of them, the exit of each command the owner started, and
-        // the end. A receiver reused for the next session still holds what a dropped one left,
-        // until its owner drains it. An owner that has dropped its receiver hears nothing more,
-        // as it chose.
+        // `arrivals` is unbounded, so the reader never waits on its owner; the protocol bounds what
+        // a session leaves there: the op in flight, the model requests in flight, at most
+        // `MAX_MODEL_REQUESTS_IN_FLIGHT`, the exit of each command the owner started, and the end.
+        // An owner that has dropped its receiver hears nothing more, as it chose.
         let send = move |arrival| {
             let _ = arrivals.send(wrap(arrival));
         };
@@ -606,16 +561,14 @@ impl Registration {
     }
 }
 
-/// Fails at once if `stopped` returns true, saying that the accept was stopped before `awaited`,
-/// and that it expected `expected` before the stop.
 fn unstopped(
     stopped: &dyn Fn() -> bool,
     awaited: impl fmt::Display,
     expected: &str,
 ) -> io::Result<()> {
     // Asked before each look, so that a stopped accept takes no connection, even one that waits
-    // already. The stop is final, so its kind is `Other`: `Interrupted` would say that a retry
-    // may succeed.
+    // already. The stop is final, so its kind is `Other`: `Interrupted` would say that a retry may
+    // succeed.
     if stopped() {
         return Err(io::Error::other(format!(
             "the accept was stopped before {awaited}: expected {expected} before the stop"
@@ -624,8 +577,6 @@ fn unstopped(
     Ok(())
 }
 
-/// The socket one sandbox connects to, which identifies the sandbox, so it takes a [`Hello`] of
-/// this version that presents no grant.
 #[derive(Debug)]
 struct Listener {
     listener: UnixListener,
@@ -633,19 +584,16 @@ struct Listener {
 }
 
 impl Listener {
-    /// Listens at [`SOCKET_NAME`] in `dir`, whose path may be of any length. Any user may
-    /// connect, since a sandbox's user is not the gateway's; only the sandbox can reach `dir`.
     fn bind(dir: &Path) -> io::Result<Self> {
         let path = dir.join(SOCKET_NAME);
-        // A socket's path, as `bind` takes it, is at most 107 bytes, which a deep directory's
-        // passes; the kernel resolves `/proc/self/fd/<n>` to the directory that handle `n` holds,
-        // so the path through it is short wherever the directory is.
         let bound = File::open(dir)
             .and_then(|handle| {
                 let fd = handle.as_raw_fd();
                 UnixListener::bind(format!("{OPEN_FILES}/{fd}/{SOCKET_NAME}"))
             })
             .and_then(|listener| {
+                // Any user may connect, since a sandbox's user is not the gateway's; only the
+                // sandbox can reach `dir`.
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
                 Ok(listener)
             });
@@ -656,9 +604,6 @@ impl Listener {
         Ok(Self { listener, path })
     }
 
-    /// Waits until `by`, or until `stopped` returns true, for the sandbox to connect, then removes
-    /// the socket, and reads the sandbox's hello, until then too: one that presents no grant, as
-    /// a socket of the sandbox's own identifies it.
     fn connected(self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         let path = self.path.display();
         self.listener
@@ -710,7 +655,6 @@ impl Drop for Listener {
     }
 }
 
-/// A [`GrantListener`]'s registration of one grant: the grant it awaits under its number.
 #[derive(Debug)]
 struct Granted {
     grants: Arc<Mutex<Grants>>,
@@ -718,8 +662,6 @@ struct Granted {
 }
 
 impl Granted {
-    /// Waits until `by`, or until `stopped` returns true, for a connection that presents the
-    /// grant, and takes it, which ends the grant.
     fn presented(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         loop {
             let awaited = "a sandbox presented the registration grant";
@@ -749,7 +691,7 @@ impl Granted {
                      sandbox it was issued for to present it while the deadline lasts",
                 ));
             }
-            // Nothing tells the wait of a presentation, or of a stop, so it looks again.
+            // Nothing wakes the wait on a presentation or a stop, so it looks again.
             thread::sleep(POLL);
         }
     }
@@ -763,17 +705,13 @@ impl Drop for Granted {
     }
 }
 
-/// Reads the sandbox's first frame on `connection`, waiting for it until `by`, or until `stopped`
-/// returns true: its [`Hello`], or the error that says why the session can't open, of kind
-/// `InvalidData` for a first frame the gateway refuses ([`refuse`]), and `Other` for the stop. A
-/// frame that waits already once `by` has passed is still read. Leaves `connection` blocking.
 fn read_hello(
     connection: &Connection,
     by: Deadline,
     stopped: &dyn Fn() -> bool,
 ) -> io::Result<Hello> {
-    // Read without blocking, as the connection was waited for, so that the session's reads,
-    // which block, keep no bound of the hello's.
+    // Read without blocking, as the connection was waited for, so that a stop and the deadline
+    // interrupt the wait; blocking again after, as the session's reads carry none of its bounds.
     connection.set_nonblocking(true).map_err(|error| {
         context(
             "the sandbox's connection can't be made non-blocking",
@@ -816,10 +754,9 @@ fn read_hello(
     }
 }
 
-/// Returns the error of a session that doesn't open on `connection`, for `error`, which
-/// [`read_hello`] or [`present`] gave, telling the sandbox why while `by` lasts if the gateway
-/// refuses its first frame. The connection closes all the same.
 fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error {
+    // Only a hello that is wrong is refused to the sandbox: after any other failure the connection
+    // can't be trusted to carry an answer.
     if error.kind() != io::ErrorKind::InvalidData {
         return error;
     }
@@ -833,8 +770,6 @@ fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error 
     io::Error::new(io::ErrorKind::InvalidData, reason)
 }
 
-/// Accepts the session on `connection`, whose hello opens one, telling the sandbox so while `by`
-/// lasts.
 fn welcome(
     connection: &Connection,
     by: Deadline,
@@ -853,13 +788,12 @@ fn welcome(
     })
 }
 
-/// Reads from a non-blocking connection, waiting for its bytes until `by`, or until `stopped`
-/// returns true, as the accept waits for the connection, after which every read fails: as timed
-/// out, or as stopped, keeping the stop's error ([`unstopped`]) in `stop`.
 struct Polled<'a> {
     connection: &'a Connection,
     by: Deadline,
     stopped: &'a dyn Fn() -> bool,
+    // Kept apart from the error returned, which a reader of the frame may wrap, so that the stop is
+    // told by where it came from, not by its kind.
     stop: Option<io::Error>,
 }
 
@@ -869,8 +803,6 @@ impl Read for Polled<'_> {
             match (&mut &*self.connection).read(buf) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if let Err(stop) = unstopped(self.stopped, "the sandbox's hello", "its hello") {
-                        // Kept apart from the error returned, which a reader of the frame may
-                        // wrap, so that the stop is told by where it came from, not by its kind.
                         let kind = stop.kind();
                         self.stop = Some(stop);
                         return Err(kind.into());
