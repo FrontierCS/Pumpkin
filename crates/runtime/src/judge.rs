@@ -1,9 +1,7 @@
-//! Judge calls, each a child of the run ([`child`](super::child)): [`call`] puts the call's
-//! payload in its slot ([`slot_payload`](schema::sandbox::slot_payload)), runs the judge's
-//! command until it exits, its timeout passes or the core stops the call, relaying the ops of a
-//! judge that holds grants, and the model requests of one with a route, to the loop meanwhile,
-//! and [`outputs`] collects and parses the judge's result under its
-//! [`ResultSpec`](schema::ir::ResultSpec).
+//! Judge calls, each a child of the run ([`child`](super::child)): a call puts its payload in its
+//! slot, runs the judge's command until it exits, its timeout passes or the core stops the call,
+//! relaying its session's ops and model requests to the loop meanwhile, and collects and parses
+//! the judge's result under its [`ResultSpec`](schema::ir::ResultSpec).
 
 use std::path::Path;
 use std::time::Duration;
@@ -37,17 +35,12 @@ pub(super) struct Call {
     pub(super) timeout: Duration,
 }
 
-/// How a judge's command ended.
 enum Ended {
     /// It exited, or ran until its timeout.
     Ran,
-    /// The core stopped the call.
     Stopped,
 }
 
-/// Runs `call` to its end in `child`, as a child of the run runs ([`child::run`]).
-///
-/// [`child::run`]: super::child::run
 pub(super) fn run<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>) {
     let workflow = child.sandboxes.workflow();
     let role = call.slot.judge().role();
@@ -58,8 +51,6 @@ pub(super) fn run<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>) {
     super::child::run(child, ops, |child, session| judge(call, child, session));
 }
 
-/// Runs `call` in `child`'s sandbox, whose session is `session`, and returns the report of its
-/// end.
 fn judge<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>, session: &mut Session) -> Event {
     let job = call.job;
     let failed = |reason: String| Event::JudgeFailed { job, reason };
@@ -214,7 +205,6 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).context(path.display())
 }
 
-/// The judge whose slot `slot` is, as the workflow of `child`'s sandboxes finds it.
 fn judge_of<'r, H: Host>(child: &Child<'r, H, OpReply>, slot: SlotId) -> &'r Judge {
     child.sandboxes.workflow().judge(slot.judge())
 }

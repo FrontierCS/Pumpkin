@@ -1,6 +1,6 @@
-//! The simulated provider ([`Sim`]) against the suite every provider passes
-//! ([`test_support::suite`]): as it is, as one whose sandboxes listen, and as a provider that
-//! frees an ended sandbox itself, whose outcomes are the same, as `Sweep::list` allows it.
+//! The simulated provider ([`Sim`]) against [`test_support::suite`]: as it is, as one whose
+//! sandboxes listen, and as a provider that frees an ended sandbox itself, whose outcomes are
+//! the same, as `Sweep::list` allows it.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -54,9 +54,6 @@ impl Subject for Freeing {
     }
 }
 
-// A create that the platform finishes after its deadline, as one may finish a create that its
-// client gave up on, leaves a sandbox that the run's list finds; where it listens for the
-// gateway, which no start claims it for any more, it ends itself, so the list finds it ended.
 #[test]
 fn late_create() {
     let sim = Sim::new().listening();

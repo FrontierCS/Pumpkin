@@ -1,5 +1,5 @@
 //! The model endpoint: an HTTP/1.1 server on the sandbox's loopback, at [`MODEL_PORT`], through
-//! which a harness in the sandbox reaches its role's model route. Each request goes over the
+//! which a harness in the sandbox reaches the model route. Each request goes over the
 //! session whole, as a model request, by [the protocol's rules](schema::sandbox), with
 //! its method, its target and every header, names in lowercase, and its response comes back as
 //! it arrives.
@@ -73,7 +73,6 @@ struct Flight {
     waiting: BTreeMap<u32, PartSender<Part>>,
 }
 
-/// A part of a response, from the gateway.
 pub(crate) enum Part {
     Head {
         status: u16,
@@ -86,7 +85,6 @@ pub(crate) enum Part {
     },
 }
 
-/// A request read whole from a client.
 struct Request {
     method: String,
     target: String,
@@ -111,7 +109,7 @@ enum Relayed {
 impl Model {
     /// Serves clients on the loopback, at [`MODEL_PORT`], on a thread of its own. The port is
     /// bound before this returns, so before the session serves its first request, and so before
-    /// any of the role's commands can take it.
+    /// any command can take it.
     pub(crate) fn serve(&self, sender: Sender) -> Result<(), String> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, MODEL_PORT))
             .context(format_args!("127.0.0.1:{MODEL_PORT}"))?;
@@ -162,7 +160,6 @@ impl Model {
         Ok(())
     }
 
-    /// Carries the request a client sends on `connection`, and writes its response.
     fn carry(&self, mut connection: TcpStream, sender: &Sender) {
         let request = match read(&mut BufReader::new(&connection)) {
             Ok(Ok(request)) => request,

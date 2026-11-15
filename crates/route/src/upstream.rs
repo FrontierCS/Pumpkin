@@ -145,7 +145,7 @@ pub enum Answer {
 /// How a run serves a model route's entry for one API: the upstream that its requests reach, of
 /// which the run makes an [`Upstream`] for each sandbox that it serves.
 pub struct Serving {
-    /// The name that the deployment gives the upstream, which the run log shows.
+    /// The name that the deployment gives the upstream.
     pub name: Name,
     pub api: Api,
     /// The upstream's endpoint for `api`.
@@ -218,11 +218,8 @@ impl TryFrom<String> for UpstreamUrl {
 }
 
 impl Key {
-    /// Reads the key in the file at `path`: one line of printable ASCII, without spaces.
-    ///
-    /// # Errors
-    ///
-    /// Fails, without showing what the file holds, if it can't be read or holds no key.
+    /// Reads the key in the file at `path`: one line of printable ASCII, without spaces. A file
+    /// that holds no such line fails, without showing what it holds.
     pub fn read(path: &Path) -> Result<Self, String> {
         let text = fs::read(path).map_err(|error| {
             format!(
@@ -286,10 +283,7 @@ impl Upstream {
     /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
     /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
     /// the key or the request is refused, and else the response, cut short if it breaks off.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the head is too long for a frame, the deadline passes, or the session ends.
+    /// Fails if the head is too long for a frame or the deadline passes.
     pub(crate) fn forward(
         &self,
         closed: &Closed,
@@ -386,7 +380,6 @@ impl Upstream {
         }
     }
 
-    /// Answers `client`'s request, which `route` takes, as [`serve`] says.
     fn serve(
         &self,
         route: &Route,
@@ -411,17 +404,16 @@ impl Upstream {
         };
     }
 
-    /// Whether the model provider has refused the key with a 401 ([`serve`]), which
-    /// ends the route.
+    /// Whether the model provider has refused the key with a 401, which ends the route.
     pub fn key_was_refused(&self) -> bool {
         self.refused.get().is_some()
     }
 
-    /// Gives up on every exchange in flight and every later one ([`serve`]), which
-    /// ends the route: before the response's head, its client gets the refusal for the route's
-    /// end (`Refusal::ended`), as does a later request; within the body, it gets the response
-    /// cut short. One still resolving the provider's name, or connecting to it, is given up on
-    /// once that ends (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`).
+    /// Gives up on every exchange in flight and every later one, which ends the route: before
+    /// the response's head, its client gets the refusal for the route's end (`Refusal::ended`),
+    /// as does a later request; within the body, it gets the response cut short. One still
+    /// resolving the provider's name, or connecting to it, is given up on once that ends
+    /// (`RESOLVE_TIMEOUT`, `CONNECT_TIMEOUT`).
     pub fn shutdown(&self) {
         let _ = self.shut_down.set(());
         // The agent's clones share its pool, whose shutdown closes every connection that any of
@@ -429,7 +421,6 @@ impl Upstream {
         self.agent.clone().shutdown();
     }
 
-    /// Whether [`Upstream::shutdown`] has ended the route.
     pub fn was_shut_down(&self) -> bool {
         self.shut_down.get().is_some()
     }
@@ -469,7 +460,6 @@ pub fn serve(
     upstream.serve(route, client, allowed, forwarding, answered);
 }
 
-/// A request to answer, by when its answer is due, and where the exchange is kept.
 pub(crate) struct Client<'k> {
     request: IncomingModelRequest,
     by: Deadline,
@@ -531,9 +521,7 @@ fn replaced(
     refusal.answer(request, by)
 }
 
-/// How a response's body went to its client ([`relay`]).
 enum Relayed {
-    /// To its end.
     Whole,
     /// Until it broke off, or was given up on.
     BrokeOff,
@@ -576,7 +564,6 @@ fn request_id(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The refusal of a request that the upstream gave no answer to, for `error`.
 // The client hears that the provider gave no answer, but not why: the reason describes the
 // host's network, which is not the agent's to know.
 fn unanswered(error: &ureq::Error) -> Refusal {
@@ -617,8 +604,7 @@ fn returned(headers: &HeaderMap, closed: &Closed) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Whether the response header `name`, in lowercase, reaches the client: one that
-/// [`RESPONSE_HEADERS`] lists, or a rate-limit header.
+/// Whether `name`, a response header in lowercase, reaches the client.
 fn reaches_client(name: &str) -> bool {
     RESPONSE_HEADERS.contains(&name)
         || RATE_LIMIT_SUFFIXES.iter().any(|suffix| {

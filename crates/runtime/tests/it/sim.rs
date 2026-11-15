@@ -75,14 +75,13 @@ pub(crate) const LATER: &str = "/sim/later";
 /// An [`image`]'s name whose create returns `SLOW_CREATE` after it starts the sandbox,
 /// whose `sandboxd` has dialed by then.
 ///
-/// A create whose deadline comes first gives up then, and fails, leaving the sandbox for the run's
-/// list to find ([`Creator::create`](provider::Creator::create)), which, where it listens, ends itself as no gateway claims
-/// it.
+/// A create whose deadline comes first gives up then, and fails, leaving the sandbox for the
+/// run's list to find ([`Creator::create`](provider::Creator::create)), which, where it listens,
+/// ends itself as no gateway claims it.
 pub(crate) const SLOW: &str = "/sim/slow";
 
-/// How long a create of [`SLOW`] takes: far longer than a run takes to act on what its agent
-/// does as the create begins, or a `sandboxd` takes to dial, and far shorter than the startup of
-/// the providers whose tests use it.
+// Far longer than a run takes to act on what its agent does as the create begins, or a `sandboxd`
+// takes to dial, and far shorter than the startup of the providers whose tests use it.
 const SLOW_CREATE: Duration = Duration::from_secs(2);
 
 /// The name of the simulated provider's second class, whose sandboxes take at most
@@ -90,9 +89,9 @@ const SLOW_CREATE: Duration = Duration::from_secs(2);
 /// roles that need that model.
 pub(crate) const BRIEF: &str = "brief";
 
-/// How long a start in class `brief` takes at most: seconds, but still far longer than a
-/// simulated sandbox takes to start, so that a busy machine makes a start that succeeds wait
-/// longer, never fail.
+/// How long a start in class `brief` takes at most, in seconds.
+// Far longer than a simulated sandbox takes to start, so that a busy machine makes a start that
+// succeeds wait longer, never fail.
 const BRIEF_STARTUP: u64 = 2;
 
 /// How long a command that awaits a job's state waits between the `status` ops it makes, and a
@@ -110,8 +109,7 @@ pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 /// The path of a `sandboxd`, or an [`image`]'s name, that dials, but whose sandbox the
 /// simulated provider refuses to delete.
 ///
-/// Once a delete is refused, its console shows nothing, as an EC2 instance's once its terminate
-/// was sent and the wait for it gave up.
+/// Once a delete is refused, its console shows nothing.
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
 /// The path of a `sandboxd`, or an [`image`]'s name, whose first delete fails, as one of
@@ -128,8 +126,7 @@ pub(crate) const UNSHOWN: &str = "/sim/unshown";
 /// before it deletes it.
 pub(crate) const LINGERING: &str = "/sim/lingering";
 
-/// How long a delete of a [`LINGERING`] sandbox takes: seconds longer than the hard end of the
-/// runs whose tests use it.
+// Seconds longer than the hard end of the runs whose tests use it.
 const LINGER: Duration = Duration::from_secs(7);
 
 /// An [`image`]'s name whose sandbox's delete waits `DAWDLE` before it deletes it.
@@ -144,9 +141,8 @@ pub(crate) const LAST: &str = "/sim/last";
 /// that nothing deletes, the test's bug.
 const LAST_WAITS: Duration = Duration::from_secs(60);
 
-/// How long a delete of a [`DAWDLING`] sandbox takes: far longer than a run takes to collect what
-/// a judge call's sandbox holds and delete it, and far shorter than the bounds of the runs whose
-/// tests use it.
+// Far longer than a run takes to collect what a judge call's sandbox holds and delete it, and far
+// shorter than the bounds of the runs whose tests use it.
 const DAWDLE: Duration = Duration::from_secs(1);
 
 /// How long a sandbox's fake `sandboxd` takes to end once its sandbox is deleted.
@@ -194,7 +190,6 @@ pub(crate) struct Journal {
 }
 
 impl Journal {
-    /// Adds `entry` after what it holds.
     pub(crate) fn tell(&self, entry: String) {
         stdx::unpoisoned(self.entries.lock()).push(entry);
     }
@@ -360,7 +355,6 @@ impl Sim {
         self
     }
 
-    /// The journal it tells, if it has one.
     pub(crate) fn journal(&self) -> Option<&Journal> {
         self.journal.as_ref()
     }
@@ -443,18 +437,14 @@ impl Sim {
         }
     }
 
-    /// The permission bits of the directory that held each create's socket directory, in the
-    /// order of the creates that dialed a socket.
     pub(crate) fn modes(&self) -> Vec<u32> {
         self.state().modes.clone()
     }
 
-    /// Whether each create asked for the model endpoint, in the order of the creates.
     pub(crate) fn models(&self) -> Vec<bool> {
         self.state().models.clone()
     }
 
-    /// The class of each create, in the order of the creates.
     pub(crate) fn classes(&self) -> Vec<Name> {
         self.state().classes.clone()
     }
@@ -788,7 +778,6 @@ impl Sim {
         })
     }
 
-    /// What sandbox `id` of `run` printed, as [`Provider::console`] asks.
     fn console_of(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let state = self.state();
         let ours = state.sandboxes.get(id.as_str());
@@ -843,7 +832,6 @@ impl Gateway {
     }
 }
 
-/// A simulated sandbox's connection to the gateway.
 enum Connection {
     Unix(UnixStream),
     Tcp(TcpStream),
@@ -1018,7 +1006,6 @@ struct Faults {
     unshown: bool,
 }
 
-/// How a create ends.
 #[derive(PartialEq, Eq)]
 enum Made {
     /// It returns the sandbox.
@@ -1029,7 +1016,6 @@ enum Made {
     Slow,
 }
 
-/// What a sandbox's `sandboxd` does.
 #[derive(PartialEq, Eq)]
 enum Dialing {
     /// It dials and says hello.
@@ -1267,9 +1253,7 @@ enum Wait {
 struct Caller {
     /// The command's stream, on which it exits.
     stream: u32,
-    /// The steps still to take, in order.
     steps: VecDeque<Step>,
-    /// The number of the op in flight.
     op: u32,
     /// The bound on the reply to the op in flight, as [`Step::Op`] gives it.
     less: Option<u64>,
@@ -1278,9 +1262,7 @@ struct Caller {
     /// The `status` or `lease_status` the op in flight asks, and the state it awaits, if it awaits
     /// one.
     awaiting: Option<(OpCall, String)>,
-    /// Whether the command has exited.
     exited: bool,
-    /// Whether its sandbox serves the model endpoint.
     endpoint: bool,
     /// The number of the last model request, once one has been made: the one in flight, as it
     /// makes one at a time.
@@ -1294,7 +1276,6 @@ struct Caller {
     /// What the last command of a lease printed, as the last `lease_status` reply gives it, or
     /// the body of the response to the last model request, whichever came last.
     read: String,
-    /// The result it wrote, if it wrote one.
     result: Option<Vec<u8>>,
     /// How its `sandboxd` ends the session, once a step has asked it to.
     end: Option<End>,

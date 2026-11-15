@@ -1,7 +1,6 @@
 //! `sandboxctl`, the shim through which callers in a sandbox make ops: the same binary as
-//! `sandboxd`, run under the name `sandboxctl`. [`flags`] holds its grammar and describes each
-//! command, its output and its exit codes, as `sandboxctl --help` prints it. The output is a
-//! reply's JSON form, which [`schema::sandbox::op`] describes.
+//! `sandboxd`, run under the name `sandboxctl`. The output is a reply's JSON form, which
+//! [`schema::sandbox::op`] describes.
 //!
 //! It connects to `sandboxd` at the sandbox's [control socket](CONTROL_SOCKET), and carries
 //! one op over it, as [`crate::ops`] describes.
@@ -26,8 +25,6 @@ use crate::print_line;
 const UNANSWERED: &str =
     "sandboxd closed the connection without an answer: expected one while its session lasts";
 
-/// The grammar of `sandboxctl`'s command line, from which xflags generates its parser, the
-/// types below and `--help`.
 mod flags {
     #![expect(
         unreachable_pub,

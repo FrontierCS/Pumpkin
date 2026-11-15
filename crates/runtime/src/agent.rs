@@ -91,17 +91,14 @@ impl Agent {
         Some(Event::AgentFailed { reason })
     }
 
-    /// Answers `op`, which the agent's session handed out, with `reply`, by `by`.
     pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Deadline) -> io::Result<()> {
         self.sandbox.session.reply(op, reply, by)
     }
 
-    /// The trees of the agent's sandbox, which a lease's thread moves to and from its runner.
     pub(super) fn trees(&self) -> Trees {
         self.sandbox.session.trees()
     }
 
-    /// Refuses `refused`, which the agent's session handed out, by `by`.
     pub(super) fn refuse(&mut self, refused: RefusedOp, by: Deadline) -> io::Result<()> {
         self.sandbox.session.refuse(refused, by)
     }
@@ -122,7 +119,6 @@ impl Agent {
         failures
     }
 
-    /// Ends the agent's sandbox, with whatever still runs in it, by [`Sandboxes::delete`].
     pub(super) fn delete(
         self,
         sandboxes: &Sandboxes<'_, impl Host>,

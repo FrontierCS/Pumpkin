@@ -1,13 +1,12 @@
-//! The run's children: sandboxes that the core starts for a part of the run, each on a thread of
-//! its own, in a fresh sandbox, passive but for a judge's that holds grants or has a model route,
-//! which a driver of its kind drives: a judge call's, the `judge` module's, or a lease's, the
-//! `lease` module's.
+//! The run's children: a sandbox the core starts for a part of the run, on a thread of its own,
+//! which a driver of its kind drives.
 //!
 //! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
 //! reports the child's end only once its sandbox is deleted; a sandbox that can't be deleted fails
-//! the run. A child's thread waits on an inbox of its own ([`Message`]), into which its session hands what its reader reads, and the loop the core's stop
-//! and its driver's orders. A stop takes effect before the child's command starts, as the thread
-//! takes what its inbox holds then, and while it waits.
+//! the run. A child's thread waits on an inbox of its own ([`Message`]), into which its session
+//! hands what its reader reads, and the loop the core's stop and its driver's orders. A stop takes
+//! effect before the child's command starts, as the thread takes what its inbox holds then, and
+//! while it waits.
 
 use std::iter;
 use std::path::PathBuf;
@@ -36,9 +35,8 @@ pub(super) struct Child<'r, H: Host, O: Send + 'static> {
     pub(super) dir: PathBuf,
     pub(super) sandboxes: &'r Sandboxes<'r, H>,
     pub(super) clock: H::Clock,
-    /// What reaches its thread.
     pub(super) inbox: <H::Clock as Clock>::Inbox<Message<O>>,
-    /// A sender into the loop's inbox, which takes its reports.
+    /// A sender into the loop's inbox, which outlives every child's thread, so a send can't fail.
     pub(super) reports: Sender<Input>,
 }
 
@@ -53,36 +51,32 @@ pub(super) struct Deadlines {
     pub(super) collect: Duration,
 }
 
-/// What reaches a child's thread through its inbox.
 pub(super) enum Message<O> {
-    /// What its session's reader handed over ([`Registration::accept`]): its commands' exits
-    /// and its end, and the ops and model requests of a session that takes them, as a judge's
-    /// that holds grants, or has a model route, does.
+    /// What its session's reader handed over ([`Registration::accept`]): its commands' exits and
+    /// its end, and the ops and model requests of a session that takes them.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
     Session(Arrival),
-    /// The core's stop.
     Stop,
     /// An order of the core's for its driver, or the core's reply to its op.
     Order(O),
 }
 
-/// What a child's thread reports to the loop.
 pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a child's time from its
     /// reports' times, which the loop's delays then don't lengthen.
     Event(Duration, Event),
-    /// An op that job `job`'s call's sandbox made, at the time `at` the thread took it, which the
-    /// loop numbers, and whose reply it sends back as an order, with the sandbox's `trees`, which
-    /// a transfer the op asks for moves.
+    /// An op that job `job`'s sandbox made, at the time `at` the thread took it, which the loop
+    /// numbers, and whose reply it sends back as an order, with the sandbox's `trees`, which a
+    /// transfer the op asks for moves.
     Op {
         at: Duration,
         job: JobId,
         request: Request,
         trees: Trees,
     },
-    /// A model request that job `job`'s call's sandbox made, at the time `at` the thread took it,
-    /// which the loop numbers and answers.
+    /// A model request that job `job`'s sandbox made, at the time `at` the thread took it, which
+    /// the loop numbers and answers.
     Model {
         at: Duration,
         job: JobId,
@@ -124,7 +118,6 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     let last = drive(child, &mut sandbox.session);
     let (logged, deleted) = child.sandboxes.delete(sandbox);
     for entry in logged {
-        // The loop's inbox outlives every child's thread, which the run's end waits for.
         let _ = child.reports.send(Input::Logged(entry));
     }
     match deleted {
@@ -141,19 +134,15 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
         iter::from_fn(|| self.inbox.take()).any(|message| matches!(message, Message::Stop))
     }
 
-    /// Reports an event, observed now.
     pub(super) fn event(&self, event: Event) {
         self.report(Report::Event(self.clock.now(), event));
     }
 
-    /// Notes `note` in the run log.
     pub(super) fn note(&self, note: String) {
-        // The loop's inbox outlives every child's thread, which the run's end waits for.
         let _ = (self.reports).send(Input::Logged(Entry::Note(note)));
     }
 
     pub(super) fn report(&self, report: Report) {
-        // The loop's inbox outlives every child's thread, which the run's end waits for.
         let _ = self.reports.send(Input::Child(report));
     }
 }

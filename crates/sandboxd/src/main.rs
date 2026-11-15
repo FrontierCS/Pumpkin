@@ -1,22 +1,16 @@
 //! `sandboxd`, the supervisor that runs in every sandbox, and, run under the file name
-//! `sandboxctl`, the shim through which callers in the sandbox make ops ([`ctl`]). [`flags`]
-//! holds `sandboxd`'s grammar, as `sandboxd --help` prints it.
+//! `sandboxctl`, the shim through which callers in the sandbox make ops ([`ctl`]).
 //!
 //! It meets the gateway, at a Unix socket of the sandbox's own, at a TCP address, or with
 //! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
-//! presenting the grant in [`SANDBOXD_GRANT`] over TCP, and serves it until the gateway closes it:
-//! it puts and collects trees, starts commands and reports their exits, and freezes the sandbox.
+//! presenting the grant in [`SANDBOXD_GRANT`] over TCP, and serves it until the gateway closes it.
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
-//!
-//! With `--ops`, it also serves [ops], which it carries to the session's owner; without it,
-//! nothing in its sandbox can make one. With `--model`, it also serves the [model] endpoint, whose
-//! requests it carries to the session's owner likewise.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
 //! kills every other process in the sandbox. Started with `--user`, behind a platform's own first
-//! process, as Modal's `dumb-init`, it asks for its descendants' orphans ([`sys::adopt_orphans`]),
-//! and freezing kills every other process of the role's user. Run as any other process, as in
-//! tests, it kills only the process groups of the commands still running.
+//! process, it asks for its descendants' orphans ([`sys::adopt_orphans`]), and freezing kills
+//! every other process of the role's user. Run as any other process, as in tests, it kills only
+//! the process groups of the commands still running.
 //!
 //! It runs as the role's user, needing no privileges, from the start or, started as root with
 //! `--user`, from before it does anything else but give `/pumpkin` to that user
@@ -56,8 +50,6 @@ mod ops;
 mod session;
 mod sys;
 
-/// The grammar of `sandboxd`'s command line, from which xflags generates its parser, the types
-/// below and `--help`.
 mod flags {
     #![expect(
         unreachable_pub,
@@ -288,7 +280,6 @@ fn become_role(User { uid, gid }: User) -> Result<(), String> {
     sys::adopt_orphans().context("taking the orphans of sandboxd's commands failed")
 }
 
-/// The registration grant in [`SANDBOXD_GRANT`].
 fn grant() -> Result<RegistrationGrant, String> {
     let Some(grant) = env::var_os(SANDBOXD_GRANT) else {
         return Err(format!(
@@ -302,9 +293,8 @@ fn grant() -> Result<RegistrationGrant, String> {
     RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
 }
 
-/// Writes `line` to `stream`, standard output or standard error, and ignores a failed write:
-/// what `sandboxd` and `sandboxctl` print never changes their outcome, which their exit code
-/// reports even when nobody reads their output.
 fn print_line(mut stream: impl Write, line: impl Display) {
+    // A failed write is ignored: what `sandboxd` and `sandboxctl` print never changes their
+    // outcome, which their exit code reports even when nobody reads their output.
     let _ = writeln!(stream, "{line}");
 }

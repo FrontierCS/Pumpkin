@@ -1,9 +1,5 @@
 //! A TLS client's end and a server's, over the loopback, the server being the stand-in for a
-//! provider's TLS edge (`test_support::edge`): what each end's stream carries, one way at a time
-//! and both at once, how one end's close reaches the other, how a connection cut short or
-//! corrupted on the way fails a read, and the handshakes a client refuses: a certificate for
-//! another name or from a root it doesn't trust, a server that sends what isn't TLS, and one
-//! that sends nothing.
+//! provider's TLS edge (`test_support::edge`).
 
 #![expect(
     clippy::unwrap_used,
@@ -21,10 +17,8 @@ use stdx::Deadline;
 use test_support::{HUNG, edge, hung};
 use tls::{Client, Stream};
 
-/// What the client meets.
 #[derive(Clone, Copy)]
 enum Peer {
-    /// The stand-in's server.
     Server,
     /// The stand-in's server, through a middle that, once told, acts on what the server sends
     /// next as this says.
@@ -33,12 +27,9 @@ enum Peer {
     Sends(&'static [u8]),
 }
 
-/// What a middle does with the server's bytes once told.
 #[derive(Clone, Copy)]
 enum Middle {
-    /// Ends the TCP connection to the client, as a connection cut short does.
     Cuts,
-    /// Sends the client a record that isn't the server's in their place.
     Corrupts,
 }
 
@@ -50,8 +41,8 @@ fn connected() -> (TcpStream, TcpStream) {
     (opened, accepted)
 }
 
-/// Copies `from` to `to` until `from` ends; once `told` has a message, acts as `middle` says on
-/// the next bytes instead, and ends.
+/// Copies `from` to `to` until `from` ends; once `middle`'s receiver has a message, acts as its
+/// [`Middle`] says on the next bytes instead, and ends.
 fn copy(mut from: TcpStream, mut to: TcpStream, middle: Option<&(Middle, mpsc::Receiver<()>)>) {
     let mut chunk = vec![0; 64 << 10];
     loop {
@@ -121,8 +112,8 @@ fn check(
     expect.assert_eq(&shown.join("\n"));
 }
 
-/// 8 MiB of a pattern, four times what the sockets between the ends hold of a session that reads
-/// nothing.
+/// 8 MiB of a pattern.
+// Four times what the sockets between the ends hold of a session that reads nothing.
 fn pattern() -> Vec<u8> {
     (0..8u32 << 20).map(|i| (i % 251) as u8).collect()
 }

@@ -74,7 +74,6 @@ pub struct Build {
     commit: Option<Commit>,
 }
 
-/// A commit of Pumpkin's repository.
 #[derive(Clone, Copy, Debug)]
 struct Commit {
     /// Its hash, in hexadecimal digits.
@@ -156,9 +155,7 @@ pub(super) struct Lock {
 /// A new run's id, which names its record and tags its sandboxes: `now` as a UTC time, and 8
 /// random hexadecimal digits, as `20261028-131811-1a2b3c4d`, which sorts by the time of the call.
 ///
-/// # Errors
-///
-/// Fails if `now` is before the Unix epoch, or `/dev/urandom` can't be read.
+/// Fails if `now` is before the Unix epoch.
 pub fn new_id(now: SystemTime) -> Result<RunTag, String> {
     let seconds = UnixTime::of(now)?.since_epoch().as_secs();
     let mut random = [0; 4];
@@ -202,8 +199,6 @@ pub fn minted(id: &str) -> Option<Duration> {
 
 /// The one of `names`, the ids of the runs `among` says where, such as `in <dir>`, that `run`, an
 /// id, a prefix of one, or of its 8 random digits, names: the one that no other id shares it with.
-///
-/// # Errors
 ///
 /// Fails if `run` is empty, or names no id of `names` or several, which the error lists.
 pub fn named<'n>(names: &'n [String], run: &str, among: &str) -> Result<&'n str, String> {
@@ -368,7 +363,7 @@ impl Record {
     /// # Errors
     ///
     /// Fails if `dir` is no directory, has no `record.json`, or has one that is not a record of
-    /// this version of Pumpkin, or if `dir` is relative and the current directory can't be read.
+    /// this version of Pumpkin.
     pub fn open(dir: &Path) -> Result<Self, String> {
         let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
             return Err(format!(
@@ -436,12 +431,8 @@ impl Record {
     }
 
     /// The record that `run`, a record's directory name, a prefix of it or of its 8 random
-    /// digits that no other record's name shares, names in `runs`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `run` is empty, if it names no record or several, which the error lists, if
-    /// `runs` can't be read, or as [`open`](Self::open) does.
+    /// digits that no other record's name shares, names in `runs`. Fails if `run` is empty, or
+    /// names no record or several, which the error lists.
     pub fn find(runs: &Path, run: &str) -> Result<Self, String> {
         let names = names(runs)?;
         let id = named(&names, run, &format!("in {}", runs.display()))?;
@@ -450,10 +441,6 @@ impl Record {
 
     /// Every record in `runs`, by its id, oldest first, each opened as [`open`](Self::open)
     /// does, or why it can't be; a directory there that holds no `record.json` is no record.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `runs` can't be read.
     pub fn all(runs: &Path) -> Result<Vec<Result<Self, String>>, String> {
         let mut records = Vec::new();
         for name in names(runs)? {
@@ -486,10 +473,6 @@ impl Record {
 
     /// The name of the run's workflow, from its `ir.json`; `None` if the record has none yet, as
     /// one just begun.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `ir.json` can't be read, or isn't a workflow's IR.
     pub fn task(&self) -> Result<Option<String>, String> {
         let path = self.dir.join("ir.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -535,10 +518,6 @@ impl Record {
     /// Waits until the run has ended, or been lost, and returns how: at once if its
     /// `outcome.json` is there. Calls `following` first if the run is live, which is to say that
     /// the wait is a long one.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `outcome.json` is not one this build knows, or if it or the lock can't be read.
     pub fn wait(&self, following: impl FnOnce()) -> Result<Ending, String> {
         if let Some(ending) = self.ending()? {
             return Ok(ending);
@@ -552,10 +531,6 @@ impl Record {
 
     /// How the run ended, or was lost, as [`wait`](Self::wait) finds it; `None` while the run is
     /// live. Does not wait.
-    ///
-    /// # Errors
-    ///
-    /// As [`wait`](Self::wait) fails.
     pub fn ending(&self) -> Result<Option<Ending>, String> {
         let (pid, pid_path) = self.pid_file()?;
         // An `outcome.json` is the record's last write, so it decides before the lock does.
@@ -571,10 +546,6 @@ impl Record {
 
     /// The process ID that the run's driver wrote to `driver.pid`, while it holds the record's
     /// lock; `None` once the run has ended or been lost.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `driver.pid` can't be read, or holds no number.
     pub fn driver(&self) -> Result<Option<u32>, String> {
         let (pid, path) = self.pid_file()?;
         match pid.try_lock_shared() {
@@ -666,11 +637,6 @@ impl Record {
     /// Whether the run's own end finished it, with every sandbox that the record holds deleted,
     /// so that a reap would find of it only what a create that gave up made after the end's
     /// sweep, which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
-    ///
-    /// # Errors
-    ///
-    /// Fails if `outcome.json` is not one this build knows, or a sandbox's `sandbox.json`, or
-    /// `reaps.jsonl`, can't be read.
     pub fn ended_clean(&self) -> Result<bool, String> {
         let finished = match self.ended()? {
             Some(Ending::Scored { .. } | Ending::Unscored(_) | Ending::NoResult { .. }) => true,
@@ -758,11 +724,6 @@ impl Record {
     /// What each provider that the run's roles are placed on reported of its environment, by
     /// its name: the `report` that `provider.json` holds of it, in the provider's own form; none
     /// if the run didn't get as far as writing `provider.json`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `provider.json` can't be read, or holds no `providers` object whose every entry
-    /// is named by a provider's name and holds a `report`.
     pub fn provider_reports(&self) -> Result<BTreeMap<Name, Value>, String> {
         let path = self.dir.join("provider.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -916,7 +877,6 @@ fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
     }
 }
 
-/// The directory of the sockets of the run whose record is `dir` (`gateway::Sockets`).
 pub(super) fn sockets(dir: &Path) -> PathBuf {
     dir.join("sockets")
 }
@@ -1001,11 +961,9 @@ fn checked(runs: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// This process's status, whose `Uid:` line [`effective_uid`] reads.
 const STATUS: &str = "/proc/self/status";
 
-/// The effective uid of this process, the second of the four on [`STATUS`]'s `Uid:` line. Fails if
-/// the file can't be read, or holds no such line.
+/// The effective uid of this process, the second of the four on [`STATUS`]'s `Uid:` line.
 fn effective_uid() -> Result<u32, String> {
     let status = fs::read_to_string(STATUS).context(STATUS)?;
     (status.lines())
@@ -1019,17 +977,14 @@ fn effective_uid() -> Result<u32, String> {
         })
 }
 
-/// The user database [`private_group`] reads.
 const PASSWD: &str = "/etc/passwd";
 
-/// The group database [`private_group`] reads.
 const GROUP: &str = "/etc/group";
 
 /// The gid of the private group of `user`, if it has one: its primary group in [`PASSWD`], when
 /// [`GROUP`] lists it with no member but `user`, and no other user in [`PASSWD`] has it as their
 /// primary group. A user or a group these files don't list, as one that only a network database
-/// holds, has none, and a member that only such a database adds goes unseen. Fails if either
-/// file can't be read.
+/// holds, has none, and a member that only such a database adds goes unseen.
 fn private_group(user: u32) -> Result<Option<u32>, String> {
     let passwd = fs::read_to_string(PASSWD).context(PASSWD)?;
     let group = fs::read_to_string(GROUP).context(GROUP)?;
@@ -1140,8 +1095,6 @@ pub(super) fn write_json(
     replace(host, dir, name, json_text(value).as_bytes())
 }
 
-/// Writes `workflow` as the record's `ir.json` in `dir`, as [`ir_json`] gives it, by [`replace`]
-/// on `host`.
 pub(super) fn write_ir(host: &impl Host, dir: &Path, workflow: &Workflow) -> Result<(), String> {
     replace(host, dir, "ir.json", ir_json(workflow).as_bytes())
 }
@@ -1256,7 +1209,6 @@ impl<'h, H: Host> Payloads<'h, H> {
         }
     }
 
-    /// Where the payload whose digest is `digest` is stored.
     fn path(&self, digest: &Sha256Digest) -> PathBuf {
         self.dir.join(digest.hex())
     }
@@ -1269,12 +1221,7 @@ pub(super) struct Stored {
 }
 
 impl Stored {
-    /// The payload's bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails if its file can't be read, or holds bytes of another size or SHA-256 than the
-    /// payload's.
+    /// The payload's bytes, checked against its size and SHA-256.
     pub(super) fn read(&self) -> Result<Vec<u8>, String> {
         let bytes = fs::read(&self.path).context(self.path.display())?;
         let read = reference(&bytes);
@@ -1306,7 +1253,6 @@ pub(super) fn collected(dir: &Path) -> String {
     parts.join("; ")
 }
 
-/// What the files below a directory hold, in all.
 #[derive(Clone, Copy, Debug, Default)]
 struct TreeSize {
     /// The entries that aren't directories.
@@ -1314,7 +1260,6 @@ struct TreeSize {
     bytes: u64,
 }
 
-/// What the files below `dir` hold, in all.
 fn tree_size(dir: &Path) -> io::Result<TreeSize> {
     let mut size = TreeSize::default();
     for entry in fs::read_dir(dir)? {

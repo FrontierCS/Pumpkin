@@ -69,7 +69,6 @@ fn short() -> Deadline {
     Deadline::after(Duration::from_millis(100))
 }
 
-/// Runs `scenario` in a directory of its own, and checks the lines it reports against `expect`.
 fn check(scenario: impl FnOnce(&Path) -> Vec<String>, expect: &Expect) {
     // Kept if the test fails.
     let dir = tempfile::Builder::new()
@@ -100,10 +99,6 @@ fn fakes(
 }
 
 /// What came of `action`, and the op replies and model responses the fake sandbox heard, if any.
-///
-/// # Panics
-///
-/// Panics unless `action` returns within [`HUNG`], which only an action that hangs takes.
 fn run(
     dir: &Path,
     ops: Option<OpPayloadLimit>,
@@ -122,10 +117,6 @@ fn run(
 
 /// What `f` returns, run on a thread of its own, so that an `f` that hangs fails the test
 /// rather than hanging it.
-///
-/// # Panics
-///
-/// Panics if `f` does, or unless it returns within [`HUNG`], saying that `what` took longer.
 fn bounded<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static) -> R {
     let (returned, result) = mpsc::channel();
     let thread = thread::spawn(move || {
@@ -248,11 +239,6 @@ fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
 
 /// `outcome`, and the op replies and model responses that `sandbox` heard by the end of
 /// `session`, if any.
-///
-/// # Panics
-///
-/// Panics unless dropping `session` returns within [`HUNG`], by when its reader has sent
-/// whatever was left to arrive, and stopped.
 fn heard(
     outcome: String,
     session: Session,
@@ -326,10 +312,6 @@ fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
 
 /// Sends the frame of `message` and `body` over and over, as fast as the gateway reads them,
 /// and reads nothing, until the gateway hangs up, which a write then shows by failing.
-///
-/// # Panics
-///
-/// Panics if the gateway is still there after [`HUNG`].
 fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
     let hung = hung();
     while frame::write(connection, message, body).is_ok() {
@@ -343,10 +325,6 @@ fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
 /// Sends a frame a byte at a time, a millisecond apart, and reads nothing, until the gateway
 /// hangs up, which a write then shows by failing. The frame's body is a full one, whose last byte
 /// is never sent, so the gateway reads no whole frame to act on.
-///
-/// # Panics
-///
-/// Panics if the gateway is still there after [`HUNG`].
 fn send_unended(connection: &mut UnixStream) {
     let mut unended = Vec::new();
     let (message, _) = done(0);
@@ -404,7 +382,6 @@ fn outcome(outcome: std::io::Result<()>) -> String {
     }
 }
 
-/// How to run `true`.
 fn launch() -> Launch {
     let path = |path: &str| AbsolutePath::try_from(path.to_owned()).unwrap();
     Launch {
@@ -514,10 +491,6 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
 }
 
 /// The next arrival, or `None` once the session's reader has stopped.
-///
-/// # Panics
-///
-/// Panics if nothing arrives within [`HUNG`].
 fn next(arrivals: &Receiver<Arrival>) -> Option<Arrival> {
     match arrivals.recv_timeout(HUNG) {
         Ok(arrival) => Some(arrival),
@@ -1218,10 +1191,9 @@ fn deadlines() {
             Some(OpPayloadLimit::NONE),
             false,
             &[
-                // The sandbox answers after a pause, or stops reading a large put for one, and then
-                // reads on: the requests wait, as their deadlines haven't passed. It answers the
-                // put before it has read it all, which the gateway takes once the put is all
-                // written.
+                // The sandbox pauses, or stops reading a large put, then reads on: the requests
+                // wait, as their deadlines haven't passed. It answers the put before reading it
+                // all, which the gateway takes once the put is all written.
                 (
                     |session, _, _| freezes(session, hung()),
                     |s| vec![pause(), done(s)],
@@ -1543,7 +1515,6 @@ fn issue(listener: &GrantListener, address: SocketAddr) -> (RegistrationGrant, R
     (grant, registration)
 }
 
-/// The hello that presents `grant`.
 fn granted(grant: &RegistrationGrant) -> Value {
     serde_json::to_value(hello(Some(grant.clone()))).unwrap()
 }
@@ -1556,7 +1527,6 @@ fn hello(grant: Option<RegistrationGrant>) -> Hello {
 /// The messages a fake sandbox named `name` sends in answer to the request on `stream`.
 type Named = fn(stream: u32, name: &str) -> Vec<Value>;
 
-/// Fails the request on `stream` with the sandbox's `name`.
 fn named(stream: u32, name: &str) -> Vec<Value> {
     vec![json!({ "type": "failed", "stream": stream, "message": format!("I am {name}") })]
 }
@@ -1937,7 +1907,6 @@ fn untrusted() -> String {
     format!("{session:?}; {:?}", shown.join().unwrap())
 }
 
-/// The stand-in edge's endpoint at `port`.
 fn endpoint(port: u16) -> Endpoint {
     Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap()
 }

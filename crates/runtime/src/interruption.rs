@@ -1,6 +1,4 @@
-//! What stops a run short of its outcome: a signal that the process notes ([`signal`]), which
-//! [`Run::execute`](super::Run::execute) heeds, or a failure; either way, how the run
-//! [`Stopped`].
+//! What stops a run short of its outcome: a signal that the process notes, or a failure.
 
 use std::fmt;
 
@@ -13,7 +11,6 @@ pub enum Signal {
 }
 
 impl Signal {
-    /// Every signal that interrupts a run.
     const ALL: [Self; 3] = [Self::Int, Self::Term, Self::Hup];
 
     /// The signal that `name` names, as [`Signal::name`] gives it, if one does.
@@ -45,7 +42,6 @@ pub(super) fn signal() -> Option<Signal> {
     Some(interrupting)
 }
 
-/// Fails with the interruption, once a signal has come ([`signal`]).
 pub(super) fn check() -> Result<(), Stopped> {
     signal().map_or(Ok(()), |signal| Err(Stopped::Interrupted(signal)))
 }
@@ -53,9 +49,7 @@ pub(super) fn check() -> Result<(), Stopped> {
 /// Why a run stopped without an outcome, as its `outcome.json` records it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stopped {
-    /// It failed, for this reason.
     Failed(String),
-    /// This signal interrupted it, as [`stdx::signal::caught`] noted it.
     Interrupted(Signal),
 }
 

@@ -33,7 +33,6 @@ use crate::{Arrival, Connection, Session, Until, context, lock, passed};
 /// through which a path resolves as through the file, a directory included.
 const OPEN_FILES: &str = "/proc/self/fd";
 
-/// The kernel's random source, which the driver's host, a full one, has.
 const RANDOM: &str = "/dev/urandom";
 
 /// How long a wait sleeps between its looks: a registration's accept for its sandbox, a hello's
@@ -68,10 +67,6 @@ impl Sockets {
     /// entries: one who could would swap `dir` for a directory of their own, where the sockets
     /// would then be issued. Its path may be of any length, as each socket is bound through its
     /// directory's handle in `/proc/self/fd`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the directory can't be made.
     pub fn create(dir: PathBuf) -> io::Result<Self> {
         DirBuilder::new()
             .mode(0o700)
@@ -87,10 +82,6 @@ impl Sockets {
     /// dials, as [`SocketDial`] says, and its registration accepts it. The socket takes the
     /// first connection, whoever makes it, which identifies the sandbox, so show the directory to
     /// that sandbox alone.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the directory or the socket can't be made.
     pub fn issue(&self, name: &Name) -> io::Result<(SocketDial, Registration)> {
         // A name is one path component, neither `.` nor `..`, so each sandbox's directory is
         // directly within this one: none is outside it, and none holds another's.
@@ -124,11 +115,10 @@ impl Drop for Sockets {
 /// The TCP address of a run's [`GrantListener`], which it binds and its sandboxes dial.
 ///
 /// It is any address but an unspecified one, such as `0.0.0.0`, or `[::ffff:0.0.0.0]`, its
-/// IPv4-mapped form, which a listener binds but no sandbox can dial. A deployment names the port
-/// that its network admits sandboxes on, such as its security group's, or port 0, for one that the
-/// kernel picks from its ephemeral range as the listener binds, which the listener's dials then
-/// name: so tests on the loopback, and a deployment whose network admits that range, as
-/// `deploy/aws`'s does.
+/// IPv4-mapped form, which a listener binds but no sandbox can dial. The port is the one that the
+/// network admits sandboxes on, or 0, for one that the kernel picks from its ephemeral range as the
+/// listener binds, which the listener's dials then name: 0 suits the loopback, or a network that
+/// admits that range.
 #[derive(Debug)]
 pub struct GatewayAddress(SocketAddr);
 
@@ -199,11 +189,6 @@ impl GrantListener {
     /// Listens at `address`, taking connections on a thread of its own until it drops, and gives
     /// each `hello_timeout` from when it takes it to say its hello ([`HELLO_TIMEOUT`] is the
     /// protocol's).
-    ///
-    /// # Errors
-    ///
-    /// Fails if `address` can't be bound, or the listener can't be made not to block, or if the
-    /// thread doesn't start.
     pub fn bind(address: &GatewayAddress, hello_timeout: Duration) -> io::Result<Self> {
         let GatewayAddress(address) = *address;
         let listener = TcpListener::bind(address).map_err(|error| {
@@ -236,10 +221,6 @@ impl GrantListener {
     /// Issues a sandbox a grant, of random bytes from the kernel, as the [`TcpDial`] its
     /// sandbox dials, and the registration that accepts the session the grant opens, as long as
     /// the registration lasts.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the kernel's random source can't be read.
     pub fn issue(&self) -> io::Result<(TcpDial, Registration)> {
         let grant = random_grant()?;
         let mut grants = lock(&self.grants);
@@ -396,10 +377,6 @@ impl Dialer {
     /// Issues a sandbox a grant, of random bytes from the kernel, as the [`Listening`] its
     /// `sandboxd` listens for, and what makes, of the endpoint its create gives, the registration
     /// that accepts its session.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the kernel's random source can't be read.
     pub fn issue(&self) -> io::Result<(Listening, Unreached)> {
         let grant = random_grant()?;
         let unreached = Unreached {
@@ -443,7 +420,6 @@ struct Dialed {
 const LISTENING: &str = "its sandboxd to listen there";
 
 impl Dialed {
-    /// What a stopped dial awaited.
     fn awaited(&self) -> impl fmt::Display {
         format!("the gateway reached the sandbox at {}", self.endpoint)
     }
@@ -577,16 +553,14 @@ fn random_grant() -> io::Result<RegistrationGrant> {
 
 /// Where one sandbox meets the gateway, and the accept of the session it opens there.
 ///
-/// [`Sockets::issue`] and [`GrantListener::issue`] issue it, and [`Unreached::at`] makes it. The
-/// sandbox meets the gateway as it connects to its socket, as its hello presents its grant, or as
-/// the gateway dials it. Dropping the registration ends the meeting: it removes the socket, or
+/// The sandbox meets the gateway as it connects to its socket, as its hello presents its grant, or
+/// as the gateway dials it. Dropping the registration ends the meeting: it removes the socket, or
 /// ends the grant, closing any connection that presented it.
 #[derive(Debug)]
 pub struct Registration {
     meeting: Meeting,
 }
 
-/// Where a [`Registration`]'s sandbox meets the gateway.
 #[derive(Debug)]
 enum Meeting {
     Socket(Listener),
@@ -603,7 +577,7 @@ impl Registration {
     /// # Errors
     ///
     /// `InvalidData` for a first frame that is no hello it takes, else `TimedOut` past `by`;
-    /// `Other` at once if `stopped` returns true as it waits; or if setting up fails.
+    /// `Other` at once if `stopped` returns true as it waits; any kind if setting up fails.
     pub fn accept<T: Send + 'static>(
         self,
         by: Deadline,

@@ -1,8 +1,6 @@
-//! Serving a session, once the gateway accepts its hello: reading what the gateway sends as it
-//! arrives, its requests, which [`files`] and [`commands`](crate::commands) serve, the replies to
-//! [ops](crate::ops), and the responses to [model requests](crate::model). A collect and a
-//! freeze, which may last, are served on threads of their own where one can start, so that the
-//! session reads on meanwhile; any other request is served before the next frame is read.
+//! Serving a session, once the gateway accepts its hello. A collect and a freeze, which may last,
+//! are served on threads of their own where one can start, so that the session reads on
+//! meanwhile; any other request is served before the next frame is read.
 
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -37,7 +35,8 @@ pub(crate) enum Gateway {
     Listen(SocketAddr, RegistrationGrant, Deadline),
 }
 
-/// How long a `sandboxd` that listens waits between its looks for a peer: a twentieth of a second, which the gateway's dial, taking a round trip or more, hardly notices.
+/// How long a `sandboxd` that listens waits between its looks for a peer.
+// A twentieth of a second, which the gateway's dial, taking a round trip or more, hardly notices.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
 /// Why a `sandboxd` that listens ends once its deadline has passed.
@@ -62,10 +61,8 @@ impl fmt::Display for Gateway {
     }
 }
 
-/// The reading end of a session's connection.
 type Reader = Box<dyn Read>;
 
-/// The writing end of a session's connection.
 type Writer = Box<dyn Write + Send>;
 
 /// How long `sandboxd` gives `nvidia-smi` to name the sandbox's GPUs as it starts.
@@ -336,8 +333,7 @@ fn halves<S: Read + Write + Send + 'static>(
     Ok((Box::new(stream), Box::new(writer)))
 }
 
-/// Sends frames to the gateway, from the session, from the thread that reports exits, from the
-/// threads that collect and freeze, and from the threads that carry ops and model requests.
+/// Sends frames to the gateway, from any of the session's threads.
 #[derive(Clone)]
 pub(crate) struct Sender(Arc<Mutex<Writer>>);
 
@@ -347,7 +343,6 @@ impl Sender {
         frame::write(&mut *writer, message, body)
     }
 
-    /// Replies to the request on `stream` with its outcome.
     pub(crate) fn reply(&self, stream: u32, outcome: Result<(), String>) -> io::Result<()> {
         let message = match outcome {
             Ok(()) => FromSandbox::Done { stream },
