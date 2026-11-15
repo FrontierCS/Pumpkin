@@ -13,20 +13,15 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::num::NonZeroU64;
 
-use harness::codex::{self, CODEX_0_167_0, ReasoningEffort, Tools, Workspace};
-use schema::ir::{self, AbsolutePath, ModelName};
 use schema::sandbox::{MAX_MODEL_REQUESTS_IN_FLIGHT, RelativePath, model_url};
-use serde::Serialize;
-use serde_json::Value as Json;
 
 use crate::builtins::{Call, Universal, called, lacks, place, string};
 use crate::plan::{Image, Place, Planned, Recipe, WorkflowCall, declare};
 use crate::problem::Fault;
 use crate::syntax::{Def, is_name};
 use crate::value::{
-    Budget, Builtin, Dict, Entry, ImageId, Key, Kind, Nested, Span, Text, Value, escape, quote,
+    Budget, Builtin, Dict, Entry, ImageId, Key, Kind, Span, Text, Value, escape, quote,
 };
 use crate::{Label, Root, is_component};
 
@@ -62,25 +57,17 @@ pub(crate) enum Pumpkin {
     Workflow,
     Arg,
     Image,
-    Codex,
     PackageName,
 }
 
 impl Pumpkin {
-    const ALL: [Self; 5] = [
-        Self::Workflow,
-        Self::Arg,
-        Self::Image,
-        Self::Codex,
-        Self::PackageName,
-    ];
+    const ALL: [Self; 4] = [Self::Workflow, Self::Arg, Self::Image, Self::PackageName];
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Workflow => "workflow",
             Self::Arg => "arg",
             Self::Image => "image",
-            Self::Codex => "codex",
             Self::PackageName => "package_name",
         }
     }
@@ -96,7 +83,6 @@ impl Pumpkin {
             Self::Workflow => workflow(call, site, planned),
             Self::Arg => arg(call, planned),
             Self::Image => image(call, site, planned),
-            Self::Codex => codex(call, site, planned),
             Self::PackageName => package_name(call, site, planned),
         }
     }
@@ -454,7 +440,7 @@ fn image(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<
         args,
         repository,
     };
-    let image = Image::Recipe { recipe, contexts };
+    let image = Image { recipe, contexts };
     let image = declare(&mut planned.images, image, site.place(at));
     Ok(Value {
         kind: Kind::Image(image),
@@ -662,111 +648,6 @@ fn fits(repository: String, at: Span) -> Result<String, Fault> {
     Err(Fault::new(at, message))
 }
 
-/// `codex(base, *, model, effort, tools, workspace, prompt, deadline_seconds,
-/// finalize_grace_seconds)`: what a role of an agent running Codex takes: `image`, `base` with
-/// Codex's layer, [`CODEX_0_167_0`]; `runtime`, [`codex::runtime`]'s for `prompt`, Codex in
-/// `workspace` on `model` at `effort`, with `tools`, deadline and grace; `egress`, `model`'s route.
-///
-/// # Errors
-///
-/// A call made while a file other than the entry loads; a base that is no image; or a value that
-/// the harness, its adapter or the IR refuses, at that value.
-fn codex(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
-    const PARAMS: Params<1, 7, 0> = Params {
-        positional: ["base"],
-        required: [
-            "model",
-            "effort",
-            "tools",
-            "workspace",
-            "prompt",
-            "deadline_seconds",
-            "finalize_grace_seconds",
-        ],
-        optional: [],
-    };
-    let Bound {
-        positional: [base],
-        required,
-        optional: [],
-    } = PARAMS.bind(Pumpkin::Codex, call)?;
-    let at = call.at;
-    site.in_entry(Pumpkin::Codex, at)?;
-    let Kind::Image(on) = base.kind else {
-        let message = format!(
-            "`codex`'s `base` can't be {}: give an image, as `image()` makes",
-            base.shown()
-        );
-        return Err(Fault::new(base.span, message));
-    };
-    let [runtime, egress] = agent(&required, call)?;
-    let base_repository = planned.images[on.0].image.repository();
-    let repository = format!("{base_repository}/{}", CODEX_0_167_0.name);
-    let layer = Image::Layer {
-        base: on,
-        pin: CODEX_0_167_0,
-        repository: fits(repository, base.span)?,
-    };
-    let layer = declare(&mut planned.images, layer, site.place(at));
-    let image = Value {
-        kind: Kind::Image(layer),
-        span: at,
-    };
-    record(
-        [("image", image), ("runtime", runtime), ("egress", egress)],
-        call,
-    )
-}
-
-/// The runtime of an agent that runs Codex and its route, as `codex()`'s doc says, from the
-/// call's `model`, `effort`, `tools`, `workspace`, `prompt`, `deadline_seconds` and
-/// `finalize_grace_seconds`, made by `call`.
-fn agent(
-    [model, effort, tools, workspace, prompt, deadline, grace]: &[Value; 7],
-    call: &Call<'_>,
-) -> Result<[Value; 2], Fault> {
-    // The harness's and the IR's own errors, at the value they reject.
-    let rejected = |value: &Value| {
-        let at = value.span;
-        move |message: String| Fault::new(at, message)
-    };
-    let name = string("`codex`'s `model`", model.span, model)?;
-    let model_name = ModelName::try_from(String::from(name)).map_err(rejected(model))?;
-    let effort_text = string("`codex`'s `effort`", effort.span, effort)?;
-    let reasoning = ReasoningEffort::try_from(effort_text).map_err(rejected(effort))?;
-    let tools_text = string("`codex`'s `tools`", tools.span, tools)?;
-    let sent = Tools::try_from(tools_text).map_err(rejected(tools))?;
-    let path = string("`codex`'s `workspace`", workspace.span, workspace)?;
-    let place = AbsolutePath::try_from(String::from(path)).and_then(Workspace::try_from);
-    let place = place.map_err(rejected(workspace))?;
-    let text = string("`codex`'s `prompt`", prompt.span, prompt)?;
-    let deadline_seconds = seconds("`codex`'s `deadline_seconds`", deadline)?;
-    let Some(deadline_seconds) = NonZeroU64::new(deadline_seconds) else {
-        let message = "`codex`'s `deadline_seconds` is 0: give a positive int";
-        return Err(Fault::new(deadline.span, message));
-    };
-    let grace_seconds = seconds("`codex`'s `finalize_grace_seconds`", grace)?;
-    // The adapter refuses only a model whose tools it can't send as `tools` says.
-    let runtime = codex::runtime(
-        place,
-        &model_name,
-        reasoning,
-        sent,
-        text,
-        deadline_seconds,
-        grace_seconds,
-    );
-    let runtime = ir::Runtime::Agent(runtime.map_err(rejected(model))?);
-    let (at, budget) = (call.at, call.budget);
-    let made = |kind| Value { kind, span: at };
-    let name = made(Kind::Str(Text::new(name, at, budget)?));
-    let models = Nested::new(Vec::from([name]), at, budget)?;
-    let api = made(Kind::Str(Text::new("responses", at, budget)?));
-    let entry = record([("api", api), ("models", made(Kind::List(models)))], call)?;
-    let route = made(Kind::List(Nested::new(Vec::from([entry]), at, budget)?));
-    Ok([data(&runtime, call)?, record([("model", route)], call)?])
-}
-
 /// `package_name()`: the entry file's directory below the root, such as `tasks/bench`, or the
 /// empty string for an entry at the root.
 ///
@@ -789,76 +670,4 @@ fn package_name(
         kind: Kind::Str(Text::new(&planned.package, call.at, call.budget)?),
         span: call.at,
     })
-}
-
-fn record<K: AsRef<str>>(
-    fields: impl IntoIterator<Item = (K, Value)>,
-    call: &Call<'_>,
-) -> Result<Value, Fault> {
-    let at = call.at;
-    let entries = fields.into_iter().map(|(key, value)| {
-        Ok(Entry {
-            key: Key::Str(Text::new(key.as_ref(), at, call.budget)?),
-            key_span: at,
-            value,
-        })
-    });
-    let entries = entries.collect::<Result<_, Fault>>()?;
-    let kind = Kind::Dict(Dict::new(entries, at, call.budget)?);
-    Ok(Value { kind, span: at })
-}
-
-/// The seconds that `value`, given as `what`, is: an int of 0 or more.
-fn seconds(what: &str, value: &Value) -> Result<u64, Fault> {
-    let Kind::Int(int) = value.kind else {
-        let message = format!("{what} can't be {}: give an int", value.shown());
-        return Err(Fault::new(value.span, message));
-    };
-    u64::try_from(int).map_err(|_| {
-        let message = format!("{what} is {int}: give an int of 0 or more");
-        Fault::new(value.span, message)
-    })
-}
-
-/// `data`, a part of the IR, as the values that write it in its JSON form, each made by `call`.
-fn data(data: &impl Serialize, call: &Call<'_>) -> Result<Value, Fault> {
-    match serde_json::to_value(data) {
-        Ok(json) => from_json(json, call),
-        Err(error) => unreachable!(
-            "the IR doesn't serialize, though its types serialize to JSON, as every run's record \
-             writes them: {error}"
-        ),
-    }
-}
-
-/// `json`, as the values that write it, each made by `call`.
-fn from_json(json: Json, call: &Call<'_>) -> Result<Value, Fault> {
-    let at = call.at;
-    let kind = match json {
-        Json::Null => Kind::None,
-        Json::Bool(bool) => Kind::Bool(bool),
-        Json::Number(number) => {
-            let Some(int) = number.as_i64() else {
-                unreachable!(
-                    "the IR holds {number}, which is no 64-bit int, though the only numbers in \
-                     the parts of the IR that `codex()` writes, an agent's runtime and its route, \
-                     are the ints its call gives"
-                )
-            };
-            Kind::Int(int)
-        }
-        Json::String(text) => Kind::Str(Text::new(&text, at, call.budget)?),
-        Json::Array(items) => {
-            let items = items.into_iter().map(|item| from_json(item, call));
-            let items = items.collect::<Result<_, _>>()?;
-            Kind::List(Nested::new(items, at, call.budget)?)
-        }
-        Json::Object(fields) => {
-            let fields = fields
-                .into_iter()
-                .map(|(key, value)| Ok((key, from_json(value, call)?)));
-            return record(fields.collect::<Result<Vec<_>, Fault>>()?, call);
-        }
-    };
-    Ok(Value { kind, span: at })
 }

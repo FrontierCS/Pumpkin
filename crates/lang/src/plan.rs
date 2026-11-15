@@ -1,8 +1,8 @@
 //! What an evaluation gives: a [`Plan`] of the images it declares and of the workflow that names
 //! them, which the IR's types and rules check once the images have IDs.
 //!
-//! The images are declared in the order the calls of `image()` and `codex()` run, so that each
-//! comes after the image it is built on, and an image declared again, equal to one before, is
+//! The images are declared in the order the calls of `image()` run, so that each comes after the
+//! images it is built on, and an image declared again, equal to one before, is
 //! that one. An image's problems, from its check or its build, are at the call that declares it,
 //! with the calls it is in.
 
@@ -12,7 +12,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
-use harness::Pin;
 use schema::ir;
 use schema::sandbox::RelativePath;
 use schema::workflow::Workflow;
@@ -83,59 +82,11 @@ pub(crate) struct Declaration {
     place: Place,
 }
 
-pub(crate) enum Image {
-    /// `recipe`'s image, given each image of `contexts` as the named context of its key.
-    Recipe {
-        recipe: Recipe,
-        contexts: BTreeMap<String, ImageId>,
-    },
-    /// `pin`'s harness added to `base`, in `repository`.
-    Layer {
-        base: ImageId,
-        pin: Pin,
-        repository: String,
-    },
-}
-
-impl Image {
-    fn bases(&self) -> impl Iterator<Item = &ImageId> {
-        let (contexts, base) = match self {
-            Self::Recipe { contexts, .. } => (Some(contexts.values()), None),
-            Self::Layer { base, .. } => (None, Some(base)),
-        };
-        contexts.into_iter().flatten().chain(base)
-    }
-
-    pub(crate) fn repository(&self) -> &str {
-        match self {
-            Self::Recipe { recipe, .. } => &recipe.repository,
-            Self::Layer { repository, .. } => repository,
-        }
-    }
-}
-
-impl PartialEq for Image {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::Recipe { recipe, contexts },
-                Self::Recipe {
-                    recipe: other_recipe,
-                    contexts: other_contexts,
-                },
-            ) => recipe == other_recipe && contexts == other_contexts,
-            // A layer's repository follows from its base and its pin.
-            (
-                Self::Layer { base, pin, .. },
-                Self::Layer {
-                    base: other_base,
-                    pin: other_pin,
-                    ..
-                },
-            ) => base == other_base && pin.name == other_pin.name,
-            (Self::Recipe { .. } | Self::Layer { .. }, _) => false,
-        }
-    }
+/// `recipe`'s image, given each image of `contexts` as the named context of its key.
+#[derive(PartialEq)]
+pub(crate) struct Image {
+    pub(crate) recipe: Recipe,
+    pub(crate) contexts: BTreeMap<String, ImageId>,
 }
 
 /// Where a call is made: its span, and the calls it is in, innermost first, each as the note that
@@ -183,23 +134,12 @@ pub struct Recipe {
     pub repository: String,
 }
 
-/// An image to build, as [`Plan::build`] asks for it, `B` being what a build gives.
+/// An image to build, as [`Plan::build`] asks for it, `B` being what a build gives: `recipe`'s
+/// image, given each image of `contexts`, each built before, as the named context of its key.
 #[derive(Debug)]
-pub enum Declared<'p, B> {
-    /// `recipe`'s image, given each image of `contexts`, each built before, as the named context
-    /// of its key.
-    Recipe {
-        recipe: &'p Recipe,
-        contexts: BTreeMap<&'p str, &'p B>,
-    },
-    /// A harness added to an image built before: `recipe`, its pin's [`Pin::recipe`], given that
-    /// image as the one named context of `contexts`, in `repository`: the image's, then `/` and
-    /// the pin's name, a name that Docker takes for a repository.
-    Layer {
-        recipe: String,
-        contexts: BTreeMap<&'p str, &'p B>,
-        repository: &'p str,
-    },
+pub struct Declared<'p, B> {
+    pub recipe: &'p Recipe,
+    pub contexts: BTreeMap<&'p str, &'p B>,
 }
 
 /// What an evaluation gives: the images it declares and the workflow that names them.
@@ -274,12 +214,10 @@ impl Plan {
     /// contexts, each by the index among the plan's images of the image it names, which no other
     /// index names, as no two images of a plan are equal.
     pub fn recipes(&self) -> impl Iterator<Item = (&Recipe, BTreeMap<&str, usize>)> {
-        (self.images.iter()).filter_map(|Declaration { image, .. }| match image {
-            Image::Recipe { recipe, contexts } => {
-                let contexts = contexts.iter().map(|(name, base)| (name.as_str(), base.0));
-                Some((recipe, contexts.collect()))
-            }
-            Image::Layer { .. } => None,
+        (self.images.iter()).map(|Declaration { image, .. }| {
+            let Image { recipe, contexts } = image;
+            let contexts = contexts.iter().map(|(name, base)| (name.as_str(), base.0));
+            (recipe, contexts.collect())
         })
     }
 
@@ -297,14 +235,10 @@ impl Plan {
     ) -> Result<Workflow, Problems> {
         let mut problems = Vec::new();
         for Declaration { image, place } in &self.images {
-            match image {
-                Image::Recipe { recipe, contexts } => {
-                    let names: Vec<&str> = contexts.keys().map(String::as_str).collect();
-                    let found = recipes(recipe, &names).into_iter();
-                    problems.extend(found.map(|message| Problem::At(place.fault(message))));
-                }
-                Image::Layer { .. } => {}
-            }
+            let Image { recipe, contexts } = image;
+            let names: Vec<&str> = contexts.keys().map(String::as_str).collect();
+            let found = recipes(recipe, &names).into_iter();
+            problems.extend(found.map(|message| Problem::At(place.fault(message))));
         }
         let stand_ins: Vec<ir::Image> = (0..self.images.len()).map(stand_in).collect();
         match self.workflow(&stand_ins) {
@@ -361,17 +295,17 @@ impl Plan {
         then: impl FnOnce(Vec<Declared<'_, B>>) -> T,
     ) -> Result<T, Problems> {
         let picked: Vec<bool> = (self.images.iter())
-            .map(|Declaration { image, .. }| match image {
-                Image::Recipe { recipe, .. } => wanted(recipe),
-                Image::Layer { .. } => false,
-            })
+            .map(|Declaration { image, .. }| wanted(&image.recipe))
             .collect();
         // Each image is declared after those it is built on, so a walk from the last marks all
         // that a picked image needs.
         let mut needed = Vec::from_iter((0..self.images.len()).map(|_| false));
         for (index, Declaration { image, .. }) in self.images.iter().enumerate().rev() {
             if picked[index] || needed[index] {
-                image.bases().for_each(|base| needed[base.0] = true);
+                image
+                    .contexts
+                    .values()
+                    .for_each(|base| needed[base.0] = true);
             }
         }
         let done = self.built(jobs, &needed, step)?;
@@ -401,7 +335,7 @@ impl Plan {
                 if !failed.is_empty() || running + ready.len() == jobs.get() {
                     break;
                 }
-                if !started[index] && image.bases().all(|base| done[base.0].is_some()) {
+                if !started[index] && (image.contexts.values()).all(|base| done[base.0].is_some()) {
                     started[index] = true;
                     ready.push((index, declared(image, &done)));
                 }
@@ -458,22 +392,12 @@ fn declared<'p, B>(image: &'p Image, done: &'p [Option<B>]) -> Declared<'p, B> {
         Some(built) => built,
         None => unreachable!("an image's build starts only once those it is built on are built"),
     };
-    match image {
-        Image::Recipe { recipe, contexts } => Declared::Recipe {
-            recipe,
-            contexts: (contexts.iter())
-                .map(|(name, base)| (name.as_str(), built(base)))
-                .collect(),
-        },
-        Image::Layer {
-            base,
-            pin,
-            repository,
-        } => Declared::Layer {
-            recipe: pin.recipe(),
-            contexts: BTreeMap::from([(harness::BASE, built(base))]),
-            repository,
-        },
+    let Image { recipe, contexts } = image;
+    Declared {
+        recipe,
+        contexts: (contexts.iter())
+            .map(|(name, base)| (name.as_str(), built(base)))
+            .collect(),
     }
 }
 

@@ -14,6 +14,7 @@ mod conformance;
 mod fixtures;
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::{fs, thread};
@@ -344,41 +345,28 @@ fn stand_in(
     number: usize,
     built: &mut Vec<String>,
 ) -> Result<Built, String> {
-    let line = match declared {
-        Declared::Recipe {
-            recipe:
-                Recipe {
-                    context,
-                    recipe,
-                    mounts,
-                    target,
-                    args,
-                    repository,
-                },
-            contexts,
-        } => {
-            if context.path() == "bad/broken" {
-                return Err(format!("the stand-in build fails `{recipe}`"));
-            }
-            let mounts = (mounts.iter()).map(|(at, dir)| format!(", with {dir} at {at}"));
-            let target = target.iter().map(|target| format!(", its stage {target}"));
-            let args = (args.iter()).map(|(name, value)| format!(", with {name}={value:?}"));
-            let contexts = (contexts.iter())
-                .map(|(name, built)| format!(", with image {} as {name}", built.number));
-            let given: String = mounts.chain(target).chain(args).chain(contexts).collect();
-            format!("{context}'s {recipe}{given}, in {repository}")
-        }
-        Declared::Layer {
-            recipe: _,
-            contexts,
-            repository,
-        } => {
-            let contexts: Vec<String> = (contexts.iter())
-                .map(|(name, built)| format!(", with image {} as {name}", built.number))
-                .collect();
-            format!("a harness's layer{}, in {repository}", contexts.concat())
-        }
-    };
+    let Declared {
+        recipe:
+            Recipe {
+                context,
+                recipe,
+                mounts,
+                target,
+                args,
+                repository,
+            },
+        contexts,
+    } = declared;
+    if context.path() == "bad/broken" {
+        return Err(format!("the stand-in build fails `{recipe}`"));
+    }
+    let mounts = (mounts.iter()).map(|(at, dir)| format!(", with {dir} at {at}"));
+    let target = target.iter().map(|target| format!(", its stage {target}"));
+    let args = (args.iter()).map(|(name, value)| format!(", with {name}={value:?}"));
+    let contexts =
+        (contexts.iter()).map(|(name, built)| format!(", with image {} as {name}", built.number));
+    let given: String = mounts.chain(target).chain(args).chain(contexts).collect();
+    let line = format!("{context}'s {recipe}{given}, in {repository}");
     built.push(format!("image {number}: {line}"));
     let image = ir::Image::try_from(format!("sha256:{number:b>64}")).unwrap();
     Ok(Built { number, image })
@@ -2989,6 +2977,52 @@ images_task(agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB})
 "#;
 
 #[test]
+fn picks() {
+    // The agent's image alone is picked, and is given once the images it is built on are built.
+    let files = files();
+    let shown = on_stack(|| {
+        let (_, case) = Case::parse(IMAGES, &files, Bounds::WORKFLOW);
+        let mut sources = Sources {
+            held: &case.held,
+            files: case.files,
+        };
+        let entry = Label::parse(&format!("//{}", case.entry)).unwrap();
+        let args = Args::parse([]).unwrap();
+        let plan = lang::evaluate(&entry, &mut sources, &args, Bounds::WORKFLOW).unwrap();
+        let mut built = Vec::new();
+        let mut started = 0;
+        let step = |ready: Vec<(usize, Declared<'_, Built>)>| {
+            let ready = ready.into_iter().map(|(index, declared)| {
+                started += 1;
+                (index, stand_in(declared, started, &mut built))
+            });
+            ready.collect()
+        };
+        let picked = plan.build_for(
+            JOBS,
+            |recipe| recipe.recipe.as_str() == "agent/Dockerfile",
+            step,
+            |picked| {
+                let picked = picked.iter().map(|Declared { recipe, contexts }| {
+                    let mut line = format!("picked: {}'s {}", recipe.context, recipe.recipe);
+                    for (name, built) in contexts {
+                        let _ = write!(line, ", with image {} as {name}", built.number);
+                    }
+                    line
+                });
+                picked.collect::<Vec<_>>()
+            },
+        );
+        built.extend(picked.unwrap());
+        built.join("\n")
+    });
+    expect![[r#"
+        image 1: //tasks/images's tools/Dockerfile, with BASE="docker.io/example/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", in pumpkin/tasks/images/tools
+        image 2: //tasks/images's toolchain/Dockerfile, its stage go, in pumpkin/tasks/images/toolchain
+        picked: //tasks/images's agent/Dockerfile, with image 1 as build-tools, with image 2 as toolchain"#]].assert_eq(&shown);
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshots"
@@ -3012,7 +3046,7 @@ fn plans() {
             building 3 and 4
             image 5: //tasks/images's judge/Dockerfile, with //shared at shared, its stage eval, with BASE="docker.io/example/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", in pumpkin/tasks/images/judge
             building 4 and 5
-            image 6: a harness's layer, with image 4 as base, in pumpkin/tasks/images/agent/codex-0.167.0
+            image 6: //harness's Dockerfile, with image 4 as base, in pumpkin/harness
             building 5 and 6
             building 6
             {
@@ -3056,38 +3090,11 @@ fn plans() {
                     "agent": {
                       "command": {
                         "argv": [
-                          "/harness/codex-0.167.0/bin/codex",
-                          "exec",
-                          "--ephemeral",
-                          "--ignore-rules",
-                          "--skip-git-repo-check",
-                          "--json",
-                          "-"
+                          "/harness/bin/agent"
                         ],
-                        "cwd": "/workspace",
-                        "env": [
-                          "CODEX_HOME=/workspace/.codex",
-                          "TMPDIR=/workspace/.tmp"
-                        ]
+                        "cwd": "/workspace"
                       },
                       "deadline_seconds": 7200,
-                      "dirs": [
-                        {
-                          "mode": "0700",
-                          "path": "/workspace/.codex"
-                        },
-                        {
-                          "mode": "0700",
-                          "path": "/workspace/.tmp"
-                        }
-                      ],
-                      "files": [
-                        {
-                          "content": "model = \"model-large\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"pumpkin\"\n# Nobody is there to approve a command, and the agent's sandbox confines Codex, whose own\n# sandbox needs `bwrap`, which its pin leaves out.\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n# A tool's shell reads no login profile, which could change the environment the command sets.\nallow_login_shell = false\n# Nothing reaches past the model route, the only way out of the sandbox.\nweb_search = \"disabled\"\n\n# Codex's record of the run is the events it writes to its standard output, which the teardown\n# collects. The databases it makes in its home as it starts stay there, uncollected: `exec`\n# writes them no log, and its session, ephemeral, keeps nothing in them.\n\n# The model endpoint `sandboxd` serves, which needs no credential.\n[model_providers.pumpkin]\n# Any name but `OpenAI` keeps off the features Codex keeps for the provider of that name.\nname = \"Pumpkin\"\nbase_url = \"http://127.0.0.1:11235\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n# A run of hours meets transient failures.\nrequest_max_retries = 100\nstream_max_retries = 100\n\n# The lead agent and as many spawned ones at most, each with one model request in flight at a\n# time: as many requests as the model route takes from a sandbox at once.\n[agents]\nmax_concurrent_threads_per_session = 6\n\n[analytics]\nenabled = false\n\n[features]\nplugins = false\napps = false\nimage_generation = false\n\n[plugins._default]\nenabled = false\n",
-                          "mode": "0600",
-                          "path": "/workspace/.codex/config.toml"
-                        }
-                      ],
                       "finalize_grace_seconds": 0,
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
                     }
@@ -3181,8 +3188,8 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            lib/images.star:9:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
-                9 | DEADLINE = arg("deadline", int, default = 5 * 3600)
+            lib/images.star:7:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
+                7 | DEADLINE = arg("deadline", int, default = 5 * 3600)
                   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 `--arg mdoel` is given, and no `arg()` call before this one declares it"#]],
     );
@@ -3193,21 +3200,9 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            lib/images.star:10:10: `--arg strict` is `"yes"`, which is no bool: give it `true` or `false`
-                10 | STRICT = arg("strict", bool, default = False)
-                   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
-    );
-    check(
-        &format!(
-            "
-#- --arg effort=hard
-{IMAGES}"
-        ),
-        &expect![[r#"
-            lib/images.star:7:10: `hard` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
-                7 | EFFORT = arg("effort", str, default = "high")
-                  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `images_task()`, called at tasks/images/task.star:5:1"#]],
+            lib/images.star:8:10: `--arg strict` is `"yes"`, which is no bool: give it `true` or `false`
+                8 | STRICT = arg("strict", bool, default = False)
+                  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         &format!(
@@ -3218,8 +3213,8 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            tasks/images/task.star: `--arg efort` is declared by no `arg()` call: give one of `deadline`, `effort`, `model`, `strict`, `tools`
-            tasks/images/task.star: `--arg mdoel` is declared by no `arg()` call: give one of `deadline`, `effort`, `model`, `strict`, `tools`"#]],
+            tasks/images/task.star: `--arg efort` is declared by no `arg()` call: give one of `deadline`, `model`, `strict`
+            tasks/images/task.star: `--arg mdoel` is declared by no `arg()` call: give one of `deadline`, `model`, `strict`"#]],
     );
     check(
         &format!(
@@ -3253,41 +3248,41 @@ load("//lib/images.star", "images_task")
 images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
 "#,
         &expect![[r#"
-            lib/images.star:38:13: the stand-in check refuses `tools/Dockerfile`
-                38 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
+            lib/images.star:36:13: the stand-in check refuses `tools/Dockerfile`
+                36 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:39:17: the stand-in check refuses `toolchain/Dockerfile`
-                39 |     toolchain = image("toolchain/Dockerfile", target = "Go")
+            lib/images.star:37:17: the stand-in check refuses `toolchain/Dockerfile`
+                37 |     toolchain = image("toolchain/Dockerfile", target = "Go")
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:41:19: the stand-in check refuses `agent/Dockerfile`, given build-tools, given toolchain
-                41 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
+            lib/images.star:39:19: the stand-in check refuses `agent/Dockerfile`, given build-tools, given toolchain
+                39 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:41:19: the stand-in check refuses the mount at `shared`
-                41 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
+            lib/images.star:39:19: the stand-in check refuses the mount at `shared`
+                39 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:24:18: the stand-in check refuses `judge/Dockerfile`
-                24 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:22:18: the stand-in check refuses `judge/Dockerfile`
+                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:44:15
+                in `_judge()`, called at lib/images.star:42:15
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:24:18: the stand-in check refuses the mount at `shared`
-                24 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:22:18: the stand-in check refuses the mount at `shared`
+                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:44:15
+                in `_judge()`, called at lib/images.star:42:15
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:24:18: the stand-in check refuses `judge/Dockerfile`
-                24 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:22:18: the stand-in check refuses `judge/Dockerfile`
+                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:44:47
+                in `_judge()`, called at lib/images.star:42:47
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:24:18: the stand-in check refuses the mount at `shared`
-                24 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:22:18: the stand-in check refuses the mount at `shared`
+                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:44:47
+                in `_judge()`, called at lib/images.star:42:47
                 in `images_task()`, called at bad/refused/task.star:5:1
             bad/refused/task.star:5:36: `cpu_millis` can't be `0`: expected a positive int
                 5 | images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
@@ -3304,12 +3299,12 @@ load("//lib/images.star", "images_task")
 images_task(agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB})
 "#,
         &expect![[r#"
-            lib/images.star:38:13: building the image failed: the stand-in build fails `tools/Dockerfile`
-                38 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
+            lib/images.star:36:13: building the image failed: the stand-in build fails `tools/Dockerfile`
+                36 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/broken/task.star:5:1
-            lib/images.star:39:17: building the image failed: the stand-in build fails `toolchain/Dockerfile`
-                39 |     toolchain = image("toolchain/Dockerfile", target = "Go")
+            lib/images.star:37:17: building the image failed: the stand-in build fails `toolchain/Dockerfile`
+                37 |     toolchain = image("toolchain/Dockerfile", target = "Go")
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/broken/task.star:5:1"#]],
     );
@@ -3426,24 +3421,6 @@ fail("same: {}, other: {}".format(
             text.star:1:67: a value of `image`'s `contexts` can't be `"Dockerfile"`: give an image, as `image()` makes
                 1 | X = image("Dockerfile", context = "//images", contexts = {"base": "Dockerfile"})
                   |                                                                   ^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"fail(", ".join(codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0).keys()))"#,
-        &expect![[r#"
-            text.star:1:1: fail: image, runtime, egress
-                1 | fail(", ".join(codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0).keys()))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"
-A = image("Dockerfile", context = "//images")
-B = codex(A, model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-C = codex(A, model = "model-large", effort = "low", tools = "native", workspace = "/home/agent", prompt = "Solve it.", deadline_seconds = 60, finalize_grace_seconds = 0)
-fail(str(int(B["image"] == C["image"])))"#,
-        &expect![[r#"
-            text.star:4:1: fail: 1
-                4 | fail(str(int(B["image"] == C["image"])))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         r#"
@@ -3574,17 +3551,6 @@ X = package_name()"#,
 #- //text.star
 load("//lib.star", "X")
 #- //lib.star
-X = codex(1, model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            lib.star:1:5: `codex()` is called while `//lib.star` loads: call it in the entry file, which loads `//lib.star`
-                1 | X = codex(1, model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
 X = image("Dockerfile", context = "//images")"#,
         &expect![[r#"
             lib.star:1:5: `image()` is called while `//lib.star` loads: call it in the entry file, which loads `//lib.star`
@@ -3597,90 +3563,6 @@ X = image("Dockerfile", context = "//images")"#,
             text.star:1:18: `package_name` takes no argument: drop it
                 1 | X = package_name(1)
                   |                  ^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "hard", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:82: `hard` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
-                1 | codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "hard", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |                                                                                  ^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "both", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:98: `both` is not a way to send Codex's tools: use one of native, functions
-                1 | codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "both", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |                                                                                                  ^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = 0, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:148: `codex`'s `deadline_seconds` is 0: give a positive int
-                1 | codex(image("Dockerfile", context = "//images"), model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = 0, finalize_grace_seconds = 0)
-                  |                                                                                                                                                    ^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = "1h", finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:148: `codex`'s `deadline_seconds` can't be `"1h"`: give an int
-                1 | codex(image("Dockerfile", context = "//images"), model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = "1h", finalize_grace_seconds = 0)
-                  |                                                                                                                                                    ^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = 60, finalize_grace_seconds = -1)"#,
-        &expect![[r#"
-            text.star:1:177: `codex`'s `finalize_grace_seconds` is -1: give an int of 0 or more
-                1 | codex(image("Dockerfile", context = "//images"), model = "m", effort = "high", tools = "native", workspace = "/w", prompt = "", deadline_seconds = 60, finalize_grace_seconds = -1)
-                  |                                                                                                                                                                                 ^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "functions", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:58: Codex's catalog entry for `model-small` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
-                1 | codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "functions", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |                                                          ^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "native", workspace = "/pumpkin/home", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:120: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                1 | codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "native", workspace = "/pumpkin/home", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |                                                                                                                        ^^^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "native", workspace = "workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:120: `workspace` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
-                1 | codex(image("Dockerfile", context = "//images"), model = "model-small", effort = "high", tools = "native", workspace = "workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |                                                                                                                        ^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "model small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:58: `model small` is not a model name: use one word
-                1 | codex(image("Dockerfile", context = "//images"), model = "model small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |                                                          ^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"codex("Dockerfile", model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:7: `codex`'s `base` can't be `"Dockerfile"`: give an image, as `image()` makes
-                1 | codex("Dockerfile", model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |       ^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//images"), model = "m")"#,
-        &expect![[r#"
-            text.star:1:1: `codex` lacks `effort`, `tools`, `workspace`, `prompt`, `deadline_seconds`, `finalize_grace_seconds`: give them
-                1 | codex(image("Dockerfile", context = "//images"), model = "m")
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"codex(image("Dockerfile", context = "//" + "/".join(["abcdefghij" for a in [1, 2] for b in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]])), model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)"#,
-        &expect![[r#"
-            text.star:1:7: the image's repository, `pumpkin/abcdefghij/abcdefghij/abcdefghij/abcdefghij/abcdefgh…`, has 263 characters, more than Docker's 255: name the directory of the recipe with fewer
-                1 | codex(image("Dockerfile", context = "//" + "/".join(["abcdefghij" for a in [1, 2] for b in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]])), model = "model-small", effort = "high", tools = "native", workspace = "/workspace", prompt = "", deadline_seconds = 60, finalize_grace_seconds = 0)
-                  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         r#"X = image("Dockerfile", contxt = "//images")"#,
@@ -4490,7 +4372,7 @@ load("//lib/parts.star", "AGENT")
 load("@pumpkin//harness/names.star", "NAME")
 "#,
         &expect![[r#"
-            @pumpkin//harness/agent.star:1:6: `@pumpkin//harness/agent.star`, a file of the standard library, loads `//lib/parts.star`, a task's file, though the standard library depends on no task: load only `@pumpkin//` files in it
+            @pumpkin//harness/agent.star:1:6: a load of a task's file, `//lib/parts.star`, in a file of the standard library, which depends on no task, is not in Pumpkin's Starlark: load only `@pumpkin//` files there
                 1 | load("//lib/parts.star", "AGENT")
                   |      ^^^^^^^^^^^^^^^^^^"#]],
     );

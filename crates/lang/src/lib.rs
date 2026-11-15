@@ -8,9 +8,9 @@
 //! and `plan` reads it through `ir`: none uses one before it.
 //!
 //! An evaluation is hermetic: it reads source only through its [`Loader`], by [`Label`]s, which
-//! stay below their root, and its `--arg`s ([`Args`]); and the crate is `no_std`, as `harness` is,
-//! whose adapter `codex()` runs, so that their own code can name no file, clock, environment,
-//! process or randomly seeded hash, though `schema`'s I/O items stay reachable through it. An
+//! stay below their root, and its `--arg`s ([`Args`]); and the crate is `no_std`, so that its own
+//! code can name no file, clock, environment, process or randomly seeded hash, though `schema`'s
+//! I/O items stay reachable through it. An
 //! image is only declared, for its caller to build. The same sources and args always give the
 //! same plan. An evaluation always ends, within [`STACK_BYTES`] of stack and its [`Bounds`]; how
 //! its problems read is [`Problems`]' doc's, and a linter's findings in the files it read read so

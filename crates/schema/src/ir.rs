@@ -354,7 +354,7 @@ pub struct ApiRoute {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Api {
-    /// OpenAI's Responses API, which Codex speaks.
+    /// OpenAI's Responses API.
     Responses,
     /// OpenAI's Chat Completions API, which most clients of a provider that speaks OpenAI's API
     /// write.

@@ -5,7 +5,9 @@
 //!
 //! What a `//` label or an image names is a path below the root, as `lang::Label` says, and it
 //! stays below the root on disk, as no component on its way from the root may be a symbolic link
-//! ([`Root::reach`]). The standard library, below `@pumpkin//` labels, holds no file here.
+//! ([`Root::reach`]). What a `@pumpkin//` label names is a file or a directory of the standard
+//! library, which this `pumpkin` holds (`library::FILES`): a build is given one of its directories
+//! as its files written into a directory of the command's own ([`Library`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -19,9 +21,11 @@ use recipe::fetch::FetchStage;
 use recipe::{Given, Stage};
 use schema::ir::Image;
 use schema::workflow::Workflow;
+use tempfile::TempDir;
 
 use crate::say;
 use crate::style::Formatter;
+use crate::workspace::Workspace;
 
 /// The file that marks the root of a task's repository, where its `//` labels start.
 pub(crate) const MARKER: &str = "PUMPKIN.star";
@@ -218,9 +222,9 @@ impl Root {
 
     /// The problems of `recipe`, an image's, given the named contexts `contexts`, that
     /// `engine::Engine::build` would refuse before building: a context or a mount that is no
-    /// directory below the root, as [`Root::reach`] reaches it; and a recipe, in the directory
-    /// that `engine::mounted` says holds it, that is no regular file there, or that
-    /// `recipe::check` refuses, with its target and args.
+    /// directory below the root, as [`Root::reach`] reaches it, or of the standard library; and a
+    /// recipe, in the directory that `engine::mounted` says holds it, that is no regular file
+    /// there, or that `recipe::check` refuses, with its target and args.
     fn recipe(&mut self, declared: &Recipe, contexts: &[&str]) -> Vec<String> {
         let Recipe {
             context,
@@ -233,16 +237,17 @@ impl Root {
         let mut problems = Vec::new();
         let mut reached = Vec::new();
         for dir in iter::once(context).chain(mounts.values()) {
-            if dir.root() == lang::Root::Library {
-                problems.push(no_library(dir));
-                continue;
-            }
-            match self.reach(dir.path(), Kind::Directory) {
-                Ok(_) => reached.push(dir),
+            let found = match dir.root() {
+                lang::Root::Task => self.reach(dir.path(), Kind::Directory).map(|_| ()),
+                lang::Root::Library if library_dir(dir.path()) => Ok(()),
+                lang::Root::Library => Err(not_in_library(dir, Kind::Directory)),
+            };
+            match found {
+                Ok(()) => reached.push(dir),
                 Err(problem) => problems.push(problem),
             }
         }
-        let (dir, below) = Self::located(declared);
+        let (dir, file) = Self::located(declared);
         // A directory that can't be reached has said why.
         if reached.contains(&dir) {
             let given = Given {
@@ -252,54 +257,45 @@ impl Root {
                     .map(|name| ((*name).to_owned(), ()))
                     .collect(),
             };
-            let checked =
-                (self.bytes(&below)).and_then(|(_, text)| recipe::check(&below, &text, &given));
+            let text = match file.root {
+                lang::Root::Task => self.bytes(&file.path).map(|(_, text)| text),
+                lang::Root::Library => (library_file(&file.path).map(<[u8]>::to_vec))
+                    .ok_or_else(|| not_in_library(&file, Kind::File)),
+            };
+            let checked = text.and_then(|text| recipe::check(&file.to_string(), &text, &given));
             problems.extend(checked.err());
         }
         problems
     }
 
     /// The image that `declared` is, found on `engine`, or its build started there, by
-    /// `engine::Engine::start`, which `admit` holds the image and admits the build for: a
-    /// recipe's, with its context and mounts below the root, its target, args and named
-    /// contexts; or a layer's, from its recipe's text, given its named context.
+    /// `engine::Engine::start`, which `admit` holds the image and admits the build for, with its
+    /// recipe's context and mounts, its target, args and named contexts.
     fn start(
         &self,
         engine: &Engine,
         declared: &Declared<'_, Built>,
         admit: &mut dyn engine::Admit,
     ) -> Result<Started, String> {
-        match *declared {
-            Declared::Recipe {
-                recipe,
-                ref contexts,
-            } => {
-                let (context, given) = self.inputs(recipe, contexts);
-                let file = engine::Recipe::File(recipe.recipe.clone());
-                engine.start(&context, &file, &given, &recipe.repository, admit)
-            }
-            Declared::Layer {
-                ref recipe,
-                ref contexts,
-                repository,
-            } => {
-                let recipe = engine::Recipe::Text(recipe.clone());
-                let given = Given {
-                    contexts: named(contexts),
-                    ..Given::default()
-                };
-                engine.start(&BuildContext::default(), &recipe, &given, repository, admit)
-            }
-        }
+        let Declared {
+            recipe,
+            ref contexts,
+        } = *declared;
+        // Held while the engine reads the context, which it copies before it starts.
+        let (context, given, _library) = self.inputs(recipe, contexts)?;
+        let file = engine::Recipe::File(recipe.recipe.clone());
+        engine.start(&context, &file, &given, &recipe.repository, admit)
     }
 
     /// The context and what else a build of `recipe` is given, with the named contexts
-    /// `contexts`: its context and mounts below the root, its target and its args.
+    /// `contexts`: its context and mounts, below the root or written out of the standard library,
+    /// its target and its args; and the [`Library`] they are written in, if any is, which the
+    /// caller holds while the context is read. Fails if the library can't be written.
     fn inputs<'b>(
         &self,
         recipe: &Recipe,
         contexts: &BTreeMap<&str, &'b Built>,
-    ) -> (BuildContext, Given<&'b Built>) {
+    ) -> Result<(BuildContext, Given<&'b Built>, Option<Library>), String> {
         let Recipe {
             context,
             recipe: _,
@@ -308,11 +304,21 @@ impl Root {
             args,
             repository: _,
         } = recipe;
-        let dir = |label: &Label| match label.root() {
-            lang::Root::Task => self.dir.join(label.path()),
-            lang::Root::Library => unreachable!(
-                "`{label}` is a build's directory, though `Root::recipe` refuses each of the \
-                 standard library's, which holds none, before a build"
+        let library: Vec<&str> = (iter::once(context).chain(mounts.values()))
+            .filter(|dir| dir.root() == lang::Root::Library)
+            .map(Label::path)
+            .collect();
+        let library = if library.is_empty() {
+            None
+        } else {
+            Some(Library::write(&library)?)
+        };
+        let dir = |label: &Label| match (label.root(), &library) {
+            (lang::Root::Task, _) => self.dir.join(label.path()),
+            (lang::Root::Library, Some(library)) => library.0.path().join(label.path()),
+            (lang::Root::Library, None) => unreachable!(
+                "`{label}` is a build's directory of the standard library, which is written out \
+                 for any build that has one"
             ),
         };
         let context = BuildContext {
@@ -326,19 +332,23 @@ impl Root {
             args: args.clone(),
             contexts: named(contexts),
         };
-        (context, given)
+        Ok((context, given, library))
     }
 
     /// The directory that holds `recipe`'s file, as `engine::mounted` says, its context or one
-    /// of its mounts, and the file's path below the root.
-    fn located(recipe: &Recipe) -> (&Label, String) {
+    /// of its mounts, and the file, below that directory's root.
+    fn located(recipe: &Recipe) -> (&Label, Placed) {
         let mounted = engine::mounted(&recipe.mounts, recipe.recipe.as_str());
         let (dir, within) = mounted.unwrap_or((&recipe.context, recipe.recipe.as_str()));
-        let below = match dir.path() {
+        let path = match dir.path() {
             "" => within.to_owned(),
             path => format!("{path}/{within}"),
         };
-        (dir, below)
+        let file = Placed {
+            root: dir.root(),
+            path,
+        };
+        (dir, file)
     }
 
     /// The path below the root of the file at `path`, relative to the working directory, as an
@@ -381,14 +391,76 @@ impl Loader for Root {
     fn load(&mut self, label: &Label) -> Result<String, String> {
         match label.root() {
             lang::Root::Task => self.text(label.path()),
-            lang::Root::Library => Err(no_library(label)),
+            lang::Root::Library => {
+                let bytes = library_file(label.path());
+                let bytes = bytes.ok_or_else(|| not_in_library(label, Kind::File))?;
+                String::from_utf8(bytes.to_vec())
+                    .map_err(|error| format!("`{label}` isn't UTF-8 ({error})"))
+            }
         }
     }
 }
 
-/// The error of `label`, a place of the standard library, which holds no file here.
-fn no_library(label: &Label) -> String {
-    format!("the standard library holds no file, so `{label}` names nothing: name one below `//`")
+/// A file by its path below a root, as a recipe's is ([`Root::located`]): shown by its path, a
+/// task's, or by its whole label, the standard library's, as `lang` names a file in a problem.
+#[derive(PartialEq, Eq)]
+struct Placed {
+    root: lang::Root,
+    path: String,
+}
+
+impl fmt::Display for Placed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.root {
+            lang::Root::Task => self.path.fmt(f),
+            lang::Root::Library => write!(f, "@pumpkin//{}", self.path),
+        }
+    }
+}
+
+/// The bytes of the standard library's file at `path`, below its root, if it holds one.
+fn library_file(path: &str) -> Option<&'static [u8]> {
+    let found = library::FILES.iter().find(|(file, _)| *file == path);
+    found.map(|(_, bytes)| *bytes)
+}
+
+/// Whether the standard library holds the directory `dir`, below its root: a file below it.
+fn library_dir(dir: &str) -> bool {
+    (library::FILES.iter()).any(|(path, _)| below_dir(path, dir))
+}
+
+/// Whether `path` is below the directory `dir`, both below the same root.
+fn below_dir(path: &str, dir: &str) -> bool {
+    (path.strip_prefix(dir)).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The problem of `place`, below `@pumpkin//`, which names no `kind` of the standard library.
+fn not_in_library(place: &impl fmt::Display, kind: Kind) -> String {
+    let noun = kind.noun();
+    format!("`{place}` names no {noun} of the standard library: name one that it holds")
+}
+
+/// Directories of the standard library, written into a directory of the command's own in the
+/// workspace's `tmp`, which is removed once this is dropped: the library's root, below which a
+/// build's context or mount of the library is its directory there.
+struct Library(TempDir);
+
+impl Library {
+    /// Writes the files below each of `dirs`, directories of the standard library, below a new
+    /// directory at their paths, each 0644 in directories of 0755, which a build's stage gives
+    /// them anyway. Fails if one can't be written.
+    fn write(dirs: &[&str]) -> Result<Self, String> {
+        let dir = Workspace::find()?.scratch("pumpkin-library-")?;
+        let below = |path: &str| (dirs.iter()).any(|dir| below_dir(path, dir));
+        for (path, bytes) in library::FILES.iter().filter(|(path, _)| below(path)) {
+            let file = dir.path().join(path);
+            let written = (file.parent())
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::write(&file, bytes));
+            written.map_err(|error| format!("{} can't be written: {error}", file.display()))?;
+        }
+        Ok(Self(dir))
+    }
 }
 
 /// Refuses `text`, the marker's, unless each of its lines holds a comment or nothing after its
@@ -432,6 +504,10 @@ pub(crate) fn check(
 ) -> Result<Result<(), Problems>, String> {
     checked(entry, args, |Task { plan, .. }| {
         plan.lint(|label, text| {
+            // The standard library is checked with this `pumpkin`, and no task can change it.
+            if label.root() == lang::Root::Library {
+                return Ok(Vec::new());
+            }
             let linted = formatter.lint(text);
             linted.map_err(|error| format!("linting `{}` failed: {error}", label.path()))
         })
@@ -505,7 +581,11 @@ pub(crate) fn lock(
 ) -> Result<Result<(), Problems>, String> {
     checked(entry, args, |Task { root, plan, .. }| {
         let below = root.below_root(recipe)?;
-        let picked = |declared: &Recipe| Root::located(declared).1 == below;
+        let file = Placed {
+            root: lang::Root::Task,
+            path: below.clone(),
+        };
+        let picked = |declared: &Recipe| Root::located(declared).1 == file;
         same_inputs(
             entry,
             &below,
@@ -522,12 +602,10 @@ pub(crate) fn lock(
             picked,
             step,
             |declared: Vec<Declared<'_, Built>>| {
-                let Some(Declared::Recipe { recipe, contexts }) = declared.first() else {
-                    unreachable!(
-                        "an image of the recipe was found, and only recipes' images are picked"
-                    )
+                let Some(Declared { recipe, contexts }) = declared.first() else {
+                    unreachable!("an image of the recipe was found, so one is picked")
                 };
-                let (context, given) = root.inputs(recipe, contexts);
+                let (context, given, _library) = root.inputs(recipe, contexts)?;
                 engine.lock(&fetch, &context, given)
             },
         );
@@ -647,13 +725,9 @@ impl<'a> Builds<'a> {
 /// The repository that `declared` is built in, and its stage, as `, stage <name>`, if its recipe
 /// names one.
 fn image<'d>(declared: &Declared<'d, Built>) -> (&'d str, String) {
-    match declared {
-        Declared::Recipe { recipe, .. } => {
-            let stage = recipe.target.iter().map(|stage| format!(", stage {stage}"));
-            (&recipe.repository, stage.collect())
-        }
-        Declared::Layer { repository, .. } => (repository, String::new()),
-    }
+    let recipe = declared.recipe;
+    let stage = recipe.target.iter().map(|stage| format!(", stage {stage}"));
+    (&recipe.repository, stage.collect())
 }
 
 /// How many images [`Task::build`] builds at once: as many as the CPUs this process may run on, or

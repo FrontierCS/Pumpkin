@@ -10,7 +10,6 @@ test = false
 doctest = false
 
 [dependencies]
-harness = { path = "../harness" }
 recipe = { path = "../recipe" }
 schema = { path = "../schema" }
 serde.workspace = true

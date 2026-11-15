@@ -131,19 +131,9 @@ Image recipes, Dockerfiles. `check` refuses a recipe that may have Docker fetch 
 pins, and `fetch` reads and writes a recipe's fetch stages (`FetchStage`), which pin each file
 that a step would fetch.
 
-**Architecture Invariant:** it does no I/O and knows no Pumpkin crate, so a harness and the engine
-share one check without either depending on the other. It is `#![no_std]`, and its manifest names
-no dependency.
-
-### `crates/harness`
-
-The harnesses that agents run, such as Codex (`codex`). Each is pinned (`Pin`), added to a task's
-agent image in a layer of its own by its recipe, and has an adapter, such as `codex::runtime`,
-that writes the agent's runtime that runs it.
-
-**Architecture Invariant:** it knows no task and no provider, so a harness reaches an agent alike
-whatever builds its image. It depends on `schema`, `recipe` and `serde_json` alone, and is
-`#![no_std]`, so an adapter's output rests on its arguments alone.
+**Architecture Invariant:** it does no I/O and knows no Pumpkin crate, so the language, `pumpkin`'s
+check of a task and the engine's build share one check without depending on each other. It is
+`#![no_std]`, and its manifest names no dependency.
 
 ### `crates/lang`
 
@@ -159,8 +149,22 @@ build; and the crate is `#![no_std]`. Every evaluation ends, within its `Bounds`
 **Architecture Invariant:** the standard library depends on no task: a file below `@pumpkin//`
 loads only files below it, which evaluation refuses otherwise.
 
-**Architecture Invariant:** only `pumpkin` depends on it, so the runtime, the core and the
-providers never see the language.
+**Architecture Invariant:** only `pumpkin` depends on it, and `library`'s tests, so the runtime,
+the core and the providers never see the language.
+
+### `crates/library`
+
+Pumpkin's standard library: the files of the repository's `library/` directory, built into the
+crate (`FILES`), which `pumpkin` serves below `@pumpkin//`. A harness is a directory there, such as
+`harness/codex/`: a `.star` file whose function gives an agent role's image, runtime and route,
+and, in a directory of its own, the `Dockerfile` that adds the harness to the agent's image, so
+that the layer's inputs are that recipe alone.
+
+**Architecture Invariant:** it holds files and nothing else, so that what a library function gives
+rests on the language alone. It depends on no crate; its tests do.
+
+**Architecture Invariant:** a harness is known only here. No other crate's code names one, but
+`route`'s lists of the headers that a request and a response may carry, which name Codex's.
 
 ### `crates/tls`
 
@@ -363,12 +367,12 @@ sandboxes left, or fails.
 
 The command line and the controller's own side. `cli` parses the command line, `config` reads the
 machine's configuration (`Config`, or `Client` for a machine whose runs go to a controller), `star`
-reads a task's source below its root (`Root`), and `driver` starts the driver process. `controller`
-reaches the controller over shared connections, `manifest` is what it sends a task's tree as, by
-content, to the controller's store, `job` is the controller's side, with the prune and the slots
-that admit its builds and publishes (`Admission`), `progress` is what `ls` shows, `next`
-makes the commands to run next, `style` runs the formatter, and `Workspace` is the `.pumpkin`
-directory.
+reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
+starts the driver process. `controller` reaches the controller over shared connections, `manifest`
+is what it sends a task's tree as, by content, to the controller's store, `job` is the controller's
+side, with the prune and the slots that admit its builds and publishes (`Admission`), `progress` is
+what `ls` shows, `next` makes the commands to run next, `style` runs the formatter, and `Workspace`
+is the `.pumpkin` directory.
 
 **Architecture Invariant:** only `style` runs the formatter, buildifier, and none of its flags or
 forms is Pumpkin's interface: each file's text goes to it on its standard input, and `style` reads
@@ -582,8 +586,8 @@ The same inputs give the same results. The core and the language read no clock a
 randomness, and the workspace's clippy configuration bans `HashMap` and `HashSet`, whose
 iteration order follows a seed each process draws. What Pumpkin builds or runs is pinned: an
 image's tag is the digest of its build's inputs, a recipe fetches only what a digest pins, a
-harness is pinned by its `Pin`, the Modal helper's packages by its lock, the formatter by version
-and checksum, and each contributor tool by version.
+harness is pinned by its recipe in the standard library, the Modal helper's packages by its lock,
+the formatter by version and checksum, and each contributor tool by version.
 
 ### Processes, panics and threads
 

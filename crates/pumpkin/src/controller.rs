@@ -210,13 +210,9 @@ struct Seen {
     ping_status: String,
 }
 
-/// A directory of this command's own, 0700, in the workspace's `tmp/` ([`Workspace::tmp`]),
-/// which dropping removes.
+/// A directory of this command's own, 0700, in the workspace's `tmp/` ([`Workspace::scratch`]).
 fn scratch() -> Result<TempDir, String> {
-    let tmp = Workspace::find()?.tmp();
-    fs::create_dir_all(&tmp).context(tmp.display())?;
-    let made = tempfile::Builder::new().prefix("pumpkin-").tempdir_in(&tmp);
-    made.context(tmp.display())
+    Workspace::find()?.scratch("pumpkin-")
 }
 
 /// The directory of this machine's key to its controllers, `$HOME/.config/pumpkin/ssh/`: the

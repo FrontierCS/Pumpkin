@@ -79,7 +79,7 @@ pub(crate) enum Kind {
     Module(Module),
 }
 
-/// An image that `image()` or `codex()` declares, by its place among its evaluation's.
+/// An image that `image()` declares, by its place among its evaluation's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ImageId(pub(crate) usize);
 

@@ -754,17 +754,18 @@ paths made absolute. The standard output holds only the IR, as a run's record
 keeps it in ir.json; the builds' output goes to the standard error.
 
 Every problem that `check` finds is said before the configuration is read, and
-so before the engine is reached and any image is built. An image is
-built from a stage of its context, and tagged by the digest of the build's
-inputs, in pumpkin/<its recipe's directory below the root>, or a harness's layer
-in <its base's repository>/<harness>; one that the engine has under its tag
-already is not built again. Images are built at once, as many as the CPUs of
-this machine that `pumpkin` may run on, as Cargo's jobs are, even if the engine
-is another machine's, each once those it is built on are built. All that each
-build's `docker build` wrote is said at once when it ends, as `make
---output-sync` says a job's, then that it ended. A failed build is said at the
-image() call that declares its image; once one has failed, no other starts but
-those started with it, and each that runs is waited for, and said if it fails.
+so before the engine is reached and any image is built. An image is built from
+a stage of its context, and tagged by the digest of the build's inputs, in
+pumpkin/<its recipe's directory below the root>, or, for a recipe of the
+standard library, in pumpkin-library/<its directory below @pumpkin//>; one that
+the engine has under its tag already is not built again. Images are built at
+once, as many as the CPUs of this machine that `pumpkin` may run on, as Cargo's
+jobs are, even if the engine is another machine's, each once those it is built
+on are built. All that each build's `docker build` wrote is said at once when it
+ends, as `make --output-sync` says a job's, then that it ended. A failed build
+is said at the image() call that declares its image; once one has failed, no
+other starts but those started with it, and each that runs is waited for, and
+said if it fails.
 
 With [controller] in the configuration, `build` sends the task as `pumpkin run`
 does, follows the build's job on the controller, and prints the IR it printed.

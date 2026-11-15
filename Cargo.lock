@@ -258,17 +258,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness"
-version = "0.0.0"
-dependencies = [
- "expect-test",
- "recipe",
- "schema",
- "serde_json",
- "test-support",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -310,7 +299,6 @@ name = "lang"
 version = "0.0.0"
 dependencies = [
  "expect-test",
- "harness",
  "recipe",
  "schema",
  "serde",
@@ -322,6 +310,19 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "library"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "lang",
+ "recipe",
+ "schema",
+ "serde_json",
+ "sha2",
+ "test-support",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -399,6 +400,7 @@ dependencies = [
  "gateway",
  "lang",
  "libc",
+ "library",
  "modal",
  "provider",
  "recipe",
