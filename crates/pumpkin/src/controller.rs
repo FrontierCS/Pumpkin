@@ -12,16 +12,17 @@
 //! runs there is the controller's own side ([`crate::job`]), whose layout below the user's home
 //! its module doc gives: a run or a build sends the files of its task's repository that the task
 //! reaches, and the bundle of the Pumpkin it pins, by content, to the controller's store, which
-//! keeps each for every later send, so that only what the store lacks goes ([`crate::manifest`]);
-//! then the job's start sends the upstreams of this machine's configuration, their keys, its
-//! Modal provider and Modal's configuration file into its job's directory in tmpfs, by `tar` on
-//! the connection's standard input, never in an argument nor in a file of this machine's, takes
-//! what arrived into the store, and starts the job, `pumpkin controller job`, which makes its tree
-//! of links into the store, in a unit of the user's systemd, which outlives every connection.
+//! keeps each for every later send, so that only what the store lacks goes, over several of the
+//! connections at once ([`crate::manifest`]); then the job's start sends the upstreams of this
+//! machine's configuration, their keys, its Modal provider and Modal's configuration file into
+//! its job's directory in tmpfs, by `tar` on the connection's standard input, never in an
+//! argument nor in a file of this machine's, takes what arrived into the store, and starts the
+//! job, `pumpkin controller job`, which makes its tree of links into the store, in a unit of the
+//! user's systemd, which outlives every connection.
 //! What the controller's commands say is forwarded as they say it, and the record of a run that
 //! has ended is copied into this machine's runs directory.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::{self, Read as _, Write as _};
 use std::ops::{Deref, DerefMut};
@@ -30,8 +31,9 @@ use std::os::unix::fs::{
 };
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, ExitCode, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
-use std::{env, fmt, thread};
+use std::{env, fmt, panic, thread};
 
 use aws::{Bound, Cli};
 use provider::RunTag;
@@ -90,6 +92,16 @@ const MASTERS: usize = 16;
 // that one command closes and one that the next opens, in what it reads at once, both count for
 // a moment: 5 at a time each take 2 at most, which 10 still takes.
 const SESSIONS: usize = 5;
+
+// A send's streams each go over a master of their own.
+const _: () = assert!(manifest::STREAMS <= MASTERS);
+
+/// How often a send says how much it has sent, so a send that ends sooner says nothing more.
+// Often enough that a person sees a send move; seldom enough that a log of a send of minutes
+// keeps a few lines of it. BuildKit's plain progress likewise says a step's count again only once
+// it has moved 5%, or 5 s have passed:
+// https://github.com/moby/buildkit/blob/1d510a3097d9fbd85a42d162d42c3a79eda1f795/util/progress/progressui/printer.go#L93-L101
+const PROGRESS: Duration = Duration::from_secs(15);
 
 /// How long a call whose connection ended waits before each attempt it makes again, over a
 /// session of a master that answers, and so how many it makes ([`Reached::pause`]).
@@ -319,10 +331,15 @@ impl Shared {
     /// Takes the lock on sending the controller what its store lacks, saying, once, that it waits
     /// while another command holds it: a command that holds it asks again what the store lacks,
     /// so that of the commands that start at once, each sends only what the others haven't.
-    // One send at a time: GNU tar replaces a file by removing it, then writing a new one, so of a
-    // piece that two sends wrote at once, a start could take one part written, and so refuse its
-    // blob, which it checks under a name of its own. A send from another workspace, which this
-    // lock doesn't hold back, can still fail a start so, never the store: sent again, it is whole.
+    // One send at a time: the sends of a workspace go one after another, so a batch's sends that
+    // each lack a piece's worth or less go in turn, each over one connection, where they could go
+    // at once over one each. In return no piece goes twice, and a batch's starts don't refuse one:
+    // GNU tar replaces a file by removing it, then writing a new one, so of a piece that two sends
+    // wrote at once, a start could take one part written, and so refuse its blob, which it checks
+    // under a name of its own. A send from another workspace, which this lock doesn't hold back,
+    // can still fail a start so, never the store: sent again, it is whole. And a send holds a
+    // session for each of its streams, `manifest::STREAMS` at most of the `MASTERS` x `SESSIONS`,
+    // so the rest stay for the workspace's other commands.
     fn upload(&self, name: &Name) -> Result<File, String> {
         let path = self.dir.join("upload");
         let file = private(&path)?;
@@ -361,11 +378,12 @@ impl Shared {
         (0..MASTERS).any(|master| self.answers(master, host))
     }
 
-    /// Looks at each master in turn, of `host`: one whose sessions are all held is in use, and so
-    /// open; of one with a session free, it takes that session, if the master answers.
-    fn scan(&self, host: &str) -> Result<Found, String> {
+    /// Looks at each master in turn, of `host`, but those of `held`: one whose sessions are all
+    /// held is in use, and so open; of one with a session free, it takes that session, if the
+    /// master answers.
+    fn scan(&self, host: &str, held: &BTreeSet<usize>) -> Result<Found, String> {
         let mut closed = None;
-        for master in 0..MASTERS {
+        for master in (0..MASTERS).filter(|master| !held.contains(master)) {
             if !self.dir.join(master.to_string()).exists() {
                 closed = closed.or(Some(master));
                 continue;
@@ -674,21 +692,45 @@ impl Reached {
     /// master that is closed, which this opens; else, once every master's sessions are held, the
     /// first to be let go, which it says it waits for.
     fn slot(&self) -> Result<Slot, String> {
+        self.slot_apart(&BTreeSet::new())
+    }
+
+    /// A session as [`slot`](Self::slot) gives one, but of a master other than those of `held`,
+    /// as long as one can be had; else, once every other master's sessions are held, or the
+    /// master to open can't be opened, which it says, of any.
+    fn slot_apart(&self, held: &BTreeSet<usize>) -> Result<Slot, String> {
         let host = self.host();
         let mut waiting = None;
         loop {
-            if let Found::Free(slot) = self.shared.scan(&host)? {
+            if let Found::Free(slot) = self.shared.scan(&host, held)? {
                 return Ok(self.waited(slot, waiting));
             }
             let lock = self.shared.lock()?;
-            match self.shared.scan(&host)? {
+            match self.shared.scan(&host, held)? {
                 Found::Free(slot) => return Ok(self.waited(slot, waiting)),
                 Found::Closed(master) => {
-                    self.open(&lock, master)?;
+                    match self.open(&lock, master) {
+                        Ok(()) => {}
+                        Err(_) if !held.is_empty() => {
+                            drop(lock);
+                            say(format_args!(
+                                "connection {master} to controller `{}` can't be opened, as its \
+                                 log says: {}: this goes on over those it holds",
+                                self.name,
+                                self.shared.log(master).display()
+                            ));
+                            return self.slot();
+                        }
+                        Err(error) => return Err(error),
+                    }
                     // Held by commands over a master that has ended, which end with it.
                     if let Some(slot) = self.shared.free(master)? {
                         return Ok(self.waited(slot, waiting));
                     }
+                }
+                Found::Held if !held.is_empty() => {
+                    drop(lock);
+                    return self.slot();
                 }
                 Found::Held => {
                     drop(lock);
@@ -801,7 +843,11 @@ impl Reached {
         if said.contains("Host key verification failed") {
             return Ok(Master::HostKeyChanged);
         }
-        let error = format!("{error}; its log, {}, says: {}", log.display(), said.trim());
+        let error = format!(
+            "{error}; its log, {}, says: {}: run it again",
+            log.display(),
+            said.trim()
+        );
         if said.contains("Permission denied (") {
             return Ok(Master::Unenrolled(error));
         }
@@ -958,11 +1004,15 @@ impl Reached {
     /// `ssh` that runs `script` on the controller, as its user's shell runs it, over a session of
     /// a shared master ([`slot`](Self::slot)).
     fn ssh(&self, script: &str) -> Result<Session, String> {
-        let slot = self.slot()?;
+        Ok(self.session(script, self.slot()?))
+    }
+
+    /// `ssh` that runs `script` on the controller, as [`ssh`](Self::ssh) does, over `slot`.
+    fn session(&self, script: &str, slot: Slot) -> Session {
         let mut command = self.shared.command("ssh");
         let options = self.ssh_options(slot.master);
         command.args(options).arg(self.host()).arg(script);
-        Ok(Session { command, slot })
+        Session { command, slot }
     }
 
     /// `rsync` over `ssh` to the controller, as [`ssh`](Self::ssh) is, which ends after
@@ -1393,8 +1443,8 @@ trap - EXIT
 
 /// Sends `reached` what its store lacks of `tree`, saying what that is, or that it lacks
 /// nothing: if it lacks anything, with the lock on sending it ([`Shared::upload`]), it asks again,
-/// and sends what it still lacks; and once more, if the connection that went over ends, as
-/// [`Reached::pause`] allows, as what has arrived stays there.
+/// and sends what it still lacks, over several connections at once ([`sent`]); and once more, if a
+/// connection that went over ends, as [`Reached::pause`] allows, as what has arrived stays there.
 fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
     let manifest::Hashed { manifest, sources } = &tree.hashed;
     if manifest::pieces(&lacked(reached, manifest)?).is_empty() {
@@ -1404,24 +1454,57 @@ fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
     let _upload = reached.shared.upload(&reached.name)?;
     let mut attempt = 0;
     loop {
-        let pieces = manifest::pieces(&lacked(reached, manifest)?);
-        say(holds(&reached.name, manifest, &pieces));
-        if pieces.is_empty() {
+        let streams = manifest::deal(manifest::pieces(&lacked(reached, manifest)?));
+        say(holds(&reached.name, manifest, &streams));
+        if streams.is_empty() {
             return Ok(());
         }
-        let mut ssh = reached.ssh(&manifest::receive())?;
-        let master = ssh.slot.master;
-        let (status, written) =
-            streamed(&mut ssh, |stdin| manifest::stream(&pieces, sources, stdin))?;
-        drop(ssh);
-        let again = "asking again what it lacks";
-        if reached.ended_connection(status, &[SSH_FAILED], master)
-            && reached.pause(attempt, master, again)
-        {
-            attempt += 1;
-            continue;
+        // Each stream's end is read once all have ended, so that one whose connection ended loses
+        // none of what the others sent; any other failure is the send's.
+        let mut cut = None;
+        for streamed in sent(reached, &streams, sources)? {
+            if streamed.cut {
+                cut = cut.or(Some(streamed.master));
+            } else {
+                streamed.ended(reached)?;
+            }
         }
-        return match written {
+        let Some(master) = cut else {
+            return Ok(());
+        };
+        if !reached.pause(attempt, master, "asking again what it lacks") {
+            return Err(format!(
+                "a connection to controller `{}` ended at each of the send's {} attempts, the last \
+                 as its log says: {}: run it again",
+                reached.name,
+                AGAIN.len() + 1,
+                reached.shared.log(master).display()
+            ));
+        }
+        attempt += 1;
+    }
+}
+
+/// How a stream of [`sent`] ended: over shared master `master`, its `ssh`'s exit status, whether
+/// that says its connection ended, and what [`manifest::stream`] gave.
+struct Streamed {
+    master: usize,
+    status: ExitStatus,
+    cut: bool,
+    written: io::Result<Result<(), String>>,
+}
+
+impl Streamed {
+    /// Whether the stream, whose connection didn't end, sent all its pieces to `reached`, else
+    /// why not.
+    fn ended(self, reached: &Reached) -> Result<(), String> {
+        let Self {
+            master,
+            status,
+            cut: _,
+            written,
+        } = self;
+        match written {
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                 let stalled = format!(
                     "sending the task's files to controller `{}` stalled: {error}, so it was \
@@ -1440,7 +1523,108 @@ fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
             }
             Ok(Ok(())) => Ok(()),
             Err(error) => Err(format!("writing to `ssh` failed: {error}")),
-        };
+        }
+    }
+}
+
+/// Sends `streams`, each a list of pieces read from where `sources` say, to `reached`, each a
+/// [`manifest::receive`] of its own, at once, over a session of a master that no other of them
+/// holds, as long as one can be had, else of one they hold ([`Reached::slot_apart`]): each starts
+/// as its master opens. Says, each [`PROGRESS`] once all have started until the last has ended,
+/// how much they have sent. Gives how each ended, once all have.
+// Many connections at once, each with a list of its own, as Bazel's uploads go over up to
+// `--remote_max_connections` and Nix's downloads over up to `http-connections`:
+// https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/com/google/devtools/build/lib/remote/options/RemoteOptions.java#L65-L80
+// https://github.com/NixOS/nix/blob/d1ecb78bf7a1c5604726bd72651bd2169c14163d/src/libstore/include/nix/store/filetransfer.hh#L52-L61
+fn sent(
+    reached: &Reached,
+    streams: &[Vec<manifest::Piece>],
+    sources: &BTreeMap<Sha256Digest, manifest::Source>,
+) -> Result<Vec<Streamed>, String> {
+    let began = Instant::now();
+    let size_bytes = streams.iter().flatten().map(|piece| piece.size_bytes).sum();
+    // Many streams write how many bytes they have sent, and this thread alone reads them; not
+    // bounded, so that no stream waits while this thread opens masters, as the counts are bounded
+    // by the reads of the pieces.
+    let (counting, counts) = mpsc::channel();
+    thread::scope(|scope| {
+        let (mut held, mut apart) = (BTreeSet::new(), true);
+        let mut threads = Vec::new();
+        let mut unstarted = None;
+        for pieces in streams {
+            let slot = if apart {
+                reached.slot_apart(&held)
+            } else {
+                reached.slot()
+            };
+            let slot = match slot {
+                Ok(slot) => slot,
+                Err(error) => {
+                    unstarted = Some(error);
+                    break;
+                }
+            };
+            let master = slot.master;
+            // Once a stream shares a master, no other master is to be had.
+            apart &= held.insert(master);
+            let mut session = reached.session(&manifest::receive(), slot);
+            let counting = counting.clone();
+            let streaming = move || {
+                // Its receiver reads until every stream has ended.
+                let mut count = |bytes| counting.send(bytes).unwrap_or(());
+                let (status, written) = streamed(&mut session, |stdin| {
+                    manifest::stream(pieces, sources, stdin, &mut count)
+                })?;
+                drop(session);
+                // Asked as soon as it ends, before another command could open its master again.
+                let cut = reached.ended_connection(status, &[SSH_FAILED], master);
+                Ok::<_, String>(Streamed {
+                    master,
+                    status,
+                    cut,
+                    written,
+                })
+            };
+            let thread = (thread::Builder::new()).name(format!("stream over {master}"));
+            match thread.spawn_scoped(scope, streaming) {
+                Ok(thread) => threads.push(thread),
+                Err(error) => {
+                    unstarted = Some(format!(
+                        "a thread to send a stream on can't be started: {error}"
+                    ));
+                    break;
+                }
+            }
+        }
+        drop(counting);
+        said_progress(&reached.name, &counts, began, size_bytes);
+        let mut ended = Vec::new();
+        for thread in threads {
+            ended.push(
+                thread
+                    .join()
+                    .unwrap_or_else(|panic| panic::resume_unwind(panic))?,
+            );
+        }
+        unstarted.map_or(Ok(ended), Err)
+    })
+}
+
+/// Says, each [`PROGRESS`] since `began` until every sender of `counts` has gone, how many of
+/// `size_bytes` they have sent to controller `name`, as the counts of bytes they send add up.
+fn said_progress(name: &Name, counts: &mpsc::Receiver<u64>, began: Instant, size_bytes: u64) {
+    let (mut sent_bytes, mut next) = (0, began + PROGRESS);
+    loop {
+        let now = Instant::now();
+        if now >= next {
+            say(progress(name, sent_bytes, size_bytes, now - began));
+            next = now + PROGRESS;
+        }
+        match counts.recv_timeout(next - now) {
+            Ok(bytes) => sent_bytes += bytes,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
     }
 }
 
@@ -1519,11 +1703,12 @@ impl io::Write for Pipe {
     }
 }
 
-/// What controller `name` lacks of `manifest`'s blobs, for a person to read, as `pieces` of them
-/// are to be sent: how many of the task's files, and whether Pumpkin's bundle; or that it holds
-/// them all.
-fn holds(name: &Name, manifest: &manifest::Manifest, pieces: &[manifest::Piece]) -> String {
-    let lacked: BTreeSet<&Sha256Digest> = pieces.iter().map(|piece| &piece.digest).collect();
+/// What controller `name` lacks of `manifest`'s blobs, for a person to read, as `streams` of
+/// their pieces are to be sent: how many of the task's files, whether Pumpkin's bundle, and over
+/// how many connections, if more than one; or that it holds them all.
+fn holds(name: &Name, manifest: &manifest::Manifest, streams: &[Vec<manifest::Piece>]) -> String {
+    let pieces = || streams.iter().flatten();
+    let lacked: BTreeSet<&Sha256Digest> = pieces().map(|piece| &piece.digest).collect();
     let (bundles, files): (Vec<&manifest::Entry>, Vec<&manifest::Entry>) = (manifest.entries())
         .iter()
         .partition(|entry| entry.kind == manifest::Kind::Bundle);
@@ -1545,11 +1730,30 @@ fn holds(name: &Name, manifest: &manifest::Manifest, pieces: &[manifest::Piece])
     if bundles.iter().any(|bundle| lacked.contains(&bundle.digest)) {
         lacks.push("Pumpkin's bundle".to_owned());
     }
-    let size_bytes = pieces.iter().map(|piece| piece.size_bytes).sum();
+    let size_bytes = pieces().map(|piece| piece.size_bytes).sum();
+    let over = match streams.len() {
+        1 => String::new(),
+        count => format!(" over {count} connections"),
+    };
     format!(
-        "controller `{name}` lacks {}: sending {}",
+        "controller `{name}` lacks {}: sending {}{over}",
         lacks.join(" and "),
         size(size_bytes)
+    )
+}
+
+/// What a send to controller `name` says of the pieces it sends, `size_bytes` in all, once it has
+/// sent `sent_bytes` of them after `elapsed`: how much, and at what rate so far, for a person to
+/// read.
+// A count of what is done against the whole, as Modal says of the files of a mount it uploads:
+// https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/mount.py#L597
+fn progress(name: &Name, sent_bytes: u64, size_bytes: u64, elapsed: Duration) -> String {
+    let rate = u128::from(sent_bytes) * 1000 / elapsed.as_millis().max(1);
+    format!(
+        "sent {} of {} to controller `{name}`, at {}/s",
+        size(sent_bytes),
+        size(size_bytes),
+        size(u64::try_from(rate).unwrap_or(u64::MAX))
     )
 }
 
