@@ -29,10 +29,6 @@ const SCRIPTED: &str = "the test to make every input the run waits on come, as i
 /// while its time is to come, and what the inbox holds, without waiting, once its time has
 /// passed, as the clock never moves by itself, but for the takes that the late take says wait. A
 /// sync makes nothing last, and succeeds unless the script fails it ([`SimHost::failed_sync`]).
-///
-/// # Panics
-///
-/// A wait panics once it has waited [`WATCHDOG`] for an input.
 pub(crate) struct SimHost {
     /// Shared, as the clock's clones read it on the run's threads, a judge call's, a model
     /// request's or a session's reader too, and its inboxes take the late take from it on theirs,
@@ -43,7 +39,6 @@ pub(crate) struct SimHost {
 }
 
 struct State {
-    /// The time since the run started.
     now: Duration,
     /// The late take, until it comes.
     late: Option<LateTake>,
@@ -200,7 +195,6 @@ fn last_record(path: &Path) -> io::Result<Option<u64>> {
         .and_then(|records| records.checked_sub(1)))
 }
 
-/// [`SimHost`]'s clock of a run.
 #[derive(Clone)]
 pub(crate) struct SimClock {
     state: Arc<Mutex<State>>,
@@ -238,7 +232,6 @@ impl Clock for SimClock {
     }
 }
 
-/// [`SimClock`]'s inbox.
 pub(crate) struct SimInbox<T> {
     clock: SimClock,
     /// Shared with the host, which fills the loop's as a slow sync holds the loop.
@@ -256,7 +249,6 @@ struct Queue<T> {
     behind: VecDeque<T>,
 }
 
-/// An inbox's queue, whatever it holds.
 trait Fill: Send + Sync {
     /// Waits until the queue holds `queued` inputs received ahead of its takes, panicking past
     /// [`WATCHDOG`] with what the wait `expected` of the test.

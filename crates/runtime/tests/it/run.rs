@@ -209,14 +209,6 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
     }
 }
 
-// A workflow is prepared, its record named by its run's id, from the UTC time it is prepared
-// at, and holding its IR; one that has a model route is prepared with an upstream that serves
-// every model the route allows, and else refused before anything starts, with its record
-// saying why. The times are a leap day's first second, a year's last, and the first of March
-// 2100, which follows the 28th of February in a year that isn't a leap year. A clock that
-// reads before 1970 is refused before anything is made, and so is a workflow whose roles need
-// more CPUs at once than the provider can hold for it, though each fits its class: the agent and
-// the train judge run at once, and the final judge, which needs as many as the agent, after.
 #[test]
 fn build() {
     let version = env!("CARGO_PKG_VERSION");
@@ -253,6 +245,8 @@ fn build() {
     }
 }
 
+// The agent and the train judge run at once, and the final judge after, so `wide` needs 1100 CPUs
+// at once, more than the provider holds, though each role fits its class.
 #[test]
 fn prepare() {
     let ir: Value = serde_json::from_str(WORKFLOW).unwrap();
@@ -340,9 +334,8 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
     outcome.to_string()
 }
 
-// Every request of a recorded run rebuilds byte for byte from the record that keeps each of its
-// conversation's items once: a run of Codex's, trimmed to its first 10 requests, each with its
-// tools cut to its first two, beside the size and SHA-256 of each trimmed body.
+// A run of Codex's, trimmed to its first 10 requests, each with its tools cut to its first
+// two.
 #[test]
 fn rebuilds_kept_requests() {
     let fixture =
@@ -391,9 +384,8 @@ fn rebuilds_kept_requests() {
     ));
 }
 
-// The model use that a record's reader takes from its log, of answers that come in turn: a good
-// one, then a 429, one cut short, a 200 whose stream states a failure, a refusal of the route's
-// own and a bar, none of which is good, so the first's time stays the last good one's.
+// None of the 429, the cut stream, the failing 200, the route's refusal and the bar is good, so the
+// first's time stays the last good one's.
 #[test]
 fn reads_model_answers() {
     let dir = TempDir::new().unwrap();
@@ -461,8 +453,6 @@ fn reads_model_answers() {
     .assert_eq(&format!("{:#?}", progress.model));
 }
 
-// The leased time that a record's reader takes from its log, of two leases each running a command
-// that never ends: one whose runner the run deletes as a signal stops it, and one that expires.
 // Each command is busy until its lease's charge ends, so that busy is never more than charged.
 #[test]
 fn reads_unended_commands() {
@@ -582,10 +572,8 @@ fn reads_other_builds_lines() {
         None [Unread { line: 1, part: Event, reason: "missing field `unix_ns`" }]"#]].assert_eq(&read.join("\n"));
 }
 
-// The spans that a record's reader takes from its log, of a judge call and two leases, each
-// event written seconds after the core took it: each span runs between the core's times, its
-// `observed_ns`, but where a record has none, as lease 1's delete, which ends its charge, at its
-// `at_ns`. A judge call's exit times nothing: its call runs until its result is collected.
+// Each span runs between the core's times, its `observed_ns`, but where a record has none, as
+// lease 1's delete, its `at_ns`.
 #[test]
 fn reads_core_times() {
     let dir = TempDir::new().unwrap();

@@ -35,7 +35,6 @@ use ureq::http::{HeaderName, HeaderValue};
 use super::upstream::Answer;
 use super::usage;
 
-/// The request headers that pass upstream, for an entry of [`Api::Responses`].
 // Each is one the harness the runs use sends, and describes its client, its session, or the form
 // in which its requests are written. Any other could reach more of the provider than the models
 // the route allows, under the deployment's key: a credential of the agent's own, or a header that
@@ -60,7 +59,6 @@ const RESPONSES_HEADERS: [&str; 10] = [
     "x-openai-internal-codex-responses-lite",
 ];
 
-/// The request headers that pass upstream, for an entry of [`Api::Chat`].
 // Each says what client it is, or the form of its request and its answer. Those by which a
 // client names itself further, such as an SDK's `x-stainless-*`, the provider needs none of.
 const CHAT_HEADERS: [&str; 3] = ["content-type", "accept", "user-agent"];
@@ -83,9 +81,7 @@ const MAX_SHOWN_BYTES: usize = 256;
 /// What an entry of one API admits, besides what every entry's rules keep alike.
 #[derive(Debug)]
 struct Rules {
-    /// The target of the API's endpoint, to which its requests go.
     target: &'static str,
-    /// The request headers that pass upstream.
     headers: &'static [&'static str],
     /// The field of a request's body that holds the conversation.
     conversation: &'static str,
@@ -102,7 +98,6 @@ struct Rules {
 /// A check of one tool that a list of tools declares.
 type Tool = fn(&Value) -> Result<(), Refusal>;
 
-/// The rules of an entry of [`Api::Responses`].
 const RESPONSES: Rules = Rules {
     target: "/responses",
     headers: &RESPONSES_HEADERS,
@@ -113,7 +108,6 @@ const RESPONSES: Rules = Rules {
     tool: client_tool,
 };
 
-/// The rules of an entry of [`Api::Chat`].
 const CHAT: Rules = Rules {
     target: "/v1/chat/completions",
     headers: &CHAT_HEADERS,
@@ -124,7 +118,7 @@ const CHAT: Rules = Rules {
     tool: function_tool,
 };
 
-/// A role's model route's entry for one API, as the host serves it.
+/// A model route's entry for one API.
 #[derive(Debug)]
 pub struct Route {
     rules: &'static Rules,
@@ -141,19 +135,17 @@ pub(crate) struct Closed {
     /// The model that the request named, and the name that its upstream takes for it, which
     /// `body` names.
     model: (ModelName, ModelName),
-    /// The rules of its API's entry.
     rules: &'static Rules,
 }
 
-/// Why the route answers a model request with an error, which [`Refusal::answer`] tells its
-/// client: a rule broken, the route's end, or an upstream's answer missing or not passed on.
+/// Why the route answers a model request with an error: a rule broken, the route's end, or an
+/// upstream's answer missing or not passed on.
 #[derive(Debug)]
 pub(crate) struct Refusal {
     status: Status,
     message: String,
 }
 
-/// The HTTP status of a refusal.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Status {
     /// The request breaks a rule of the closure's, the model provider refused it or the route's
@@ -186,11 +178,8 @@ impl Route {
     }
 
     /// Parses `request`, which [`Route::takes`], into one that keeps the route closed, naming its
-    /// model as its upstream takes it.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a request that breaks a rule that [the route's docs](crate) give.
+    /// model as its upstream takes it. Refuses a request that breaks a rule of
+    /// [the route's docs](crate).
     pub(crate) fn close(&self, request: &ModelRequest) -> Result<Closed, Refusal> {
         let ModelRequest {
             method,
@@ -254,7 +243,6 @@ impl Route {
 }
 
 impl Closed {
-    /// The request's headers that pass upstream.
     pub(crate) fn headers(&self) -> &[(HeaderName, HeaderValue)] {
         &self.headers
     }
@@ -270,7 +258,6 @@ impl Closed {
         self.rules.conversation
     }
 
-    /// Where its API's response gives the tokens it used.
     pub(crate) fn usage(&self) -> usage::Fields {
         self.rules.usage
     }
@@ -303,8 +290,6 @@ impl Refusal {
         refusal(Status::NotFound, message)
     }
 
-    /// The refusal of a request once the route has ended, by its caller ([`serve`](super::serve))
-    /// or by [`Upstream::shutdown`](super::Upstream::shutdown).
     pub(crate) fn ended() -> Self {
         // A 400, which a harness takes as final, where it would retry a 403. The message names
         // no cause, as the route knows no run.
@@ -313,7 +298,7 @@ impl Refusal {
     }
 
     /// The refusal of a request once the model provider has refused the route's key with a 401,
-    /// with which the route ends.
+    /// which ends the route.
     pub(crate) fn key_refused() -> Self {
         // A 400, as for the route's end, so that the harness ends its turn rather than try
         // again with the same key, which every later request would carry.
@@ -322,7 +307,6 @@ impl Refusal {
         refusal(Status::BadRequest, message.to_owned())
     }
 
-    /// The refusal of a request that the model provider refused with a 403.
     pub(crate) fn forbidden() -> Self {
         // A 400, so that the harness ends its turn rather than try the same request again.
         let message = "the model provider refused the request, with a 403: send only requests \
@@ -345,8 +329,7 @@ impl Refusal {
         }
     }
 
-    /// How [`serve`](super::serve) answers its client with the refusal of a
-    /// request that never reached the upstream.
+    /// The answer for a request that never reached the upstream.
     pub(crate) fn barred(&self) -> Answer {
         Answer::Barred {
             status: self.status.code(),
@@ -354,12 +337,8 @@ impl Refusal {
         }
     }
 
-    /// Answers `request` with the refusal by `by` ([`IncomingModelRequest::respond`]): its
-    /// status, with `allow: POST` for a 405, and its [`body`](Refusal::body).
-    ///
-    /// # Errors
-    ///
-    /// Fails if `by` passes first, or if the session has ended.
+    /// Answers `request` with the refusal: its status, with `allow: POST` for a 405, and its
+    /// [`body`](Refusal::body). Fails if `by` passes first.
     pub(crate) fn answer(self, request: IncomingModelRequest, by: Deadline) -> io::Result<()> {
         let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
         // HTTP requires a 405 to name the methods its target allows.
@@ -413,7 +392,6 @@ pub(super) fn refusal(status: Status, message: String) -> Refusal {
     Refusal { status, message }
 }
 
-/// A refusal of a request that breaks a rule of the closure's.
 fn bad(message: impl Into<String>) -> Refusal {
     refusal(Status::BadRequest, message.into())
 }
@@ -456,7 +434,6 @@ fn passed(
         .collect()
 }
 
-/// Refuses a request that keeps state on the provider's side, or refers to state kept there.
 fn stateless(body: &Map<String, Value>) -> Result<(), Refusal> {
     // A request that leaves `store` out is stored too.
     if body.get("store") != Some(&Value::Bool(false)) {
@@ -495,7 +472,6 @@ fn stateless(body: &Map<String, Value>) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Refuses a request of the Chat Completions API that the provider would store.
 fn stores_nothing(body: &Map<String, Value>) -> Result<(), Refusal> {
     // Left out, `store` is false.
     match body.get("store") {
@@ -507,7 +483,6 @@ fn stores_nothing(body: &Map<String, Value>) -> Result<(), Refusal> {
     }
 }
 
-/// Refuses a request of the Chat Completions API that has the provider search the web.
 fn searches_nothing(body: &Map<String, Value>) -> Result<(), Refusal> {
     if body
         .get("web_search_options")
@@ -521,8 +496,6 @@ fn searches_nothing(body: &Map<String, Value>) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Refuses a request of the Responses API that picks a feature of the provider's beyond its
-/// model and its own tools: an access program.
 fn picks_no_feature(body: &Map<String, Value>) -> Result<(), Refusal> {
     // An access program is one that the deployment's key may be authorized for, which the
     // workflow didn't choose as it chose the models.
@@ -538,7 +511,6 @@ fn picks_no_feature(body: &Map<String, Value>) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Refuses a request whose `tool_choice` names a tool that the provider runs.
 fn chooses_client_tool(body: &Map<String, Value>) -> Result<(), Refusal> {
     // A choice that is an object names a kind of tool. The allowed tools are a list of tools,
     // which [`closed_fields`] checks as it checks any other.
@@ -634,8 +606,6 @@ fn client_tool(tool: &Value) -> Result<(), Refusal> {
     )))
 }
 
-/// Refuses a tool of the Chat Completions API that is not one the client runs: one whose `type`
-/// is neither `function` nor `custom`, such as a provider's own search.
 fn function_tool(tool: &Value) -> Result<(), Refusal> {
     let kind = tool.get("type").and_then(Value::as_str).unwrap_or_default();
     if matches!(kind, "function" | "custom") {

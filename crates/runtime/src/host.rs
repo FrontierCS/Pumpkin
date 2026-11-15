@@ -1,6 +1,4 @@
-//! A run's host, what the run reads of time and waits on, and what makes its record last: [`Host`]
-//! starts the run's [`Clock`], which makes the [`Inbox`]es that the run's threads wait on, and
-//! syncs each file of the record it writes ([`Host::sync`]). [`System`] is the machine's.
+//! A run's host: what the run reads of time and waits on, and what makes its record last.
 //!
 //! What a run reads or waits on by the machine's time, whatever its host:
 //! - the session's and the provider's calls, and the model route's, each take a [`Deadline`]
@@ -20,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use stdx::Deadline;
 
 /// The machine a run runs on, as far as the run reads time, waits, and makes its record last.
-// Sync, as each judge call's thread keeps its sandbox's console through it.
+// Sync, as each child's thread syncs the record of its sandbox's start and delete through it.
 pub trait Host: Sync {
     type Clock: Clock;
 
@@ -28,16 +26,11 @@ pub trait Host: Sync {
     fn start(&self) -> Self::Clock;
 
     /// Makes what was written to `file`, a file or directory of a run's record, last through a
-    /// crash of the machine, as far as `durable` says.
-    ///
-    /// # Errors
-    ///
-    /// Fails as the machine's sync does: what was written to `file` since its last sync that
-    /// succeeded may then be lost.
+    /// crash of the machine, as far as `durable` says. A failure may lose what was written to
+    /// `file` since its last sync that succeeded.
     fn sync(&self, file: &File, durable: Durable) -> io::Result<()>;
 }
 
-/// What of a file [`Host::sync`] makes last.
 #[derive(Clone, Copy, Debug)]
 pub enum Durable {
     /// Its data, and what of its metadata reading the data back needs, such as its size, as
@@ -57,7 +50,6 @@ pub enum Durable {
 pub trait Clock: Clone + Send + 'static {
     type Inbox<T: Send + 'static>: Inbox<T> + Send;
 
-    /// The time since the run started.
     fn now(&self) -> Duration;
 
     /// When the run started, by the machine's clock.
@@ -103,7 +95,6 @@ impl Host for System {
     }
 }
 
-/// [`System`]'s clock of a run.
 #[derive(Clone, Copy, Debug)]
 pub struct SystemClock {
     start: Instant,
@@ -131,7 +122,6 @@ impl Clock for SystemClock {
     }
 }
 
-/// [`SystemClock`]'s inbox.
 #[derive(Debug)]
 pub struct SystemInbox<T> {
     receiver: Receiver<T>,

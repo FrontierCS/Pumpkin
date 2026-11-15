@@ -28,13 +28,10 @@ use stdx::{Context, unpoisoned};
 use crate::session::Sender;
 use crate::{print_line, sys};
 
-/// The context of a failed [`sys::has_children`], which the reaper and freezing both call.
 const HAS_CHILDREN_FAILED: &str = "finding whether sandboxd has children failed";
 
-/// The context of a failed [`kill_everything`], which freezing and a failed reaper both call.
 const KILL_FAILED: &str = "the sandbox's processes couldn't be killed";
 
-/// The commands started in this sandbox.
 #[derive(Clone)]
 pub(crate) struct Commands {
     // Shared with the reaper thread, which reaps children while the session starts commands,
@@ -63,7 +60,6 @@ impl Shared {
         unpoisoned(self.state.lock())
     }
 
-    /// Waits for `changed` to be signalled, releasing `state` meanwhile.
     fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
         unpoisoned(self.changed.wait(state))
     }
@@ -255,7 +251,6 @@ fn reaper(shared: &Shared) -> Result<Infallible, String> {
     }
 }
 
-/// Decodes the status of a child that exited or was killed by a signal.
 fn exit_status(status: std::process::ExitStatus) -> ExitStatus {
     if let Some(code) = status.code() {
         return ExitStatus::Code(code);

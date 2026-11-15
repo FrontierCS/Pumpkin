@@ -35,7 +35,6 @@ use super::{Clock, Host, Inbox};
 /// The directory of a lease's record that holds the tree a transfer moves, while it does.
 pub(super) const STAGING: &str = "transfer";
 
-/// What the core orders a lease to do next.
 pub(super) enum Order {
     Run(Run),
     Transfer(Transfer),
@@ -60,7 +59,6 @@ pub(super) struct Run {
     pub(super) timeout: Option<Duration>,
 }
 
-/// The command a lease runs.
 struct Running {
     command: u64,
     process: Process,
@@ -69,10 +67,6 @@ struct Running {
     timed_out: bool,
 }
 
-/// Runs lease `lease`, whose runner is `runner`, to its end in `child`, as a child of the run
-/// runs ([`child::run`]).
-///
-/// [`child::run`]: super::child::run
 pub(super) fn run<H: Host>(lease: LeaseId, runner: &Runner, child: &mut Child<'_, H, Order>) {
     super::child::run(child, None, |child, session| {
         drive(lease, runner, child, session)
@@ -208,8 +202,7 @@ fn kill<H: Host>(child: &Child<'_, H, Order>, running: &mut Running, session: &m
     }
 }
 
-/// Starts `run` in the runner's sandbox, whose session is `session`, in the runner's `cwd` with
-/// its `env`, its output in [`command_dir`].
+/// Starts `run` in the runner's `cwd` with its `env`, its output in [`command_dir`].
 fn start<H: Host>(
     runner: &Runner,
     child: &Child<'_, H, Order>,
@@ -370,7 +363,6 @@ fn staged_move(
     }
 }
 
-/// The report that a lease's `command`th command ended as `ended` says.
 fn command_ended(lease: LeaseId, command: u64, ended: (CommandEnd, String, String)) -> Event {
     let (end, stdout, stderr) = ended;
     Event::CommandEnded {

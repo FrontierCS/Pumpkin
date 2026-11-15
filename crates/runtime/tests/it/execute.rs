@@ -1,7 +1,7 @@
 //! Executing a prepared run through the library's entry point, [`Run::execute`], on the
 //! simulated provider ([`Sim`]), and on the machine's host ([`System`]) or a simulated one
-//! ([`SimHost`]): what it returns, its record, its run log, and what it leaves behind. The
-//! agent's model route, where it has one, reaches a stand-in model provider ([`StandIn`]).
+//! ([`SimHost`]). The agent's model route, where it has one, reaches a stand-in model provider
+//! ([`StandIn`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -48,14 +48,16 @@ use crate::sim::{
 /// A `sandboxd` that dials.
 const SANDBOXD: &str = "/sim/sandboxd";
 
-/// The startup of a simulated provider whose tests wait for a start, or a teardown, to run out:
-/// short, so that the wait takes seconds, but still far longer than a simulated sandbox takes
-/// to start, so that a busy machine makes a start that succeeds wait longer, never fail.
+/// The startup of a simulated provider whose tests wait for a start, or a teardown, to run out,
+/// in seconds.
+// Short, so that the wait takes seconds, but far longer than a simulated sandbox takes to start,
+// so that a busy machine makes a start that succeeds wait longer, never fail.
 const SHORT_STARTUP: u64 = 1;
 
 /// The seconds that what an interrupted run waits on lasts, a start's startup or a work phase's
-/// deadline: far past the signal's latency, yet short, so that a run that misses the signal
-/// fails its case within a minute or so, rather than holding `ci` up.
+/// deadline.
+// Far past the signal's latency, yet short, so that a run that misses the signal fails its case
+// within a minute or so, rather than holding `ci` up.
 const WAITED: u64 = 60;
 
 /// Where an [`Interrupting`] provider notes SIGTERM: as it publishes `sandboxd`, the first publish;
@@ -86,7 +88,6 @@ struct Interrupting<'a> {
 }
 
 impl Interrupting<'_> {
-    /// Interrupts the process if the run has come to `step`.
     fn at(&self, step: At) {
         if self.at == Some(step) {
             interrupt();
@@ -170,7 +171,6 @@ where
     }
 }
 
-/// The one of `providers` that `name` names.
 fn named<'s, P>(providers: &'s [(&'static str, P)], name: &ir::Name) -> &'s P {
     let found = (providers.iter()).find(|(named, _)| name.as_str() == *named);
     &found.unwrap().1
@@ -871,9 +871,6 @@ fn short_workflow(argv: &[&str], deadline: u64) -> Value {
     ir
 }
 
-// A run whose agent's sandbox its provider refuses to delete once: the agent's teardown fails to
-// delete it, and the run's sweep, which finds it again, deletes it, which its record says last;
-// the run fails for the first delete.
 #[test]
 fn deleted_by_the_sweep() {
     check(
@@ -903,10 +900,6 @@ fn deleted_by_the_sweep() {
     );
 }
 
-// A run whose agent's sandbox its provider refuses to delete once, as in
-// [`deleted_by_the_sweep`], on a host whose sync of its record of the sweep's delete fails: the
-// run fails for the first delete and for that sync, and the record keeps the first delete's
-// outcome.
 #[test]
 fn sweep_unrecorded() {
     check(
@@ -936,9 +929,6 @@ fn sweep_unrecorded() {
     );
 }
 
-// A run whose agent's sandbox can't be deleted, and whose console its provider can't read: the
-// agent's teardown notes the console it didn't keep, and so does the run's sweep, which finds
-// the sandbox again; the run fails for the delete alone.
 #[test]
 fn unshown() {
     let mut ir = workflow(&["exit", "0"]);
@@ -971,9 +961,6 @@ fn unshown() {
     );
 }
 
-// A run whose agent's `sandboxd` exits without dialing, and whose sandbox can't be deleted, after
-// which its console shows nothing: the record keeps the console its failed start read, which the
-// run's sweep, finding the sandbox again, doesn't read again.
 #[test]
 fn unstarted_undeletable() {
     let mut ir = workflow(&["exit", "0"]);
@@ -1108,11 +1095,8 @@ fn stalls() {
     );
 }
 
-// A run whose agent's `sandboxd` exits without dialing: the run's watcher finds its sandbox
-// ended, whether its list then finds it so or leaves it out, long before its class's
-// startup, which ends its start then, and the sandbox is deleted, with its console quoted in
-// the agent's failure. Both runs end before the startup has passed once, which a start that
-// waited it out wouldn't.
+// Both runs end before the startup has passed once, which a start that waited it out
+// wouldn't.
 #[test]
 fn unstarted() {
     let ir = workflow(&["exit", "0"]);
@@ -1410,10 +1394,7 @@ fn interrupted_last_batch() {
     );
 }
 
-// A run whose agent's `sandboxd` hangs without dialing while the run's list fails: its start
-// runs out at the provider's startup, and the sandbox is deleted, with the last list's failure
-// and its console quoted in the agent's failure, which ends the work phase: the start lasts at
-// least as long as the deadline, which counts only from the agent's start.
+// The start lasts at least as long as the deadline, which counts only from the agent's start.
 #[test]
 fn unlistable() {
     let mut ir = workflow(&["exit", "0"]);
@@ -1643,9 +1624,7 @@ fn ops() {
     );
 }
 
-// A run whose payload is overwritten after the core accepts it, as the agent's sandbox is
-// deleted, before the final judge reads it: the read fails, as the payload's size and digest
-// differ from the accepted ones, rather than put other bytes in the judge's slot.
+// The read fails, as the size and digest differ, rather than put other bytes in the judge's slot.
 #[test]
 fn swapped_payload() {
     let swapped = executed(
@@ -1759,10 +1738,7 @@ fn crashes_with_an_op_in_flight() {
     );
 }
 
-// A run whose agent makes a judge call, then exits, and whose judge's sandbox takes seconds to
-// create, past the deadline: an agent's call starts by the work phase's end, which comes by the
-// deadline, however long the provider's startup, so the create gives up then, leaving the
-// sandbox for the run's end to delete, and the run finishes without a submission.
+// An agent's call starts by the work phase's end, however long the provider's startup.
 #[test]
 fn judge_starts_past_the_deadline() {
     // A deadline that the create, which begins once the agent has started, outlasts, and that
@@ -1798,10 +1774,6 @@ fn judge_starts_past_the_deadline() {
     );
 }
 
-// A run whose train judge needs the CPU model [`BRIEF`], so is placed in that class, whose
-// sandboxes start in seconds, and whose `sandboxd` hangs without dialing: its start runs out at
-// its own class's startup, though the agent's class gives 30 s, so the agent, which awaits the
-// call's end, sees it errored, and exits long before the deadline.
 #[test]
 fn judge_placed_apart() {
     // The judge's start runs out at its own class's startup, though the agent's class gives
@@ -1848,14 +1820,8 @@ fn there(sim: Sim) -> Sim {
     sim.named("there").offering_memory(16 << 30)
 }
 
-// A run on two simulated providers, the agent on `here` and the judges on [`there`], the train
-// judge, which needs the CPU model [`BRIEF`], in that class, whose agent and judges share
-// an image, which each provider publishes itself, and each refuses a reference that the other
-// published; `there` is private, so its sandboxes dial the run's grant listener, or it listens, so
-// the run dials its sandboxes, and `here`'s dial their sockets, alike either way: the agent makes
-// a judge call and a final submission, which the final judge scores, each sandbox is created in
-// its role's class, and each provider is left with none of the run's sandboxes; the record says
-// where each role is placed, and each provider's reach.
+// `there` is private, so its sandboxes dial the run's grant listener, or it listens, so the run
+// dials them, and `here`'s dial their sockets, alike either way.
 #[test]
 fn spans_providers() {
     let argv = [
@@ -1917,10 +1883,6 @@ fn spans_providers() {
     }
 }
 
-// A run on two simulated providers, `here` and [`there`], whose agent's
-// sandbox, on `here`, can't be deleted, and whose train judge's create, on `there`, fails,
-// leaving a sandbox: `here`'s sweep fails, and `there`'s still deletes what it finds, so the run
-// fails, naming `here`.
 #[test]
 fn sweeps_each_provider() {
     let mut ir = ops_workflow(&["ops", "judge train 6", "await 0 errored"], 30);
@@ -1965,14 +1927,7 @@ fn sweeps_each_provider() {
     );
 }
 
-// A run whose agent makes two judge calls, of judges placed on two providers, the second a
-// second after the first: the near judge's, on `here`, as it needs what the agent does, whose
-// `sandboxd` hangs without dialing; then the train judge's, on `there`, in class [`BRIEF`], whose
-// model it needs, whose `sandboxd` ends at once without dialing. The run's watcher lists each
-// provider where a start waits, and takes each list for that provider's starts alone: so the
-// train judge's start is found ended on its own provider while the near judge's start still
-// waits on `here`, and the near judge's start runs out at its class's startup. The agent, which
-// awaits both calls' ends, sees each errored.
+// The watcher takes each provider's list for that provider's starts alone.
 #[test]
 fn watches_each_provider() {
     // The agent can't tell when a start is handed to the watcher, so a second's sleep orders the
@@ -2050,11 +2005,8 @@ fn watches_each_provider() {
     );
 }
 
-// A run whose train judge stalls its sandbox once its command has started, which the agent
-// awaits before it finalizes: the work phase ends at once, so the core stops the call, whose
-// sandbox's freeze runs out at the agent's teardown's end, which leaves the final judge its
-// startup and timeout before the hard end. The final judge scores the submission, but its
-// sandbox can't be deleted, which fails the run, and the run's end can't delete it either.
+// The call's freeze runs out at the agent's teardown's end, which leaves the final judge its
+// startup and timeout before the hard end.
 #[test]
 fn judge_stalls() {
     let argv = [
@@ -2185,13 +2137,8 @@ fn deleted_while_torn_down() {
     );
 }
 
-// A run whose agent's judge call fails once its start runs out, since its judge hangs without
-// dialing, and whose agent's sandbox's delete, as the agent exits, outlasts the run's hard
-// end, so that the loop takes the call's last report only after it, and the judge call that
-// the agent's sandbox makes after the exit, as a process the agent left would, which reaches
-// the host before the report. Each came before the hard end, at the time it carries: the core
-// refuses the op, whose refusal can't be sent, and the report ends the call in time, so the
-// run finishes without a submission rather than be abandoned.
+// The late op and the call's report each came before the hard end, at the time it carries, so the
+// report ends the call in time and the run finishes rather than be abandoned.
 #[test]
 fn reported_before_the_hard_end() {
     // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
@@ -2234,12 +2181,8 @@ fn reported_before_the_hard_end() {
     );
 }
 
-// A run on a simulated host, whose agent makes a judge call as the run starts, and whose loop
-// takes it 0.5 s past the deadline, then finds its inbox empty until the call's thread, which
-// finds the call's start due by the deadline, reports the call's failure, at that time: the op
-// reached the host before the deadline, so the core accepts it, and the failure, which reached
-// it after, waits while the deadline's tick ends the work phase, then ends the call, which
-// finishes the run.
+// The op reached the host before the deadline, so the core accepts it; the failure, which
+// reached it after, waits for the deadline's tick.
 #[test]
 fn reported_past_the_deadline() {
     let late = LateTake {
@@ -2314,10 +2257,8 @@ fn reported_past_the_hard_end() {
     );
 }
 
-// A run whose agent finalizes a submission, and whose agent's sandbox's delete, in the teardown
-// that follows, outlasts the run's hard end: the final judge's start is due by then, so its
-// call fails with no sandbox created, once the hard end has passed, and the hard end's tick,
-// which comes first, abandons the run.
+// The final judge's start is due by the hard end, which has passed, so its call fails with no
+// sandbox created, and the hard end's tick, which comes first, abandons the run.
 #[test]
 fn torn_down_past_the_hard_end() {
     check(
@@ -2350,12 +2291,8 @@ fn torn_down_past_the_hard_end() {
     );
 }
 
-// A run whose agent waits 2 s once its first `ops` is answered before it makes its second,
-// timed as it reached the host, so that its reply leaves at least 2 s less than the first's,
-// however long the agent took to start, which the agent checks, exiting with 1 if not. It then
-// exits, and its sandbox makes a judge call after the exit, as a process the agent left would:
-// the call arrives once the core has finished the run, so the core refuses it, and the refusal
-// can't be sent, which the run log notes.
+// The agent checks that the `ops` after its 2 s sleep leaves at least 2 s less than the one before,
+// however long it took to start.
 #[test]
 fn late_ops() {
     let argv = [
@@ -2396,17 +2333,8 @@ fn late_ops() {
     );
 }
 
-// A run on a simulated host, whose agent makes a judge call, then at once ends its session by
-// closing the connection, both as the run starts, and whose loop takes the op 0.5 s past the
-// deadline, as a slow sync of the run log would hold it, with the session's end queued behind
-// it: each reached the host before the deadline, and counts then, however late the loop takes
-// it, so the core accepts the op, whose reply isn't sent, as it was due by the deadline, and the
-// session's end ends the work phase as the agent's failure, ahead of the call's failure, which
-// its thread reports as the call's start was due by then, and which then finishes the run.
-//
-// The test is deterministic because one thread produces its inputs, the session's reader, so
-// they reach the inbox in a fixed order; the order between producers on different threads, such
-// as a judge's report and the agent's reader, isn't scripted yet.
+// Deterministic, as one thread, the session's reader, produces both inputs, which reach the
+// inbox in a fixed order.
 #[test]
 fn taken_past_the_deadline() {
     let late = LateTake {
@@ -2446,12 +2374,7 @@ fn taken_past_the_deadline() {
     );
 }
 
-// A run on a simulated host, whose agent makes an `ops`, then at once ends its session by
-// closing the connection, both as the run starts, and whose loop takes the op at once, but
-// whose sync of the op's record lasts until the session's end is queued behind it, and ends
-// 0.5 s past the deadline: the reply is due by the deadline, so it isn't sent; and the
-// session's end, which reached the host at 0, is decided at 0, ahead of the core's tick, so
-// the agent fails.
+// The session's end, which reached the host at 0, is decided at 0, ahead of the core's tick.
 #[test]
 fn held_by_a_slow_sync() {
     let slow = SlowSync {
@@ -2490,12 +2413,8 @@ fn held_by_a_slow_sync() {
     );
 }
 
-// A run on a simulated host whose agent starts 25 s in, within its startup of 30 s, as a slow
-// sync of the run's first record holds its start back, and whose loop takes the agent's `ops`
-// 55 s in: the deadline of 30 s counts from the agent's start, so the reply leaves the agent
-// the whole 30 s, though it isn't sent, as it was due by the deadline, 55 s in, whose tick
-// then ends the work phase. Held to 35 s, past its startup, which counts from the run's start,
-// the start fails, rather than leaving the agent less than its deadline.
+// The deadline counts from the agent's start, the startup from the run's: held past the
+// startup, the start fails.
 #[test]
 fn started_late() {
     let slow = SlowSync {
@@ -2562,9 +2481,6 @@ fn started_late() {
     );
 }
 
-// A run on a simulated host whose sync of the record of the agent's first op fails: the run
-// fails with the sync's error as its reason, and sends no reply; the run's end deletes the
-// agent's sandbox, which the run log notes, with why the run failed.
 #[test]
 fn sync_fails() {
     check(
@@ -2593,10 +2509,6 @@ fn sync_fails() {
     );
 }
 
-// A run on a simulated host whose agent makes an `ops`, then a judge call whose payload is over
-// the agent's limit, which the gateway refuses, and whose sync of the refused op's record ends
-// 0.5 s past the deadline: the refusal, due by then, comes only after that sync, so it isn't
-// sent, and the core's tick ends the work phase at its deadline.
 #[test]
 fn refusal_held_by_a_slow_sync() {
     let slow = SlowSync {
@@ -2633,14 +2545,8 @@ fn refusal_held_by_a_slow_sync() {
     );
 }
 
-// A run on a simulated host whose journal shows each sync of its record in order with what the
-// simulated provider sees of the acts that follow: its agent makes an `ops`, then a judge call
-// whose payload is over the agent's limit, which the gateway refuses, then exits. Each record of
-// the run log that leads to an act is synced before it, with every record before it: the run's
-// start before the agent's create, the `ops`'s arrival before its reply reaches the agent's
-// session, the refused op's record before its refusal does, and the agent's exit before its
-// sandbox's delete. The agent's start and the note of what its teardown collected lead to no act,
-// and are synced with the next record that does, or by the run's end, before `outcome.json`.
+// The agent's start leads to no act, so it is synced with the next record that does; the note of
+// what its teardown collected, which no such record follows, by the run's end.
 #[test]
 fn syncs() {
     let journal = Journal::default();
@@ -2701,16 +2607,8 @@ fn syncs() {
     );
 }
 
-// A run whose agent makes model requests through its route, each once the one before it is
-// answered, which the run log says goes to the stand-in, each model under the name it takes:
-// one goes upstream, its model named as the upstream takes it, with the upstream's key, and its
-// stream reaches the agent, naming the model that answered as the agent named it; one that
-// names a model the route doesn't allow is refused; and once the agent has finalized a
-// submission, one goes upstream too, as the route stays open through the grace after the
-// finalize, until the agent's exit ends the work phase, and so do one whose stream states that
-// it failed, with a 200, and one whose key the provider refuses, with a 401, which the run log
-// keeps while the run is scored as usual, since the finalize had locked its selection. The run
-// log records how each was answered, before the agent goes on.
+// The route stays open through the grace after the finalize, until the agent's exit ends the
+// work phase.
 #[test]
 fn model_requests() {
     let argv = [
@@ -3139,10 +3037,6 @@ fn judge_routed(mut ir: Value, judge: usize, steps: &[&str]) -> Value {
     ir
 }
 
-// A run whose score judge asks its model while its command runs, in the final phase, once the
-// agent's route has ended, and scores the submission with the number the model answered: the
-// run log notes each role's route as the run starts, and names the caller of each model
-// request it records.
 #[test]
 fn judge_model() {
     let argv = ["ops", "model m-large stream", "finalize submit 6"];
@@ -3197,10 +3091,8 @@ fn judge_model() {
     );
 }
 
-// A run whose agent's model request streams while its train judge's call asks its own model,
-// and the call's result, the number the model answered, reaches the agent; then the call asks
-// again, and exits with that request in flight: its route ends with its command, so the request
-// is cut short then, while the agent's stream goes on until the agent exits.
+// The call's route ends with its command, so its request in flight is cut short, while the
+// agent's stream goes on.
 #[test]
 fn judge_and_agent_model() {
     let argv = [
@@ -3272,9 +3164,8 @@ fn judge_and_agent_model() {
     );
 }
 
-// A run whose train judge's call hears that the model provider refused its route's key, with a
-// 401: the call gives no result, and though the agent goes on and its submission is judged, the
-// run fails, as the refusal is the deployment's fault, never the agent's.
+// The model provider's refusal of the call's key is the deployment's fault, never the agent's,
+// so the run fails though its submission is judged.
 #[test]
 fn judge_key_refused() {
     let argv = [
@@ -3343,10 +3234,8 @@ fn nanos(value: &Value) -> Option<u64> {
     value.as_str()?.parse().ok()
 }
 
-// A run holds what its provider reserved for it until its end, interrupted or not: while one run
-// holds all the provider's CPUs, another is refused before its record; once the first has
-// ended, as a signal ends it before it publishes, the other is prepared, and once that one has
-// finished, a third.
+// A run holds what it reserved until its end, interrupted or not: a signal ends the second before
+// it publishes, and a third is then prepared.
 #[test]
 fn holds_until_its_end() {
     let runs = Runs::new("holds-until-its-end");
@@ -3428,12 +3317,6 @@ fn lease_workflow(argv: &[&str], deadline: u64, image: &str) -> Value {
 /// An image of the simulated provider's that no fault names, for a runner.
 const RUNNER: &str = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
 
-// A run whose agent leases a runner: the lease opens at once, and is ready once its runner has
-// started; it runs two commands, one after the other, whose ends and output the agent reads, as
-// far as a status holds the second's, and
-// a third that passes its timeout of 1 s, which is killed alone; the agent's ops on a lease it
-// doesn't have, or on a grant that isn't a lease grant, are refused; and its close ends the
-// runner. The lease's record holds each command's output.
 #[test]
 fn leases() {
     let argv = [
@@ -3505,9 +3388,6 @@ fn leases() {
     );
 }
 
-// A run whose agent's first lease ends at the time it asked for, 1 s after its runner is ready,
-// while its command runs, and whose second lease, the first instance free again, ends with the
-// work phase, as the agent exits: the final judge starts once both have ended.
 #[test]
 fn lease_ends() {
     let argv = [
@@ -3572,9 +3452,8 @@ fn lease_ends() {
     );
 }
 
-// A run whose runner's create fails, as a provider with no room refuses one: the lease fails,
-// saying why in its status, at no cost to its grant, and the agent opens another, which fails
-// alike, and goes on to its submission, which the run scores.
+// The runner's create fails, as a provider with no room refuses one: the lease fails at no cost to
+// its grant.
 #[test]
 fn lease_unstarted() {
     let argv = [
@@ -3628,13 +3507,8 @@ fn lease_unstarted() {
     );
 }
 
-// A run whose agent moves trees to and from a leased runner: it puts a directory of its own in
-// the runner, which a command there lists, each entry with the mode it had in the agent's
-// sandbox, whatever the host's umask; the same put again fails, as its destination exists; it
-// gets the command's output back, and the directory it put, then replaces that directory with
-// another, and gets it back, all of which its teardown collects with its `out`; and a tree over
-// the grant's `transfer_bytes` fails as it is collected. Each transfer counts as a command, and
-// leaves nothing of the tree in the lease's record.
+// Each entry keeps the mode it had in the agent's sandbox, whatever the host's umask; a transfer
+// counts as a command.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn lease_transfers() {
@@ -3736,10 +3610,8 @@ fn lease_transfers() {
     );
 }
 
-// A run whose agent puts a tree in a leased runner whose collect from its own sandbox waits: the
-// run goes on deciding meanwhile, answering the agent's ops; the agent closes the lease, which
-// cuts the transfer short as the tree begins to arrive, a failed transfer in the lease's status,
-// and the agent's session goes on to its submission.
+// The collect from the agent's sandbox waits, so the run goes on deciding meanwhile, answering
+// the agent's ops.
 #[test]
 fn transfer_cut() {
     let argv = [
@@ -3834,10 +3706,7 @@ const LEASING_JUDGE: [&str; 8] = [
     "result",
 ];
 
-// A run whose train judge leases a runner as its call runs, as [`LEASING_JUDGE`] does, its ops
-// relayed by its call's thread and named its call's in the run log; its lease ends as its
-// command ends; and the agent, which names the call's lease, is refused, as no lease of its own
-// has that number.
+// The agent, which names the call's lease, is refused, as no lease of its own has that number.
 #[test]
 fn judge_leases() {
     let argv = [
@@ -3947,11 +3816,8 @@ fn score_leases() {
     );
 }
 
-// A run whose train judge leases a runner whose create takes seconds, longer than the call's
-// timeout of 1 s, and exits at once: the lease, closed as the call ends, starts by the call's
-// timeout, not by its class's startup, so its create gives up then, and the lease ends without
-// its runner ever ready, charged nothing; the run goes on to its score, and its end deletes the
-// sandbox that the create left.
+// The lease starts by the call's timeout, not by its class's startup, so its create gives up
+// then.
 #[test]
 fn lease_starts_by_its_holders_end() {
     let judge = ["ops", "lease_open box"];

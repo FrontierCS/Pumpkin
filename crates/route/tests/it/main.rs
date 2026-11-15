@@ -37,11 +37,10 @@ fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
     names.map(|name| (model(name), model(name))).into()
 }
 
-/// Sends each case's request over a session, as a sandbox of a role whose route allows `m-large`
-/// and `m-small` through the Responses API and through Chat Completions, and serves it as the
-/// session's owner: it shows what the stand-in model
-/// provider received of each that the route admitted, or the refusal that the sandbox heard,
-/// and checks them against `expect`.
+/// Sends each case's request over a session, as a sandbox whose route allows `m-large` and
+/// `m-small` through the Responses API and through Chat Completions, and serves it as the
+/// session's owner: it shows what the stand-in model provider received of each that the route
+/// admitted, or the refusal that the sandbox heard, and checks them against `expect`.
 #[expect(
     clippy::too_many_lines,
     reason = "it runs a session, a stand-in and each case's exchange in one place"
@@ -123,7 +122,6 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// A keeper of exchanges that keeps nothing.
 struct Ignored;
 
 impl Keep for Ignored {
@@ -341,14 +339,12 @@ fn chat(edit: impl FnOnce(&mut Value)) -> Request {
     ("POST", path, chat_headers(), body)
 }
 
-/// The harness's request with `name: value` added to its headers.
 fn with_header(name: &str, value: &str) -> Request {
     let (method, path, mut headers, body) = post(|_| {});
     headers.push((name.to_owned(), value.to_owned()));
     (method, path, headers, body)
 }
 
-/// The harness's request, by `method` to `path`.
 fn at(method: &'static str, path: &str) -> Request {
     let (_, _, headers, body) = post(|_| {});
     (method, path.to_owned(), headers, body)

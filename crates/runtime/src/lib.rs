@@ -1,17 +1,14 @@
 //! Pumpkin's host side, the runtime: runs a workflow on the [`Provider`]s its roles are placed
-//! on, as the [core](decision) decides, and keeps the run's record. A role with a model route,
-//! the agent or a judge, reaches its model through [`route`], which the runtime serves.
+//! on, as the [core](decision) decides, and keeps the run's record. A role with a model route
+//! reaches its model through [`route`], which the runtime serves.
 //!
 //! [`Run::prepare`] begins the record of a placed workflow, and [`Run::execute`] runs it to its
 //! outcome, or until a signal interrupts it ([`Stopped::Interrupted`]), one thread driving the core
 //! as [`Core`] says, while each child of the run, a judge call or a lease, runs on a thread of its
-//! own, the `child` module's, which the `judge` or the `lease` module drives. Between the core's
-//! ticks, the driving thread waits on one inbox of the run's [`Host`], into which the agent's
-//! session hands what it reads, and each child's thread its reports, a judge's call's ops and model
-//! requests among them, which the loop answers, an op through the call's thread. Its sandboxes
-//! start on one path, the `sandbox` module's, which ends a start once its sandbox has ended, and
-//! the agent's is the `agent` module's. Each model request is answered on a thread of its own, as
-//! the `model` module serves its sandbox's route, until the core stops allowing its caller's
+//! own. Between the core's ticks, the driving thread waits on one inbox of the run's [`Host`],
+//! into which the agent's session hands what it reads, and each child's thread its reports, ops
+//! and model requests among them, which the loop answers. Each model request is answered on a
+//! thread of its own, until the core stops allowing its caller's
 //! ([`Core::model_requests_allowed`]), which ends the route's exchanges. The record's files and the
 //! run log's records, and when each is written, are laid out in the `record` and `log` modules.
 
@@ -82,9 +79,7 @@ pub struct Recorded<'a> {
 pub struct Run<'r, H> {
     host: &'r H,
     placed: Placed,
-    /// Each provider that a role is placed on, by its name.
     providers: ByProvider<&'r dyn Provider>,
-    /// Each role's model route, as [`model::routes`] gives it.
     routes: ByRole<Vec<Serving>>,
     id: RunTag,
     /// The tag of each image's build, by the image's ID, for `provider.json`.
@@ -106,7 +101,7 @@ impl<'r, H: Host> Run<'r, H> {
     /// # Errors
     ///
     /// Fails, before any record is made, if a route has no serving or a provider can't reserve;
-    /// or if `runs` isn't safe from other users, `id` is taken, or the record can't be written.
+    /// or if `runs` isn't safe from other users, or `id` is taken.
     pub fn prepare(
         host: &'r H,
         placed: Placed,
@@ -148,14 +143,15 @@ impl<'r, H: Host> Run<'r, H> {
         &self.dir
     }
 
-    /// Runs the workflow on its roles' providers, with the static `sandboxd` in each sandbox, calling `started` once that is published; a private provider's
-    /// sandboxes meet the gateway at `private`, a listening one's through `dialer`. Records its
-    /// end in `outcome.json`, and deletes what each provider lists of it.
+    /// Runs the workflow on its roles' providers, with the static `sandboxd` in each sandbox,
+    /// calling `started` once that is published; a private provider's sandboxes meet the gateway
+    /// at `private`, a listening one's through `dialer`. Records its end in `outcome.json`, and
+    /// deletes what each provider lists of it.
     ///
     /// # Errors
     ///
-    /// Stops once a signal comes ([`Stopped::Interrupted`]); fails if it can't be set up, recorded
-    /// or cleaned up, if `started` fails, past its hard end ([`lasts`]), or as `routes_held` says.
+    /// Stops once a signal comes ([`Stopped::Interrupted`]); fails if `started` fails, past its
+    /// hard end ([`lasts`]), or if a model provider's refusal or failure could change the score.
     pub fn execute(
         self,
         sandboxd: &Path,
@@ -190,10 +186,6 @@ impl<'r, H: Host> Run<'r, H> {
         failed_also(outcome, written)
     }
 
-    /// Records what each provider declared, and where each role is placed, and publishes what
-    /// the run's sandboxes run, calls `started` unless a signal has come first, then starts the
-    /// run's clock on its host and drives the run, keeping its log, deletes what each provider
-    /// still lists of it, and syncs the log.
     fn run_on(
         &self,
         sandboxd: &Path,
@@ -297,7 +289,6 @@ impl Failure for Stopped {
     }
 }
 
-/// Whether `reply` accepts the call it answers.
 fn accepts(reply: &OpReply) -> bool {
     match reply {
         OpReply::Judge(_) | OpReply::Submit(_) => true,
@@ -453,12 +444,10 @@ fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
 struct Runtime<'r, H: Host> {
     /// The run's workflow, placed, which says how long each role's sandboxes take to start.
     placed: &'r Placed,
-    /// Each role's model route, as [`model::routes`] gives it.
     routes: &'r ByRole<Vec<Serving>>,
     /// The model route of each sandbox that the run serves one, by its caller: the agent's, and
     /// each call's of a judge with a route, each shared with its model requests' threads.
     served: BTreeMap<Caller, Arc<Served>>,
-    /// The run's record.
     dir: &'r Path,
     /// The run's sandboxes, and its only way to its provider, which judge calls' threads share.
     sandboxes: &'r Sandboxes<'r, H>,
@@ -479,7 +468,6 @@ struct Runtime<'r, H: Host> {
     /// The callers whose routes' keys no model provider had refused when the core accepted the
     /// agent's final submission, which locks the selection, if it did ([`Runtime::routes_held`]).
     held_at_lock: BTreeSet<Caller>,
-    /// Each judge call, by job.
     jobs: BTreeMap<JobId, Called>,
     /// A sender into each lease's inbox, by lease, through which the core's orders reach it.
     leases: BTreeMap<LeaseId, Sender<Message<lease::Order>>>,
@@ -1141,13 +1129,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(())
     }
 
-    /// Stops job `job`'s call.
     fn stop_job(&mut self, job: JobId) {
         // A call whose thread has ended has nothing left to stop.
         let _ = self.call(job).orders.send(Message::Stop);
     }
 
-    /// Job `job`'s call.
     fn call(&mut self, job: JobId) -> &mut Called {
         // A type tying the job to its start would carry the runtime's sender through the core,
         // which holds no runtime state.
@@ -1183,7 +1169,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         trees
     }
 
-    /// Sends `message` into lease `lease`'s inbox.
     fn send_lease(&self, lease: LeaseId, message: Message<lease::Order>) {
         // A type tying the order to the open would carry the runtime's sender through the core,
         // which holds no runtime state.
@@ -1203,10 +1188,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     /// `scope`'s that runs `run` on it, in a directory of its own in the record, and returns the
     /// sender into its inbox. The child fails ([`Which::failed`]), with nothing started, if the
     /// thread doesn't start.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the child's directory can't be made.
     fn start_child<'s, O: Send + 'static>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -1296,11 +1277,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     /// result of the agent's to score: that none refused a route's key, but one heard after the
     /// selection was locked on a route that served before it ([`Runtime::held_at_lock`]), and
     /// that none failed the agent's last request, if it exited with no submission finalized in a
-    /// run that ended with `outcome` ([`Served::failed_last`]).
-    ///
-    /// # Errors
-    ///
-    /// Fails, naming the upstream and the route, if one did.
+    /// run that ended with `outcome` ([`Served::failed_last`]). Fails, naming the upstream and the
+    /// route, if one did.
     fn routes_held(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
         // A refusal heard after the lock can't change the score: the agent's or a call's whose
         // answer the agent can no longer act on. The score's call starts after the lock, so a

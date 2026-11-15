@@ -159,7 +159,6 @@ impl Ops {
         }
     }
 
-    /// Carries the op a caller sends on `connection`, and answers it.
     fn carry(&self, mut connection: UnixStream, sender: &Sender) {
         let answer = match frame::read::<OpCall>(&mut connection) {
             Ok(Some((call, path))) => self.call(call, &path, &connection, sender),

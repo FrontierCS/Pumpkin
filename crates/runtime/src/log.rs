@@ -215,7 +215,6 @@ impl<'h, H: Host> Log<'h, H> {
         self.told(event)
     }
 
-    /// Appends `entry`, as [`Entry`] says.
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
@@ -286,7 +285,6 @@ impl<'h, H: Host> Log<'h, H> {
         Ok(())
     }
 
-    /// Makes every record written so far last.
     pub(super) fn sync(&self) -> Result<(), String> {
         (self.host)
             .sync(&self.file, Durable::Data)
@@ -765,7 +763,6 @@ pub struct LeaseSpan {
     /// How many commands and transfers it ran, and the last.
     pub commands: u64,
     pub last: Option<Work>,
-    /// Why it failed, if it did.
     pub failed: Option<String>,
     /// How long it was busy, until the command or transfer that runs, if one does, began.
     busy: Duration,

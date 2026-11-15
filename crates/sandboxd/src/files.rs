@@ -1,5 +1,4 @@
-//! Moving trees between the gateway and the sandbox: writing the trees the gateway puts, and
-//! sending the trees it collects.
+//! Moving trees between the gateway and the sandbox.
 //!
 //! A tree being put is written as its parts arrive, so [`Puts`] holds each tree in progress,
 //! by its stream. A tree being collected is listed whole before anything is sent, so a tree
@@ -22,7 +21,6 @@ use stdx::Context;
 use crate::session::Sender;
 use crate::sys;
 
-/// The trees being put, each written as its parts arrive.
 #[derive(Default)]
 pub(crate) struct Puts {
     /// The tree being put on each stream: `None` once it has failed, until its end arrives.
@@ -30,7 +28,6 @@ pub(crate) struct Puts {
 }
 
 impl Puts {
-    /// Begins putting a tree in `dir` on `stream`, made as `root` says, with its parents.
     pub(crate) fn begin(
         &mut self,
         sender: &Sender,
@@ -60,13 +57,10 @@ impl Puts {
         }
     }
 
-    /// Writes an entry of the tree being put on `stream` ([`tree::Writer::entry`]).
     pub(crate) fn entry(&mut self, sender: &Sender, stream: u32, entry: &Entry) -> io::Result<()> {
         self.write(sender, stream, |tree| tree.entry(entry))
     }
 
-    /// Writes bytes of the current file of the tree being put on `stream`
-    /// ([`tree::Writer::data`]).
     pub(crate) fn data(&mut self, sender: &Sender, stream: u32, bytes: &[u8]) -> io::Result<()> {
         self.write(sender, stream, |tree| tree.data(bytes))
     }
@@ -134,7 +128,6 @@ fn protocol_error(stream: u32, what: &str) -> io::Error {
     )
 }
 
-/// Sends the tree in `dir` on `stream`, or a failure.
 pub(crate) fn collect(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
     let mut entries = Vec::new();
     if let Err(message) = list(dir, None, &mut entries) {

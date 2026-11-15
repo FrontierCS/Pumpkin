@@ -1,5 +1,4 @@
-//! The model routes that a run serves: each role's ([`routes`]), and each sandbox's of a role
-//! with one, as the run serves it ([`Served`]), by the rules of [`route`].
+//! The model routes that a run serves, by the rules of [`route`].
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -48,12 +47,8 @@ impl fmt::Debug for Served {
 
 /// Each role's model route in `workflow`, as `servings` serve it: for each entry of the route,
 /// in its order, the serving of the entry's API, which takes the models that the entry allows
-/// alone; none for a role without a route.
-///
-/// # Errors
-///
-/// Fails if a role's route has an entry that no serving of its API serves, or that allows a
-/// model that its serving doesn't serve.
+/// alone; none for a role without a route. Fails if an entry has no serving of its API, or
+/// allows a model that its serving doesn't serve.
 pub(super) fn routes(
     workflow: &Workflow,
     servings: &ByRole<Vec<Serving>>,
@@ -61,7 +56,6 @@ pub(super) fn routes(
     workflow.by_role(|(role, sandbox)| route(sandbox, servings.get(role)))
 }
 
-/// `sandbox`'s role's model route, as [`routes`] gives it.
 fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String> {
     let Some(route) = &sandbox.model_route else {
         return Ok(Vec::new());
@@ -176,7 +170,6 @@ impl Served {
         };
     }
 
-    /// The upstream that refused the route's key, if one has ([`Upstream::key_was_refused`]).
     pub(super) fn key_refused_by(&self) -> Option<&Name> {
         let refused = self
             .entries
@@ -187,11 +180,8 @@ impl Served {
 
     /// Checks that the sandbox's last request answered while the route was open got no failure
     /// from the model provider, if the agent's exit ended the work phase of a run that ended with
-    /// `outcome` with no submission finalized.
-    ///
-    /// # Errors
-    ///
-    /// Fails, naming the upstream and the failure, if it did.
+    /// `outcome` with no submission finalized. Fails, naming the upstream and the failure, if it
+    /// did.
     pub(super) fn failed_last(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
         // An agent that ran to the deadline, or finalized, is scored as usual: Harbor scores an
         // agent that timed out in its provider's backoff, and Inspect's `time_limit` is wall
@@ -220,7 +210,6 @@ impl Served {
         }
     }
 
-    /// Whether [`Served::end`] has ended the route.
     fn ended(&self) -> bool {
         self.entries
             .iter()
@@ -303,7 +292,6 @@ struct Body {
     items: Option<(&'static str, usize)>,
 }
 
-/// One file of an exchange's.
 struct Part {
     name: &'static str,
     file: RefCell<Option<File>>,
@@ -311,7 +299,6 @@ struct Part {
 }
 
 impl Exchange {
-    /// Exchange `number`, to keep in the record at `record`.
     pub(super) fn new(record: &Path, number: u64) -> Self {
         let part = |name| Part {
             name,
@@ -365,7 +352,6 @@ impl Exchange {
         })
     }
 
-    /// Adds `bytes` to `part`'s file, which it makes if it has none yet.
     fn add(&self, part: &Part, bytes: &[u8]) {
         if bytes.is_empty() || self.failed.borrow().is_some() {
             return;

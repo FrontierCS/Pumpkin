@@ -1,12 +1,9 @@
 //! The runtime's one start path, which every sandbox of a run starts on, on the provider its role
-//! is placed on ([`Sandboxes::start`]), which ends a start once its sandbox has ended, as the run
-//! ends every start once a signal has come, and what each role's sandbox needs of it: its IR
-//! command launched, and what it wrote collected. Each sandbox that a start created is recorded
-//! with what its provider made of it, the GPUs its `sandboxd` saw, and each delete's outcome
-//! ([`record::write_sandbox`]); each delete keeps its console in the run's record first
-//! ([`record::write_console`]).
-//!
-//! The provider's side of each step is [`Provider`]'s, and the session's [`Session`]'s.
+//! is placed on, and what each role's sandbox needs of it: its IR command launched, and what it
+//! wrote collected. A start ends once its sandbox has ended, as the run ends every start once a
+//! signal has come. Each sandbox that a start created is recorded with what its provider made of
+//! it, the GPUs its `sandboxd` saw, and each delete's outcome; each delete keeps its console in
+//! the run's record first.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -121,7 +118,6 @@ pub(super) struct Sandboxes<'p, H: Host> {
     between_looks: Duration,
 }
 
-/// A sandbox that a start of the run created.
 #[derive(Clone)]
 struct Made<'p> {
     on: &'p Name,
@@ -212,7 +208,6 @@ impl Which {
         }
     }
 
-    /// The event that it failed for `reason`.
     pub(super) fn failed(self, reason: String) -> Event {
         match self {
             Self::Agent => Event::AgentFailed { reason },
@@ -299,7 +294,6 @@ impl<'de> Deserialize<'de> for SandboxName {
 
 /// A sandbox that started, with its session, set up.
 pub(super) struct Started {
-    /// Which of the run's sandboxes it is, on the provider of whose role it runs.
     which: Which,
     id: SandboxId,
     pub(super) session: Session,
@@ -564,12 +558,10 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         self.placed.workflow()
     }
 
-    /// The name of the provider that `which` sandbox's role is placed on.
     fn on(&self, which: Which) -> &'p Name {
         &self.placed.placement(which.role(self.workflow())).provider
     }
 
-    /// The provider that `which` sandbox's role is placed on.
     fn provider(&self, which: Which) -> &'p dyn Provider {
         self.providers.get(self.on(which)).provider
     }
@@ -649,7 +641,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         (logged, recorded)
     }
 
-    /// Sends `logged`, records for the run log, into the loop's inbox.
     fn send(&self, logged: Vec<log::Entry>) {
         for entry in logged {
             // The loop's inbox outlives every thread that deletes a sandbox.
@@ -659,10 +650,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 
     /// Keeps sandbox `id`'s console, `which` of the run, as its provider shows it, in the run's
     /// record ([`record::write_console`]).
-    ///
-    /// # Errors
-    ///
-    /// Fails if the provider can't show the console, or the record can't be written.
     fn keep_console(&self, which: Which, id: &SandboxId) -> Result<(), String> {
         let read = self.provider(which).console(&self.run, id);
         let unkept = format_args!("sandbox {}'s console wasn't kept", id.as_str());
@@ -678,8 +665,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             &self.record.join(which.record_dir()),
             &console.text,
         )?;
-        // A later read could only replace what was kept with less: a sandbox being deleted, as an
-        // EC2 instance being terminated, may show nothing.
+        // A later read could only replace what was kept with less: a sandbox being deleted may show
+        // nothing.
         let on = self.on(which);
         let mut created = stdx::unpoisoned(self.created.lock());
         for made in (created.iter_mut()).filter(|made| made.on == on && made.id == *id) {
@@ -728,7 +715,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 pub(super) struct Deleted {
     /// Its name within the run ([`Which::name`]), if a start of the run created it.
     pub(super) sandbox: Option<Name>,
-    /// The provider it was on.
     pub(super) provider: Name,
     pub(super) id: SandboxId,
 }

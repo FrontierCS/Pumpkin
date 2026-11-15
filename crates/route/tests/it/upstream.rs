@@ -21,7 +21,6 @@ use test_support::http::{read_request, write_chunk};
 
 use super::{Request, chat, fake_sandbox, meeting, models, next_model_request, post};
 
-/// The key file's text, whose key goes upstream.
 const KEY: &str = "sk-test-0123\n";
 
 /// The stand-in's URL, which [`check`] completes with its address.
@@ -35,17 +34,14 @@ const STREAM_HEAD: &str = "content-type: text/event-stream\r\nopenai-model: m-la
                            x-ratelimit-remaining-requests: 499\r\nset-cookie: s=1\r\n\
                            transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
 
-/// The two parts of a stream that the stand-in sends.
 type Parts = [&'static str; 2];
 
-/// The two parts of the stand-in's streamed body.
 const PARTS: Parts = [
     "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":8},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":3}}}}\n\n",
 ];
 
-/// The two parts of the stand-in's streamed body for Chat Completions, the second with the usage
-/// that the request asked for.
+/// The second part holds the usage that the request asked for.
 const CHAT_PARTS: Parts = [
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"7\"}}],\"usage\":null}\n\n",
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":16},\"completion_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\ndata: [DONE]\n\n",
@@ -87,21 +83,20 @@ const CHAT_FAILED_PARTS: Parts = [
     "data: {\"error\":{\"message\":\"Rate limit reached\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":\"rate_limit_exceeded\"}}\n\n",
 ];
 
-/// A case: its name, its upstream's URL and the text of its key file (`None` for no file), how
-/// the stand-in answers (`None` if it never receives the request), and whether a second request,
-/// which the stand-in never receives, is served with the same upstream, and if so whether it is
-/// allowed (`Some(allowed)`).
 struct Case {
     name: &'static str,
     /// The API of the route's entry, whose client's request the sandbox sends.
     api: Api,
     url: &'static str,
+    /// The text of its key file; `None` for no file.
     key: Option<&'static str>,
+    /// How the stand-in answers; `None` if it never receives the request.
     answer: Option<Answer>,
+    /// Whether a second request, which the stand-in never receives, is served with the same
+    /// upstream: `Some(allowed)`.
     then: Option<bool>,
 }
 
-/// How the stand-in answers a case's request.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Answer {
     /// With a stream in two parts, the second once the sandbox has heard the first.
@@ -147,8 +142,9 @@ fn unanswered(name: &'static str) -> Case {
 }
 
 /// Makes each case's upstream, and through each that it makes, forwards the request of a client
-/// of the case's API, sent by a sandbox of a role whose route allows `m-large` and `m-small`, to
-/// the stand-in, answering by a deadline that only a hang reaches. Checks what came of each against `expect`.
+/// of the case's API, sent by a sandbox whose route allows `m-large` and `m-small`, to the
+/// stand-in, answering by a deadline that only a hang reaches. Checks what came of each against
+/// `expect`.
 #[expect(
     clippy::too_many_lines,
     reason = "it runs a session, a stand-in and each case's exchange in one place"
@@ -288,7 +284,6 @@ fn serve_one(
     (told, sizes.unwrap_or_default())
 }
 
-/// What a test keeps of an exchange: the request's body and the answer's.
 #[derive(Default)]
 struct Kept {
     request: RefCell<Vec<u8>>,
@@ -296,7 +291,6 @@ struct Kept {
 }
 
 impl Kept {
-    /// The sizes of what it kept.
     fn sizes(&self) -> String {
         let (request, response) = (self.request.borrow().len(), self.response.borrow().len());
         format!("request {request} bytes, response {response} bytes")
@@ -313,7 +307,6 @@ impl Keep for Kept {
     }
 }
 
-/// The request that a client of `api` sends.
 fn request(api: Api) -> Request {
     match api {
         Api::Responses => post(|_| {}),

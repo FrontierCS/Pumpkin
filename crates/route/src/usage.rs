@@ -16,7 +16,6 @@ const MAX_CODE_BYTES: usize = 64;
 /// reasoning tokens.
 pub(crate) type Fields = [&'static str; 4];
 
-/// Where the Responses API's usage gives them.
 pub(crate) const RESPONSES_FIELDS: Fields = [
     "input_tokens",
     "output_tokens",
@@ -24,7 +23,6 @@ pub(crate) const RESPONSES_FIELDS: Fields = [
     "/output_tokens_details/reasoning_tokens",
 ];
 
-/// Where the Chat Completions API's usage gives them.
 pub(crate) const CHAT_FIELDS: Fields = [
     "prompt_tokens",
     "completion_tokens",
@@ -79,7 +77,6 @@ impl Failure {
         self.code.as_deref()
     }
 
-    /// The failure that `event`, a stream's, states, if it does.
     fn of(event: &Value) -> Option<Self> {
         let error = match (event.get("error"), event["type"].as_str()) {
             (Some(error), _) if !error.is_null() => Some(error),
@@ -112,7 +109,6 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    /// A scan of a body whose `content-type` is `content_type`, whose usage is in `fields`.
     pub(crate) fn new(content_type: Option<&str>, fields: Fields) -> Self {
         let stream = content_type.is_some_and(|value| value.contains("text/event-stream"));
         Self {
@@ -124,7 +120,6 @@ impl Scan {
         }
     }
 
-    /// Takes the next `bytes` of the body.
     pub(crate) fn feed(&mut self, mut bytes: &[u8]) {
         if !self.stream {
             self.hold(bytes);
@@ -138,7 +133,6 @@ impl Scan {
         self.hold(bytes);
     }
 
-    /// The usage that the body reported, and the failure it stated, once it has ended.
     pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>) {
         if self.stream {
             self.line();
@@ -161,8 +155,6 @@ impl Scan {
         }
     }
 
-    /// Ends the stream's current line, and keeps the usage it holds, and the failure it states,
-    /// if any.
     fn line(&mut self) {
         let Some(held) = self.held.replace(Vec::new()) else {
             return;

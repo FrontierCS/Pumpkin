@@ -53,11 +53,7 @@ impl Client {
         Self::with(roots)
     }
 
-    /// A client that trusts `root`, a certificate in DER, alone.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `root` isn't a certificate that can be a root.
+    /// A client that trusts `root`, a certificate in DER, alone: one that can't be a root fails.
     pub fn trusting(root: &[u8]) -> io::Result<Self> {
         let mut roots = RootCertStore::empty();
         (roots.add(CertificateDer::from(root.to_vec()))).map_err(|error| tls(&error))?;
@@ -82,8 +78,8 @@ impl Client {
     /// # Errors
     ///
     /// Fails if `name` isn't a DNS name, if the server's certificate isn't one of `name` from a
-    /// trusted root, if the handshake fails otherwise or isn't done by `by`, or if a relay's thread
-    /// can't start: TLS's own failures as [`InvalidData`](io::ErrorKind::InvalidData) alone.
+    /// trusted root, or if the handshake fails otherwise or isn't done by `by`: TLS's own
+    /// failures are [`InvalidData`](io::ErrorKind::InvalidData) alone.
     pub fn connect(&self, stream: TcpStream, name: &str, by: Deadline) -> io::Result<Stream> {
         let Ok(server @ ServerName::DnsName(_)) = ServerName::try_from(name.to_owned()) else {
             return Err(io::Error::new(
@@ -109,11 +105,8 @@ pub struct Server {
 
 impl Server {
     /// A server that shows `chain`, certificates in DER from its own to the last below a root,
-    /// whose own is of `key`, a PKCS #8 private key in DER.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `key` isn't a private key, or isn't the key of `chain`'s first certificate.
+    /// whose own is of `key`, a PKCS #8 private key in DER. A `key` that isn't a private key, or
+    /// isn't the key of `chain`'s first certificate, fails.
     pub fn new(chain: &[&[u8]], key: &[u8]) -> io::Result<Self> {
         let chain = (chain.iter())
             .map(|certificate| CertificateDer::from(certificate.to_vec()))
@@ -136,11 +129,7 @@ impl Server {
     }
 
     /// Runs TLS on `stream`, a connection to a client, with the handshake done by `by`, and
-    /// returns the session's [`Stream`].
-    ///
-    /// # Errors
-    ///
-    /// Fails if the handshake fails or isn't done by `by`, or a relay's thread can't start.
+    /// returns the session's [`Stream`]. A handshake not done by `by` fails.
     pub fn accept(&self, stream: TcpStream, by: Deadline) -> io::Result<Stream> {
         let connection =
             ServerConnection::new(Arc::clone(&self.config)).map_err(|error| tls(&error))?;
@@ -153,12 +142,11 @@ impl Server {
     }
 }
 
-/// The cryptography both ends use: `ring`'s, as the workspace's other TLS uses.
 fn provider() -> Arc<CryptoProvider> {
+    // `ring`'s, as the workspace's other TLS uses.
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// `builder` restricted to TLS 1.3.
 fn builder<S: rustls::ConfigSide>(
     builder: ConfigBuilder<S, rustls::WantsVersions>,
 ) -> ConfigBuilder<S, WantsVerifier> {
@@ -185,9 +173,6 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// # Errors
-    ///
-    /// Fails as [`UnixStream::try_clone`] does.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             socket: self.socket.try_clone()?,
@@ -197,24 +182,14 @@ impl Stream {
 
     /// Ends the session's stream both ways, for every clone, which closes the TLS connection, as
     /// the [crate doc](crate) says.
-    ///
-    /// # Errors
-    ///
-    /// Fails as [`UnixStream::shutdown`] does.
     pub fn shutdown(&self) -> io::Result<()> {
         self.socket.shutdown(Shutdown::Both)
     }
 
-    /// # Errors
-    ///
-    /// Fails as [`UnixStream::set_nonblocking`] does.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.socket.set_nonblocking(nonblocking)
     }
 
-    /// # Errors
-    ///
-    /// Fails as [`UnixStream::set_write_timeout`] does.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.socket.set_write_timeout(timeout)
     }
@@ -243,8 +218,7 @@ impl Write for &Stream {
     }
 }
 
-/// Completes `tls`'s handshake on `tcp` by `by`, or fails saying what was `expected`, then
-/// starts its relay, as the [crate doc](crate) says, and returns the session's [`Stream`].
+/// Completes the handshake by `by`, or fails saying what was `expected`, then starts the relay.
 fn carry(
     mut tls: Connection,
     mut tcp: TcpStream,
@@ -284,9 +258,8 @@ fn carry(
     Ok(Stream { socket, ended })
 }
 
-/// Relays between `tcp`, under `tls`, and `carried`, the relay's end of the session's socket,
-/// until either ends, then closes both, having set `ended` unless the peer ended the TLS with its
-/// `close_notify`.
+/// Relays between `tcp`, under `tls`, and `carried` until either ends, then closes both, having
+/// set `ended` unless the peer ended the TLS with its `close_notify`.
 fn relay(
     mut tls: Connection,
     tcp: &TcpStream,
@@ -424,7 +397,6 @@ fn flushed(tls: &mut Connection, mut tcp: &TcpStream, by: Deadline) -> io::Resul
     Ok(())
 }
 
-/// `fd`'s entry for [`wait`], watched for a read if `read` and a write if `write`.
 fn watch(fd: &impl AsFd, read: bool, write: bool) -> PollFd<'_> {
     let mut events = PollFlags::empty();
     events.set(PollFlags::IN, read);

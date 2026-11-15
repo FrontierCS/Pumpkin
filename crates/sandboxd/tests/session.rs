@@ -1,12 +1,10 @@
 //! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
 //! sandbox's own, at a TCP address on the loopback, or where `sandboxd` listens on the loopback,
-//! behind the stand-in TLS edge ([`Meeting`]). `sandboxd` runs here as an
-//! ordinary process, not as a sandbox's first process, and a temporary directory stands in for
-//! the sandbox. So `sandboxd` serves no ops, which it serves only at the sandbox's own
-//! `/pumpkin`, nor the model endpoint, at a port of the sandbox's own loopback: the Docker
-//! provider's tests make ops and model requests, in real sandboxes. A fake gateway sends
-//! what the gateway's end never would, or holds up what only a slow link would, having read the
-//! hello.
+//! behind the stand-in TLS edge ([`Meeting`]). `sandboxd` runs here as an ordinary process, not as
+//! a sandbox's first process, and a temporary directory stands in for the sandbox. So `sandboxd`
+//! serves no ops, which it serves only at the sandbox's own `/pumpkin`, nor the model endpoint, at
+//! a port of the sandbox's own loopback. A fake gateway sends what the gateway's end never would,
+//! or holds up what only a slow link would, having read the hello.
 
 #![expect(
     clippy::unwrap_used,
@@ -55,12 +53,12 @@ enum Meeting {
     /// At a socket of the sandbox's own, with [`GRANT`] in `sandboxd`'s environment all the same,
     /// which a command shows it doesn't get.
     Socket,
-    /// At a grant listener's address on the loopback, as a provider starts `sandboxd` for the
-    /// dial that the listener issued: with its address and its grant ([`TcpDial`]).
+    /// At a grant listener's address on the loopback, with the address and the grant that the
+    /// listener issued ([`TcpDial`]).
     Tcp,
-    /// Where `sandboxd` listens, at an address of the loopback's, as a provider starts it for the
-    /// dial that a dialer issued, with its grant ([`Listening`]), behind the stand-in TLS
-    /// edge, at whose endpoint the gateway dials it.
+    /// Where `sandboxd` listens, at an address of the loopback's, with the grant that a dialer
+    /// issued ([`Listening`]), behind the stand-in TLS edge, at whose endpoint the gateway dials
+    /// it.
     Listen,
 }
 
@@ -71,9 +69,7 @@ enum Meeting {
 )]
 enum Gateway {
     Sockets(Sockets),
-    /// The listener, and the address it listens at.
     Tcp(GrantListener, SocketAddr),
-    /// The address where `sandboxd` listens.
     Listen(SocketAddr),
 }
 
@@ -89,8 +85,8 @@ struct Sandbox {
 
 impl Sandbox {
     /// Starts `sandboxd`, meeting the gateway as `meeting` says, with the shell script
-    /// `nvidia_smi`, if given, as the `nvidia-smi` on its `PATH`, and puts the directories a role
-    /// expects.
+    /// `nvidia_smi`, if given, as the `nvidia-smi` on its `PATH`, and puts the directories `in`,
+    /// `out`, `home` and `log` there.
     fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
         // Kept if the test fails.
         let root = tempfile::Builder::new()
@@ -166,7 +162,6 @@ impl Sandbox {
         }
     }
 
-    /// The path of a socket `name` in the root.
     fn socket(&self, name: &str) -> PathBuf {
         self.root.join(name)
     }
@@ -183,7 +178,6 @@ impl Sandbox {
         }
     }
 
-    /// A path in the sandbox.
     fn at(&self, relative: &str) -> AbsolutePath {
         absolute(&self.root.join(relative))
     }
@@ -205,7 +199,6 @@ impl Sandbox {
         }
     }
 
-    /// Collects the sandbox's `dir` and lists what arrived.
     fn collect(&mut self, dir: &str) -> Result<Vec<String>, String> {
         let collected = self.root.join("collected");
         fs::create_dir_all(&collected).unwrap();
@@ -330,9 +323,8 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 }
 
 /// Runs `scenario` against a new sandbox, whose `sandboxd` meets the gateway as `meeting` says,
-/// ends the session by dropping it, and checks what the scenario reported, what arrived after it,
-/// how `sandboxd` exited, and how many processes were left running in the sandbox, against
-/// `expect`. Those left get 2 s to exit, and are then killed.
+/// ends the session, and checks what the scenario reported, then what [`Sandbox::end`] says,
+/// against `expect`.
 fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
     let mut sandbox = Sandbox::start(meeting, None);
     let mut lines = scenario(&mut sandbox);
@@ -473,7 +465,6 @@ fn judge() {
     );
 }
 
-/// [`judge`]'s scenario.
 fn judging(sandbox: &mut Sandbox) -> Vec<String> {
     let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
     // Over two frames, and kept as evidence, so that it is put and collected in several.
@@ -503,9 +494,8 @@ fn judging(sandbox: &mut Sandbox) -> Vec<String> {
     lines
 }
 
-// A tree keeps each entry's permission bits both ways, the host's within its umask, but that a
-// directory's owner always has all three, and never a set-ID or sticky bit: so the receiver can
-// always remove what it got, and a put can replace a tree that it put with a read-only directory.
+// A tree keeps each entry's permission bits, the host's within its umask, but a directory's owner
+// always has all three and no set-ID or sticky bit: so the receiver can always remove what it got.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn modes_and_stdin() {
@@ -606,8 +596,8 @@ fn modes_and_stdin() {
     );
 }
 
-/// `len` bytes that repeat out of step with the frames, so that a frame lost, repeated or out of
-/// order shows.
+/// `len` bytes that repeat out of step with the frames.
+// So that a frame lost, repeated or out of order shows.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|n| u8::try_from(n % 251).unwrap()).collect()
 }

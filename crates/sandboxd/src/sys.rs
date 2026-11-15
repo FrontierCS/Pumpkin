@@ -1,8 +1,4 @@
-//! The system calls the standard library doesn't offer, and the flags it doesn't name: waiting
-//! for any child or finding whether there is one, killing every process, taking the orphans of
-//! the process's descendants, finding whether the process is root and becoming the role's user,
-//! making the process non-dumpable, opening only a regular file, at a path the role's code can
-//! write, and finding whether a connection's other end has closed it, without reading from it.
+//! The system calls the standard library doesn't offer, and the flags it doesn't name.
 //!
 //! Every errno a call returns is the world's, and returned: the kernel's security policy, a
 //! security module's or a seccomp filter's, may fail any call with any errno.
@@ -85,8 +81,8 @@ pub(crate) fn kill_all_others() -> io::Result<()> {
 
 /// Has the kernel hand this process the orphans among its descendants, as it hands the first
 /// process of a PID namespace every orphan in it: for a `sandboxd` whose platform puts a process
-/// of its own first in each sandbox, as Modal does `dumb-init`. Fails if the kernel refuses, as
-/// a security module's policy may.
+/// of its own first in each sandbox. Fails if the kernel refuses, as a security module's policy
+/// may.
 pub(crate) fn adopt_orphans() -> io::Result<()> {
     // Any process ID marks it on; the kernel reads only whether one is given.
     Ok(process::set_child_subreaper(Some(process::getpid()))?)
