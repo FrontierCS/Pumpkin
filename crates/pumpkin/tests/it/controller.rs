@@ -1080,7 +1080,8 @@ const KEY: &str = "sk-client-stand-in";
 /// `set`, in `scripts`, runs `before-<n>` beside it once, if it is there, before the `<n>`th call
 /// that `scripts` notes, then runs its command as the controller's user, in `home`, with runtime
 /// directory `run`. A receive over master `<m>` adds what it is sent to `received-<m>`, and is cut,
-/// if `cut-<m>` is there, after as many bytes as it says, as a connection that ends.
+/// if `cut-<m>` is there, after as many bytes as it says, as a connection that ends; any other
+/// call over it is cut so after as many bytes of its output as `cut-out-<m>` says.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -1104,7 +1105,11 @@ calls=$(wc --lines < "$dir/scripts")
 if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
 cd "$dir/../home" || exit 255
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
-[ "$first" = 'cd "$HOME/store/incoming"' ] || exec sh -c "$*"
+if [ "$first" != 'cd "$HOME/store/incoming"' ]; then
+    [ -e "$dir/cut-out-$master" ] || exec sh -c "$*"
+    sh -c "$*" | head --bytes="$(cat "$dir/cut-out-$master")"
+    rm "$dir/cut-out-$master"; touch "$dir/unanswered-$master"; exit 255
+fi
 if [ -e "$dir/cut-$master" ]; then
     head --bytes="$(cat "$dir/cut-$master")" | sh -c "$*"
     rm "$dir/cut-$master"; touch "$dir/unanswered-$master"; exit 255
@@ -1112,12 +1117,16 @@ fi
 tee --append "$dir/received-$master" | sh -c "$*"
 "#;
 
+/// The stand-in `systemctl`, which answers that no unit runs.
+const SYSTEMCTL: &str = "#!/bin/sh\n";
+
 /// The stand-in `systemd-run`, which notes its arguments in `argv` beside it, as [`SSH`] does,
 /// and runs nothing.
 const SYSTEMD_RUN: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/argv\"\n";
 
 /// Sets `scratch` up as the client and its controller: in `bin`, the stand-ins for `aws`
-/// ([`AWS`]), `ssh` ([`SSH`]), `systemd-run` ([`SYSTEMD_RUN`]) and the Session Manager plugin;
+/// ([`AWS`]), `ssh` ([`SSH`]), `systemctl` ([`SYSTEMCTL`]), `systemd-run` ([`SYSTEMD_RUN`]) and
+/// the Session Manager plugin;
 /// the controller user's home, `home`, and runtime directory, `run`; the client's home, `client`,
 /// whose configuration names controller `alice`, beside its upstream, whose key is [`KEY`]; and
 /// its task's repository, `repo`, pinning Pumpkin [`PINNED`], with the `pumpkin` of it that
@@ -1127,6 +1136,7 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
     for (name, script) in [
         ("aws", AWS),
         ("ssh", SSH),
+        ("systemctl", SYSTEMCTL),
         ("systemd-run", SYSTEMD_RUN),
         ("session-manager-plugin", ""),
     ] {
@@ -2258,5 +2268,246 @@ fn store_collection() {
               a manifest: a tree of no files
               incoming/: piece 00000 of a blob of now, 6 bytes
             the job built the IR that the repository builds: true"#]],
+    );
+}
+
+/// Plants job `id` on the controller, with log `log`, whose run has ended, and its own `pumpkin`,
+/// whose follower says the lines it returns each time, then that the run has ended.
+fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
+    let job = format!("home/jobs/{id}");
+    scratch.write(&format!("{job}/log"), log);
+    scratch.write(&format!("{job}/out"), &format!("{id}\n"));
+    let said = [
+        format!("pumpkin: following run {id}: ending this command does not stop it\n"),
+        "pumpkin:    0:01 the agent started on local\n".to_owned(),
+        "pumpkin:    0:09 the work phase ended\n".to_owned(),
+    ];
+    let mut own = "#!/bin/sh\n".to_owned();
+    for line in &said {
+        own.extend(["printf '%s' '", line, "' >&2\n"]);
+    }
+    own.push_str("exit 102\n");
+    scratch.write_executable(&format!("{job}/pumpkin"), own.as_bytes());
+    let record = format!("home/.pumpkin/runs/{id}");
+    let args = ["stand-in/task.star"];
+    scratch.write(
+        &format!("{record}/record.json"),
+        &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+    );
+    scratch.write(&format!("{record}/driver.pid"), "4242\n");
+    scratch.write(
+        &format!("{record}/outcome.json"),
+        r#"{"state": "finished"}"#,
+    );
+    said
+}
+
+// A job whose log holds a NUL-ended line, a line twice and an unfinished last line, followed cut
+// inside a log line, at the end of one, inside the last, and inside a line its follower says.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn follow_carries_on() {
+    let scratch = Scratch::new("controller-follow-carries-on");
+    let client = set_up_client(&scratch);
+    let _ = start(&scratch, &client);
+    let id = id_ago(0, "0f000001");
+    let log = [
+        "building stand-in\n",
+        "step 1 of 2\n",
+        "binary\0\n",
+        "step 2 of 2\n",
+        "step 2 of 2\n",
+        "publish",
+    ];
+    let said = ended_job(&scratch, &id, &log.concat());
+    let logged = log[..5].concat().len();
+    let cuts = [
+        ("inside the log's second line", log[0].len() + 5),
+        (
+            "at the end of the log's second line",
+            log[0].len() + log[1].len(),
+        ),
+        ("inside the log's last line", logged + 3),
+        (
+            "inside the follower's second line",
+            logged + "publish\0pumpkin: the log ends\0\n".len() + said[0].len() + 10,
+        ),
+    ];
+    let mut lines = Vec::new();
+    for (at, bytes) in cuts {
+        let path = scratch.0.join("bin/scripts");
+        let calls = fs::read_to_string(&path).map_or(0, |text| text.lines().count());
+        let cut = scratch.0.join("bin/cut-out-0");
+        scratch.write(
+            &format!("bin/before-{}", calls + 2),
+            &format!("echo {bytes} > '{}'\n", cut.display()),
+        );
+        // The copy that the last `wait` made, from which a `wait` would say the run's ending.
+        let _ = fs::remove_dir_all(scratch.0.join(format!("repo/.pumpkin/runs/{id}")));
+        let waited = on_client(&scratch, &client, &["wait", &id])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(waited.stderr)
+            .unwrap()
+            .replace('\0', "<NUL>");
+        let shown: Vec<&str> = stderr
+            .lines()
+            .take_while(|line| !line.starts_with("pumpkin: copying run"))
+            .collect();
+        lines.push(format!("cut {at}, after {bytes} bytes:"));
+        lines.extend(shown.iter().map(|line| format!("  {line}")));
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            cut inside the log's second line, after 23 bytes:
+              building stand-in
+              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+              step 1 of 2
+              binary<NUL>
+              step 2 of 2
+              step 2 of 2
+              publish
+              pumpkin: following run <id>: ending this command does not stop it
+              pumpkin:    0:01 the agent started on local
+              pumpkin:    0:09 the work phase ended
+            cut at the end of the log's second line, after 30 bytes:
+              building stand-in
+              step 1 of 2
+              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+              binary<NUL>
+              step 2 of 2
+              step 2 of 2
+              publish
+              pumpkin: following run <id>: ending this command does not stop it
+              pumpkin:    0:01 the agent started on local
+              pumpkin:    0:09 the work phase ended
+            cut inside the log's last line, after 65 bytes:
+              building stand-in
+              step 1 of 2
+              binary<NUL>
+              step 2 of 2
+              step 2 of 2
+              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+              publish
+              pumpkin: following run <id>: ending this command does not stop it
+              pumpkin:    0:01 the agent started on local
+              pumpkin:    0:09 the work phase ended
+            cut inside the follower's second line, after 189 bytes:
+              building stand-in
+              step 1 of 2
+              binary<NUL>
+              step 2 of 2
+              step 2 of 2
+              publish
+              pumpkin: following run <id>: ending this command does not stop it
+              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+              pumpkin:    0:01 the agent started on local
+              pumpkin:    0:09 the work phase ended"#]],
+    );
+}
+
+// A follow cut more times than it makes attempts in a row, each cut after a line it showed.
+#[test]
+fn follow_cut_often() {
+    let scratch = Scratch::new("controller-follow-cut-often");
+    let client = set_up_client(&scratch);
+    let _ = start(&scratch, &client);
+    let id = id_ago(0, "0f000002");
+    let log = (1..=10).fold(String::new(), |log, line| {
+        log + &format!("line {line:02} of 10\n")
+    });
+    let _ = ended_job(&scratch, &id, &log);
+    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
+    let calls = calls.lines().count();
+    let cut = scratch.0.join("bin/cut-out-0");
+    // Each connection is cut inside the second line it prints, so it shows one line.
+    for cut_index in 0..9 {
+        scratch.write(
+            &format!("bin/before-{}", calls + 2 + cut_index),
+            &format!("echo 17 > '{}'\n", cut.display()),
+        );
+    }
+    let waited = on_client(&scratch, &client, &["wait", &id])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(waited.stderr).unwrap();
+    let shown: Vec<&str> = stderr
+        .lines()
+        .take_while(|line| !line.starts_with("pumpkin: copying run"))
+        .collect();
+    check(
+        &scratch,
+        &shown.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            line 01 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 02 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 03 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 04 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 05 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 06 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 07 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 08 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 09 of 10
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            line 10 of 10
+            pumpkin: following run <id>: ending this command does not stop it
+            pumpkin:    0:01 the agent started on local
+            pumpkin:    0:09 the work phase ended"#]],
+    );
+}
+
+// Connections each cut before their first line: the attempts count on, until the third, which
+// is said before its pause of 5 s, which the test doesn't wait out.
+#[test]
+fn follow_cut_before_a_line() {
+    let scratch = Scratch::new("controller-follow-cut-before-a-line");
+    let client = set_up_client(&scratch);
+    let _ = start(&scratch, &client);
+    let id = id_ago(0, "0f000003");
+    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
+    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
+    let calls = calls.lines().count();
+    let cut = scratch.0.join("bin/cut-out-0");
+    for cut_index in 0..3 {
+        scratch.write(
+            &format!("bin/before-{}", calls + 2 + cut_index),
+            &format!("echo 0 > '{}'\n", cut.display()),
+        );
+    }
+    let mut waiting = on_client(&scratch, &client, &["wait", &id])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = BufReader::new(waiting.stderr.take().unwrap());
+    let mut shown = Vec::new();
+    for line in stderr.lines() {
+        let line = line.unwrap();
+        let third = line.ends_with("attempt 3 of 7");
+        shown.push(line);
+        if third {
+            break;
+        }
+    }
+    waiting.kill().unwrap();
+    waiting.wait().unwrap();
+    check(
+        &scratch,
+        &shown.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, in 5 s, attempt 3 of 7"#]],
     );
 }

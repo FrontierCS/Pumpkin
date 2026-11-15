@@ -22,7 +22,7 @@ mod send;
 
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, TryLockError};
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, BufRead as _, Read as _, Write as _};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{
     DirBuilderExt as _, FileExt as _, OpenOptionsExt as _, PermissionsExt as _,
@@ -870,9 +870,9 @@ impl Reached {
     }
 
     /// Whether a call whose connection over shared master `master` ended is to be made again,
-    /// after attempt `attempt`, counted from 0: once it has said so, saying where the master's log
-    /// is and `what` it does again, and has waited [`AGAIN`]'s pause for it; not once those have
-    /// run out.
+    /// after attempt `attempt` in a row, counted from 0 since the call last moved what it does on:
+    /// once it has said so, saying where the master's log is and `what` it does again, and has
+    /// waited [`AGAIN`]'s pause for it; not once those have run out.
     fn pause(&self, attempt: usize, master: usize, what: &str) -> bool {
         let Some(pause) = AGAIN.get(attempt) else {
             return false;
@@ -1031,6 +1031,37 @@ impl Reached {
             status,
             master: ssh.slot.master,
         })
+    }
+
+    /// Runs `script` on the controller, as [`attached`](Self::attached) does with no input, but
+    /// hands `line` each line of its standard output, with its newline, as it comes; returns how
+    /// it ended, and what it printed after its last newline.
+    fn relayed(
+        &self,
+        script: &str,
+        mut line: impl FnMut(&[u8]),
+    ) -> Result<(Attached, Vec<u8>), String> {
+        let mut ssh = self.ssh(script)?;
+        let child = ssh.stdout(Stdio::piped()).spawn();
+        let mut child = child.context("running `ssh` failed")?;
+        let Some(stdout) = child.stdout.take() else {
+            unreachable!("the child's standard output is missing, though it is piped just above")
+        };
+        let mut stdout = io::BufReader::new(stdout);
+        let mut read = Vec::new();
+        let relayed = loop {
+            read.clear();
+            match stdout.read_until(b'\n', &mut read) {
+                Ok(_) if read.ends_with(b"\n") => line(&read),
+                Ok(_) => break Ok(()),
+                Err(error) => break Err(error),
+            }
+        };
+        drop(stdout);
+        let status = child.wait().context("running `ssh` failed")?;
+        relayed.context("reading from `ssh` failed")?;
+        let master = ssh.slot.master;
+        Ok((Attached { status, master }, read))
     }
 
     /// The exit status that `attached`, a command on the controller that [`attached`] ran,
