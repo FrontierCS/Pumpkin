@@ -7,6 +7,9 @@
 //! whose `docker image inspect` says what an image's ID is the digest of
 //! ([`Engine::check_platform`]), with the containerd image store, rootful or rootless
 //! ([`Security::rootless`]).
+//!
+//! Production code reaches the operator's engine only through this crate; an EC2 instance's boot
+//! runs that instance's own `docker`.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;

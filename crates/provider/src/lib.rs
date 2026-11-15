@@ -1,4 +1,6 @@
 //! The interface every provider implements.
+//!
+//! A provider is a crate `<name>` at `providers/<name>`.
 
 use std::fmt;
 use std::path::Path;

@@ -336,6 +336,8 @@ pub struct LeaseRemaining {
 
 /// The reply to [`OpCall::LeaseStatus`]: how a lease is doing, its last command or transfer, and
 /// what it and its grant have left.
+///
+/// It carries the ends of its commands' output, so it goes to the lease's holder alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseStatusReply {

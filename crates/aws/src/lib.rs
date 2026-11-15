@@ -168,6 +168,9 @@ pub enum Bound {
 
 /// The `aws` command line, AWS CLI v2, found on `PATH`, run in one region, given only the
 /// environment that finds its own configuration.
+///
+/// Production code reaches AWS only through it, but for the ECR login that an EC2 sandbox's entry
+/// makes with its instance's own `aws`.
 #[derive(Debug)]
 pub struct Cli {
     region: Region,

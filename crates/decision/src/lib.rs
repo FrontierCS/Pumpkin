@@ -10,7 +10,9 @@
 
 // Without `std`, the core can name none of its files, network, processes, environment, threads
 // or clock; `alloc` gives it what else it uses, such as `Vec` and `String`. It still reaches the
-// I/O items that `schema` holds (`tree::Writer`, `frame` over `std::io`, `PathBuf` paths).
+// I/O items that `schema` holds (`tree::Writer`, `frame` over `std::io`, `PathBuf` paths). No
+// clock from `core::arch` is reachable either, as `_rdtsc` takes `unsafe`, which the workspace
+// denies.
 #![no_std]
 
 extern crate alloc;
