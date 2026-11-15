@@ -1,7 +1,6 @@
 //! The model upstream, against a stand-in model provider: a local HTTP server that answers each
-//! request as its case says. The test is the session's owner: it makes each case's upstream,
-//! serves the harness's request from the fake sandbox with it, and shows what the stand-in
-//! received and what the sandbox heard.
+//! request as its case says. The test is the session's owner: it serves the harness's request
+//! from the fake sandbox, and shows what the stand-in received and what the sandbox heard.
 
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
@@ -27,11 +26,9 @@ use super::{
 
 const KEY: &str = "sk-test-0123\n";
 
-/// The stand-in's URL, which [`check`] completes with its address.
 const STAND_IN: &str = "http://{stand-in}/v1/responses";
 
-/// The head of the stand-in's stream, after its status line: headers that a harness reads, then
-/// ones that stay behind.
+// Headers that a harness reads, then ones that stay behind.
 const STREAM_HEAD: &str = "content-type: text/event-stream\r\nopenai-model: m-large\r\n\
                            x-request-id: req_1\r\nrequest-id: req_1\r\n\
                            x-codex-primary-used-percent: 5\r\n\
@@ -46,130 +43,100 @@ const PARTS: Parts = [
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":8},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":3}}}}\n\n",
 ];
 
-/// The second part holds the usage that the request asked for.
 const CHAT_PARTS: Parts = [
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"7\"}}],\"usage\":null}\n\n",
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":16},\"completion_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\ndata: [DONE]\n\n",
 ];
 
-/// A stream that fails with a rate limit as a provider sent it with a 200, its message cut short.
 const LIMITED_PARTS: Parts = [
     "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"},\"output\":[],\"usage\":null}}\n\n",
     "event: error\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\",\"param\":null,\"sequence_number\":1}\n\n",
 ];
 
-/// A stream that fails after some of the model's output, reporting its usage.
 const FAILED_LATE_PARTS: Parts = [
     "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
     "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The model failed\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":1}}}\n\n",
 ];
 
-/// A stream whose failure gives no code.
 const UNCODED_PARTS: Parts = [
     PARTS[0],
     "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n",
 ];
 
-/// A stream whose failure gives a code that is no identifier.
 const MISCODED_PARTS: Parts = [
     PARTS[0],
     "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"Slow down: wait 3s\",\"message\":\"\"}}}\n\n",
 ];
 
-/// A stream that ends with an `error` event alone.
 const ERROR_PARTS: Parts = [
     PARTS[0],
     "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"An error occurred\",\"param\":null}\n\n",
 ];
 
-/// A stream whose first item added is reasoning, and whose second, a function call, begins its
-/// output.
 const CALL_PARTS: Parts = [
     "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\"}}\n\n",
     "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"exec\"}}\n\nevent: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n",
 ];
 
-/// A stream of Chat Completions whose first chunk names its role with empty content, and whose
-/// second begins its output with a tool call.
 const CHAT_CALL_PARTS: Parts = [
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"exec\",\"arguments\":\"\"}}]}}]}\n\ndata: [DONE]\n\n",
 ];
 
-/// A stream whose first item added is reasoning, as real streams' are, whose first delta is empty,
-/// and whose second begins its output.
 const REASONING_PARTS: Parts = [
     "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"output\":[],\"status\":\"in_progress\"},\"sequence_number\":0,\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"item\":{\"content\":[],\"id\":\"rs_1\",\"status\":\"in_progress\",\"summary\":[],\"type\":\"reasoning\"},\"output_index\":0,\"sequence_number\":1,\"type\":\"response.output_item.added\"}\n\nevent: response.reasoning_text.delta\ndata: {\"content_index\":0,\"delta\":\"\",\"item_id\":\"rs_1\",\"output_index\":0,\"sequence_number\":2,\"type\":\"response.reasoning_text.delta\"}\n\n",
     "event: response.reasoning_text.delta\ndata: {\"content_index\":0,\"delta\":\"Two\",\"item_id\":\"rs_1\",\"output_index\":0,\"sequence_number\":3,\"type\":\"response.reasoning_text.delta\"}\n\n",
 ];
 
-/// A stream whose output begins with a delta of a call's arguments.
 const ARGUMENTS_PARTS: Parts = [
     PARTS[0],
     "event: response.function_call_arguments.delta\ndata: {\"delta\":\"{\\\"\",\"item_id\":\"fc_1\",\"output_index\":0,\"sequence_number\":1,\"type\":\"response.function_call_arguments.delta\"}\n\n",
 ];
 
-/// A stream whose output begins with a custom tool call's item added, as Codex's `apply_patch`
-/// streams.
 const CUSTOM_CALL_PARTS: Parts = [
     "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"input\":\"\",\"status\":\"in_progress\"}}\n\n",
     "event: response.custom_tool_call_input.delta\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ctc_1\",\"call_id\":\"call_1\",\"delta\":\"*** Begin Patch\"}\n\n",
 ];
 
-/// A stream whose output begins with a delta of a custom tool call's input.
 const CUSTOM_INPUT_PARTS: Parts = [PARTS[0], CUSTOM_CALL_PARTS[1]];
 
-/// A stream whose output begins with a delta of a refusal.
 const REFUSAL_PARTS: Parts = [
     PARTS[0],
     "event: response.refusal.delta\ndata: {\"type\":\"response.refusal.delta\",\"delta\":\"No\"}\n\n",
 ];
 
-/// A stream of Chat Completions whose first chunk begins its output with reasoning, as real
-/// streams' do.
 const CHAT_REASONING_PARTS: Parts = [
     "data: {\"id\":\"chatcmpl_1\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"m-large\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Two\"}}]}\n\n",
     "data: [DONE]\n\n",
 ];
 
-/// A stream of Chat Completions whose reasoning is named `reasoning`, empty in its first chunk.
 const CHAT_REASONED_PARTS: Parts = [
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"\"}}]}\n\n",
     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"Two\"}}]}\n\ndata: [DONE]\n\n",
 ];
 
-/// A stream of the Messages API that fails with an `error` event after its start, as the API's
-/// documentation gives one.
 const MESSAGES_FAILED_PARTS: Parts = [
     MESSAGES_PARTS[0],
     "event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}\n\n",
 ];
 
-/// A stream of Chat Completions that fails after its first chunk.
 const CHAT_FAILED_PARTS: Parts = [
     CHAT_PARTS[0],
     "data: {\"error\":{\"message\":\"Rate limit reached\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":\"rate_limit_exceeded\"}}\n\n",
 ];
 
-/// A stream of the Messages API whose `message_start` gives its input's counts, the cache's
-/// included, and whose `message_delta` gives its output's count so far.
 const MESSAGES_PARTS: Parts = [
     "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m-large\",\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":300,\"cache_read_input_tokens\":2000,\"output_tokens\":1}}}\n\n",
     "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"7\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 ];
 
-/// A stream of the Messages API whose `message_delta` gives its input's counts again, as the
-/// API's documentation shows one may.
 const MESSAGES_RECOUNTED_PARTS: Parts = [
     MESSAGES_PARTS[0],
     "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":2100,\"output_tokens\":7,\"output_tokens_details\":{\"thinking_tokens\":4}}}\n\n",
 ];
 
-/// A message of the Messages API, not streamed, whose usage gives the cache's counts and its
-/// thinking's.
 const MESSAGE: &str = "{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"7\"}],\"model\":\"m-large\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":300,\"cache_read_input_tokens\":2000,\"output_tokens\":5,\"output_tokens_details\":{\"thinking_tokens\":3}}}";
 
-/// A stream of the Messages API whose output begins with a delta of a tool call's input.
 const MESSAGES_INPUT_PARTS: Parts = [
     MESSAGES_PARTS[0],
     "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"\"}}\n\n",
@@ -177,7 +144,6 @@ const MESSAGES_INPUT_PARTS: Parts = [
 
 struct Case {
     name: &'static str,
-    /// The API of the route's entry, whose client's request the sandbox sends.
     api: Api,
     url: &'static str,
     /// The text of its key file; `None` for no file.
@@ -191,31 +157,23 @@ struct Case {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Answer {
-    /// With a stream in two parts, the second once the sandbox has heard the first.
     Streams(Parts),
-    /// With one JSON value, whole.
     Json(&'static str),
-    /// With an error of its own, a 429.
     Refuses,
-    /// With a refusal, of the key or the request: a 401 or a 403.
     RefusesKey(u16),
-    /// With a redirect to itself.
     Redirects,
-    /// With a body that it codes, though the request asks for it uncoded.
     Codes,
     /// With the stream's head and first part, then it hangs up.
     BreaksOff,
     /// With a stream in two parts, whose sandbox hangs up as it hears the first: the second, and
     /// the stream's end, come then.
     Unheard,
-    /// It hangs up without an answer.
     HangsUp,
     /// It tells the test that it holds the request, then holds it without an answer until the
     /// route's end hangs up on it.
     Holds,
 }
 
-/// A case whose upstream is the stand-in with [`KEY`], never given up on.
 fn case(name: &'static str, answer: Answer) -> Case {
     Case {
         name,
@@ -227,7 +185,6 @@ fn case(name: &'static str, answer: Answer) -> Case {
     }
 }
 
-/// A case of Chat Completions, whose upstream is the stand-in with [`KEY`], never given up on.
 fn chat_case(name: &'static str, answer: Answer) -> Case {
     Case {
         api: Api::Chat,
@@ -236,7 +193,6 @@ fn chat_case(name: &'static str, answer: Answer) -> Case {
     }
 }
 
-/// A case of the Messages API, whose upstream is the stand-in with [`KEY`], never given up on.
 fn messages_case(name: &'static str, answer: Answer) -> Case {
     Case {
         api: Api::Messages,
@@ -245,7 +201,6 @@ fn messages_case(name: &'static str, answer: Answer) -> Case {
     }
 }
 
-/// A case whose request the stand-in never receives.
 fn unanswered(name: &'static str) -> Case {
     Case {
         answer: None,
@@ -253,15 +208,10 @@ fn unanswered(name: &'static str) -> Case {
     }
 }
 
-/// Checks what came of each case against `expect`.
 fn check(cases: &[Case], expect: &Expect) {
     expect.assert_eq(&exchanged(cases));
 }
 
-/// Makes each case's upstream, and through each that it makes, forwards the request of a client
-/// of the case's API, sent by a sandbox whose route allows `m-large` and `m-small`, to the
-/// stand-in, answering by a deadline that only a hang reaches, and shows what came of each, a
-/// line each.
 #[expect(
     clippy::too_many_lines,
     reason = "it runs a session, a stand-in and each case's exchange in one place"
@@ -348,9 +298,6 @@ fn exchanged(cases: &[Case]) -> String {
     shown.replace(&dir.display().to_string(), "<dir>")
 }
 
-/// Serves `case`'s request, and its second if it has one, with `entry`, and returns how it
-/// answered each. For a case whose stand-in holds the request, the route ends once `held` says
-/// that it does.
 fn serve_case(
     case: &Case,
     entry: &(Route, Upstream),
@@ -377,8 +324,6 @@ fn serve_case(
     served
 }
 
-/// Serves `incoming` with `entry`, a route's only one, and returns how it answered, and the
-/// sizes of what was kept of the exchange by then.
 fn serve_one(
     entry: &(Route, Upstream),
     incoming: IncomingModelRequest,
@@ -405,7 +350,6 @@ fn serve_one(
 struct Kept {
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
-    /// How many of the response's bytes were kept as its output began, once it has.
     first_output: Cell<Option<usize>>,
 }
 
@@ -448,8 +392,6 @@ fn request(api: Api) -> Request {
     }
 }
 
-/// The route's entry for `case`'s API that allows `m-large` and `m-small`, with the upstream that
-/// `case` names, its key file at `key`, or why the upstream can't be made.
 fn upstream(case: &Case, key: &Path, address: &str) -> Result<(Route, Upstream), String> {
     if let Some(text) = case.key {
         fs::write(key, text).unwrap();
@@ -459,8 +401,6 @@ fn upstream(case: &Case, key: &Path, address: &str) -> Result<(Route, Upstream),
     Ok((route, Upstream::new(case.api, &url, &Key::read(key)?)))
 }
 
-/// What the stand-in received, as `(head, body)`: a head that is the `first` it received shown
-/// as such, and a body that is the one `sent` shown as such.
 fn got((head, body): (String, Vec<u8>), sent: &[u8], first: &mut Option<String>) -> String {
     let head = if first.is_none() {
         first.insert(head).clone()
@@ -476,9 +416,6 @@ fn got((head, body): (String, Vec<u8>), sent: &[u8], first: &mut Option<String>)
     }
 }
 
-/// Answers a request on each connection in turn, as `answers` say, and returns what each held:
-/// its line and headers, and its body. It sends a stream's second part, or breaks it off, once
-/// `heard_part` says the sandbox heard of its first, and tells `holds` of each request it holds.
 #[expect(
     clippy::too_many_lines,
     reason = "it answers in each way that a case may ask for, in one match"
@@ -503,6 +440,8 @@ fn serve(
                     _ => PARTS,
                 };
                 write!(connection, "HTTP/1.1 200 OK\r\n{STREAM_HEAD}").unwrap();
+                // The rest waits for the sandbox to hear the first part, so a route that holds
+                // a stream back fails here.
                 write_chunk(&mut connection, parts[0]);
                 let heard = heard_part.recv_timeout(HUNG);
                 assert!(
@@ -570,7 +509,6 @@ fn serve(
             Answer::HangsUp => {}
             Answer::Holds => {
                 holds.send(()).unwrap();
-                // Until the client hangs up.
                 let _ = io::copy(&mut connection, &mut io::sink());
             }
         }
