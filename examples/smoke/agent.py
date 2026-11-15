@@ -66,8 +66,6 @@ def probed(grant):
 
 
 def held(grants):
-    """Opens a lease of each of `grants`, says once each is ready, and holds them until the run
-    ends."""
     # Each opened first, so that their runners start at once, and one slow to start takes none of
     # the others' time.
     opened = [(grant, ctl("lease", "open", grant)) for grant in grants]

@@ -1,8 +1,6 @@
-# The person's controller, which builds the tasks' images and runs the drivers, and runs no role:
-# its role and instance profile, what the `ec2` provider's calls need in the envelope; the
-# settings of its jobs; and its instance, on Ubuntu 24.04 LTS, which the person reaches through
-# SSM alone, and which stops itself when idle, so it costs only its volume between runs
-# (controller.yaml). The envelope's network names the controller's security group (network.tf).
+# The person's controller, which builds the tasks' images and runs the drivers, and runs no role.
+# The person reaches it through SSM alone, and it stops itself when idle (controller.yaml), so it
+# costs only its volume between runs.
 
 resource "aws_iam_role" "controller" {
   name        = "${local.prefix}-controller"
@@ -19,8 +17,6 @@ resource "aws_iam_role_policy_attachment" "controller_ssm" {
   policy_arn = "${local.arn}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# What the `ec2` provider's calls need, and the `aws` crate's pushes of the EC2 and Modal
-# providers.
 resource "aws_iam_role_policy" "controller" {
   name = "run"
   role = aws_iam_role.controller.id
@@ -88,10 +84,9 @@ resource "aws_iam_instance_profile" "controller" {
 
 # Each job's settings, which `pumpkin controller job` reads as it starts, so an apply that
 # changes them takes effect at the next job: the controller's Docker engine, the EC2 provider
-# `aws`, and the `images` of the Modal provider `modal`, which each job takes for the Modal
-# provider that its client sends, `[controller.modal]`, and drops without one. What each job sets
-# itself is not here: the gateway's address, the client's upstreams, and the rest of the Modal
-# provider, which is the person's to change with no apply. The advanced tier holds 8 KB.
+# `aws`, and the `images` of the Modal provider `modal`, which a job drops if its client sends no
+# `[controller.modal]`. Nothing else is here: the rest is each job's own or its client's. The
+# advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"

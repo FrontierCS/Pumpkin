@@ -2,15 +2,13 @@
 # requires-python = ">=3.12"
 # dependencies = ["modal==1.6.3"]
 # ///
-"""The Modal provider's helper: Pumpkin's `modal` crate runs it once for each call on Modal, as
-`uv run --frozen --quiet --no-config --script pumpkin-modal.py`, with the lock beside it, and the
-environment the crate's `helper` module says.
+"""The Modal provider's helper, which Pumpkin's `modal` crate runs once for each call on Modal,
+as its `helper` module says.
 
-It reads one request, a JSON object, on standard input, whose `call` names what it does, as the
-crate's `helper::Request` says, and prints one answer on standard output: `{"ok": …}`, what the
-call returns, or `{"error": "…"}`, what Modal, or the way to it, reports, which the crate passes
-on. Anything else, such as a bug's traceback, it prints on standard error, and exits with a status
-other than 0.
+It reads one request on standard input and prints one answer on standard output, as the crate's
+`helper::Request` says: `{"ok": …}`, what the call returns, or `{"error": "…"}`, what Modal, or
+the way to it, reports. Anything else, such as a bug's traceback, it prints on standard error, and
+exits with a status other than 0.
 
 Every sandbox carries its run's tag and its role's (`RUN_TAG`, `ROLE_TAG`): a run's list finds its
 sandboxes by its tag, and a call on a sandbox that a request names refuses one of another run's.
@@ -47,7 +45,7 @@ LISTED_EVERY = 0.5
 # How many of a sandbox's last log entries its console holds.
 CONSOLE_ENTRIES = 20
 
-# What begins the line of a sandbox's console that this helper adds, as EC2's boot begins its own.
+# What begins the line of a sandbox's console that this helper adds.
 CONSOLE_PREFIX = "pumpkin-modal:"
 
 
@@ -101,14 +99,13 @@ def imported(modal, request: dict) -> str:
 
 
 def create(modal, request: dict) -> dict:
-    """The sandbox's command is `sandboxd`, which Modal's own first process there, `dumb-init`,
-    runs as root: listening at `PORT`, given the grant in its environment, it becomes the role's
-    user; the sandbox runs under gVisor, with the class's GPU, if any, the role's CPU and memory
-    as both its request and its limit, no connection out, and its tunnel open to `source` alone;
-    and Modal ends it at its run's `hard_end`, in seconds since the Unix epoch, if nothing ends it
-    first, as its timeout, which Modal counts from its create, is taken just before it. Its
-    `sandboxd` ends it too if no gateway has claimed it a minute after its start's deadline, `by`,
-    as when Modal makes it after the create was given up."""
+    """Creates the run's sandbox of the request's role, and returns its ID, its App, and its
+    tunnel's host and port.
+
+    Modal ends it at the run's `hard_end`, in seconds since the Unix epoch, if nothing ends it
+    first. Its `sandboxd` ends it too if no gateway has claimed it a minute after its start's
+    deadline, `by`, as when Modal makes it after the create was given up."""
+    # Modal counts the timeout from its create, which this is just before.
     timeout = request["hard_end"] - int(time.time())
     if timeout <= 0:
         raise Refused("the create's hard end has passed: expected one to come")
@@ -165,12 +162,13 @@ def ids(modal, app, run: str) -> list[str]:
 
 
 def listed(modal, request: dict) -> list[dict]:
-    """Modal lists only the sandboxes that haven't finished, as it frees a finished one itself,
-    and those of an App it holds: none, before a create or an import has made Pumpkin's."""
+    """The run's sandboxes that Modal lists, which are those that haven't finished: it frees a
+    finished one itself."""
     run = request["run"]
     try:
         app = modal.App.lookup(APP)
     except modal.exception.NotFoundError:
+        # A create or an import makes Pumpkin's App, so before one there are no sandboxes.
         return []
     sandboxes = modal.Sandbox.list(app_id=app.app_id, tags={RUN_TAG: run})
     return [{"id": box.object_id, "ended": box.returncode is not None} for box in sandboxes]
@@ -208,12 +206,13 @@ def delete(modal, request: dict) -> dict:
 
 def console(modal, request: dict) -> str:
     """The last `CONSOLE_ENTRIES` entries of the sandbox's log, then, if Modal reports it ended, a
-    line `pumpkin-modal: sandbox <id> exited with status <N>`: a sandbox that the kernel's OOM
-    killer ends prints nothing of why, and only its status, 137, says how it ended."""
+    line `pumpkin-modal: sandbox <id> exited with status <N>`."""
     sandbox = owned(modal, request["run"], request["id"])
     if sandbox is None:
         raise Refused(f"Modal holds no sandbox {request['id']}: expected one of the run's")
     text = "".join(entry.message for entry in sandbox.logs.tail(CONSOLE_ENTRIES))
+    # A sandbox that the kernel's OOM killer ends prints nothing of why: only its status, 137,
+    # says how it ended.
     status = sandbox.poll()
     if status is None:
         return text

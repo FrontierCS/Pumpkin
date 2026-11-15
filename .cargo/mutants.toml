@@ -6,9 +6,8 @@ test_tool = "nextest"
 exclude_globs = ["crates/engine/**", "providers/docker/**"]
 
 # Every mutant runs the whole workspace's tests, as ci does: a crate's code is often tested from
-# another crate, as the schema's wire forms are by the gateway, `sandboxd`, the runtime and the
-# routes that read and write them, and a mutant that only its own crate's tests ran would read
-# as missed when another crate's tests catch it.
+# another crate, and a mutant that only its own crate's tests ran would read as missed when
+# another crate's tests catch it.
 test_workspace = true
 # cargo-mutants times the unmutated tree on the mutated crates' tests alone, and bounds each
 # mutant's run by that time; the whole workspace's tests take longer, so this is their bound.

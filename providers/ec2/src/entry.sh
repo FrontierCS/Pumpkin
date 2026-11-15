@@ -1,13 +1,10 @@
 #!/bin/bash
 # The entry of a Pumpkin sandbox's instance, its user data once the provider fills in its values:
-# it arms the hard end, makes a later boot shut down, starts the Docker that the module's AMI
-# holds, copies `ec2-boot` out of `sandboxd`'s image, and runs it with the start that follows,
-# which `ec2-boot` documents. Only the lines that begin @PREFIX@ reach the serial console;
-# nothing here prints the start, which holds the grant.
+# it runs `ec2-boot` with the start that follows, which `ec2-boot` documents. Only the lines that
+# begin @PREFIX@ reach the serial console; nothing here prints the start, which holds the grant.
 set -o errexit -o nounset -o pipefail
 # What the commands print goes nowhere: cloud-init would copy it to the serial console.
 exec >/dev/null 2>&1
-# The step under way, which the end names: what a failed command prints goes nowhere.
 step='arming the hard end'
 # Whatever ends this, a step that fails or `ec2-boot`'s end, however it ends, logs out of the
 # registry and powers the instance off, which the launch makes terminate it.

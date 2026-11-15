@@ -1,9 +1,8 @@
 #cloud-config
 # The controller's first boot, on Ubuntu 24.04 LTS: the user `pumpkin`, which runs every Pumpkin
-# process, lingering, so that its job units outlive every SSH session; Docker, Buildx, AWS CLI v2
-# and uv at exact versions, and git, gcc and rsync from the snapshot of Ubuntu's archive that
-# controller.tf names, for builds; and two thin units that need no client and no Pumpkin build:
-# the idle stop, and the reap at boot once a job has run.
+# process, lingering, so that its job units outlive every SSH session; what its jobs need, at the
+# versions controller.tf names; and two thin units that need no client and no Pumpkin build: the
+# idle stop, and the reap at boot once a job has run.
 groups:
   - docker
 users:

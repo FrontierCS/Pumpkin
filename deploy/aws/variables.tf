@@ -36,8 +36,8 @@ variable "modal_workspace" {
 # The classes of sandbox: the instance type of each, and the CPU flags and model it offers a role,
 # as `/proc/cpuinfo` names them. The flags are the x86-64 levels the instance's CPU meets (v2:
 # cx16 to ssse3, v3: abm to xsave, v4: the avx512 ones), which the tasks' needs name. A class's
-# `usd_per_hour`, what its instance type costs an hour in the region, as AWS's pricing page gives
-# it, prices its sandboxes in `pumpkin ls` and a run's summary.
+# `usd_per_hour` is what its instance type costs an hour in the region, as AWS's pricing page
+# gives it.
 variable "classes" {
   description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars."
   type = map(object({
