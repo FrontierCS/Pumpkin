@@ -5,11 +5,12 @@
 //! The client hashes each file it would send into a [`Manifest`], whose own SHA-256 names the
 //! tree, and sends it in one call ([`query`]); the controller keeps it, and answers with each
 //! blob its store lacks ([`missing`]), with the pieces of it that it already holds whole; the
-//! client sends the rest of those pieces ([`pieces`]) as members of a `tar` stream ([`stream`]),
-//! which the controller extracts into the store's [`INCOMING`] ([`receive`]); the job's start
-//! then takes each blob whose pieces have all arrived into the store, once its SHA-256 is its name
-//! ([`admit`]). This is REAPI's content-addressable storage and its `FindMissingBlobs`, the
-//! find-missing call before every upload that Bazel's remote execution makes:
+//! client deals the rest of those pieces ([`pieces`]) to several streams at once ([`deal`]), each
+//! with its pieces as members of a `tar` stream ([`stream`]), which the controller extracts into
+//! the store's [`INCOMING`] ([`receive`]); the job's start then takes each blob whose pieces have
+//! all arrived into the store, once its SHA-256 is its name ([`admit`]). This is REAPI's
+//! content-addressable storage and its `FindMissingBlobs`, the find-missing call before every
+//! upload that Bazel's remote execution makes:
 //! <https://github.com/bazelbuild/remote-apis/blob/c2c07e3d718d3d490a4958344d9c3e47de0bfaf3/build/bazel/remote/execution/v2/remote_execution.proto#L350-L362>,
 //! and Modal's check of a mount's every hash at once, then the put of each that it lacks:
 //! <https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/mount.py#L502-L536>.
@@ -584,8 +585,7 @@ pub(crate) fn unadmitted(hashed: &Hashed, printed: &[u8]) -> String {
         "are"
     };
     format!(
-        "{} {is} no longer on the controller, as its prune removes what no tree holds: run it \
-         again",
+        "{} {is} no longer whole on the controller: run it again",
         what.join(" and ")
     )
 }
@@ -701,9 +701,41 @@ pub(crate) fn pieces(missing: &[Missing]) -> Vec<Piece> {
     pieces
 }
 
+/// The most streams that a send's pieces go over at once, each a [`receive`] over a connection of
+/// its own.
+// Each SSM session is bounded on its own, so sessions at once add up. The workspace's
+// connections are 16 masters, and a stream over a master that another stream holds shares its
+// session, so more streams would gain nothing.
+pub(crate) const STREAMS: usize = 16;
+
+/// `pieces`, dealt to as many streams as [`STREAMS`] but one per [`PIECE_BYTES`] they hold, at
+/// least one, and none for no pieces: the largest first, each to the stream with the fewest bytes
+/// so far, the first of those; so no stream holds a piece's bytes more than another, and the same
+/// pieces in any order are dealt the same.
+pub(crate) fn deal(mut pieces: Vec<Piece>) -> Vec<Vec<Piece>> {
+    let size_bytes: u64 = pieces.iter().map(|piece| piece.size_bytes).sum();
+    // The master of each stream past the first opens in about a second, while the streams before
+    // it send, and a piece takes about ten: so a piece earns its own.
+    let wanted = usize::try_from(size_bytes.div_ceil(PIECE_BYTES)).unwrap_or(STREAMS);
+    let count = wanted.clamp(1, STREAMS).min(pieces.len());
+    pieces.sort_by(|one, other| {
+        let by_size = other.size_bytes.cmp(&one.size_bytes);
+        by_size.then_with(|| (&one.digest, one.index).cmp(&(&other.digest, other.index)))
+    });
+    let mut streams: Vec<(u64, Vec<Piece>)> = vec![(0, Vec::new()); count];
+    for piece in pieces {
+        let Some((dealt_bytes, dealt)) = streams.iter_mut().min_by_key(|(bytes, _)| *bytes) else {
+            unreachable!("there is a stream for each piece's deal, as there are pieces")
+        };
+        *dealt_bytes += piece.size_bytes;
+        dealt.push(piece);
+    }
+    streams.into_iter().map(|(_, dealt)| dealt).collect()
+}
+
 /// Writes `pieces`, each read from where `sources`, which hold each one's blob, say it is, to
 /// `out` as a POSIX `ustar` stream that [`receive`] extracts, a member each, named as
-/// [`Piece::name`] names it, 0444.
+/// [`Piece::name`] names it, 0444; and gives `sent` each count of a piece's bytes it has written.
 ///
 /// # Errors
 ///
@@ -714,6 +746,7 @@ pub(crate) fn stream(
     pieces: &[Piece],
     sources: &BTreeMap<Sha256Digest, Source>,
     out: &mut impl Write,
+    sent: &mut impl FnMut(u64),
 ) -> io::Result<Result<(), String>> {
     let end = |out: &mut dyn Write| out.write_all(&[0; 2 * BLOCK]);
     for piece in pieces {
@@ -743,7 +776,7 @@ pub(crate) fn stream(
             }
         };
         out.write_all(&header(&piece.name(), 0o444, piece.size_bytes))?;
-        match part(blob, piece, out)? {
+        match part(blob, piece, out, sent)? {
             Ok(copied) if copied == piece.size_bytes => {}
             // Shortened since it was opened: the member is cut off, and so the stream.
             Ok(_) => return Ok(Err(changed())),
@@ -760,17 +793,20 @@ trait ReadSeek: Read + Seek {}
 
 impl<T: Read + Seek> ReadSeek for T {}
 
-/// Copies `piece`'s bytes from `blob` to `out`, until `blob` ends; gives how many there were, or
-/// why `blob` can't be read. Fails if writing to `out` fails.
+/// Copies `piece`'s bytes from `blob` to `out`, until `blob` ends, giving `sent` each count of
+/// them it has written; gives how many there were, or why `blob` can't be read. Fails if writing
+/// to `out` fails.
 fn part(
     mut blob: impl Read + Seek,
     piece: &Piece,
     out: &mut impl Write,
+    sent: &mut impl FnMut(u64),
 ) -> io::Result<io::Result<u64>> {
     if let Err(error) = blob.seek(SeekFrom::Start(piece.offset_bytes())) {
         return Ok(Err(error));
     }
     let mut blob = blob.take(piece.size_bytes);
+    // All that a stream holds of a blob, whatever its size.
     let mut buffer = vec![0; 1 << 16];
     let mut copied = 0;
     loop {
@@ -781,6 +817,7 @@ fn part(
             Err(error) => return Ok(Err(error)),
         };
         out.write_all(&buffer[..read])?;
+        sent(read as u64);
         copied += read as u64;
     }
 }

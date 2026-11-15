@@ -1073,19 +1073,26 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 /// The client's key, of its upstream `gateway`.
 const KEY: &str = "sk-client-stand-in";
 
-/// The stand-in `ssh` to the controller, of a shared master that answers: `-O check` succeeds,
-/// but once after a cut, and any other call notes its arguments in `argv`, a line each, and the
-/// first line of its command but a `set`, in `scripts`, runs `before-<n>` beside it once, if it
-/// is there, before the `<n>`th call that `scripts` notes, then runs its command as the
-/// controller's user, in `home`, with runtime directory `run`. A receive, if `cut` is there, is
-/// cut after as many bytes as it says, as a connection that ends.
+/// The stand-in `ssh` to the controller, of shared masters that answer: one that `-N` opens makes
+/// its socket, unless `refused-<m>` is there for master `<m>`, which then fails as one whose
+/// connection closes; `-O check` of one succeeds, but once after a cut over it; and any other
+/// call notes its arguments in `argv`, a line each, and the first line of its command but a
+/// `set`, in `scripts`, runs `before-<n>` beside it once, if it is there, before the `<n>`th call
+/// that `scripts` notes, then runs its command as the controller's user, in `home`, with runtime
+/// directory `run`. A receive over master `<m>` adds what it is sent to `received-<m>`, and is cut,
+/// if `cut-<m>` is there, after as many bytes as it says, as a connection that ends.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
 while :; do
     case $1 in
-        -O) if [ -e "$dir/unanswered" ]; then rm "$dir/unanswered"; exit 255; fi; exit 0 ;;
-        -F|-i|-o|-E|-l) shift 2 ;;
+        -N) if [ -e "$dir/refused-$master" ]; then
+                echo 'Connection closed by UNKNOWN port 65535' >> "$master.log"; exit 255
+            fi
+            (umask 077 && : > "$master"); exit 0 ;;
+        -O) if rm "$dir/unanswered-$master" 2>/dev/null; then exit 255; fi; exit 0 ;;
+        -o) case $2 in ControlPath=*) master=${2#ControlPath=} ;; esac; shift 2 ;;
+        -F|-i|-E|-l) shift 2 ;;
         -*) shift ;;
         *) break ;;
     esac
@@ -1097,11 +1104,12 @@ calls=$(wc --lines < "$dir/scripts")
 if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
 cd "$dir/../home" || exit 255
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
-if [ -e "$dir/cut" ] && [ "$first" = 'cd "$HOME/store/incoming"' ]; then
-    head --bytes="$(cat "$dir/cut")" | sh -c "$*"
-    rm "$dir/cut"; touch "$dir/unanswered"; exit 255
+[ "$first" = 'cd "$HOME/store/incoming"' ] || exec sh -c "$*"
+if [ -e "$dir/cut-$master" ]; then
+    head --bytes="$(cat "$dir/cut-$master")" | sh -c "$*"
+    rm "$dir/cut-$master"; touch "$dir/unanswered-$master"; exit 255
 fi
-exec sh -c "$*"
+tee --append "$dir/received-$master" | sh -c "$*"
 "#;
 
 /// The stand-in `systemd-run`, which notes its arguments in `argv` beside it, as [`SSH`] does,
@@ -1773,17 +1781,56 @@ fn send_refused_piece() {
     );
 }
 
-// The connection ends part way through the second piece of a file of 17 MiB.
+/// Writes the file `name` of the client's task, of `size_bytes`, each its index's remainder by
+/// `modulus`.
+fn write_big(scratch: &Scratch, name: &str, size_bytes: u32, modulus: u32) {
+    let big: Vec<u8> = (0..size_bytes)
+        .map(|index| u8::try_from(index % modulus).unwrap())
+        .collect();
+    fs::write(scratch.0.join("repo/stand-in").join(name), &big).unwrap();
+}
+
+/// What each receive over a shared master was sent, a line each: by master, each member of the
+/// `tar` stream by the file that `holders` gives its blob, with its piece's index and its bytes.
+fn received(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for master in 0..16 {
+        let Ok(stream) = fs::read(scratch.0.join(format!("bin/received-{master}"))) else {
+            continue;
+        };
+        let (mut members, mut at, mut total_bytes) = (Vec::new(), 0, 0);
+        while stream[at] != 0 {
+            let header = &stream[at..at + 512];
+            let name = String::from_utf8(header[..100].to_vec()).unwrap();
+            let (hex, index) = name.trim_end_matches('\0').split_once('.').unwrap();
+            let size = std::str::from_utf8(&header[124..135]).unwrap();
+            let size_bytes = u64::from_str_radix(size, 8).unwrap();
+            let file = holders.iter().find(|(held, _)| held == hex).unwrap();
+            members.push(format!("{} {index} ({size_bytes})", file.1));
+            total_bytes += size_bytes;
+            at += 512 + usize::try_from(size_bytes.next_multiple_of(512)).unwrap();
+        }
+        lines.push(format!(
+            "over {master}, {total_bytes} bytes: {}",
+            members.join(", ")
+        ));
+    }
+    lines
+}
+
+// The connection that carries the first piece of a file of 17 MiB ends part way through it, while
+// the other, of its second piece and the rest, ends whole.
 #[test]
 fn send_carries_on() {
     let scratch = Scratch::new("controller-send-carries-on");
     let client = set_up_client(&scratch);
-    let big: Vec<u8> = (0..17u32 << 20).map(|index| (index % 251) as u8).collect();
-    fs::write(scratch.0.join("repo/stand-in/big.bin"), &big).unwrap();
-    scratch.write("bin/cut", &((16 << 20) + (64 << 10)).to_string());
+    write_big(&scratch, "big.bin", 17 << 20, 251);
+    scratch.write("bin/cut-0", &(64 << 10).to_string());
     let (_, sent) = start(&scratch, &client);
     let mut lines = vec![sent, calls(&scratch)];
-    let stored = stored(&scratch, &holders(&scratch, &[]));
+    let holders = holders(&scratch, &[]);
+    lines.extend(received(&scratch, &holders));
+    let stored = stored(&scratch, &holders);
     let shown = ["big.bin", "incoming"];
     lines.extend(
         stored
@@ -1795,23 +1842,188 @@ fn send_carries_on() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            tar: Unexpected EOF in archive
+            tar: Unexpected EOF in archive
+            tar: Error is not recoverable: exiting now
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: asking again what it lacks, now, attempt 2 of 7
+            pumpkin: controller `alice` lacks 1 of the task's 6 files: sending 16.0 MiB
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            the calls: query, query, receive, receive, query, receive, start
+            over 0, 16777216 bytes: stand-in/big.bin 00000 (16777216)
+            over 1, 1050617 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1806), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+              stand-in/big.bin: 444, 1 link
+              incoming/: none"#]],
+    );
+}
+
+// Files of 20, 8 and 5 MiB, with the task's few small ones, are 3 streams' worth.
+#[test]
+fn send_over_streams() {
+    let scratch = Scratch::new("controller-send-streams");
+    let client = set_up_client(&scratch);
+    let files = [
+        ("a.bin", 20 << 20, 251),
+        ("b.bin", 8 << 20, 241),
+        ("c.bin", 5 << 20, 239),
+    ];
+    for (name, size_bytes, modulus) in files {
+        write_big(&scratch, name, size_bytes, modulus);
+    }
+    let (_, sent) = start(&scratch, &client);
+    let mut lines = vec![sent, calls(&scratch)];
+    let holders = holders(&scratch, &[(last_tree(&scratch), "the task's tree")]);
+    lines.extend(received(&scratch, &holders));
+    lines.extend(stored(&scratch, &holders));
+    lines.push(format!(
+        "the connections: {}",
+        modes(&scratch.0.join(SHARED))
+    ));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
         $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
         exit status: Some(0)
         pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 17.0 MiB
-        tar: Unexpected EOF in archive
-        tar: Unexpected EOF in archive
-        tar: Error is not recoverable: exiting now
-        pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: asking again what it lacks, now, attempt 2 of 7
-        pumpkin: controller `alice` lacks 2 of the task's 6 files: sending 1.0 MiB
+        pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 33.0 MiB over 3 connections
         pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
         pumpkin: to follow it: pumpkin wait <id>
         pumpkin: to stop it: pumpkin cancel <id>
         printed:
           <id>
-        the calls: query, query, receive, query, receive, start
+        the calls: query, query, receive, receive, receive, start
+        over 0, 16777216 bytes: stand-in/a.bin 00000 (16777216)
+        over 1, 8390649 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1806), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+        over 2, 9437184 bytes: stand-in/c.bin 00000 (5242880), stand-in/a.bin 00001 (4194304)
+        the store:
+          .pumpkinversion: 444, 2 links
+          PUMPKIN.star: 444, 1 link
+          Pumpkin's bundle: 444, 2 links
+          pumpkin, to run: 555, 2 links
+          pumpkin: 444, 1 link
+          stand-in/Dockerfile: 444, 1 link
+          stand-in/a.bin: 444, 1 link
+          stand-in/b.bin: 444, 1 link
+          stand-in/c.bin: 444, 1 link
+          stand-in/task.star: 444, 1 link
+          a manifest: the task's tree
+          incoming/: none
+        the connections: 0 600, 0-0 600, 1 600, 1-0 600, 1.log 600, 2 600, 2-0 600, 2.log 600, lock 600, upload 600"#]],
+    );
+}
+
+// Files of 17 MiB, 2 streams' worth, while every session of masters 1 to 15 is held, as by
+// other commands: both streams go over master 0.
+#[test]
+fn send_over_one_connection() {
+    let scratch = Scratch::new("controller-send-one-connection");
+    let client = set_up_client(&scratch);
+    write_big(&scratch, "big.bin", 17 << 20, 251);
+    let shared = scratch.0.join(SHARED);
+    fs::create_dir_all(&shared).unwrap();
+    fs::set_permissions(&shared, Permissions::from_mode(0o700)).unwrap();
+    let mut held = Vec::new();
+    for master in 1..16 {
+        fs::write(shared.join(master.to_string()), "").unwrap();
+        for session in 0..5 {
+            let slot = File::create(shared.join(format!("{master}-{session}"))).unwrap();
+            slot.lock().unwrap();
+            held.push(slot);
+        }
+    }
+    let (_, sent) = start(&scratch, &client);
+    drop(held);
+    let mut lines = vec![sent, calls(&scratch)];
+    let holders = holders(&scratch, &[(last_tree(&scratch), "the task's tree")]);
+    lines.extend(stored(&scratch, &holders));
+    let sessions = modes(&shared);
+    let sessions = sessions.split(", ").filter(|file| file.starts_with('0'));
+    lines.push(format!(
+        "master 0: {}",
+        sessions.collect::<Vec<_>>().join(", ")
+    ));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, receive, start
+        the store:
+          .pumpkinversion: 444, 2 links
+          PUMPKIN.star: 444, 1 link
+          Pumpkin's bundle: 444, 2 links
+          pumpkin, to run: 555, 2 links
+          pumpkin: 444, 1 link
+          stand-in/Dockerfile: 444, 1 link
           stand-in/big.bin: 444, 1 link
-          incoming/: none"#]],
+          stand-in/task.star: 444, 1 link
+          a manifest: the task's tree
+          incoming/: none
+        master 0: 0 600, 0-0 600, 0-1 600"#]],
+    );
+}
+
+// Files of 17 MiB, 2 streams' worth, while master 1 can't be opened: both go over master 0.
+#[test]
+fn send_over_the_connection_held() {
+    let scratch = Scratch::new("controller-send-connection-held");
+    let client = set_up_client(&scratch);
+    write_big(&scratch, "big.bin", 17 << 20, 251);
+    scratch.write("bin/refused-1", "");
+    let (_, sent) = start(&scratch, &client);
+    let mut lines = vec![sent, calls(&scratch)];
+    let holders = holders(&scratch, &[(last_tree(&scratch), "the task's tree")]);
+    lines.extend(stored(&scratch, &holders));
+    lines.push(format!(
+        "the connections: {}",
+        modes(&scratch.0.join(SHARED))
+    ));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+        pumpkin: connection 1 to controller `alice` can't be opened, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/1.log: this goes on over those it holds
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, receive, start
+        the store:
+          .pumpkinversion: 444, 2 links
+          PUMPKIN.star: 444, 1 link
+          Pumpkin's bundle: 444, 2 links
+          pumpkin, to run: 555, 2 links
+          pumpkin: 444, 1 link
+          stand-in/Dockerfile: 444, 1 link
+          stand-in/big.bin: 444, 1 link
+          stand-in/task.star: 444, 1 link
+          a manifest: the task's tree
+          incoming/: none
+        the connections: 0 600, 0-0 600, 0-1 600, 1.log 600, lock 600, upload 600"#]],
     );
 }
 
@@ -1872,7 +2084,7 @@ fn send_changed_file() {
         $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
         exit status: Some(0)
         pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks 2 of the task's 6 files: sending 1.7 KiB
+        pumpkin: controller `alice` lacks 1 of the task's 6 files: sending 2 bytes
         pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
         pumpkin: to follow it: pumpkin wait <id>
         pumpkin: to stop it: pumpkin cancel <id>
@@ -1924,7 +2136,7 @@ fn send_bundle_and_gone() {
         exit status: Some(1)
         pumpkin: run <id> goes to controller `alice`
         pumpkin: controller `alice` holds all 6 of the task's files
-        pumpkin: 1 of the task's files and Pumpkin's bundle are no longer on the controller, as its prune removes what no tree holds: run it again
+        pumpkin: 1 of the task's files and Pumpkin's bundle are no longer whole on the controller: run it again
         the calls: query, start"#]],
     );
 }
