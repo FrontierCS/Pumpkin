@@ -30,6 +30,7 @@ mod frame;
 mod http;
 mod json;
 mod page;
+mod scrub;
 mod talk;
 mod trace;
 
@@ -78,7 +79,7 @@ const HELD_ENDED_RUNS: usize = 8;
 pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     let cli::View { runs, port, export } = flags;
     if let Some(export) = export {
-        return export::export(runs, &export);
+        return export::export(runs, &export, scrub::Scrub::of_machine());
     }
     let (source, serving) = if runs.is_none()
         && let Some(client) = config::client(None)?

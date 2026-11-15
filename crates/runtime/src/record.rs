@@ -765,6 +765,39 @@ impl Record {
         Ok(finished && self.undeleted()?.is_empty())
     }
 
+    /// The `sandbox.json` of each sandbox that the record holds, the agent's, each job's and each
+    /// lease's, by its directory below the record, such as `jobs/3`, in the order of their paths.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a directory or a `sandbox.json` of the record can't be read, or one isn't JSON.
+    pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
+        let mut dirs = vec![PathBuf::from("agent")];
+        for of in ["jobs", "leases"] {
+            let path = self.dir.join(of);
+            match fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        dirs.push(Path::new(of).join(entry.context(path.display())?.file_name()));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context(path.display()),
+            }
+        }
+        dirs.sort();
+        let mut sandboxes = Vec::new();
+        for dir in dirs {
+            let path = self.dir.join(&dir).join("sandbox.json");
+            let Some(bytes) = read_optional(&path)? else {
+                continue;
+            };
+            let sandbox: Value = serde_json::from_slice(&bytes).context(path.display())?;
+            sandboxes.push((dir, sandbox));
+        }
+        Ok(sandboxes)
+    }
+
     /// Each sandbox that the record holds without a delete that succeeded, the agent's, each
     /// job's and each lease's, by its provider's name, but those that an earlier reap removed
     /// ([`REAPS`]).
@@ -779,27 +812,9 @@ impl Record {
                 removed.push((line["provider"].clone(), line["id"].clone()));
             }
         }
-        let mut dirs = vec![self.dir.join("agent")];
-        for of in ["jobs", "leases"] {
-            let of = self.dir.join(of);
-            match fs::read_dir(&of) {
-                Ok(entries) => {
-                    for entry in entries {
-                        dirs.push(entry.context(of.display())?.path());
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).context(of.display()),
-            }
-        }
-        dirs.sort();
         let mut undeleted = Vec::new();
-        for dir in dirs {
-            let path = dir.join("sandbox.json");
-            let Some(bytes) = read_optional(&path)? else {
-                continue;
-            };
-            let sandbox: Value = serde_json::from_slice(&bytes).context(path.display())?;
+        for (dir, sandbox) in self.sandboxes()? {
+            let path = self.dir.join(dir).join("sandbox.json");
             let reaped = (removed.iter())
                 .any(|(provider, id)| *provider == sandbox["provider"] && *id == sandbox["id"]);
             if sandbox["delete"]["state"] == "deleted" || reaped {

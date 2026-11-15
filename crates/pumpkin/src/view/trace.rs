@@ -40,6 +40,7 @@ mod ops;
 mod stats;
 
 pub(super) use ask::{Answer, Asked, Side, asked};
+pub(super) use json::searchable;
 pub(super) use ops::Ops;
 
 /// The most traces that the view holds, those read last, besides those of live runs whose folds
