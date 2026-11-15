@@ -892,6 +892,65 @@ fn answers_past_a_connection_that_sends_nothing() {
 }
 
 #[test]
+fn deflates_what_the_request_accepts() {
+    let scratch = Scratch::new("deflates");
+    let id = "20261110-200000-00000015";
+    let outcome = Some(judged(49.36, json!({})));
+    let places = lease_places(true);
+    write_run(&scratch, id, asked(id, 30), &judged_log(), outcome, &places);
+    let served = Served::start(&scratch);
+    let mut steps = Vec::new();
+    let log = format!("/api/runs/{id}/log?at=0");
+    for path in ["/", "/hanken-grotesk.woff2", &log] {
+        let (_, plain) = served.exchange_bytes("GET", path, &[]);
+        for accepted in [
+            "gzip, deflate, br, zstd",
+            "gzip",
+            "gzip, deflate;q=0",
+            "deflate;q=0.5",
+        ] {
+            let asked = [("Accept-Encoding", accepted)];
+            let (head, body) = served.exchange_bytes("GET", path, &asked);
+            let header = |name: &str| {
+                let prefix = format!("{name}: ");
+                head.lines().find_map(|line| line.strip_prefix(&prefix))
+            };
+            assert_eq!(header("Content-Length"), Some(&*body.len().to_string()));
+            let encoding = header("Content-Encoding");
+            let sent = match encoding {
+                Some("deflate") => miniz_oxide::inflate::decompress_to_vec_zlib(&body).unwrap(),
+                _ => body,
+            };
+            assert_eq!(sent, plain, "{path} {accepted}");
+            steps.push(format!(
+                "{path} {accepted:?}: Content-Encoding {}, Vary {}",
+                encoding.unwrap_or("none"),
+                header("Vary").unwrap_or("none")
+            ));
+        }
+    }
+    check(
+        &scratch,
+        steps.into_iter().map(Step::Ran),
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+            / "gzip, deflate, br, zstd": Content-Encoding deflate, Vary Accept-Encoding
+            / "gzip": Content-Encoding none, Vary Accept-Encoding
+            / "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            / "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
+            /hanken-grotesk.woff2 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /hanken-grotesk.woff2 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /hanken-grotesk.woff2 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /hanken-grotesk.woff2 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/log?at=0 "gzip, deflate, br, zstd": Content-Encoding deflate, Vary Accept-Encoding
+            /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding"#]],
+    );
+}
+
+#[test]
 fn pages_the_list() {
     let scratch = Scratch::new("pages-the-list");
     let write = |runs: std::ops::Range<u64>| {
