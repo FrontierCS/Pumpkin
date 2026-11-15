@@ -79,8 +79,9 @@ impl TryFrom<u64> for OpPayloadLimit {
     }
 }
 
-/// The most model requests a sandbox may have in flight: one for each agent of a harness that
-/// runs a lead agent and up to six helpers at once, each waiting on one response at a time.
+/// The most model requests a sandbox may have in flight, whatever client makes them, which bounds
+/// what the sandbox's requests cost the host.
+// A lead agent and six helpers, each waiting on one response at a time.
 pub const MAX_MODEL_REQUESTS_IN_FLIGHT: usize = 7;
 
 /// The most bytes a model request's body may hold: as many as an op's payload, since the gateway
@@ -245,14 +246,20 @@ pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 3] {
     ]
 }
 
-/// The port of the model endpoint, on `127.0.0.1` in a sandbox whose role has a model route.
+/// The port of the model endpoint, on `127.0.0.1` in a sandbox whose role has a model route, at
+/// [`model_url()`].
 ///
-/// Its harness makes model requests ([`FromSandbox::ModelRequest`]) at
-/// `http://127.0.0.1:<MODEL_PORT>`: by that address, not `localhost`, which may also name the
-/// IPv6 loopback, where nothing listens. Every provider starts that sandbox's `sandboxd` with
-/// `--model`, which makes it serve the endpoint there, and the session's owner accepts the
-/// session to take model requests.
+/// Every provider starts that sandbox's `sandboxd` with `--model`, which makes it serve the
+/// endpoint there, and the session's owner accepts the session to take model requests.
 pub const MODEL_PORT: u16 = 11235;
+
+/// The URL of the model endpoint, `http://127.0.0.1:<MODEL_PORT>`.
+///
+/// A harness in the sandbox makes model requests ([`FromSandbox::ModelRequest`]) there: by that
+/// address, not `localhost`, which may also name the IPv6 loopback, where nothing listens.
+pub fn model_url() -> String {
+    format!("http://127.0.0.1:{MODEL_PORT}")
+}
 
 /// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
 pub const PROTOCOL_VERSION: u32 = 0;
