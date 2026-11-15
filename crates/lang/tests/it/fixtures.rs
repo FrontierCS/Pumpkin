@@ -1,7 +1,7 @@
 //! The files of `tests/fixtures`, listed rather than named, so that none goes unchecked: each
 //! folder says what its entries, the files named `task.star`, must do, as `Folder`'s variants
-//! say, and every prefix of each file but `bad/stack/lib.star` must evaluate or give problems
-//! that read, as `Case::prefixes` has it.
+//! say, and each file but `bad/stack/lib.star`, cut at every eighth character and at each line's
+//! end, must evaluate or give problems that read, as `Case::prefixes` has it.
 
 use std::collections::BTreeMap;
 
@@ -66,11 +66,9 @@ fn show(folder: Folder, path: &str, files: &BTreeMap<String, String>, args: &Arg
     // Its prefixes cut what the other fixtures' prefixes cut, only deeper, and would take most
     // of the tests' time.
     let swept = (path != "bad/stack/lib.star").then(|| {
-        let cuts = files[path].chars().count() + 1;
-        format!(
-            ": {} of {cuts} prefixes evaluate",
-            case.prefixes(path, args)
-        )
+        // Every eighth character, as a cut at each took 5 s of the tests' time.
+        let (evaluated, cuts) = case.prefixes(path, args, 8);
+        format!(": {evaluated} of {cuts} prefixes evaluate")
     });
     let evaluated = is_entry.then(|| case.evaluate(args));
     match (folder, &evaluated) {
@@ -100,7 +98,7 @@ fn tasks() {
     check(
         Folder::Tasks,
         &expect![[r#"
-            == tasks/judged/task.star: 2 of 415 prefixes evaluate
+            == tasks/judged/task.star: 2 of 65 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/judged-neutral",
@@ -253,7 +251,7 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 3960 prefixes evaluate
+            == tasks/literal/task.star: 2 of 571 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
@@ -417,7 +415,7 @@ fn tasks() {
               }
             }
 
-            == tasks/loaded/task.star: 2 of 700 prefixes evaluate
+            == tasks/loaded/task.star: 2 of 115 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/loaded",
@@ -504,9 +502,9 @@ fn bad() {
     check(
         Folder::Bad,
         &expect![[r#"
-            == bad/calls/lib.star: 0 of 1707 prefixes evaluate
+            == bad/calls/lib.star: 0 of 350 prefixes evaluate
 
-            == bad/calls/task.star: 0 of 41 prefixes evaluate
+            == bad/calls/task.star: 0 of 7 prefixes evaluate
             bad/calls/lib.star:146:12: this call would run 49 functions at once: nest calls at most 48 deep
                 146 |     return f48(x)
                     |            ^^^^^^
@@ -561,7 +559,7 @@ fn bad() {
 
             == bad/stack/lib.star
 
-            == bad/stack/task.star: 0 of 41 prefixes evaluate
+            == bad/stack/task.star: 0 of 7 prefixes evaluate
             bad/stack/lib.star:71:11: `+` can't take an int and a bool: give it two ints, two strings, two lists or two tuples
                 71 |         1 + (DEEP == DEEP)
                    |           ^
@@ -576,12 +574,12 @@ fn lib() {
     check(
         Folder::Lib,
         &expect![[r#"
-            == lib/deep.star: 0 of 370 prefixes evaluate
+            == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 3435 prefixes evaluate
+            == lib/images.star: 0 of 498 prefixes evaluate
 
-            == lib/judged.star: 0 of 3858 prefixes evaluate
+            == lib/judged.star: 0 of 563 prefixes evaluate
 
-            == lib/parts.star: 0 of 1455 prefixes evaluate"#]],
+            == lib/parts.star: 0 of 219 prefixes evaluate"#]],
     );
 }

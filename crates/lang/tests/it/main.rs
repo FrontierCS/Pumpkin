@@ -133,10 +133,10 @@ impl<'c> Case<'c> {
         Ok(format!("{built}{ir:#}"))
     }
 
-    /// How many prefixes of the file at `path` evaluate, given `args`, each cut at a
-    /// character's boundary, with the other files whole; one whose problems don't read panics,
-    /// named beside the panic.
-    fn prefixes(&self, path: &str, args: &Args) -> usize {
+    /// How many prefixes of the file at `path` evaluate, given `args`, of how many it cuts: at
+    /// every `every`th character's boundary, at each line's end and at the file's, with the other
+    /// files whole; one whose problems don't read panics, named beside the panic.
+    fn prefixes(&self, path: &str, args: &Args, every: usize) -> (usize, usize) {
         let held = self.held.iter().find(|(held, _)| *held == path);
         let text = held.map_or_else(|| self.files[path].as_str(), |(_, text)| text);
         let mut cut = Self {
@@ -147,13 +147,18 @@ impl<'c> Case<'c> {
             ..*self
         };
         cut.held.push((path, text));
-        let ends = text.char_indices().map(|(end, _)| end).chain([text.len()]);
-        ends.filter(|&end| {
+        let ends = (text.char_indices().enumerate())
+            .filter(|&(index, (_, char))| index % every == 0 || char == '\n')
+            .map(|(_, (end, _))| end)
+            .chain([text.len()]);
+        let (mut evaluated, mut cuts) = (0, 0);
+        for end in ends {
             let _named = Named { path, end };
             *cut.held.last_mut().unwrap() = (path, &text[..end]);
-            cut.evaluate(args).is_ok()
-        })
-        .count()
+            evaluated += usize::from(cut.evaluate(args).is_ok());
+            cuts += 1;
+        }
+        (evaluated, cuts)
     }
 }
 
@@ -227,7 +232,7 @@ fn check_within(bounds: Bounds, fixture: &str, expect: &Expect) {
         let (Ok(shown) | Err(shown)) = case.evaluate(&args);
         // Only that no prefix panics: how many evaluate is what a fixture's file shows.
         for (path, _) in &case.held {
-            case.prefixes(path, &args);
+            case.prefixes(path, &args, 1);
         }
         shown
     });

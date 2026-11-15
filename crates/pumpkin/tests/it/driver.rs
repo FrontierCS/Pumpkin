@@ -128,57 +128,12 @@ fn on_engine(name: &str, task: &str, info: &str, image: &str) -> String {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the cases and their snapshot"
-)]
-fn does_not_start() {
-    let scratch = Scratch::new("does-not-start");
+fn lacks_its_image() {
+    let scratch = Scratch::new("lacking");
     let stand_in = StandIn::new(&scratch);
-    let mut steps = vec![Step::from(stand_in.run("lacking/task.star", &[]))];
-    steps.push(Step::Ran(unlogged("unlogged")));
-    steps.push(Step::Ran(unbuilt("unbuilt")));
-    // As an engine of the classic store reports its graph driver's status, and as one before
-    // Docker 28.0, or one that drops the experimental field, inspects an image.
-    let containerd = r#"["driver-type","io.containerd.snapshotter.v1"]"#;
-    let classic = INFO.replace(containerd, r#"["Backing Filesystem","extfs"]"#);
-    steps.push(Step::Ran(on_engine("classic", "stand-in", &classic, IMAGE)));
-    let descriptor = r#","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
-    steps.push(Step::Ran(on_engine(
-        "undescribed",
-        "stand-in",
-        INFO,
-        &IMAGE.replace(descriptor, ""),
-    )));
-    // An engine that can't limit a container's swap, of a task whose image it would build.
-    let unlimited = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
-    steps.push(Step::Ran(on_engine(
-        "unlimited",
-        "unbuilt",
-        &unlimited,
-        IMAGE,
-    )));
-    for (at, whom, signal, released) in [
-        ("context", Whom::Driver, "KILL", false),
-        ("context", Whom::Driver, "TERM", false),
-        ("context", Whom::Run, "KILL", false),
-        ("context", Whom::Run, "TERM", false),
-        ("context", Whom::Both, "INT", false),
-        // While it builds the task's images, before any record is made.
-        ("lookup", Whom::Driver, "KILL", false),
-        ("lookup", Whom::Run, "TERM", false),
-        ("lookup", Whom::Both, "INT", false),
-        ("image", Whom::Driver, "KILL", false),
-        ("image", Whom::Driver, "TERM", true),
-        ("image", Whom::Run, "TERM", false),
-        ("image", Whom::Both, "INT", false),
-    ] {
-        let name = format!("unstarted-{at}-{}", steps.len());
-        steps.push(Step::Ran(unstarted(&name, at, whom, signal, released)));
-    }
     check(
         &scratch,
-        steps,
+        [stand_in.run("lacking/task.star", &[])],
         false,
         &[],
         &expect![[r#"
@@ -189,121 +144,235 @@ fn does_not_start() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
             outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
-            printed outcome.json: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            record: driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}
-            printed outcome.json: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: building an image in pumpkin/unbuilt
-            the stand-in creates nothing
-            pumpkin: the build of an image in pumpkin/unbuilt failed
-            unbuilt/task.star:1:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-                1 | IMAGE = image("Dockerfile")
-                  |         ^^^^^^^^^^^^^^^^^^^
-            pumpkin: unbuilt/task.star: the task has 1 problem
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
-            a record was made: false
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: the Docker engine of context `default` doesn't keep its images in the containerd image store, as `docker info` reports no `driver-type` of `io.containerd.snapshotter.v1`, so it can't find an image by its manifest's digest: turn the store on, as `"features": {"containerd-snapshotter": true}` in the engine's `daemon.json` does
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one","state":"failed"}
-            printed outcome.json: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: reaching provider `local` failed: the Docker engine of context `default` can't enforce every limit a sandbox has: `docker info` reports SwapLimit false: use an engine that reports each true
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: the driver ended before the run started, by signal: 15 (SIGTERM)
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 9
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 15
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 2
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 15
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 2
-            the driver is gone, and made no record: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
-            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
-            outcome.json: none
-            printed the id alone: false
-            $ pumpkin wait <id> --runs runs
-            exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
-            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-            outcome.json: {"signal":"SIGTERM","state":"interrupted"}
-            printed outcome.json: true
-            $ pumpkin wait <id> --runs runs
-            exit status: Some(1)
-            pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 15
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            outcome.json: none
-            printed the id alone: false
-            $ pumpkin wait <id> --runs runs
-            exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
-            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            ended by signal: 2
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            outcome.json: none
-            printed the id alone: false
-            $ pumpkin wait <id> --runs runs
-            exit status: Some(1)
-            pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
-            pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]],
+            printed outcome.json: true"#]],
     );
+}
+
+#[test]
+fn loses_its_log() {
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: run <id> records into <scratch>/runs/<id>
+        pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        record: driver.pid, ir.json, outcome.json, provider.json, record.json
+        outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}
+        printed outcome.json: true"#]].assert_eq(&unlogged("unlogged"));
+}
+
+#[test]
+fn fails_its_build() {
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: building an image in pumpkin/unbuilt
+        the stand-in creates nothing
+        pumpkin: the build of an image in pumpkin/unbuilt failed
+        unbuilt/task.star:1:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+            1 | IMAGE = image("Dockerfile")
+              |         ^^^^^^^^^^^^^^^^^^^
+        pumpkin: unbuilt/task.star: the task has 1 problem
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
+        a record was made: false"#]].assert_eq(&unbuilt("unbuilt"));
+}
+
+#[test]
+fn refuses_the_classic_store() {
+    // As an engine of the classic store reports its graph driver's status.
+    let containerd = r#"["driver-type","io.containerd.snapshotter.v1"]"#;
+    let classic = INFO.replace(containerd, r#"["Backing Filesystem","extfs"]"#);
+    let shown = on_engine("classic", "stand-in", &classic, IMAGE);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: the Docker engine of context `default` doesn't keep its images in the containerd image store, as `docker info` reports no `driver-type` of `io.containerd.snapshotter.v1`, so it can't find an image by its manifest's digest: turn the store on, as `"features": {"containerd-snapshotter": true}` in the engine's `daemon.json` does
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star"#]].assert_eq(&shown);
+}
+
+#[test]
+fn refuses_an_undescribed_image() {
+    // As an engine before Docker 28.0, or one that drops the experimental field, inspects an
+    // image.
+    let descriptor = r#","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let shown = on_engine(
+        "undescribed",
+        "stand-in",
+        INFO,
+        &IMAGE.replace(descriptor, ""),
+    );
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: run <id> records into <scratch>/runs/<id>
+        pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one","state":"failed"}
+        printed outcome.json: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn refuses_unlimited_swap() {
+    // Of a task whose image the engine would build.
+    let unlimited = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
+    let shown = on_engine("unlimited", "unbuilt", &unlimited, IMAGE);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: reaching provider `local` failed: the Docker engine of context `default` can't enforce every limit a sandbox has: `docker info` reports SwapLimit false: use an engine that reports each true
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_context_driver_kill() {
+    let shown = unstarted("unstarted", "context", Whom::Driver, "KILL", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_context_driver_term() {
+    let shown = unstarted("unstarted", "context", Whom::Driver, "TERM", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: the driver ended before the run started, by signal: 15 (SIGTERM)
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_context_run_kill() {
+    let shown = unstarted("unstarted", "context", Whom::Run, "KILL", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 9
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_context_run_term() {
+    let shown = unstarted("unstarted", "context", Whom::Run, "TERM", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 15
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_context_both_int() {
+    let shown = unstarted("unstarted", "context", Whom::Both, "INT", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 2
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_lookup_driver_kill() {
+    // While it builds the task's images, before any record is made.
+    let shown = unstarted("unstarted", "lookup", Whom::Driver, "KILL", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_lookup_run_term() {
+    let shown = unstarted("unstarted", "lookup", Whom::Run, "TERM", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 15
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_lookup_both_int() {
+    let shown = unstarted("unstarted", "lookup", Whom::Both, "INT", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 2
+        the driver is gone, and made no record: true"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_image_driver_kill() {
+    let shown = unstarted("unstarted", "image", Whom::Driver, "KILL", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: run <id> records into <scratch>/runs/<id>
+        pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
+        pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+        pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs
+        outcome.json: none
+        printed the id alone: false
+        $ pumpkin wait <id> --runs runs
+        exit status: Some(1)
+        pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+        pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_image_driver_term_released() {
+    let shown = unstarted("unstarted", "image", Whom::Driver, "TERM", true);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: run <id> records into <scratch>/runs/<id>
+        pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        outcome.json: {"signal":"SIGTERM","state":"interrupted"}
+        printed outcome.json: true
+        $ pumpkin wait <id> --runs runs
+        exit status: Some(1)
+        pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_image_run_term() {
+    let shown = unstarted("unstarted", "image", Whom::Run, "TERM", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 15
+        pumpkin: run <id> records into <scratch>/runs/<id>
+        outcome.json: none
+        printed the id alone: false
+        $ pumpkin wait <id> --runs runs
+        exit status: Some(1)
+        pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+        pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]].assert_eq(&shown);
+}
+
+#[test]
+fn unstarted_image_both_int() {
+    let shown = unstarted("unstarted", "image", Whom::Both, "INT", false);
+    expect![[r#"
+        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
+        ended by signal: 2
+        pumpkin: run <id> records into <scratch>/runs/<id>
+        outcome.json: none
+        printed the id alone: false
+        $ pumpkin wait <id> --runs runs
+        exit status: Some(1)
+        pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
+        pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
+        pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]].assert_eq(&shown);
 }
 
 /// What [`detaches`] shows of a run that `run`, invoked as `invoked`, started while the stand-in
