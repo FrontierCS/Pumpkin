@@ -22,9 +22,9 @@ pub use upstream::{Answer, Key, Serving, Upstream, UpstreamUrl, serve};
 
 /// Where [`serve`] keeps a model exchange as it passes, for the run's record.
 pub trait Keep {
-    /// The request's body as it went upstream, with the field that holds its conversation, if
-    /// it is one the route read; or, if it never went upstream, as its client sent it.
-    fn request(&self, body: &[u8], conversation: Option<&'static str>);
+    /// The request's body as it went upstream, with the fields of its API that a record may keep
+    /// apart, if it is one the route read; or, if it never went upstream, as its client sent it.
+    fn request(&self, body: &[u8], apart: Option<Apart>);
     /// The next bytes of the answer's body: the upstream's, as each part arrives, even where the
     /// route answers its client with a refusal in its place, or, if none came, the refusal.
     fn response(&self, bytes: &[u8]);
@@ -35,3 +35,13 @@ pub trait Keep {
     fn first_output(&self);
 }
 pub use usage::{Failure, Usage};
+
+/// The fields of an API's request body that a client sends again on each request: its
+/// conversation, and the fields it sends whole and most often unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Apart {
+    /// The field that holds the conversation, an array of its items, the earlier ones first.
+    pub conversation: &'static str,
+    /// The fields sent whole, such as the list of tools.
+    pub whole: &'static [&'static str],
+}

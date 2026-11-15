@@ -34,6 +34,7 @@ use ureq::http::{HeaderName, HeaderValue};
 
 use super::upstream::Answer;
 use super::usage;
+use crate::Apart;
 
 // Each is one the harness the runs use sends, and describes its client, its session, or the form
 // in which its requests are written. Any other could reach more of the provider than the models
@@ -83,8 +84,8 @@ const MAX_SHOWN_BYTES: usize = 256;
 struct Rules {
     target: &'static str,
     headers: &'static [&'static str],
-    /// The field of a request's body that holds the conversation.
-    conversation: &'static str,
+    /// The fields of a request's body that a record may keep apart.
+    apart: Apart,
     /// Where a response's usage gives its tokens.
     usage: usage::Fields,
     /// Which events of a response's stream are the model's output.
@@ -103,7 +104,10 @@ type Tool = fn(&Value) -> Result<(), Refusal>;
 const RESPONSES: Rules = Rules {
     target: "/responses",
     headers: &RESPONSES_HEADERS,
-    conversation: "input",
+    apart: Apart {
+        conversation: "input",
+        whole: &["tools", "instructions"],
+    },
     usage: usage::RESPONSES_FIELDS,
     output: usage::responses_output,
     stored: stateless,
@@ -114,7 +118,10 @@ const RESPONSES: Rules = Rules {
 const CHAT: Rules = Rules {
     target: "/v1/chat/completions",
     headers: &CHAT_HEADERS,
-    conversation: "messages",
+    apart: Apart {
+        conversation: "messages",
+        whole: &["tools"],
+    },
     usage: usage::CHAT_FIELDS,
     output: usage::chat_output,
     stored: stores_nothing,
@@ -256,10 +263,9 @@ impl Closed {
         &self.body
     }
 
-    /// The field of its body that holds the conversation, in its API: the Responses API's
-    /// `input`, or Chat Completions' `messages`.
-    pub(crate) fn conversation(&self) -> &'static str {
-        self.rules.conversation
+    /// The fields of its body that its API's client sends again on each request.
+    pub(crate) fn apart(&self) -> Apart {
+        self.rules.apart
     }
 
     pub(crate) fn usage(&self) -> usage::Fields {

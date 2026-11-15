@@ -18,7 +18,7 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
-use route::{Keep, Key, Route, Upstream, UpstreamUrl};
+use route::{Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox, frame};
 use serde_json::{Value, json};
@@ -125,7 +125,7 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
 struct Ignored;
 
 impl Keep for Ignored {
-    fn request(&self, _: &[u8], _: Option<&'static str>) {}
+    fn request(&self, _: &[u8], _: Option<Apart>) {}
 
     fn response(&self, _: &[u8]) {}
 

@@ -13,7 +13,7 @@ use std::{fs, iter, slice, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
-use route::{Answer as Told, Keep, Key, Route, Upstream, UpstreamUrl};
+use route::{Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::Api;
 use stdx::Deadline;
 use test_support::HUNG;
@@ -369,7 +369,7 @@ impl Kept {
 }
 
 impl Keep for Kept {
-    fn request(&self, body: &[u8], _: Option<&'static str>) {
+    fn request(&self, body: &[u8], _: Option<Apart>) {
         self.request.borrow_mut().extend_from_slice(body);
     }
 

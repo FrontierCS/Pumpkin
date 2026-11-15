@@ -1,5 +1,6 @@
 //! The model routes that a run serves, by the rules of [`route`].
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::fs::{self, File};
@@ -10,10 +11,10 @@ use std::time::Duration;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
-use route::{Answer, Keep, Route, Serving, Upstream};
+use route::{Answer, Apart, Keep, Route, Serving, Upstream};
 use schema::ir::{Api, ApiRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 use stdx::{Context as _, Deadline, unpoisoned};
 
@@ -270,9 +271,10 @@ fn failure(answer: &Answer) -> Option<String> {
 
 /// A model exchange, as the record keeps it while it passes ([`Keep`]), in `model/` of the
 /// record, numbered as the run log numbers requests: its request as `<n>.request` and its
-/// answer's body as `<n>.response`, each made as its first bytes come. A request whose body holds
-/// a conversation the route read keeps each of its items once, in `items/<hex>`, the item's JSON
-/// named by its SHA-256, and its body with that list of items as their digests, in order;
+/// answer's body as `<n>.response`, each made as its first bytes come. A request whose body the
+/// route read keeps apart what its API lets it ([`Apart`]): each item of its conversation, and
+/// each field kept whole that the body holds, such as its tools, once in `items/<hex>`, the JSON
+/// named by its SHA-256; its body holds the digest of each in its place, and
 /// [`Record::model_request`](super::Record::model_request) rebuilds it. It notes, by the run's
 /// clock `C`, when its answer's first bytes came, and when its stream's output began.
 pub(super) struct Exchange<C> {
@@ -285,19 +287,36 @@ pub(super) struct Exchange<C> {
     request: Part,
     response: Part,
     /// The request's body, once it has come.
-    body: Cell<Option<Body>>,
+    body: RefCell<Option<Body>>,
     /// The items it made, to sync at its end.
     items: RefCell<Vec<File>>,
     /// Why keeping it failed, if it did: it is then kept no further.
     failed: RefCell<Option<String>>,
 }
 
-/// What an exchange keeps of its request's body: its size, and the field whose items are kept
-/// apart, with their count, if they are.
-#[derive(Clone, Copy)]
+/// What an exchange keeps of its request's body: its size and SHA-256, the field whose items are
+/// kept apart, with their count, if they are, and the fields kept whole.
 struct Body {
     bytes: u64,
+    sha256: Sha256Digest,
     items: Option<(&'static str, usize)>,
+    whole: Vec<&'static str>,
+}
+
+impl Body {
+    /// What is kept of `body`, which went upstream, with `items` and `whole` kept apart.
+    fn of(body: &[u8], items: Option<(&'static str, usize)>, whole: Vec<&'static str>) -> Self {
+        Self {
+            bytes: body.len() as u64,
+            sha256: sha256(body),
+            items,
+            whole,
+        }
+    }
+}
+
+fn sha256(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(bytes)))
 }
 
 struct Part {
@@ -321,16 +340,18 @@ impl<C: Clock> Exchange<C> {
             number,
             request: part("request"),
             response: part("response"),
-            body: Cell::new(None),
+            body: RefCell::new(None),
             items: RefCell::new(Vec::new()),
             failed: RefCell::new(None),
         }
     }
 
     /// What the run log's `model_answered` says of where it is kept so far: `{"request": {"path":
-    /// p, "bytes": b, "body_bytes": s, "items": {"field": f, "count": c}}, "response": {"path": p,
-    /// "bytes": b}}`, each part once it has bytes, with the paths below the record: `s` the size of
-    /// the request's body, and `items` the field whose `c` items are kept apart, if any.
+    /// p, "bytes": b, "body_bytes": s, "body_sha256": h, "items": {"field": f, "count": c},
+    /// "whole": [w]}, "response": {"path": p, "bytes": b}}`, each part once it has bytes, with the
+    /// paths below the record: `s` the size of the request's body and `h` its SHA-256's 64
+    /// hexadecimal digits, `items` the field whose `c` items are kept apart, if any, and `whole`
+    /// the fields kept whole, in their API's order, if any.
     pub(super) fn kept(&self) -> Value {
         let mut kept = json!({});
         for part in [&self.request, &self.response] {
@@ -339,12 +360,20 @@ impl<C: Clock> Exchange<C> {
                 kept[part.name] = json!({ "path": path, "bytes": part.bytes.get() });
             }
         }
-        if let (Some(Body { bytes, items }), Some(request)) =
-            (self.body.get(), kept.get_mut("request"))
-        {
+        if let (Some(body), Some(request)) = (&*self.body.borrow(), kept.get_mut("request")) {
+            let Body {
+                bytes,
+                sha256,
+                items,
+                whole,
+            } = body;
             request["body_bytes"] = json!(bytes);
+            request["body_sha256"] = json!(sha256.hex());
             if let Some((field, count)) = items {
                 request["items"] = json!({ "field": field, "count": count });
+            }
+            if !whole.is_empty() {
+                request["whole"] = json!(whole);
             }
         }
         kept
@@ -387,37 +416,63 @@ impl<C: Clock> Exchange<C> {
         }
     }
 
-    /// `body` with each item of its array `field` kept apart, once in the record ([`Exchange`]),
-    /// and its place in the array holding its digest; `None` if `body` is no JSON object whose
-    /// `field` is an array, or an item couldn't be kept.
-    fn without_items(&self, body: &[u8], field: &str) -> Option<(Vec<u8>, usize)> {
+    /// `body` with the fields of `apart` kept apart, each once in the record ([`Exchange`]): each
+    /// item of its conversation, if that is an array, and each field kept whole that it holds,
+    /// with the digest of each in its place; and what it keeps of the body. `None` if `body` is no
+    /// JSON object, or a part couldn't be kept.
+    fn kept_apart(&self, body: &[u8], apart: Apart) -> Option<(Vec<u8>, Body)> {
         let Ok(Value::Object(mut fields)) = serde_json::from_slice(body) else {
-            return None;
-        };
-        let Some(Value::Array(items)) = fields.get_mut(field) else {
             return None;
         };
         let dir = self.dir.join("items");
         fs::create_dir_all(&dir).ok()?;
-        for item in items.iter_mut() {
-            // The body went upstream as `serde_json` writes it, so each item is written alike,
-            // and the body rebuilt from the items' text is the body that went.
-            let text = item.to_string();
-            let digest = Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(text.as_bytes())));
-            let path = dir.join(digest.hex());
-            // Kept once: by an earlier request, or by another caller's at the same time.
-            match File::create_new(&path) {
-                Ok(mut file) => {
-                    file.write_all(text.as_bytes()).ok()?;
-                    self.items.borrow_mut().push(file);
+        let items = match fields.get_mut(apart.conversation) {
+            Some(Value::Array(items)) => {
+                for item in items.iter_mut() {
+                    *item = self.kept_item(&dir, item)?;
                 }
+                Some((apart.conversation, items.len()))
+            }
+            _ => None,
+        };
+        let mut whole = Vec::new();
+        for &field in apart.whole {
+            if let Some(value) = fields.get_mut(field) {
+                *value = self.kept_item(&dir, value)?;
+                whole.push(field);
+            }
+        }
+        let rest = Value::Object(fields).to_string().into_bytes();
+        Some((rest, Body::of(body, items, whole)))
+    }
+
+    /// Keeps `value` in `dir` as an item, once, named by the SHA-256 of its JSON, and returns
+    /// its digest, as a JSON string; `None` if it couldn't be kept.
+    fn kept_item(&self, dir: &Path, value: &Value) -> Option<Value> {
+        // The body went upstream as `serde_json` writes it, so each item is written alike, and the
+        // body rebuilt from the items' text is the body that went.
+        let text = value.to_string();
+        let digest = sha256(text.as_bytes());
+        let path = dir.join(digest.hex());
+        // Kept once: by an earlier request, or by another caller's at the same time. It is written
+        // under this exchange's own name, then linked to its digest's, which no later link
+        // replaces, so no other request sees its name before all of it is written, as git moves
+        // an object into place:
+        // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/object-file.c#L382-L457
+        if !path.try_exists().ok()? {
+            let partial = dir.join(format!(".{}.partial", self.number));
+            let mut file = File::create_new(&partial).ok()?;
+            let linked =
+                (file.write_all(text.as_bytes())).and_then(|()| fs::hard_link(&partial, &path));
+            let removed = fs::remove_file(&partial);
+            match linked {
+                Ok(()) => self.items.borrow_mut().push(file),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(_) => return None,
             }
-            *item = Value::String(digest.as_str().to_owned());
+            removed.ok()?;
         }
-        let count = items.len();
-        Some((Value::Object(fields).to_string().into_bytes(), count))
+        Some(Value::String(digest.as_str().to_owned()))
     }
 }
 
@@ -435,48 +490,87 @@ pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, Str
     let Some(Value::Object(kept)) = kept else {
         return Err(format!("the run log names no kept model request {number}"));
     };
+    let body = rebuilt_body(record, &kept)?;
+    if let Some(sent) = kept.get("body_sha256") {
+        let rebuilt = sha256(&body);
+        if sent.as_str() != Some(rebuilt.hex()) {
+            let sent = sent
+                .as_str()
+                .map_or_else(|| sent.to_string(), str::to_owned);
+            return Err(format!(
+                "model request {number}: the record's items don't give back the body it sent: \
+                 the rebuilt body's SHA-256 is {}, where the run log names {sent}",
+                rebuilt.hex()
+            ));
+        }
+    }
+    Ok(body)
+}
+
+/// The body of the request that `kept`, its run log's `kept.request`, names in the record at
+/// `record`.
+fn rebuilt_body(record: &Path, kept: &Map<String, Value>) -> Result<Vec<u8>, String> {
     let path = record.join(kept.get("path").and_then(Value::as_str).unwrap_or_default());
     let bytes = fs::read(&path).context(path.display())?;
-    let Some(field) = kept.get("items").and_then(|items| items["field"].as_str()) else {
+    // A record names the fields it kept apart, so a field that a client sent as a digest's text
+    // stays as it was sent.
+    let items = kept.get("items").and_then(|items| items["field"].as_str());
+    let whole = kept.get("whole").and_then(Value::as_array);
+    let whole: Vec<&str> = (whole.into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect();
+    if items.is_none() && whole.is_empty() {
         return Ok(bytes);
-    };
+    }
     let unkept = |what: &str| {
         format!(
-            "{}: {what}: expected a body kept with its items apart",
+            "{}: {what}: expected a body kept with its parts apart",
             path.display()
         )
     };
     let Ok(Value::Object(mut fields)) = serde_json::from_slice(&bytes) else {
         return Err(unkept("not a JSON object"));
     };
-    let Some(Value::Array(items)) = fields.get_mut(field) else {
-        return Err(unkept(&format!("no array `{field}`")));
-    };
-    for item in items.iter_mut() {
-        let hex = item
-            .as_str()
-            .and_then(|digest| digest.strip_prefix("sha256:"));
-        let Some(hex) = hex.filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit())) else {
-            return Err(unkept("an item that is no digest"));
+    if let Some(field) = items {
+        let Some(Value::Array(items)) = fields.get_mut(field) else {
+            return Err(unkept(&format!("no array `{field}`")));
         };
-        let path = record.join("model/items").join(hex);
-        let text = fs::read(&path).context(path.display())?;
-        *item = serde_json::from_slice(&text)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        for item in items.iter_mut() {
+            *item =
+                kept_item(record, item).ok_or_else(|| unkept("an item that is no digest"))??;
+        }
+    }
+    for field in whole {
+        let Some(value) = fields.get_mut(field) else {
+            return Err(unkept(&format!("no field `{field}`")));
+        };
+        *value = kept_item(record, value)
+            .ok_or_else(|| unkept(&format!("`{field}` is no digest")))??;
     }
     Ok(Value::Object(fields).to_string().into_bytes())
 }
 
+/// The item of the record at `record` that `digest` names, as kept, or why it couldn't be read;
+/// `None` if `digest` is no digest.
+fn kept_item(record: &Path, digest: &Value) -> Option<Result<Value, String>> {
+    let hex = digest
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"));
+    let hex = hex.filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+    let path = record.join("model/items").join(hex);
+    let read = fs::read(&path).context(path.display()).and_then(|text| {
+        serde_json::from_slice(&text).map_err(|error| format!("{}: {error}", path.display()))
+    });
+    Some(read)
+}
+
 impl<C: Clock> Keep for Exchange<C> {
-    fn request(&self, body: &[u8], conversation: Option<&'static str>) {
-        let split = conversation.and_then(|field| Some((field, self.without_items(body, field)?)));
-        let (kept, items) = match &split {
-            Some((field, (rest, count))) => (rest.as_slice(), Some((*field, *count))),
-            None => (body, None),
-        };
-        let bytes = body.len() as u64;
-        self.body.set(Some(Body { bytes, items }));
-        self.add(&self.request, kept);
+    fn request(&self, body: &[u8], apart: Option<Apart>) {
+        let unsplit = || (Cow::Borrowed(body), Body::of(body, None, Vec::new()));
+        let (kept, read) = (apart.and_then(|apart| self.kept_apart(body, apart)))
+            .map_or_else(unsplit, |(rest, read)| (Cow::Owned(rest), read));
+        *self.body.borrow_mut() = Some(read);
+        self.add(&self.request, &kept);
     }
 
     fn response(&self, bytes: &[u8]) {

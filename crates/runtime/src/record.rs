@@ -16,7 +16,8 @@
 //!   call and of lease `n`'s runner, once created: its `sandbox.json` ([`write_sandbox`]), its
 //!   `console.txt` as the run deleted it ([`write_console`]), and its `out` and `log` as far as
 //!   collected, but a result over [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
-//! - `model/`: each model exchange, each conversation item once (`Exchange`);
+//! - `model/`: each model exchange, each conversation item and each field kept whole, such as a
+//!   list of tools, once (`Exchange`);
 //! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
 //! - `reaps.jsonl`: each sandbox that a reap deleted ([`REAPS`]);
 //! - `outcome.json`: how the run ended, and what it used (`log::usage_of`): `{"state":
@@ -48,8 +49,10 @@ use super::{Durable, Host, Signal, Stopped, System};
 const LOST: &str = "its driver ended without an outcome";
 
 /// The version of the record's form, named as the IR's version is
-/// ([`IrVersion`](schema::ir::IrVersion)), which a reader checks before it reads the rest: a
-/// change to the form, a new file included, takes a new version. A record's `record.json` is
+/// ([`IrVersion`](schema::ir::IrVersion)), which a reader checks before it reads the rest. Until
+/// Pumpkin's first release, the form changes under this version; after it, each change to the
+/// form, a new file included, takes a new version, so that a build refuses a record whose form it
+/// doesn't know instead of misreading it. A record's `record.json` is
 /// `{"record_version": v, "pumpkin": p, "args": a}`: this version, the build that made it
 /// ([`BUILD`]), `{"version": v, "commit": c}`, with `c` `{"hash": h, "date": d}` or `null`
 /// ([`Record::other_build`]), and the `pumpkin run`'s arguments, an array of words
@@ -503,8 +506,9 @@ impl Record {
     ///
     /// # Errors
     ///
-    /// Fails if the log names no request `number` that the record kept, or a file it names can't
-    /// be read or isn't the form the record keeps.
+    /// Fails if the log names no request `number` that the record kept, if a file it names can't
+    /// be read or isn't the form the record keeps, or if the log names the SHA-256 of the body
+    /// sent and the rebuilt body has another.
     pub fn model_request(&self, number: u64) -> Result<Vec<u8>, String> {
         super::model::rebuilt_request(&self.dir, number)
     }

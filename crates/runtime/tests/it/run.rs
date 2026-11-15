@@ -405,6 +405,49 @@ fn reads_model_answers() {
     .assert_eq(&format!("{:#?}", progress.model));
 }
 
+// The form a request was kept in before fields were kept whole: its log names no `whole`, so the
+// client's `instructions`, a digest's text, stay as sent.
+#[test]
+fn rebuilds_requests_kept_before_whole_fields() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir_all(record.join("model/items")).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let hex = "1a00".repeat(16);
+    let item = r#"{"content":"hi","role":"user","type":"message"}"#;
+    fs::write(record.join("model/items").join(&hex), item).unwrap();
+    let rest = format!(
+        r#""instructions":"sha256:{hex}","model":"m","store":false,"tools":[{{"name":"f","type":"function"}}]}}"#
+    );
+    let kept = format!(r#"{{"input":["sha256:{hex}"],{rest}"#);
+    fs::write(record.join("model/0.request"), &kept).unwrap();
+    let raw = r#"{"tools": [], "model": "m-huge"}"#;
+    fs::write(record.join("model/1.request"), raw).unwrap();
+    let request = |path: &str, items: &str| {
+        format!(r#"{{"path":"model/{path}.request","bytes":1,"body_bytes":1{items}}}"#)
+    };
+    let items = r#","items":{"field":"input","count":1}"#;
+    let log = [
+        r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#.to_owned(),
+        format!(
+            r#"{{"seq":1,"at_ns":"1","actions":[],"event":{{"kind":"model_answered","caller":"agent","request":0,"answer":{{"kind":"forwarded"}},"upstream_status":200,"kept":{{"request":{}}}}}}}"#,
+            request("0", items)
+        ),
+        format!(
+            r#"{{"seq":2,"at_ns":"2","actions":[],"event":{{"kind":"model_answered","caller":"agent","request":1,"answer":{{"kind":"barred","status":400,"message":"m"}},"upstream_status":null,"kept":{{"request":{}}}}}}}"#,
+            request("1", "")
+        ),
+    ];
+    fs::write(record.join("log.jsonl"), log.join("\n") + "\n").unwrap();
+    let opened = Record::open(&record).unwrap();
+    let rebuilt = [0, 1].map(|number| String::from_utf8(opened.model_request(number).unwrap()));
+    assert_eq!(
+        rebuilt.map(Result::unwrap),
+        [format!("{{\"input\":[{item}],{rest}"), raw.to_owned()]
+    );
+}
+
 // Each command is busy until its lease's charge ends, so that busy is never more than charged.
 #[test]
 fn reads_unended_commands() {
