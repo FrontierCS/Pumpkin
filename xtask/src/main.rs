@@ -79,7 +79,7 @@ mod flags {
                 /// With `ec2` or `modal`, loses the run once the agent holds a lease of each
                 /// grant, by killing its job on the controller, and checks that each sandbox ends
                 /// by itself by the run's hard end, about 95 minutes after its start, and that
-                /// `pumpkin reap` then removes what is left: about $1 on EC2, $4 on Modal.
+                /// `pumpkin reap` then removes what is left: at most about $1 on EC2, $4 on Modal.
                 optional --lost
             }
 
