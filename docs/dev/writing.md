@@ -24,7 +24,8 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
 - KEEP `ARCHITECTURE.md` to what changes slowly, as
   [rust-analyzer's](https://github.com/rust-lang/rust-analyzer/blob/55effabb762bbd0a21c5af530ea447bd6772881d/docs/book/src/contributing/architecture.md)
   does: a bird's-eye view, the entry points, a code map giving each crate's purpose, key types
-  and boundary invariants, and the cross-cutting concerns. Name things there, never link them
+  and boundary invariants, and the cross-cutting concerns. Name code there (a crate, a module,
+  a type, a source file), never link it, as a link to code goes stale; link another document
 - `cargo xtask ci` checks the rest: doc lengths, no doc on a test, doc form (first paragraph,
   punctuation, backticks, links), `# Panics` on a public function that can panic, no `TODO`,
   `FIXME`, `XXX` or code commented out
