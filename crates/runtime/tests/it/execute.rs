@@ -318,9 +318,17 @@ enum Also {
     ChangedItem,
 }
 
+fn interruption(also: &[Also]) -> Option<At> {
+    also.iter().find_map(|also| match also {
+        Also::Interrupted(at) => Some(*at),
+        Also::Listing | Also::Usage | Also::Exchanges | Also::ChangedItem => None,
+    })
+}
+
 /// What [`check`] checks of `ir`'s run, as test `name`, on `host`, with `sandboxd`, on
 /// `providers`, and what it shows `also`. It fails unless what holds of every run holds of this
-/// one ([`held`], [`kept_exchanges`], [`left`]), and its socket directories are gone. It shows
+/// one ([`held`], [`kept_exchanges`], [`left`], [`folds_as_whole`]), and its socket directories
+/// are gone. It shows
 /// what `execute` returned, the log ([`logged`]), when its last record came ([`when`]), what the
 /// sandboxes printed, the stand-in's hang-ups, and what departs from the normal run. It shows the
 /// socket directories, the stand-in's address, the record, as made and once made, and the runs
@@ -333,10 +341,7 @@ fn executed<H: Shown>(
     sandboxd: &str,
     also: &[Also],
 ) -> String {
-    let at = also.iter().find_map(|also| match also {
-        Also::Interrupted(at) => Some(*at),
-        Also::Listing | Also::Usage | Also::Exchanges | Also::ChangedItem => None,
-    });
+    let at = interruption(also);
     let runs = Runs::new(name);
     let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
     let routed = ir.roles.iter().any(|role| role.egress.model.is_some());
@@ -381,6 +386,7 @@ fn executed<H: Shown>(
     let address = stand_in.as_ref().map(|stand_in| stand_in.address.clone());
     let (received, hung_ups) = stand_in.map(StandIn::stop).unwrap_or_default();
     let exchanges = kept_exchanges(name, &record, received);
+    folds_as_whole(name, &record);
     if also.contains(&Also::Exchanges) {
         lines.extend(exchanges);
     }
@@ -1091,6 +1097,64 @@ fn elided(line: &str) -> String {
     }
     elided.push_str(rest);
     elided
+}
+
+/// Fails, as test `name`, unless the log of `record`, a run's, taken by one fold as it grows in
+/// pieces, each line in halves and its newline on its own, reads after each half as before it,
+/// and after each newline of the first lines, of every 16th and of the last as the log then
+/// does read whole; and unless, then found shorter, it is read again from its start. It leaves
+/// the log as it was, but for when it was last written.
+fn folds_as_whole(name: &str, record: &Path) {
+    let path = record.join("log.jsonl");
+    let whole = fs::read(&path).unwrap_or_default();
+    if whole.is_empty() {
+        return;
+    }
+    let opened = Record::open(record).unwrap();
+    let read_whole = || format!("{:?}", opened.progress().unwrap());
+    let mut fold = opened.fold();
+    let mut log = fs::File::create(&path).unwrap();
+    let mut before = read_whole();
+    let lines = whole.split_inclusive(|byte| *byte == b'\n');
+    let last = lines.clone().count() - 1;
+    for (index, line) in lines.enumerate() {
+        let (head, newline) = line.split_at(line.len() - 1);
+        let (first, second) = head.split_at(head.len() / 2);
+        for piece in [first, second] {
+            log.write_all(piece).unwrap();
+            assert!(
+                fold.take().unwrap().is_none(),
+                "{name}: a growing log read as shorter"
+            );
+            let read = format!("{:?}", fold.readout().unwrap());
+            assert_eq!(read, before, "{name}: a line read before its newline");
+        }
+        log.write_all(newline).unwrap();
+        assert!(
+            fold.take().unwrap().is_none(),
+            "{name}: a growing log read as shorter"
+        );
+        before = format!("{:?}", fold.readout().unwrap());
+        // A read whole costs what the log holds, so reading it at every line would cost the
+        // square of its lines.
+        if index < 16 || index % 16 == 0 || index == last {
+            assert_eq!(before, read_whole(), "{name}: the log read in pieces");
+        }
+    }
+    fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+    assert!(
+        fold.take().unwrap().is_some(),
+        "{name}: a shorter log read on"
+    );
+    let read = format!("{:?}", fold.readout().unwrap());
+    assert_eq!(read, read_whole(), "{name}: a shorter log read again");
+    fs::write(&path, &whole).unwrap();
+    assert!(
+        fold.take().unwrap().is_none(),
+        "{name}: a growing log read as shorter"
+    );
+    let read = format!("{:?}", fold.readout().unwrap());
+    assert_eq!(read, read_whole(), "{name}: the log read in pieces");
 }
 
 /// How long after its start, `start` nanoseconds since the Unix epoch, the log in `record`, a

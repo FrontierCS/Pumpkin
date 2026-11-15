@@ -641,3 +641,71 @@ fn reads_core_times() {
         last: 25s"#]]
     .assert_eq(&read.join("\n"));
 }
+
+// A line is taken once whole, numbered on from the lines before; a log gone, shorter or another
+// file is read again from its start; a failed take leaves nothing that a later one takes twice.
+#[test]
+fn reads_a_growing_log() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
+    let unnumbered =
+        r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"judge_started"},"actions":[]}"#;
+    let finished =
+        r#"{"seq":2,"at_ns":"2000000000","event":{"kind":"tick"},"actions":[{"kind":"finish"}]}"#;
+    let log = record.join("log.jsonl");
+    let opened = Record::open(&record).unwrap();
+    let mut fold = opened.fold();
+    let mut read = Vec::new();
+    let mut take = || {
+        let started_over = match fold.take() {
+            Ok(started_over) => started_over.map(|started_over| started_over.to_string()),
+            Err(error) => {
+                read.push(error.replace(&dir.path().display().to_string(), "…"));
+                return;
+            }
+        };
+        let readout = fold.readout().unwrap();
+        let whole = format!("{:?}", opened.progress().unwrap());
+        assert_eq!(format!("{readout:?}"), whole, "the log read in pieces");
+        let progress = (readout.progress).map(|progress| (progress.last, progress.end));
+        read.push(format!(
+            "{started_over:?} {progress:?} {:?}",
+            readout.unread
+        ));
+    };
+    let (head, tail) = finished.split_at(40);
+    fs::write(&log, "").unwrap();
+    take();
+    fs::write(&log, format!("{started}\n{unnumbered}\n{head}")).unwrap();
+    take();
+    let grown = format!("{started}\n{unnumbered}\n{finished}\n{unnumbered}\n");
+    fs::write(&log, &grown).unwrap();
+    take();
+    fs::write(&log, format!("{unnumbered}\n{started}\n{tail}")).unwrap();
+    take();
+    let other = record.join("other.jsonl");
+    fs::write(&other, &grown).unwrap();
+    fs::rename(&other, &log).unwrap();
+    take();
+    fs::remove_file(&log).unwrap();
+    take();
+    fs::create_dir(&log).unwrap();
+    take();
+    fs::remove_dir(&log).unwrap();
+    fs::write(&log, &grown).unwrap();
+    take();
+    expect![[r#"
+        None None []
+        None Some((1s, None)) [Unread { line: 2, part: Event, reason: "missing field `job`" }]
+        None Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]
+        Some("its log is 248 bytes, shorter than the 366 bytes read of it before: reading it again from its start") Some((1s, None)) [Unread { line: 1, part: Event, reason: "missing field `job`" }]
+        Some("its log is another file than the one 204 bytes were read of before: reading it from its start") Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]
+        Some("its log is gone, after 366 bytes were read of it: reading the next log there from its start") None []
+        …/20261114-120000-00000001/log.jsonl: Is a directory (os error 21)
+        None Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]"#]]
+    .assert_eq(&read.join("\n"));
+}

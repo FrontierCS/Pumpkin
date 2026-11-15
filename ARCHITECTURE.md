@@ -511,7 +511,9 @@ on, with the actions it took, timed as the runtime observed it, so a run can be 
 event. A reader takes the log in typed parts, each whole or not at all: a part that this build
 can't read is listed as unread (`Readout`), so no content of the log fails a read.
 
-The record is written as the run goes, and each file is synced through the `Host`. A record
+The record is written as the run goes, and each file is synced through the `Host`. The run log
+only grows, a whole line at a time, and `ir.json` and `provider.json` are written before it and
+never again, so a reader of a live run reads only what the log gained (`LogFold`). A record
 appears only once its `driver.pid` is locked (`Lock`), and the lock is held until the run's last
 write, so `outcome.json` and the lock tell an ended run from a live or a lost one. Only the lock's
 holder writes the record; once it has let go, only `Record::reap` does, which records a lost run

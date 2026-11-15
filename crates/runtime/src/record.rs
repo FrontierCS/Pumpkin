@@ -42,7 +42,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
 
-use super::log::{self, Readout};
+use super::log::{self, LogFold, Readout};
 use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System};
 
@@ -496,10 +496,15 @@ impl Record {
     ///
     /// # Errors
     ///
-    /// Fails if a file of the record can't be read, or its `ir.json` or `provider.json` isn't
-    /// JSON.
+    /// Fails if a file of the record can't be read, or, once the log exists, its `ir.json` or
+    /// `provider.json` isn't JSON.
     pub fn progress(&self) -> Result<Readout, String> {
         log::progress(&self.dir)
+    }
+
+    /// The run's log, none of it read yet, to read as the run appends to it ([`LogFold`]).
+    pub fn fold(&self) -> LogFold {
+        LogFold::new(&self.dir)
     }
 
     /// Model request `number`'s body as it went upstream, or as its client sent it, rebuilt from
