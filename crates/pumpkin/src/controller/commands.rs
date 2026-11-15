@@ -1,12 +1,10 @@
-//! `run`, `wait`, `build`, `cancel` and `reap` on the controller, each by a `pumpkin` there.
+//! The commands that a machine whose runs go to a controller makes of it: `run`, `build`,
+//! `wait`, `cancel` and `reap`.
 //!
-//! What the controller's commands say is forwarded as they say it, and the record of a run that
-//! has ended is copied into this machine's runs directory. A command there that finds no job, or
-//! one that ended before its run started, says so by an exit status of its own, which this turns
-//! into an error; any other exit status is this command's.
-//!
-//! Sending a job is [`super::send`]'s, copying a record is [`super::copy`]'s, and `ls` is
-//! [`super::listing`]'s.
+//! Each runs a shell script on the controller over a session of [`Reached`], and what the script
+//! says is forwarded as it says it. A script ends with the code of what it ran: the codes this
+//! module names mean what the script found, and any other is the command's own. The record of a
+//! run that has ended is copied into this machine's runs directory.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -21,17 +19,19 @@ use crate::job::{BUILDS, JOBS};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
 
-/// The exit status of a command on the controller that finds no job of the id it was given.
+// The code of a script that finds no job of the run's id on the controller.
 const NO_JOB: i32 = 100;
 
-/// The exit status of a command on the controller that finds a job that ended before its run
-/// started, or its build printed an IR.
+// The code of a script that finds the job there, but no run it started, or no IR of a build.
 const UNSTARTED: i32 = 101;
 
-/// What a command on the controller runs to follow job `id`, below `kind`: shows its unit's
-/// standard error, `log`, as it grows, until the job ends or `done`, a test in its directory,
-/// holds, then runs `then`. Without `after`, the log goes to standard error, all of it; with
-/// it, to standard output, past its first `after` lines, and then [`LOGGED`].
+/// The script that follows the log of job `id` below `kind` on the controller until the job's
+/// process ends or the shell condition `done` holds, then runs `then`.
+///
+/// With `after`, which is the count of log lines already shown, the log is written to the
+/// script's standard output from the next line, and ends with `LOGGED` so that `then`'s output
+/// can be told from it. Without, the log goes to the standard error from the first line, and the
+/// standard output is `then`'s alone.
 // `tail` follows the log until the loop before it ends, then shows what the log holds by then.
 fn following(kind: &str, id: &str, done: &str, after: Option<u64>, then: &str) -> String {
     let (first, to, logged) = match after {
@@ -49,40 +49,32 @@ wait
     )
 }
 
-/// What [`following`] prints after the log, on the end of the log's last line, which the job may
-/// have left in part: a fixed line between NUL bytes, which a build's output can't plausibly end
-/// a line with. What comes after it is not the log's.
+// The line that ends a followed log, printed on the end of its last line, which the job may have
+// left in part. The NULs keep a line of the log from being taken for it. What follows isn't the
+// log's.
 const LOGGED: &[u8] = b"\0pumpkin: the log ends\0\n";
 
-/// What a follow of a run's job has shown, over each connection it went over, so that the
-/// follow over the next shows no line twice and loses none: of the job's log, which only grows,
-/// the whole lines shown, which the next skips ([`following`]'s `after`); of what the run's
-/// follower says after it, which it says again from its start, each line once. A line that came
-/// in part is shown only once it is whole, so the next connection shows it whole.
+/// What following a job has shown over its connections so far, so that the follow over the next
+/// shows no line twice and loses none. The log only grows, so the next skips the whole lines
+/// shown; what the job says after the log comes again from its start, so each line is shown once.
+/// A line that came in part is shown only once it is whole.
 #[derive(Default)]
 struct Shown {
-    /// The whole lines of the log shown.
     log_lines: u64,
-    /// Whether [`LOGGED`] has come, over this connection or an earlier one.
     logged: bool,
-    /// Whether [`LOGGED`] has come over the current connection.
     past_log: bool,
-    /// The lines that the run's follower said.
     said: BTreeSet<Vec<u8>>,
 }
 
 impl Shown {
-    /// Readies this for what a new connection prints.
     fn again(&mut self) {
         self.past_log = false;
     }
 
-    /// How far this has shown, which changes with each line it shows.
     fn shown(&self) -> (u64, bool, usize) {
         (self.log_lines, self.logged, self.said.len())
     }
 
-    /// Shows `line`, a whole line that [`following`] printed, unless it was shown before.
     fn show(&mut self, line: &[u8]) {
         if self.past_log {
             if self.said.insert(line.to_vec()) {
@@ -104,8 +96,8 @@ impl Shown {
     }
 }
 
-/// Refuses `flags` of `run` or `build` that name what this machine's runs would use, but its
-/// configuration sends them to the controller.
+/// Fails, naming each flag given, as each names something of this machine's that a run on the
+/// controller can't use.
 fn unsendable(client: &config::Client, flags: &[(&str, bool)]) -> Result<(), String> {
     let given: Vec<&str> = flags
         .iter()
@@ -123,9 +115,9 @@ fn unsendable(client: &config::Client, flags: &[(&str, bool)]) -> Result<(), Str
     ))
 }
 
-/// `pumpkin run` on the controller: sends the task's repository and starts the job, which
-/// builds the task, then runs it with the id minted here, and says so at once; then prints the
-/// id, or with `wait` follows the run as [`wait`] does.
+/// Sends the task to the controller as a job that builds and runs it there. Without `--wait`
+/// it prints the run's id and the commands that follow and stop it; with, it follows the run
+/// as [`wait`] does.
 pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, String> {
     let cli::Run {
         entry,
@@ -168,23 +160,20 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
     Ok(ExitCode::SUCCESS)
 }
 
-/// `pumpkin wait` on the controller, of the run that `run` names there.
+/// Follows the run that `run` names on the controller to its end, copies its record here, and
+/// ends as the run ended. A connection that ends meanwhile is opened again, and the log goes on
+/// where it stopped.
 pub(crate) fn wait(client: &config::Client, run: &str) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
     let id = reached.resolve(run)?;
     follow(&reached, &id, None)
 }
 
-/// Follows run `id`'s job on `reached` until it has started the run, or ended, then the run,
-/// saying its milestones as they come, by the `pumpkin` that the job runs
-/// ([`crate::job::follow`]), and copies the run's record here, from which it says the run's
-/// ending, which ends with the command that runs it again from here, with the configuration at
-/// `config`, if given ([`here`]); returns the exit status that `wait`'s help gives.
 fn follow(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode, String> {
     // A job prints its run's id once it has said all it says of the run's start.
     let started = "[ -s out ]";
-    // A job that predates its own link is followed by the controller's `wait`, which says the
-    // run's ending as the controller would run it again.
+    // A job with no `pumpkin` of its own is followed by the controller's current one, whose `wait`
+    // says the run's ending as the controller would run it again.
     let then = format!(
         "cd\n[ -d {runs}/{id} ] || exit {UNSTARTED}\n\
          [ ! -x {JOBS}/{id}/{own} ] || exec {JOBS}/{id}/{own} controller follow {id} 2>&1\n\
@@ -207,7 +196,7 @@ fn follow(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode,
         }
         let ended = reached.ended_connection(attached.status, &[SSH_FAILED], attached.master);
         let what = format!("following run {id} again from where it was");
-        // `rest`, a line cut in part, is shown only once nothing follows ([`Shown`]).
+        // `rest`, a line cut in part, is shown only once nothing follows (`Shown`).
         if ended && reached.pause(attempt, attached.master, &what) {
             attempt += 1;
             continue;
@@ -232,10 +221,8 @@ fn follow(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode,
     }
 }
 
-/// Copies the record of run `id`, which has ended on `reached`, here, and says its ending from the
-/// copy, as `wait` does, ending with the command that runs it again from here, with the
-/// configuration at `config`, if given ([`here`]); returns the exit status that `wait`'s help
-/// gives.
+/// Copies the record of run `id`, which has ended, and says its ending from the copy, as `wait`
+/// does, ending with the command that runs it again from here.
 fn said_here(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode, String> {
     reached.copy(id)?;
     let runs = PathBuf::from(crate::default_runs()?);
@@ -251,11 +238,10 @@ fn said_here(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCo
     crate::end(&record, &ending, None, &here(&record, config)?)
 }
 
-/// The arguments of the `pumpkin run` that runs the run of `record` again from here, of a copy of
-/// a record that a job on the controller made: the job's, but its configuration, which is this
-/// machine's at `config`, if given, else the default one, and its entry, in this workspace's
-/// repository, whose files the job's tree, named by the run's id, holds where the repository does.
-/// Those of a record that no job made are its own.
+/// The command line of a run that went to the controller, for this machine: the task's entry as
+/// its path in this machine's repository, whose files the run's tree holds where the repository
+/// does, and `config`, if given, in place of the `--config` it had. A record whose command doesn't
+/// end with an entry below the run's tree on the controller gives its command as it is.
 pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec<String>, String> {
     let args = record.args();
     let tree = format!("/{}/", record.id());
@@ -286,13 +272,12 @@ pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec
     Ok(words)
 }
 
-/// The exit status `code`, of a command on the controller, as this command's.
 fn exit(code: i32) -> ExitCode {
     u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
 }
 
-/// `pumpkin build` on the controller: sends the task's repository, starts the job, which builds
-/// the task, follows it, and prints the IR it printed.
+/// Sends the task to the controller as a build job and prints its IR once the images are built.
+/// If the connection ends first, the build goes on there.
 pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCode, String> {
     let cli::Build {
         entry,
@@ -323,11 +308,10 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
     }
 }
 
-/// The script of a command on the controller that `body` makes of the flag that names Modal's
-/// configuration file of `client`'s, if it has one ([`config::Client::modal_file`]), and
-/// what the script is fed: that file, which it takes first into a directory of its own in tmpfs,
-/// which its end removes, so that the command reaches the Modal providers of runs whose jobs,
-/// which held the file, have ended. Without one, the flag is empty, and nothing is fed.
+/// The script that `body` makes, and the Modal configuration of the client, if it has one, to feed
+/// it. The script takes the file into a directory of its own in tmpfs, which its end removes, so
+/// that the command reaches the Modal providers of runs whose jobs, which held the file, have
+/// ended. `body` is given the flag that names the file there, or an empty one.
 fn with_modal(
     client: &config::Client,
     body: impl FnOnce(&str) -> String,
@@ -343,11 +327,9 @@ fn with_modal(
     Ok((script, Some(file)))
 }
 
-/// `pumpkin cancel` on the controller, of the run that `run` names there: stops its job's unit
-/// while the run builds, and removes the job's directory, unless the run has a record by then;
-/// and cancels the run as the controller's `pumpkin cancel` does once it has started
-/// ([`with_modal`]), by the `pumpkin` that its job runs ([`crate::job::cancel`]), then says its
-/// ending from its copy here ([`said_here`]).
+/// Stops the run that `run` names on the controller, as `pumpkin cancel` does there, `force`
+/// included, and says its ending from the copy of its record here. A job whose run hasn't
+/// started is stopped and removed.
 pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
     let id = reached.resolve(run)?;
@@ -375,8 +357,8 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
             ));
             Ok(ExitCode::SUCCESS)
         }
-        // `cancel`'s exit says only that the run has ended, however that was, and whether what
-        // it left on its provider is gone, as a local one's does.
+        // `cancel`'s exit says only that the run has ended, however that was, and whether what it
+        // left on its provider is gone, as a local one's does.
         code if code == i32::from(crate::job::ENDED) => {
             said_here(&reached, &id, None)?;
             Ok(ExitCode::SUCCESS)
@@ -396,7 +378,7 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
     }
 }
 
-/// `pumpkin reap` on the controller, as its own `pumpkin reap` does ([`with_modal`]).
+/// Removes on the controller what runs left, as `pumpkin reap` does there.
 pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
     let current = crate::job::CURRENT;

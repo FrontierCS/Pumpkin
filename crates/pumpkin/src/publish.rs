@@ -1,16 +1,17 @@
-//! `pumpkin controller publish`, and a run's job on the controller while its run is live: the
-//! runs, as `pumpkin view --export` writes them ([`view::exported`]), copied to an S3 bucket.
+//! Publishing a controller's runs to the S3 bucket of the public page: the runs, as `view`
+//! exports them, copied to the bucket.
 //!
-//! The export's directory ([`EXPORT`]) holds what was exported last, and the bucket what was
-//! uploaded; nothing else is kept but the mark ([`MARK`]). One publisher at a time holds the
-//! mark's lock, exports, plans the uploads of what changed since the mark ([`plan`]), runs them,
-//! then moves the mark; one that fails leaves the mark where it was, so the next publish plans
-//! again what this one did not upload.
+//! The export's directory (`EXPORT`) holds what was exported last, and the bucket what was
+//! uploaded; nothing else is kept but the mark (`MARK`). One publisher at a time holds the mark's
+//! lock, exports, plans the uploads of what changed since the mark (`plan`), runs them, then moves
+//! the mark to the time it planned at, so that a file written during the uploads goes at the
+//! next. One that fails leaves the mark where it was, so the next publish plans again what this
+//! one did not upload.
 //!
 //! The uploads go in an order in which no file names one not uploaded yet: the files written once
 //! (each run's `exchange/`, `diff/` and `kept/`, and the page's digest directories), then each
 //! run's other files, then each run's `run.json`, then the page's `index.html` and `robots.txt`,
-//! then `runs.json`. Each file's cache lifetime is its [`Cache`]'s.
+//! then `runs.json`. Each file's cache lifetime is its `Cache`'s.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -32,26 +33,25 @@ use toml::value::{Datetime, Offset};
 use crate::view::{self, Exported, Scrub};
 use crate::{cli, say};
 
-/// How often a job publishes while its run is live.
-// A reader sees a live run this far behind at most, and the lifetime of a `Cache::Mutable` file
-// besides.
+// How often a live run's records are published. A reader sees a live run this far behind, and the
+// lifetime of a `Cache::Mutable` file besides.
 const PUBLISH_EVERY: Duration = Duration::from_mins(1);
 
-/// How often a job looks whether its run has ended, between two publishes.
+// How often the wait between publishes looks whether the run has ended.
 const ENDED_POLL: Duration = Duration::from_secs(1);
 
-/// The export's directory, beside the runs directory.
+// The directory of the export, beside the runs directory.
 const EXPORT: &str = "public";
 
-/// The file in the export's directory that a publisher locks, whose modification time is when the
-/// last publish that uploaded all it planned read the directory: the Unix epoch until one has.
+// The file in the export that a publisher locks, whose modification time is when the last publish
+// that uploaded all it planned read the directory: the Unix epoch until one has.
 const MARK: &str = ".published";
 
-/// The directories of a run's export whose files are written once, as the export's module doc
-/// says.
+// The directories of a run's export whose files are never rewritten, so that they are cached
+// for good.
 const WRITTEN_ONCE: [&str; 3] = ["exchange", "diff", "kept"];
 
-/// The extension of what the export leaves of a file that it was writing when it was stopped.
+// The extension of a file that the export is still writing, which no upload takes.
 const PART: &str = "part";
 
 /// `[publish]` of the controller's settings, as `pumpkin help config` says.
@@ -68,8 +68,7 @@ pub(crate) struct Settings {
     since: Option<Since>,
 }
 
-/// An S3 bucket's name, as S3 allows one: 3 to 63 lowercase letters, digits, `.` and `-`, that
-/// starts and ends with a letter or a digit.
+/// An S3 bucket's name.
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct Bucket(String);
@@ -154,7 +153,8 @@ impl FromStr for Since {
     }
 }
 
-/// `pumpkin controller publish`, as its help says.
+/// Publishes the runs of a directory once, waiting if a publish of it is under way, as
+/// `pumpkin controller publish`'s help says.
 pub(crate) fn by_hand(flags: cli::Publish) -> Result<ExitCode, String> {
     let cli::Publish {
         runs,
@@ -199,10 +199,10 @@ pub(crate) fn by_hand(flags: cli::Publish) -> Result<ExitCode, String> {
 }
 
 /// Waits until `record`'s run has ended, publishing the runs in `runs` as `settings` say, with
-/// `aws` in `region`, every [`PUBLISH_EVERY`] while it is live, and once more as it ends, each
-/// with the controller's addresses replaced ([`crate::job::addresses`]). A publish that fails, or
-/// one that can't start, is said, and the next tries again; only a failed read of the record
-/// fails the wait.
+/// `aws` in `region`, every `PUBLISH_EVERY` while it is live, and once more as it ends, each with
+/// the controller's addresses replaced (`crate::job::addresses`). A publish that fails, or one
+/// that can't start, is said, and the next tries again; only a failed read of the record fails
+/// the wait.
 pub(crate) fn until_ended(
     record: &Record,
     settings: Settings,
@@ -250,10 +250,8 @@ pub(crate) fn until_ended(
     }
 }
 
-/// What a publish exports, and where it uploads it.
 struct Publisher {
     runs: String,
-    /// The export's directory ([`EXPORT`]).
     export: String,
     bucket: Bucket,
     since: Option<Since>,
@@ -261,7 +259,7 @@ struct Publisher {
     aws: Cli,
 }
 
-/// Whether a publish waits for another's to end.
+/// Whether a publish waits for another that holds the mark, or gives up.
 #[derive(Clone, Copy)]
 enum Wait {
     Yes,
@@ -274,9 +272,9 @@ struct Published {
 }
 
 impl Publisher {
-    /// A publisher of the runs in `runs`, an absolute path, but those that started before
-    /// `since`, to `bucket`, with `aws` in `region`, each of `controller` replaced with
-    /// `<controller>` beside what an export replaces ([`Scrub`]).
+    /// A publisher of the runs in `runs`, an absolute path, but those that started before `since`,
+    /// to `bucket`, with `aws` in `region`, each address of `controller` replaced with
+    /// `<controller>` beside what an export replaces (`Scrub`).
     fn new(
         runs: &str,
         bucket: Bucket,
@@ -302,9 +300,9 @@ impl Publisher {
         })
     }
 
-    /// Exports, under the mark's lock ([`MARK`]), then runs, in order, the uploads of what changed
-    /// since the mark ([`plan`]), then moves the mark to the time it planned at; `None` if
-    /// another publish holds the lock and `wait` is [`Wait::No`].
+    /// Exports, under the mark's lock, then runs, in order, the uploads of what changed since the
+    /// mark (`plan`), then moves the mark to the time it planned at; none if another publish holds
+    /// the lock and `wait` is `No`.
     fn publish(&self, wait: Wait) -> Result<Option<Published>, String> {
         let export = Path::new(&self.export);
         fs::create_dir_all(export).context(export.display())?;
@@ -343,7 +341,7 @@ impl Publisher {
     }
 }
 
-/// The mark at `path` ([`MARK`]), opened to be locked, made at the Unix epoch if it isn't there.
+/// Opens the mark, made at the epoch if it is new, so that the first publish uploads everything.
 fn mark(path: &Path) -> Result<File, String> {
     let made = OpenOptions::new().write(true).create_new(true).open(path);
     match made {
@@ -360,34 +358,24 @@ fn mark(path: &Path) -> Result<File, String> {
     }
 }
 
-/// An `aws s3` command of a publish's plan.
 struct Upload {
     files: Files,
     cache: Cache,
     encoding: Encoding,
 }
 
-/// What an upload copies: files of the export's directory, each to the key of its path there.
 enum Files {
-    /// The files below the directory at `dir` that `filter` takes, those that S3 lacks or holds
-    /// older or of another size, by `aws s3 sync`.
     Sync { dir: String, filter: Filter },
-    /// The file at `key`, by `aws s3 cp`.
     Copy { key: String },
 }
 
-/// Which files of a directory an upload takes, but always none that the export left part-way.
 #[derive(Clone, Copy)]
 enum Filter {
-    /// Of a run's directory, those of its directories written once ([`WRITTEN_ONCE`]).
     WrittenOnce,
-    /// Of a run's directory, those outside its directories written once, but its `run.json`.
     Rewritten,
-    /// Every file.
     All,
 }
 
-/// How long a reader may keep a file, as its `Cache-Control` says.
 #[derive(Clone, Copy)]
 enum Cache {
     /// A year, as a file written once never changes.
@@ -396,17 +384,14 @@ enum Cache {
     Mutable,
 }
 
-/// How a file's bytes are encoded, as its `Content-Encoding` says.
 #[derive(Clone, Copy)]
 enum Encoding {
     /// Deflated in zlib's format, which `Content-Encoding: deflate` names.
     Deflate,
-    /// As they are.
     Identity,
 }
 
 impl Upload {
-    /// The arguments of `aws` that upload, from the export's directory `export`, to `bucket`.
     fn args(&self, export: &str, bucket: &Bucket) -> Vec<String> {
         let bucket = &bucket.0;
         let mut args = vec!["s3".to_owned()];
@@ -455,8 +440,9 @@ impl Upload {
     }
 }
 
-/// The uploads, in order, of what changed in the export's directory `export` since `mark`, of
-/// the runs `ids` and the page: each file modified after `mark` is in one of them.
+/// The uploads, in order, of what changed in the export's directory `export` since `mark`, of the
+/// runs `ids` and the page: each file modified after `mark` is in one of them. A run's files that
+/// are written once go with a cache that never expires; the rest with a short one.
 fn plan(export: &Path, mark: SystemTime, ids: &[RunTag]) -> Result<Vec<Upload>, String> {
     let ids: BTreeSet<&str> = ids.iter().map(RunTag::as_str).collect();
     let (mut once, mut rewritten, mut run_files) =
@@ -527,8 +513,7 @@ fn plan(export: &Path, mark: SystemTime, ids: &[RunTag]) -> Result<Vec<Upload>, 
     Ok(plan)
 }
 
-/// The path below `dir` of each file there modified after `mark`, but what the export left
-/// part-way ([`PART`]).
+/// The paths below `dir` of the files modified after `mark`, but for those still being written.
 fn changed(dir: &Path, mark: SystemTime) -> Result<Vec<String>, String> {
     let mut changed = Vec::new();
     let mut dirs = vec![dir.to_owned()];
