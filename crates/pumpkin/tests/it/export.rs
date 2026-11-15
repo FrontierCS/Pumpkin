@@ -408,7 +408,7 @@ fn rewrites_what_a_live_run_changed() {
     let scratch = Scratch::new("rewrites-what-a-live-run-changed");
     let mut unreadable = lease_places(true);
     unreadable["routes"] =
-        json!({ "solver": [{ "api": "messages", "upstream": "zai", "models": {} }] });
+        json!({ "solver": [{ "api": "realtime", "upstream": "zai", "models": {} }] });
     let started_at = super::asked(UNREADABLE, 0);
     write_run(
         &scratch,
@@ -465,10 +465,10 @@ fn rewrites_what_a_live_run_changed() {
         false,
         &[(EXPORTED, "<id>"), (UNREADABLE, "<unreadable>")],
         &expect![[r#"
-            pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `messages`, expected `responses` or `chat` at line 1 column 507"}
+            pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `realtime`, expected one of `responses`, `chat`, `messages` at line 1 column 507"}
             pumpkin: exported 1 run into public, and left out 1: wrote 96 files
 
-            pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `messages`, expected `responses` or `chat` at line 1 column 507"}
+            pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `realtime`, expected one of `responses`, `chat`, `messages` at line 1 column 507"}
             pumpkin: exported 1 run into public, and left out 1: wrote 14 files
 
             changed:

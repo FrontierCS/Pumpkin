@@ -76,7 +76,7 @@ function totalsLine(t) {
   return [
     part("Steps", number(t.steps), "Its steps, in " + plural(t.threads, "thread") + " and " + plural(t.turns, "turn")),
     part("Threads", number(t.threads), "Its threads"),
-    part("Tokens", count(t.input, "tok") + " in · " + percent(t.cache_hit) + " cached · " + count(t.output, "tok") + " out", "The sums of the tokens its steps report"),
+    part("Tokens", count(t.input, "tok") + " in · " + percent(t.cache_hit) + " cached · " + (t.cache_write === null ? "" : count(t.cache_write, "tok") + " written to the cache · ") + count(t.output, "tok") + " out", "The sums of the tokens its steps report"),
     part("Model", time(t.model_ns), "The sum of its steps' model times"),
     part("Between", time(t.queue_ns), "The sum of the times between steps: tool calls and the harness"),
     part("TTFT", time(t.median_to_first_token_ns), "The median time to the first token"),

@@ -830,6 +830,8 @@ fn header_names() {
         "openai-organization",
         "openai-project",
         "anthropic-organization-id",
+        "anthropic-workspace-id",
+        "anthropic-user-profile-id",
         "x-amz-security-token",
         "x-amz-date",
         "host",
@@ -881,6 +883,8 @@ fn header_names() {
             `openai-organization` carries a credential or picks an account, which are the host's alone: list another header
             `openai-project` carries a credential or picks an account, which are the host's alone: list another header
             `anthropic-organization-id` carries a credential or picks an account, which are the host's alone: list another header
+            `anthropic-workspace-id` picks the workspace that the request runs and is billed in, which is the host's alone: list another header
+            `anthropic-user-profile-id` attributes the request to a user profile, on whose behalf it acts, which is the host's alone: list another header
             `x-amz-security-token` signs the request or carries a session's token, which are the host's alone: list another header
             `x-amz-date` signs the request or carries a session's token, which are the host's alone: list another header
             `host` frames the message on one hop, which the route does for each: list another header

@@ -333,6 +333,10 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
 // None of the 429, the cut stream, the failing 200, the route's refusal and the bar is good, so the
 // first's time stays the last good one's.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the log's answers and the snapshot"
+)]
 fn reads_model_answers() {
     let dir = TempDir::new().unwrap();
     let record = dir.path().join("20261114-120000-00000001");
@@ -346,6 +350,7 @@ fn reads_model_answers() {
         r#"{"answer":{"kind":"forwarded"},"upstream_status":200,"failed":{"code":"rate_limit_exceeded"}}"#,
         r#"{"answer":{"kind":"refused","status":502,"message":"m"},"upstream_status":null}"#,
         r#"{"answer":{"kind":"barred","status":400,"message":"m"},"upstream_status":null}"#,
+        r#"{"answer":{"kind":"forwarded"},"api":"messages","upstream":"u","upstream_status":200,"usage":{"input_tokens":2312,"output_tokens":5,"cached_tokens":2000,"cache_write_tokens":300}}"#,
     ];
     let mut log = String::from(
         r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#,
@@ -371,9 +376,9 @@ fn reads_model_answers() {
         .unwrap();
     expect![[r#"
         ModelUse {
-            requests: 6,
+            requests: 7,
             answers: {
-                "200": 2,
+                "200": 3,
                 "200 cut": 1,
                 "429": 1,
                 "barred": 1,
@@ -386,16 +391,21 @@ fn reads_model_answers() {
             },
             not_2xx: 4,
             last_good: Some(
-                1s,
+                7s,
             ),
             in_flight: {},
             took: [],
             first_tokens: [],
             tokens: Tokens {
-                reported: 0,
-                input: 0,
-                output: 0,
-                cached: None,
+                reported: 1,
+                input: 2312,
+                output: 5,
+                cached: Some(
+                    2000,
+                ),
+                cache_write: Some(
+                    300,
+                ),
                 reasoning: None,
             },
             dropped_headers: {},

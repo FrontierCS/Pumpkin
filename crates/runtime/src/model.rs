@@ -107,7 +107,10 @@ impl Served {
     pub(super) fn new(servings: &[Serving]) -> Option<Self> {
         let entries = servings.iter().map(|serving| {
             let route = Route::new(serving.api, serving.models.clone(), &serving.headers);
-            (route, Upstream::new(&serving.url, &serving.key))
+            (
+                route,
+                Upstream::new(serving.api, &serving.url, &serving.key),
+            )
         });
         let names = (servings.iter()).map(|serving| (serving.name.clone(), serving.api));
         (!servings.is_empty()).then(|| Self {

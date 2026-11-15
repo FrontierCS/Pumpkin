@@ -19,9 +19,10 @@ The rules for writing Pumpkin's tests and their snapshots.
 - SPLIT cases that each start a process into tests of their own, which nextest runs at once
 - WRITE a test's scratch into a `tempfile::TempDir` in the system's temporary directory: no other
   test shares it, and its paths fit a socket's, which holds 107 bytes at most
-- RUN `cargo xtask mutants crates/decision crates/schema` at review of a change to the decision
-  core or to the schema's refusals, which mutates the change in those crates alone, and read each
-  mutant it reports missed, a change that no test catches: ci doesn't run it
+- RUN `cargo xtask mutants crates/decision crates/schema crates/route` at review of a change to
+  the decision core, to the schema's refusals or to the route's request rules, which guard the
+  operator's key; it mutates the change in those crates alone: read each mutant it reports missed,
+  a change that no test catches, as ci doesn't run it
 - KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud; temporary
   files, Pumpkin's own processes and loopback sockets are fine. IGNORE each
   test that needs a Docker engine, the static `sandboxd` or a server elsewhere (`#[ignore = "…:

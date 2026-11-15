@@ -347,7 +347,7 @@ fn serves_runs() {
             {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.06+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
-            end: 8287
+            end: 8312
             id: "<ended>"
             lanes:
               {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
@@ -374,11 +374,11 @@ fn serves_runs() {
             verdict: "Run <ended> finished with a score of 49.36, after the work phase ended when the agent exited with status 0"
 
             GET /api/runs/<ended>/since?log=<end>
-            {"end":8287,"live":false}
+            {"end":8312,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 8287, live false, next 8287, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7336
-            next 8287, end 8287, bytes [Number(7336), Number(7479), Number(7610), Number(7699), Number(7817), Number(8123)], the last's event "judge_collected"
+            end 8312, live false, next 8312, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7361
+            next 8312, end 8312, bytes [Number(7361), Number(7504), Number(7635), Number(7724), Number(7842), Number(8148)], the last's event "judge_collected"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -396,7 +396,7 @@ fn serves_runs() {
             {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8287: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8312: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -880,16 +880,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 8287, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3113&log_epoch=0
+            GET /api/runs/<id>: end 8312, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3138&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3113: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3113&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3138: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3138&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3113: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4473, log_epoch 1
-            GET /api/runs/<id>/since?log=3113&log_epoch=1
-            end 4473, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3138: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4498, log_epoch 1
+            GET /api/runs/<id>/since?log=3138&log_epoch=1
+            end 4498, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -937,7 +937,7 @@ fn windows_a_log_by_its_bytes() {
         &expect![[r#"
             from byte 0: 10001 records, next 709044
             from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10055 records, next 2486012"#]],
+            from byte 1757701: 10055 records, next 2486037"#]],
     );
 }
 
@@ -1163,10 +1163,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8287 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8287 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8287 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8287 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=8312 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8312 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8312 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8312 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 
@@ -1765,6 +1765,163 @@ fn traces_a_caller() {
     );
 }
 
+// A Messages API stream of thinking, then a tool call, cut down.
+const MESSAGES_STREAM: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",",
+    "\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"type\":\"content_block_start\",\"index\":0,",
+    "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,",
+    "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Tars built.\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,",
+    "\"delta\":{\"type\":\"signature_delta\",\"signature\":\"93bf01a7\"}}\n\n",
+    "event: content_block_stop\n",
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: content_block_start\n",
+    "data: {\"type\":\"content_block_start\",\"index\":1,",
+    "\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{}}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":1,",
+    "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"ls\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":1,",
+    "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" -la\\\"}\"}}\n\n",
+    "event: content_block_stop\n",
+    "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},",
+    "\"usage\":{\"input_tokens\":174,\"output_tokens\":83,\"cache_read_input_tokens\":36544}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+);
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the record's exchanges and the snapshot"
+)]
+fn traces_a_messages_exchange() {
+    let scratch = Scratch::new("traces-a-messages-exchange");
+    let id = "20261110-190000-00000014";
+    let dir = scratch.0.join("runs").join(id);
+    let mut model = Model::new(&dir);
+    let system = json!([
+        { "type": "text", "text": "You are a Claude agent." },
+        { "type": "text", "text": "Assist with the task.", "cache_control": { "type": "ephemeral" } },
+    ]);
+    let tools = json!([{ "name": "Bash", "description": "Executes a bash command.",
+        "input_schema": { "type": "object", "properties": { "command": { "type": "string" } } } }]);
+    let whole = [("system", system), ("tools", tools)];
+    let rest = || {
+        json!({ "model": "glm-5.3", "max_tokens": 32000, "stream": true,
+        "thinking": { "type": "adaptive" } })
+    };
+    let first = json!({ "role": "user", "content": "list the files" });
+    let call = json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "call_1",
+        "name": "Bash", "input": { "command": "ls -la" } }] });
+    let result = json!({ "role": "user", "content": [{ "type": "tool_result",
+        "tool_use_id": "call_1", "content": "a.txt", "is_error": false }] });
+    // Claude Code puts its own environment updates into the conversation as `system` messages.
+    let update = json!({ "role": "system", "content": [{ "type": "text",
+        "text": "# Environment update\n - Primary working directory: /workspace" }] });
+    let answer = |text: &str| {
+        let delta = json!({ "type": "content_block_delta", "index": 0,
+            "delta": { "type": "text_delta", "text": text } });
+        format!(
+            "event: content_block_delta\ndata: {delta}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        )
+    };
+    let mut log = vec![started(1, "agent", 0)];
+    let kept = model.keep(
+        0,
+        "messages",
+        std::slice::from_ref(&first),
+        &whole,
+        rest(),
+        Some(MESSAGES_STREAM),
+    );
+    let mut record = answered(2, "agent", 0, 200, kept, Some("messages"));
+    // As the route logs the stream's counts, with 120 tokens written to the cache: its input
+    // counts the cache's reads and writes.
+    record["event"]["usage"] = json!({ "input_tokens": 36838, "output_tokens": 83,
+        "cached_tokens": 36544, "cache_write_tokens": 120 });
+    log.push(record);
+    log.push(started(3, "agent", 1));
+    let kept = model.keep(
+        1,
+        "messages",
+        &[first, call, result, update],
+        &whole,
+        rest(),
+        Some(&answer("a.txt is there")),
+    );
+    log.push(answered(4, "agent", 1, 200, kept, Some("messages")));
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(60)).unwrap(),
+        &log,
+        Some(json!({ "state": "failed" })),
+        &lease_places(true),
+    );
+    let served = Served::start(&scratch);
+    let run = format!("/api/runs/{id}");
+    let mut said = Vec::new();
+    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    said.push(format!(
+        "the agent's steps:\n{}",
+        columns_text(&steps, "steps")
+    ));
+    let folded = served.get(&format!("{run}/trace/agent/stats?by=step"));
+    said.push(format!("by step:\n{}", columns_text(&folded, "rows")));
+    let exchange = served.get(&format!("{run}/exchange/0"));
+    said.push(format!("exchange 0:\n{}", fields(&exchange, &[])));
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+            the agent's steps:
+            added=1 added_entries=1 answer="forwarded" answers=0 api="messages" back_bytes=1376 cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls=[] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=36838 items=1 kept_bytes=335 model_ns=1000000001 output=83 request=0 sent_bytes=100 start_ns="999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=false
+            added=3 added_entries=3 answer="forwarded" answers=0 api="messages" back_bytes=180 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=false
+            caller: "agent"
+            end: 1484
+            live: false
+            log_epoch: 0
+            thread_spans: {"span_ns":[3000000001],"thread":[0]}
+            threads: 1
+            tool_lists: [{"digest":"0000000000000000000000000000000000000000000000000000000000000002","names":["Bash"]}]
+
+            by step:
+            cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0
+            cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
+            by: "step"
+            caller: "agent"
+            totals: {"cache_hit":0.9906870972981753,"cache_write":120,"cache_write_unknown":1,"cached":36594,"cached_unknown":0,"calls":{},"decode_ns":800000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":36938,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":2000000002,"model_ns_unknown":0,"output":93,"output_unknown":0,"queue_ns":999999999,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":2,"refusals":0,"repeats":0,"retries":0,"span_ns":3000000001,"steps":2,"threads":1,"tok_s":116.25,"turns":1}
+
+            exchange 0:
+            answer: {"kind":"forwarded"}
+            api: "messages"
+            caller: "agent"
+            config: {"max_tokens":32000,"model":"glm-5.3","reasoning_effort":null,"stop":[],"stream":true,"temperature":null,"tools":["Bash"]}
+            failed: null
+            kept: {"request":{"body_bytes":100,"bytes":335,"items":{"count":1,"field":"messages"},"path":"model/0.request","whole":["system","tools"]},"response":{"bytes":1376,"path":"model/0.response"}}
+            request: 0
+            request_id: null
+            stats: {"cache_hit":0.9920191107009066,"cache_write":120,"cached":36544,"calls":{},"decode_ns":400000000,"input":36838,"model_ns":1000000001,"outcome":"ok","output":83,"queue_ns":null,"reasoning":null,"repeat_of":null,"request":0,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":207.5,"turn":0}
+            status: 200
+            times: {"end_ns":"2000000000","first_byte_ns":"1999999500","first_token_ns":"1600000000","start_ns":"999999999"}
+            upstream: "zai"
+            usage: {"cache_write_tokens":120,"cached_tokens":36544,"input_tokens":36838,"output_tokens":83}
+        "#]],
+    );
+}
 #[test]
 #[expect(
     clippy::too_many_lines,

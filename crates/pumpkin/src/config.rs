@@ -312,11 +312,13 @@ fn base<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> 
 }
 
 /// The endpoint of `api` below `base`, an upstream's base URL: `/responses` for
-/// [`Api::Responses`], and `/chat/completions` for [`Api::Chat`].
+/// [`Api::Responses`], `/chat/completions` for [`Api::Chat`], and `/messages` for
+/// [`Api::Messages`].
 fn endpoint(base: &str, api: Api) -> String {
     let path = match api {
         Api::Responses => "/responses",
         Api::Chat => "/chat/completions",
+        Api::Messages => "/messages",
     };
     format!("{base}{path}")
 }

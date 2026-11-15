@@ -1035,6 +1035,7 @@ fn model(model: &runtime::ModelUse) -> String {
         input,
         output,
         cached,
+        cache_write,
         reasoning,
     } = &model.tokens;
     if *reported == 0 {
@@ -1045,8 +1046,15 @@ fn model(model: &runtime::ModelUse) -> String {
         return line;
     }
     let _ = write!(line, "; tokens {input} in");
-    if let Some(cached) = cached {
-        let _ = write!(line, " ({cached} cached)");
+    let input_parts: Vec<String> = [
+        cached.map(|cached| format!("{cached} cached")),
+        cache_write.map(|written| format!("{written} written to the cache")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !input_parts.is_empty() {
+        let _ = write!(line, " ({})", input_parts.join(", "));
     }
     let _ = write!(line, ", {output} out");
     if let Some(reasoning) = reasoning {

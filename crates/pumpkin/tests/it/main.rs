@@ -622,14 +622,15 @@ fn judged(score: f64, returned: Value) -> Value {
     outcome
 }
 
-/// The log of a run of [`lease_task`] that went the whole way, but its start, by the second
-/// since the run started: the agent's three model requests, each from its start, two reporting
-/// their tokens and their first token's time; four train judge calls, one scored, whose call
-/// leases a box that a file is put into and a script runs in, one never started, one stopped and
-/// one timed out, with no score; three leases of the agent's, a `gpu` runner whose sandbox sees
-/// the GPU its role needs, closed by the agent, a `cpu` runner whose command times out, closed as
-/// the work phase ends, and a `gpu` runner whose sandbox sees another GPU, which expires; and the
-/// final judge's score, 49.36, after a model request whose stream begins and states a rate limit.
+/// The log of a run of [`lease_task`] that went the whole way, but its start, by the second since
+/// the run started: the agent's three model requests, each from its start, two reporting their
+/// tokens, one its cache's writes too, and their first token's time; four train judge calls, one
+/// scored, whose call leases a box that a file is put into and a script runs in, one never started,
+/// one stopped and one timed out, with no score; three leases of the agent's, a `gpu` runner whose
+/// sandbox sees the GPU its role needs, closed by the agent, a `cpu` runner whose command times
+/// out, closed as the work phase ends, and a `gpu` runner whose sandbox sees another GPU, which
+/// expires; and the final judge's score, 49.36, after a model request whose stream begins and
+/// states a rate limit.
 #[expect(clippy::too_many_lines, reason = "one line for each record")]
 fn judged_log() -> Vec<Value> {
     let none = || json!([]);
@@ -722,16 +723,15 @@ fn judged_log() -> Vec<Value> {
         "first_token_ns": "1013000000000",
         "kept": { "request": { "dropped_headers": ["x-stainless-lang", "x-title"] } },
     });
+    // As the Messages API reports a cache's writes.
+    let mut written = tokens(2000, 200, 1800);
+    written["cache_write_tokens"] = json!(150);
     vec![
         logged(5, json!({ "kind": "agent_started" }), none()),
         logged(8, started(0), none()),
         logged(10, answered(0, reasoned, Some("9250000000")), none()),
         logged(15, started(1), none()),
-        logged(
-            20,
-            answered(1, tokens(2000, 200, 1800), Some("16500000000")),
-            none(),
-        ),
+        logged(20, answered(1, written, Some("16500000000")), none()),
         logged(26, started(2), none()),
         logged(31, answered(2, Value::Null, None), none()),
         logged(40, asked_0, start_0),

@@ -1,4 +1,4 @@
-//! Reading a kept model exchange, of either API, into what any API's conversation holds: each of
+//! Reading a kept model exchange, of any API, into what any API's conversation holds: each of
 //! its items as one kind of [`Item`].
 //!
 //! A request's body is one as it went upstream, which a record's reader rebuilds from the items the
@@ -10,6 +10,7 @@
 //! forms are its own module's; what the reader makes of them is the same for every API.
 
 mod chat;
+mod messages;
 mod responses;
 
 use schema::ir::Api;
@@ -115,6 +116,7 @@ pub(crate) fn dialect(api: Api) -> &'static Dialect {
     match api {
         Api::Responses => &responses::DIALECT,
         Api::Chat => &chat::DIALECT,
+        Api::Messages => &messages::DIALECT,
     }
 }
 
@@ -186,7 +188,7 @@ pub fn config(api: Api, body: &Value) -> Config {
 /// The field of a request's body, as `api` writes it, that holds its list of tools.
 pub fn tools_field(api: Api) -> &'static str {
     match api {
-        Api::Responses | Api::Chat => "tools",
+        Api::Responses | Api::Chat | Api::Messages => "tools",
     }
 }
 

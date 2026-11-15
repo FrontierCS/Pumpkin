@@ -3,8 +3,8 @@
 - RUN `cargo xtask live ec2` and `cargo xtask live modal`, which cost money, at review of a
   change that only a real provider reaches, as `docs/dev/testing.md` says
 - RUN `cargo xtask install-tools` before the checks, and again when `cargo xtask ci` asks
-- RUN `cargo xtask mutants` at review of a change to the decision core or to the schema's
-  refusals, as `docs/dev/testing.md` says
+- RUN `cargo xtask mutants` at review of a change to the decision core, to the schema's
+  refusals or to the route's request rules, as `docs/dev/testing.md` says
 - NEVER assume a clippy warning or a test failure is pre-existing
 - PREFER running the narrowest relevant test while iterating
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend

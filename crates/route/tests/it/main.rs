@@ -41,7 +41,7 @@ fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
 }
 
 /// The headers that the Responses API's entry lists, as Codex's library lists them; the Chat
-/// Completions entry lists none.
+/// Completions entry lists none; the Messages entry lists those that Claude Code sends.
 fn listed(api: Api) -> Headers {
     let names = |names: &[&str]| {
         (names.iter())
@@ -87,6 +87,10 @@ fn listed(api: Api) -> Headers {
             ]),
         },
         Api::Chat => Headers::default(),
+        Api::Messages => Headers {
+            request: names(&["anthropic-beta", "user-agent", "x-app"]),
+            response: Vec::new(),
+        },
     }
 }
 
@@ -94,11 +98,16 @@ fn listed(api: Api) -> Headers {
 /// `m-small` through the Responses API and through Chat Completions, and serves it as the
 /// session's owner: it shows what the stand-in model provider received of each that the route
 /// admitted, or the refusal that the sandbox heard, and checks them against `expect`.
+fn check(cases: &[(&str, Request)], expect: &Expect) {
+    check_apis(&[Api::Responses, Api::Chat], cases, expect);
+}
+
+/// [`check`]s each case through a route with an entry for each of `apis`.
 #[expect(
     clippy::too_many_lines,
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
-fn check(cases: &[(&str, Request)], expect: &Expect) {
+fn check_apis(apis: &[Api], cases: &[(&str, Request)], expect: &Expect) {
     // Kept if the test fails.
     let dir = tempfile::Builder::new()
         .prefix(&format!("route-{}-", thread::current().name().unwrap()))
@@ -120,15 +129,17 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     });
     let key = dir.join("key");
     fs::write(&key, "sk-test-0123\n").unwrap();
-    let entry = |api, path: &str| {
+    let entry = |&api| {
+        let path = match api {
+            Api::Responses => "responses",
+            Api::Chat => "chat/completions",
+            Api::Messages => "messages",
+        };
         let url = UpstreamUrl::try_from(format!("http://{address}/v1/{path}")).unwrap();
         let route = Route::new(api, models(["m-large", "m-small"]), &listed(api));
-        (route, Upstream::new(&url, &Key::read(&key).unwrap()))
+        (route, Upstream::new(api, &url, &Key::read(&key).unwrap()))
     };
-    let entries = [
-        entry(Api::Responses, "responses"),
-        entry(Api::Chat, "chat/completions"),
-    ];
+    let entries: Vec<(Route, Upstream)> = apis.iter().map(entry).collect();
     // Its sockets fit in a socket's address by this path to their directory.
     let (_sockets, registration, socket) = meeting(&dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
@@ -400,6 +411,69 @@ fn chat(edit: impl FnOnce(&mut Value)) -> Request {
     let body = body.to_string().into_bytes();
     let path = "/v1/chat/completions".to_owned();
     ("POST", path, chat_headers(), body)
+}
+
+/// The request headers of a client of the Messages API, as Claude Code's are, with ones that must
+/// stay behind.
+fn messages_headers() -> Vec<(String, String)> {
+    [
+        ("host", "127.0.0.1:11235"),
+        ("content-type", "application/json"),
+        ("accept", "application/json"),
+        ("anthropic-version", "2023-06-01"),
+        ("anthropic-beta", "interleaved-thinking-2025-05-14"),
+        ("authorization", "Bearer pumpkin"),
+        ("x-api-key", "sk-ant-the-sandbox's-own"),
+        ("user-agent", "claude-cli/2.1.311 (external, cli)"),
+        ("x-app", "cli"),
+        ("x-claude-code-session-id", "s-1"),
+        ("x-stainless-lang", "js"),
+    ]
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .to_vec()
+}
+
+/// A client's request of the Messages API with `edit` applied to its body: streamed, with a
+/// system prompt, custom tools, an image inline, and a tool call whose input names a URL and a
+/// file, which are the client's own, and its result. A tool's schema names a `url`.
+fn messages(edit: impl FnOnce(&mut Value)) -> Request {
+    let schema = json!({ "type": "object", "properties": { "url": { "type": "string" } } });
+    let image = json!({
+        "type": "image",
+        "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" }
+    });
+    let mut body = json!({
+        "model": "m-large",
+        "max_tokens": 32000,
+        "stream": true,
+        "system": [{ "type": "text", "text": "You are Claude Code.", "cache_control": { "type": "ephemeral" } }],
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": "hi" }, image] },
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Fetch",
+                    "input": { "url": "https://example.com", "file_id": "file_1" }
+                }]
+            },
+            {
+                "role": "user",
+                "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }]
+            }
+        ],
+        "tools": [
+            { "name": "Fetch", "description": "Fetches a page", "input_schema": schema },
+            { "type": "custom", "name": "Bash", "input_schema": { "type": "object" } }
+        ],
+        "tool_choice": { "type": "auto" },
+        "thinking": { "type": "adaptive" },
+        "metadata": { "user_id": "u-1" }
+    });
+    edit(&mut body);
+    let body = body.to_string().into_bytes();
+    ("POST", "/v1/messages".to_owned(), messages_headers(), body)
 }
 
 fn with_header(name: &str, value: &str) -> Request {
@@ -684,5 +758,175 @@ fn chat_closure() {
             a stored file: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`file_id` refers to a file stored on the provider's side, which the route refuses: send the content inline","param":null,"type":"invalid_request_error"}}
             another method: 405 [("content-type", "application/json"), ("allow", "POST")] {"error":{"code":null,"message":"`GET /v1/chat/completions` is not served: send POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}
             without /v1: 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/chat/completions` is not served: send POST /responses or POST /v1/chat/completions","param":null,"type":"invalid_request_error"}}"#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn messages_closure() {
+    let block = |block: Value| move |body: &mut Value| body["messages"][0]["content"][1] = block;
+    let to = |path: &str| {
+        let (method, _, headers, body) = messages(|_| {});
+        (method, path.to_owned(), headers, body)
+    };
+    check_apis(
+        &[Api::Messages],
+        &[
+            ("the client's", messages(|_| {})),
+            (
+                "a tool chosen",
+                messages(|body| body["tool_choice"] = json!({ "type": "tool", "name": "Bash" })),
+            ),
+            (
+                "no container",
+                messages(|body| body["container"] = json!(null)),
+            ),
+            (
+                "a container",
+                messages(|body| body["container"] = json!("container_1")),
+            ),
+            ("no thread", messages(|body| body["thread"] = json!(null))),
+            (
+                "a new thread",
+                messages(|body| body["thread"] = json!({ "type": "create" })),
+            ),
+            (
+                "a thread continued",
+                messages(|body| {
+                    body["thread"] = json!({ "type": "continue", "previous_message_id": "msg_1" });
+                }),
+            ),
+            (
+                "MCP servers",
+                messages(|body| {
+                    body["mcp_servers"] =
+                        json!([{ "type": "url", "url": "https://mcp.example", "name": "m" }]);
+                }),
+            ),
+            ("the beta namespace", to("/v1/messages?beta=true")),
+            ("another query", to("/v1/messages?beta=false")),
+            (
+                "another model",
+                messages(|body| body["model"] = json!("m-huge")),
+            ),
+            (
+                "fallback models",
+                messages(|body| body["fallbacks"] = json!([{ "model": "m-huge" }])),
+            ),
+            (
+                "the default fallback",
+                messages(|body| body["fallbacks"] = json!("default")),
+            ),
+            (
+                "an advisor of another model",
+                messages(|body| {
+                    body["tools"][1] =
+                        json!({ "type": "advisor_20260301", "name": "advisor", "model": "m-huge" });
+                }),
+            ),
+            (
+                "web search",
+                messages(|body| {
+                    body["tools"][0] =
+                        json!({ "type": "web_search_20250305", "name": "web_search" });
+                }),
+            ),
+            (
+                "a tool whose form the provider defines",
+                messages(|body| {
+                    body["tools"][1] = json!({ "type": "bash_20250124", "name": "bash" });
+                }),
+            ),
+            (
+                "an MCP toolset alone",
+                messages(|body| {
+                    body["tools"][1] = json!({ "type": "mcp_toolset", "mcp_server_name": "m" });
+                }),
+            ),
+            (
+                "a tool of a null type",
+                messages(|body| body["tools"][1]["type"] = json!(null)),
+            ),
+            (
+                "a provider's tool chosen",
+                messages(|body| body["tool_choice"] = json!({ "type": "web_search" })),
+            ),
+            (
+                "an image by URL",
+                messages(block(json!({
+                    "type": "image",
+                    "source": { "type": "url", "url": "https://example.com/a.png" }
+                }))),
+            ),
+            (
+                "a stored file",
+                messages(block(json!({
+                    "type": "document",
+                    "source": { "type": "file", "file_id": "file_1" }
+                }))),
+            ),
+            (
+                "a file uploaded to a container",
+                messages(block(
+                    json!({ "type": "container_upload", "file_id": "file_1" }),
+                )),
+            ),
+            (
+                "a URL beside a tool call's input",
+                messages(|body| {
+                    body["messages"][1]["content"][0]["url"] = json!("https://a.example");
+                }),
+            ),
+            // A listed header passes whatever its value, so a beta turns on no feature that its
+            // body's fields don't, which the rules refuse.
+            ("MCP servers, with their beta", {
+                let (method, path, mut headers, body) = messages(|body| {
+                    body["mcp_servers"] =
+                        json!([{ "type": "url", "url": "https://mcp.example", "name": "m" }]);
+                    body["tools"][1] = json!({ "type": "mcp_toolset", "mcp_server_name": "m" });
+                });
+                for (name, value) in &mut headers {
+                    if name == "anthropic-beta" {
+                        *value = "mcp-client-2025-11-20,code-execution-2025-08-25".to_owned();
+                    }
+                }
+                (method, path, headers, body)
+            }),
+            ("tokens counted", to("/v1/messages/count_tokens")),
+            ("another method", {
+                let (_, path, headers, body) = messages(|_| {});
+                ("GET", path, headers, body)
+            }),
+        ],
+        &expect![[r#"
+            the client's: went upstream, as POST /v1/messages HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "813"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] and the body as sent, leaving ["x-claude-code-session-id", "x-stainless-lang"]
+            a tool chosen: went upstream, as POST /v1/messages HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "827"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] and the body as sent, leaving ["x-claude-code-session-id", "x-stainless-lang"]
+            no container: went upstream, as POST /v1/messages HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "830"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] and the body as sent, leaving ["x-claude-code-session-id", "x-stainless-lang"]
+            a container: 400 [("content-type", "application/json")] {"error":{"message":"`container` names a container kept on the provider's side, which the route refuses: leave it out, and run code through a custom tool","type":"invalid_request_error"},"type":"error"}
+            no thread: went upstream, as POST /v1/messages HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "827"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] and the body as sent, leaving ["x-claude-code-session-id", "x-stainless-lang"]
+            a new thread: 400 [("content-type", "application/json")] {"error":{"message":"`thread` refers to state kept on the provider's side, which the route refuses: send the whole context instead","type":"invalid_request_error"},"type":"error"}
+            a thread continued: 400 [("content-type", "application/json")] {"error":{"message":"`thread` refers to state kept on the provider's side, which the route refuses: send the whole context instead","type":"invalid_request_error"},"type":"error"}
+            MCP servers: 400 [("content-type", "application/json")] {"error":{"message":"`mcp_servers` has the provider call MCP servers, which the route refuses: leave it out, and declare their tools as custom tools","type":"invalid_request_error"},"type":"error"}
+            the beta namespace: went upstream, as POST /v1/messages?beta=true HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "813"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] and the body as sent, leaving ["x-claude-code-session-id", "x-stainless-lang"]
+            another query: 404 [("content-type", "application/json")] {"error":{"message":"`/v1/messages?beta=false` is not served: send POST /v1/messages","type":"not_found_error"},"type":"error"}
+            another model: 400 [("content-type", "application/json")] {"error":{"message":"the request names `m-huge`, which the route doesn't allow: name `m-large` or `m-small`","type":"invalid_request_error"},"type":"error"}
+            fallback models: 400 [("content-type", "application/json")] {"error":{"message":"`fallbacks` has the provider answer with another model when the one named declines, which the route refuses: leave it out, and name a model the route allows","type":"invalid_request_error"},"type":"error"}
+            the default fallback: 400 [("content-type", "application/json")] {"error":{"message":"`fallbacks` has the provider answer with another model when the one named declines, which the route refuses: leave it out, and name a model the route allows","type":"invalid_request_error"},"type":"error"}
+            an advisor of another model: 400 [("content-type", "application/json")] {"error":{"message":"the tool `advisor_20260301` is one the provider defines or runs, which the route refuses: declare custom tools only, of no `type` or `custom`","type":"invalid_request_error"},"type":"error"}
+            web search: 400 [("content-type", "application/json")] {"error":{"message":"the tool `web_search_20250305` is one the provider defines or runs, which the route refuses: declare custom tools only, of no `type` or `custom`","type":"invalid_request_error"},"type":"error"}
+            a tool whose form the provider defines: 400 [("content-type", "application/json")] {"error":{"message":"the tool `bash_20250124` is one the provider defines or runs, which the route refuses: declare custom tools only, of no `type` or `custom`","type":"invalid_request_error"},"type":"error"}
+            an MCP toolset alone: 400 [("content-type", "application/json")] {"error":{"message":"the tool `mcp_toolset` is one the provider defines or runs, which the route refuses: declare custom tools only, of no `type` or `custom`","type":"invalid_request_error"},"type":"error"}
+            a tool of a null type: 400 [("content-type", "application/json")] {"error":{"message":"the tool `null` is one the provider defines or runs, which the route refuses: declare custom tools only, of no `type` or `custom`","type":"invalid_request_error"},"type":"error"}
+            a provider's tool chosen: 400 [("content-type", "application/json")] {"error":{"message":"the tool choice `web_search` is none the route admits: choose `auto`, `any`, `none`, or a `tool` that the request declares","type":"invalid_request_error"},"type":"error"}
+            an image by URL: 400 [("content-type", "application/json")] {"error":{"message":"a block's `source` is a url that the provider would fetch, which the route refuses: send the content inline, as `base64` or `text`","type":"invalid_request_error"},"type":"error"}
+            a stored file: 400 [("content-type", "application/json")] {"error":{"message":"a block's `source` is a file that the provider would fetch, which the route refuses: send the content inline, as `base64` or `text`","type":"invalid_request_error"},"type":"error"}
+            a file uploaded to a container: 400 [("content-type", "application/json")] {"error":{"message":"a `container_upload` block puts a file in a container kept on the provider's side, which the route refuses: send the content inline","type":"invalid_request_error"},"type":"error"}
+            a URL beside a tool call's input: 400 [("content-type", "application/json")] {"error":{"message":"`url` holds a URL the provider would fetch, which the route refuses: send the content inline, as a `data:` URL","type":"invalid_request_error"},"type":"error"}
+            MCP servers, with their beta: 400 [("content-type", "application/json")] {"error":{"message":"`mcp_servers` has the provider call MCP servers, which the route refuses: leave it out, and declare their tools as custom tools","type":"invalid_request_error"},"type":"error"}
+            tokens counted: 404 [("content-type", "application/json")] {"error":{"message":"`/v1/messages/count_tokens` is not served: send POST /v1/messages","type":"not_found_error"},"type":"error"}
+            another method: 405 [("content-type", "application/json"), ("allow", "POST")] {"error":{"message":"`GET /v1/messages` is not served: send POST /v1/messages","type":"invalid_request_error"},"type":"error"}"#]],
     );
 }
