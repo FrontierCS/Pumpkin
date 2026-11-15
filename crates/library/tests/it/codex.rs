@@ -227,7 +227,7 @@ fn roles() {
         // The layer and the configuration's whole text, once: the cases' configurations differ
         // only in the lines that name a model.
         if index == 0 {
-            shown.push_str(&layer(agent, images));
+            shown.push_str(&layer(agent, &images));
             let config = &runtime.files[0];
             let _ = write!(shown, "{} in full:\n{}", config.path, config.content);
         }
@@ -248,15 +248,9 @@ fn roles() {
             route: responses model-small
             request headers: originator user-agent session-id thread-id x-codex-beta-features x-codex-window-id x-codex-turn-metadata x-openai-internal-codex-responses-lite
             response headers: openai-model x-reasoning-included x-models-etag x-codex-turn-state x-codex-safety-buffering-enabled x-codex-safety-buffering-faster-model x-codex-credits-has-credits x-codex-credits-unlimited x-codex-credits-balance x-codex-promo-message x-codex-rate-limit-reached-type x-codex-active-limit x-oai-request-id cf-ray x-openai-authorization-error x-error-json x-codex-primary-used-percent x-codex-primary-window-minutes x-codex-primary-reset-at x-codex-secondary-used-percent x-codex-secondary-window-minutes x-codex-secondary-reset-at x-codex-limit-name
-            image: @pumpkin//harness/codex/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/codex/layer
-              FROM busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e AS codex-0.167.0
-              ADD --checksum=sha256:2dc9aa871abb513c3539d20d025f701faf1974c46ee906bda3a1e1f5026d4434 https://registry.npmjs.org/@openai/codex/-/codex-0.167.0-linux-x64.tgz /harness.tgz
-              RUN tar --extract --gzip --file /harness.tgz --directory / package/vendor/x86_64-unknown-linux-musl/bin/codex package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host package/vendor/x86_64-unknown-linux-musl/codex-package.json package/vendor/x86_64-unknown-linux-musl/codex-path/rg
-              FROM busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e AS codex-0.167.0-tree
-              COPY --from=codex-0.167.0 /package/vendor/x86_64-unknown-linux-musl/ /out/harness/codex-0.167.0/
-              RUN chmod 0444 /out/harness/codex-0.167.0/codex-package.json && chmod 0555 /out/harness /out/harness/codex-0.167.0 /out/harness/codex-0.167.0/bin /out/harness/codex-0.167.0/bin/codex /out/harness/codex-0.167.0/bin/codex-code-mode-host /out/harness/codex-0.167.0/codex-path /out/harness/codex-0.167.0/codex-path/rg
-              FROM base
-              COPY --link --from=codex-0.167.0-tree --chown=0:0 /out/ /
+            image 1: //images's Dockerfile, in pumpkin/images
+            image 2: @pumpkin//harness/codex/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/codex/layer
+            the agent's image: image 2
             /workspace/.codex/config.toml in full:
             model = "model-small"
             model_reasoning_effort = "high"

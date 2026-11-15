@@ -169,7 +169,7 @@ fn roles() {
         }));
         shown.push_str(&route(agent));
         if index == 0 {
-            shown.push_str(&layer(agent, images));
+            shown.push_str(&layer(agent, &images));
         }
     }
     check(
@@ -187,17 +187,10 @@ fn roles() {
             route: chat qwen3.8-max
             request headers: user-agent
             response headers: none
-            image: @pumpkin//harness/node/layer's Dockerfile, in pumpkin-library/harness/node/layer
-              FROM node@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
-              ADD --checksum=sha256:38861b171079e440b25ac86483284f690d0ee7921dba98b0c8fe04a9b0a11667 https://github.com/NixOS/patchelf/releases/download/0.19.3/patchelf-0.19.3-x86_64.tar.gz /patchelf.tgz
-              RUN mkdir /patchelf && tar --extract --gzip --file /patchelf.tgz --directory /patchelf ./bin/patchelf && mkdir --parents /out/harness/node-24.14.0/lib && cp /usr/local/bin/node /usr/local/LICENSE /out/harness/node-24.14.0/ && /patchelf/bin/patchelf --set-interpreter /harness/node-24.14.0/lib/ld-linux-x86-64.so.2 --set-rpath /harness/node-24.14.0/lib /out/harness/node-24.14.0/node && rm --recursive /patchelf /patchelf.tgz && cd /lib/x86_64-linux-gnu && cp --dereference ld-linux-x86-64.so.2 libc.so.6 libdl.so.2 libgcc_s.so.1 libm.so.6 libpthread.so.0 libstdc++.so.6 /out/harness/node-24.14.0/lib/ && cd /out/harness/node-24.14.0 && chmod 0444 LICENSE lib/libc.so.6 lib/libdl.so.2 lib/libgcc_s.so.1 lib/libm.so.6 lib/libpthread.so.0 lib/libstdc++.so.6 && chmod 0555 /out/harness . lib node lib/ld-linux-x86-64.so.2
-            image: @pumpkin//harness/qwen_code/layer's Dockerfile, image 1 as base, image 2 as node, in pumpkin-library/harness/qwen_code/layer
-              FROM node AS qwen-code-0.25.0
-              ADD --checksum=sha256:afeab0c85d682f201101319ce05decf3302d7ed7fb6319baa6a592051ea1a1ba https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.25.0.tgz /qwen-code.tgz
-              RUN mkdir --parents /layer/harness/qwen-code-0.25.0 && tar --extract --gzip --file /qwen-code.tgz --directory /layer/harness/qwen-code-0.25.0 --strip-components=1 --no-same-owner && chmod --recursive a=rX /layer/harness && chmod 0555 /layer/harness/qwen-code-0.25.0/vendor/ripgrep/x64-linux/rg
-              FROM base
-              COPY --link --from=node --chown=0:0 /out/ /
-              COPY --link --from=qwen-code-0.25.0 --chown=0:0 /layer/ /
+            image 1: //images's Dockerfile, in pumpkin/images
+            image 2: @pumpkin//harness/node/layer's Dockerfile, in pumpkin-library/harness/node/layer
+            image 3: @pumpkin//harness/qwen_code/layer's Dockerfile, image 1 as base, image 2 as node, in pumpkin-library/harness/qwen_code/layer
+            the agent's image: image 3
             vendor/"quoted"\model xhigh /srv/my "work" dir 1 1 {"max_tokens": 7, "reasoning_effort": "none"}:
             argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model vendor/"quoted"\model --approval-mode yolo --output-format text "--prompt=-leading dash\nsecond line, \"quoted\"\n"
             env: "HOME=/srv/my \"work\" dir/.qwen-home" "TMPDIR=/srv/my \"work\" dir/.qwen-home/tmp" "QWEN_HOME=/srv/my \"work\" dir/.qwen-home/qwen" PUMPKIN_MODEL_KEY=pumpkin QWEN_STREAM_MAX_LIFETIME_MS=0 QWEN_CODE_MODELS_DEV_REFRESH=off

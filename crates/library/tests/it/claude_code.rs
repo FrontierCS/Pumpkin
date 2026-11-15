@@ -151,7 +151,7 @@ fn roles() {
         shown.push_str(&show(runtime, |_| String::new()));
         shown.push_str(&route(agent));
         if index == 0 {
-            shown.push_str(&layer(agent, images));
+            shown.push_str(&layer(agent, &images));
         }
     }
     check(
@@ -167,13 +167,9 @@ fn roles() {
             route: messages claude-opus-5-5
             request headers: anthropic-beta user-agent x-app
             response headers: none
-            image: @pumpkin//harness/claude_code/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/claude_code/layer
-              FROM debian@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS claude-code-2.1.296
-              ADD --checksum=sha256:eef5a2e2b09a5e7d2ce784d1b3ba335ae7fc6c7f6256c802a0ebf2c21e4fd0e1 https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.296.tgz /harness.tgz
-              ADD --checksum=sha256:38861b171079e440b25ac86483284f690d0ee7921dba98b0c8fe04a9b0a11667 https://github.com/NixOS/patchelf/releases/download/0.19.3/patchelf-0.19.3-x86_64.tar.gz /patchelf.tgz
-              RUN tar --extract --gzip --file /harness.tgz --directory / package/claude package/LICENSE.md && mkdir /patchelf && tar --extract --gzip --file /patchelf.tgz --directory /patchelf ./bin/patchelf && /patchelf/bin/patchelf --set-interpreter /harness/claude-code-2.1.296/lib/ld-linux-x86-64.so.2 --set-rpath /harness/claude-code-2.1.296/lib /package/claude && mkdir --parents /out/harness/claude-code-2.1.296/lib && mv /package/claude /package/LICENSE.md /out/harness/claude-code-2.1.296/ && cd /lib/x86_64-linux-gnu && cp --dereference ld-linux-x86-64.so.2 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 /out/harness/claude-code-2.1.296/lib/ && cd /out/harness/claude-code-2.1.296 && chmod 0444 LICENSE.md lib/libc.so.6 lib/libdl.so.2 lib/libm.so.6 lib/libpthread.so.0 lib/librt.so.1 && chmod 0555 /out/harness . lib claude lib/ld-linux-x86-64.so.2
-              FROM base
-              COPY --link --from=claude-code-2.1.296 --chown=0:0 /out/ /
+            image 1: //images's Dockerfile, in pumpkin/images
+            image 2: @pumpkin//harness/claude_code/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/claude_code/layer
+            the agent's image: image 2
             glm-5.3 max /workspace 128000:
             argv: /harness/claude-code-2.1.296/claude --print --model glm-5.3 --effort max --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
             env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=glm-5.3 ANTHROPIC_DEFAULT_MODEL=glm-5.3 ANTHROPIC_SMALL_FAST_MODEL=glm-5.3 ANTHROPIC_DEFAULT_FABLE_MODEL=glm-5.3 ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3 ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3 ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3 CLAUDE_CODE_SUBAGENT_MODEL=glm-5.3 CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=glm-5.3 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000
