@@ -76,7 +76,7 @@ impl TryFrom<PathBuf> for ConfigFile {
 #[derive(Serialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub(crate) enum Request<'a> {
-    /// The workspace that the profile reaches, and the versions of the SDK and of Python.
+    /// Reaches the workspace that the profile names.
     Ready,
     /// Imports the image at `reference`, a reference by digest, which Modal pulls with the AWS
     /// role `role_arn` in `region`, and returns its id.

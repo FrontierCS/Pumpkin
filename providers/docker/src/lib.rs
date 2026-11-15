@@ -219,10 +219,8 @@ impl Creator<SocketDial> for Docker<'_> {
             }
             return Err(message);
         }
-        // A container is all a create makes.
         Ok(Created {
             id: SandboxId::from(id),
-            report: serde_json::Value::Null,
         })
     }
 }

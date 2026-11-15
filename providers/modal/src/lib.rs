@@ -36,6 +36,7 @@ use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use stdx::Deadline;
 
 use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
@@ -66,7 +67,7 @@ pub struct Settings {
 
 /// Where Modal imports the provider's images from: an ECR repository in `region`, which Modal
 /// pulls from with the AWS role `role_arn`, which it assumes by its own identity.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Images {
     region: Region,
@@ -195,39 +196,20 @@ pub struct Modal<'e> {
     repository: Repository,
     dials_from: Ipv4Addr,
     classes: BTreeMap<Name, SandboxClass>,
-    /// What `Provider::ready` gives: the report as JSON, and the classes of sandbox.
+    /// What `Provider::ready` gives: no report, as a reap reaches the workspace by the settings,
+    /// and the classes of sandbox.
     ready: Ready,
 }
 
-/// The workspace and the repository, as Modal and AWS describe them before anything starts.
-#[derive(Debug, Serialize)]
-struct Report {
-    profile: Profile,
-    /// The workspace's name, and the versions of Modal's SDK and of the Python it runs on.
-    #[serde(flatten)]
-    helper: Described,
-    /// What `aws --version` prints, such as `aws-cli/2.38.1 Python/3.14.6 Linux/…`.
-    aws: String,
-    images: Images,
-    repository: Repository,
-    dials_from: Ipv4Addr,
-    docker: engine::Report,
-}
-
-/// What the helper's `ready` describes.
-#[derive(Debug, Deserialize, Serialize)]
+/// What the helper's `ready` returns.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Described {
-    workspace: String,
-    modal: String,
-    python: String,
-}
+struct Described {}
 
 impl<'e> Modal<'e> {
     /// Reaches the workspace that `settings`' profile reaches, through the helper at `script`,
     /// whose lock is beside it, and the settings' repository, with `pusher`, the engine it
-    /// publishes from, and reports them: the workspace's name, the versions of Modal's SDK, Python
-    /// and `aws`, and the repository. It writes in `dir` what `uv` fetches. It fails if Modal's
+    /// publishes from. It writes in `dir` what `uv` fetches. It fails if Modal's
     /// configuration lacks the profile, or AWS describes no such repository.
     pub fn connect(
         settings: &Settings,
@@ -243,45 +225,21 @@ impl<'e> Modal<'e> {
             classes,
         } = settings;
         let helper = Helper::new(script, dir, profile.clone(), config.clone());
-        let described = helper.call::<Described>(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
+        let Described {} = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         let cli = Cli::connect(images.region.clone())?;
         let [repository] = cli.repositories([&images.repository])?;
-        let report = Report {
-            profile: profile.clone(),
-            helper: described,
-            aws: cli.version().to_owned(),
-            images: images.clone(),
-            repository: repository?,
-            dials_from: *dials_from,
-            docker: pusher.engine().report().clone(),
-        };
-        let Ok(json) = serde_json::to_value(&report) else {
-            unreachable!(
-                "{report:?} can't be written as JSON, though a `Report` holds only strings and \
-                 Docker's report, through derived impls, none of which serde_json fails to write"
-            )
-        };
         let declared =
             (classes.iter()).map(|(name, sandbox)| (name.clone(), sandbox.class.clone()));
         let ready = Ready {
-            report: json,
+            report: Value::Null,
             classes: declared.collect(),
         };
-        let Report {
-            profile: _,
-            helper: _,
-            aws: _,
-            images,
-            repository,
-            dials_from: _,
-            docker: _,
-        } = report;
         Ok(Self {
             reached: Reached { helper },
             cli,
             pusher,
-            images,
-            repository,
+            images: images.clone(),
+            repository: repository?,
             dials_from: *dials_from,
             classes: classes.clone(),
             ready,
@@ -304,7 +262,7 @@ impl<'e> Modal<'e> {
             None => settings.config.clone(),
         };
         let helper = Helper::new(script, dir, settings.profile.clone(), config);
-        let Described { .. } = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
+        let Described {} = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         Ok(Reached { helper })
     }
 }

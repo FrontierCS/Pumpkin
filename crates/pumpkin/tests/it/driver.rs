@@ -789,7 +789,7 @@ fn lost_on_docker() {
             pumpkin: to stop it: pumpkin cancel --runs <scratch>/runs <id>
             outcome.json: none
             printed the id alone: true
-            the agent's sandbox, agent/sandbox.json: {"id":"<container>","provider":"local","report":null}
+            the agent's sandbox, agent/sandbox.json: {"id":"<container>","provider":"local"}
             its socket directories: ["agent"]
             its temporary directory holds: []
             $ pumpkin wait <id> --runs runs

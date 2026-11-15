@@ -28,7 +28,7 @@ use gateway::{
 };
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
-use schema::ir::{Api, Image, Name};
+use schema::ir::{Api, Name};
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{ByProvider, ByRole, JudgeCall, LeaseGrantId, Placed, RoleId, Workflow};
 use serde_json::json;
@@ -74,8 +74,6 @@ const LOOK: Duration = Duration::from_millis(50);
 pub struct Recorded<'a> {
     /// The arguments of the `pumpkin run` that started the run.
     pub args: &'a [String],
-    /// The tag of each image's build, by the image's ID.
-    pub tags: &'a BTreeMap<Image, String>,
 }
 
 /// A run, prepared on its host, `H`: its workflow placed, on the providers its roles are placed
@@ -86,8 +84,6 @@ pub struct Run<'r, H> {
     providers: ByProvider<&'r dyn Provider>,
     routes: ByRole<Vec<Serving>>,
     id: RunTag,
-    /// The tag of each image's build, by the image's ID, for `provider.json`.
-    tags: &'r BTreeMap<Image, String>,
     dir: PathBuf,
     /// Held until `outcome.json` is written: see [`Lock`].
     lock: Lock,
@@ -115,7 +111,7 @@ impl<'r, H: Host> Run<'r, H> {
         servings: &ByRole<Vec<Serving>>,
         recorded: Recorded<'r>,
     ) -> Result<Self, String> {
-        let Recorded { args, tags } = recorded;
+        let Recorded { args } = recorded;
         let routes = model::routes(placed.workflow(), servings)?;
         let reserved = placed.by_provider(|name| {
             let phases = sandbox::phases(&placed, name);
@@ -130,7 +126,6 @@ impl<'r, H: Host> Run<'r, H> {
             providers,
             routes,
             id,
-            tags,
             dir,
             lock,
             reserved,
@@ -197,7 +192,7 @@ impl<'r, H: Host> Run<'r, H> {
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
-        let provided = record::provided(&self.placed, &self.providers, self.tags, &self.routes);
+        let provided = record::provided(&self.placed, &self.providers, &self.routes);
         record::write_json(host, &self.dir, "provider.json", &provided)?;
         let published = Published::create(
             &self.providers,
@@ -1330,10 +1325,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed,
-    /// keeping its console, or noting why it wasn't kept, and logs the delete. A failure
-    /// to write the record, or to delete the sandbox, is returned once each has been tried, joined
-    /// if more than one fails.
+    /// Collects what the agent's sandbox holds, then deletes it, even if collecting failed, and
+    /// logs the delete. A failure to write the record, or to delete the sandbox, is returned once
+    /// each has been tried, joined if more than one fails.
     fn tear_down_agent(&mut self) -> Result<(), String> {
         let Some(mut agent) = self.agent.take() else {
             let note = "the agent's sandbox never started: nothing was collected";
@@ -1358,12 +1352,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         notes.iter().try_for_each(|note| self.log.note(note))
     }
 
-    /// Deletes every sandbox that each of the run's providers still lists of it, and notes each
-    /// console the sweep didn't keep.
-    fn sweep(&mut self) -> Result<(), String> {
-        let (unkept, swept) = self.sandboxes.sweep();
-        let noted = unkept.iter().try_for_each(|unkept| self.log.note(unkept));
-        failed_also(swept, noted)
+    /// Deletes every sandbox that each of the run's providers still lists of it.
+    fn sweep(&self) -> Result<(), String> {
+        self.sandboxes.sweep()
     }
 
     /// Logs what is in the inbox for the run log alone ([`Input::Logged`]), once the core has

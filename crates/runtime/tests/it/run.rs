@@ -69,7 +69,6 @@ fn check(
 ) {
     let runs = Runs::new("prepare");
     let args = ["--config".to_owned(), "/pumpkin.toml".to_owned()];
-    let no_tags = BTreeMap::new();
     let mut lines = Vec::new();
     for (index, (seconds, value, served)) in cases.into_iter().enumerate() {
         let ir: ir::Workflow = serde_json::from_value(value).unwrap();
@@ -86,10 +85,7 @@ fn check(
             let placed = placed(&ir, sim.ready())?;
             let servings = agent_servings(placed.workflow(), &runs.dir, url, served);
             let on = providers_of(&placed, |_| &sim);
-            let recorded = Recorded {
-                args: &args,
-                tags: &no_tags,
-            };
+            let recorded = Recorded { args: &args };
             Run::prepare(&System, placed, on, &dir, id, &servings, recorded)
         });
         let record = fs::read_dir(&dir)

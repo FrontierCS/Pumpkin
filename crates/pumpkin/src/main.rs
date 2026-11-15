@@ -318,7 +318,6 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
     let Prepared {
         workflow,
-        tags,
         providers,
         gateway,
         servings,
@@ -338,10 +337,7 @@ fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
     let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
     let on = placed_on.map(Connected::provider);
-    let kept = Recorded {
-        args: &words,
-        tags: &tags,
-    };
+    let kept = Recorded { args: &words };
     let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     begun(&id, &dir, &names, reader);
@@ -411,11 +407,10 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), Str
     }
 }
 
-/// What a run starts from: its task's workflow, built, with the tag of each image, which the
-/// run's record keeps, and what it reads of the machine's configuration, its providers connected.
+/// What a run starts from: its task's workflow, built, and what it reads of the machine's
+/// configuration, its providers connected.
 struct Prepared<'e> {
     workflow: Workflow,
-    tags: star::Tags,
     providers: config::Providers<Connected<'e>>,
     gateway: config::Gateway,
     /// How each role's model route is served, an entry at a time.
@@ -449,15 +444,12 @@ fn prepared<'e>(
     let engine = &*engine.insert(crate::engine(context, reader)?);
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
-    Ok(task
-        .build(engine, &mut ())
-        .map(|(workflow, tags)| Prepared {
-            workflow,
-            tags,
-            providers,
-            gateway,
-            servings,
-        }))
+    Ok(task.build(engine, &mut ()).map(|(workflow, _)| Prepared {
+        workflow,
+        providers,
+        gateway,
+        servings,
+    }))
 }
 
 /// Waits until the run that `flags` name, in their runs directory or [`default_runs`], has

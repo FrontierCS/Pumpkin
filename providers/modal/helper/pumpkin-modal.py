@@ -17,7 +17,6 @@ sandboxes by its tag, and a call on a sandbox that a request names refuses one o
 import hashlib
 import json
 import math
-import platform
 import sys
 import time
 
@@ -78,11 +77,7 @@ def main() -> None:
 def ready(modal, request: dict) -> dict:
     workspace = modal.Workspace.from_context()
     workspace.hydrate()
-    return {
-        "workspace": workspace.name,
-        "modal": modal.__version__,
-        "python": platform.python_version(),
-    }
+    return {}
 
 
 def imported(modal, request: dict) -> str:
@@ -99,8 +94,8 @@ def imported(modal, request: dict) -> str:
 
 
 def create(modal, request: dict) -> dict:
-    """Creates the run's sandbox of the request's role, and returns its ID, its App, and its
-    tunnel's host and port.
+    """Creates the run's sandbox of the request's role, and returns its ID and its tunnel's host
+    and port.
 
     Modal ends it at the run's `hard_end`, in seconds since the Unix epoch, if nothing ends it
     first. Its `sandboxd` ends it too if no gateway has claimed it a minute after its start's
@@ -147,7 +142,7 @@ def create(modal, request: dict) -> dict:
     tunnel = sandbox.tunnels()[PORT]
     while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
         time.sleep(LISTED_EVERY)
-    return {"id": sandbox.object_id, "app": app.name, "host": tunnel.host, "port": tunnel.port}
+    return {"id": sandbox.object_id, "host": tunnel.host, "port": tunnel.port}
 
 
 def cores(millis: int) -> float:

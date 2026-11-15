@@ -8,8 +8,7 @@
 //! tunnel, which takes connections from the settings' `dials_from` address alone. The sandbox has
 //! no connection out, though Modal's resolver still answers its DNS queries; it runs under gVisor
 //! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
-//! and Modal ends it at its run's hard end, if nothing ends it first. Its report names its App,
-//! its image's id and digest, its `sandboxd` and its GPU.
+//! and Modal ends it at its run's hard end, if nothing ends it first.
 //!
 //! The provider never stops the App, as an App with no sandbox costs nothing.
 
@@ -22,7 +21,6 @@ use provider::{Console, Create, Created, Listed, RunTag, SandboxId, SandboxdRef,
 use schema::ir::Sha256Digest;
 use schema::sandbox::{Endpoint, Listening};
 use serde::Deserialize;
-use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use stdx::Deadline;
 
@@ -44,7 +42,6 @@ const ID_PREFIX: &str = "sb-";
 #[serde(deny_unknown_fields)]
 struct Made {
     id: String,
-    app: String,
     host: String,
     port: u16,
 }
@@ -99,7 +96,7 @@ impl Modal<'_> {
                 create.class
             ));
         };
-        let Some((image, digest)) = create.image.as_str().split_once('@') else {
+        let Some((image, _)) = create.image.as_str().split_once('@') else {
             return Err(format!(
                 "`{}` is no image this provider published: publish one first",
                 create.image.as_str()
@@ -110,25 +107,13 @@ impl Modal<'_> {
             .reached
             .helper
             .call::<Made>(&request, Deadline::at_unix(create.by.since_epoch()));
-        let Made {
-            id,
-            app,
-            host,
-            port,
-        } = made.map_err(|error| {
+        let Made { id, host, port } = made.map_err(|error| {
             format!("{error}; what Modal made by then, if anything, the run's list finds")
         })?;
         let endpoint = Endpoint::new(host, port).map_err(|error| {
             format!("Modal's tunnel to sandbox {id} isn't an endpoint: {error}")
         })?;
         let created = Created {
-            report: json!({
-                "app": app,
-                "image": image,
-                "digest": digest,
-                "sandboxd": create.sandboxd.as_str(),
-                "gpu": class.gpu,
-            }),
             id: SandboxId::from(id),
         };
         Ok((created, endpoint))

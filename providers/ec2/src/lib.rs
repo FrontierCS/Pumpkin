@@ -1,6 +1,6 @@
 //! The EC2 provider: a sandbox for a role as a container on an EC2 instance of its own.
 //!
-//! [`Ec2::connect`] reaches the [envelope](#the-envelope) and reports it before anything starts.
+//! [`Ec2::connect`] reaches the [envelope](#the-envelope) before anything starts.
 //! It keeps to a run's own instances by the tag that carries its run.
 //!
 //! # The envelope
@@ -33,7 +33,8 @@ use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
 use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
 use schema::sandbox::TcpDial;
 use schema::workflow::{Class, Offers, UsdPerHour};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::Value;
 
 mod launch;
 
@@ -75,7 +76,7 @@ pub struct Settings {
 /// ([`launch::HardEnd::timer`]), then deletes itself. A create that can't make it terminates the
 /// instance and fails; a delete deletes it once the instance is terminated, and one a lost run
 /// leaves fires on an instance gone already.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Timer {
     group: GroupName,
@@ -83,11 +84,11 @@ struct Timer {
 }
 
 /// The name of an `EventBridge` Scheduler schedule group, such as `pumpkin`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct GroupName(String);
 
 /// The envelope's image repositories, one for each kind of image a sandbox pulls, each as a `T`.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Repositories<T> {
     /// The roles' images.
@@ -101,7 +102,7 @@ struct Repositories<T> {
 /// `/proc/cpuinfo` names them; and the price that the operator says an instance costs. Without
 /// `cpu_features`, it states no flag, without `cpu_model`, no model, and without
 /// `usd_per_hour`, no price.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstanceClass {
     template: TemplateId,
@@ -159,7 +160,7 @@ fn reserved_mib(memory_mib: u64) -> u64 {
 }
 
 /// The ID of an EC2 launch template, such as `lt-0123456789abcdef0`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct TemplateId(String);
 
 /// The EC2 envelope, reached, which every sandbox of the provider's runs in, and the operator's
@@ -180,15 +181,15 @@ pub struct Ec2<'e> {
     repositories: Repositories<Repository>,
     /// The timer's role, which each instance's schedule runs with.
     timer_role: RoleArn,
-    /// What [`Provider::ready`] gives: the report as JSON, and the classes of sandbox.
+    /// What [`Provider::ready`] gives: no report, and the classes of sandbox.
     ready: Ready,
     dir: PathBuf,
 }
 
 impl<'e> Ec2<'e> {
     /// Reaches the envelope that `settings` name, with `pusher`, the Docker engine that the
-    /// provider publishes from, and reports it: the command line's version, whose credentials it
-    /// uses, the classes and the timer, and the repositories, with their URIs. It writes in `dir`,
+    /// provider publishes from, once AWS answers to the command line's credentials and describes
+    /// the repositories. It writes in `dir`,
     /// made once a launch needs it, each launch's user data, while `aws` reads it. It fails if AWS
     /// describes no repository that the settings name.
     pub fn connect(settings: &Settings, pusher: Pusher<'e>, dir: &Path) -> Result<Self, String> {
@@ -199,36 +200,17 @@ impl<'e> Ec2<'e> {
             timer,
         } = settings;
         let cli = Cli::connect(region.clone())?;
-        let Identity { account, arn } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
-        let report = Report {
-            cli: cli.version().to_owned(),
-            account,
-            caller: arn,
-            region: region.clone(),
-            classes: classes.clone(),
-            repositories: described_repositories(&cli, repositories)?,
-            timer: timer.clone(),
-            docker: pusher.engine().report().clone(),
-        };
-        let ready = ready(&report);
-        let Report {
-            cli: _,
-            account: _,
-            caller: _,
-            region,
-            classes,
-            repositories,
-            timer: Timer { group, role_arn },
-            docker: _,
-        } = report;
+        let Identity {} = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        let repositories = described_repositories(&cli, repositories)?;
+        let Timer { group, role_arn } = timer.clone();
         Ok(Self {
             reached: Reached { cli, group },
             pusher,
-            region,
-            classes,
+            region: region.clone(),
+            classes: classes.clone(),
             repositories,
             timer_role: role_arn,
-            ready,
+            ready: ready(classes),
             dir: dir.to_owned(),
         })
     }
@@ -240,7 +222,7 @@ impl Ec2<'_> {
     /// the settings' region, as [`connect`](Self::connect) has it answer.
     pub fn reach(settings: &Settings) -> Result<Reached, String> {
         let cli = Cli::connect(settings.region.clone())?;
-        let Identity { .. } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        let Identity {} = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
         let group = settings.timer.group.clone();
         Ok(Reached { cli, group })
     }
@@ -317,37 +299,13 @@ impl Creator<TcpDial> for Ec2<'_> {
     }
 }
 
-/// The envelope, as its settings state it and AWS describes its repositories before anything
-/// starts.
-#[derive(Debug, Serialize)]
-struct Report {
-    /// What `aws --version` prints, such as `aws-cli/2.38.1 Python/3.14.6 Linux/…`.
-    cli: String,
-    /// The account the credentials are in.
-    account: String,
-    /// Whose credentials they are, as an ARN.
-    caller: String,
-    region: Region,
-    classes: BTreeMap<Name, InstanceClass>,
-    repositories: Repositories<Repository>,
-    timer: Timer,
-    /// The Docker engine that the provider pushes through.
-    docker: engine::Report,
-}
-
-/// What [`Provider::ready`] gives of an envelope that `report` describes.
-fn ready(report: &Report) -> Ready {
-    let Ok(json) = serde_json::to_value(report) else {
-        unreachable!(
-            "{report:?} can't be written as JSON, though a `Report` holds only strings, numbers, \
-             options and sets of them, and maps keyed by names, through derived impls and \
-             `Display`, none of which serde_json fails to write"
-        )
-    };
+/// What [`Provider::ready`] gives of an envelope of instance classes `classes`: no report, as a
+/// reap reaches the envelope by the settings.
+fn ready(classes: &BTreeMap<Name, InstanceClass>) -> Ready {
     // Each instance class is a class of sandbox, which offers a role what its instance type
     // leaves one ([`InstanceClass::role_limits`]), and the CPU's flags and model that the
     // settings state.
-    let classes = (report.classes.iter()).map(|(name, class)| {
+    let classes = (classes.iter()).map(|(name, class)| {
         let (cpu_millis, memory_bytes) = class.role_limits();
         let offers = Offers {
             cpu_millis,
@@ -364,18 +322,14 @@ fn ready(report: &Report) -> Ready {
         (name.clone(), class)
     });
     Ready {
-        report: json,
+        report: Value::Null,
         classes: classes.collect(),
     }
 }
 
-/// What `aws sts get-caller-identity` prints.
+/// What `aws sts get-caller-identity` prints, which a call answers if the credentials work.
 #[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Identity {
-    account: String,
-    arn: String,
-}
+struct Identity {}
 
 /// `repositories`, with their URIs.
 fn described_repositories(

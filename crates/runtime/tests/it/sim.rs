@@ -108,8 +108,6 @@ pub(crate) const UNPUBLISHED: &str = "/sim/unpublished";
 
 /// The path of a `sandboxd`, or an [`image`]'s name, that dials, but whose sandbox the
 /// simulated provider refuses to delete.
-///
-/// Once a delete is refused, its console shows nothing.
 pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 
 /// The path of a `sandboxd`, or an [`image`]'s name, whose first delete fails, as one of
@@ -117,10 +115,6 @@ pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 ///
 /// The next deletes it, as a provider's API may fail a call once.
 pub(crate) const REFUSED_ONCE: &str = "/sim/refused-once";
-
-/// The path of a `sandboxd`, or an [`image`]'s name, that dials, but whose sandbox's console
-/// the simulated provider fails to read.
-pub(crate) const UNSHOWN: &str = "/sim/unshown";
 
 /// An [`image`]'s name whose sandbox's delete waits `DAWDLE` before it deletes it.
 pub(crate) const DAWDLING: &str = "/sim/dawdling";
@@ -235,7 +229,6 @@ struct Sandbox {
     linger: Duration,
     /// [`LAST`]'s.
     last: bool,
-    unshown: bool,
     listing: Listing,
     // Shared with the sandbox's thread, which prints to its console and hands over its
     // connection.
@@ -531,7 +524,6 @@ impl Sweep for Sim {
                     if sandbox.refusals != u32::MAX {
                         sandbox.refusals -= 1;
                     }
-                    status(&sandbox.shared).console.clear();
                     failures.push(format!(
                         "{id} can't be deleted by the simulated provider: create one with another \
                          `sandboxd`"
@@ -714,7 +706,6 @@ impl Sim {
             refusals,
             linger,
             last,
-            unshown,
         } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
         let (mute, hung) = dialing.silent();
         let hello = if dialing == Dialing::Later {
@@ -747,7 +738,6 @@ impl Sim {
             refusals,
             linger,
             last,
-            unshown,
             listing,
             shared,
             thread,
@@ -767,7 +757,6 @@ impl Sim {
         }
         Ok(Created {
             id: SandboxId::from(id),
-            report: Value::Null,
         })
     }
 
@@ -781,12 +770,6 @@ impl Sim {
                 run.as_str()
             ));
         };
-        if sandbox.unshown {
-            return Err(format!(
-                "the simulated console of {} can't be read: create one with another `sandboxd`",
-                id.as_str()
-            ));
-        }
         let text = status(&sandbox.shared).console.clone();
         Ok(Console { text })
     }
@@ -995,8 +978,6 @@ struct Faults {
     linger: Duration,
     /// [`LAST`]'s.
     last: bool,
-    /// [`UNSHOWN`]'s.
-    unshown: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -1075,7 +1056,6 @@ impl Faults {
                 Duration::ZERO
             },
             last: names(LAST),
-            unshown: names(UNSHOWN),
         }
     }
 }
@@ -1088,7 +1068,6 @@ fn stop(sandbox: Sandbox) {
         refusals: _,
         linger,
         last: _,
-        unshown: _,
         listing: _,
         shared,
         thread,
