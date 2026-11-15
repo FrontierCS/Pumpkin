@@ -222,6 +222,12 @@ fn check(fixture: &str, expect: &Expect) {
 /// file it holds evaluates or gives problems that read.
 #[track_caller]
 fn check_within(bounds: Bounds, fixture: &str, expect: &Expect) {
+    expect.assert_eq(&shown(bounds, fixture));
+}
+
+/// What `check_within` checks of `fixture`, within `bounds`.
+#[track_caller]
+fn shown(bounds: Bounds, fixture: &str) -> String {
     let files = files();
     let shown = on_stack(|| {
         let (args, case) = Case::parse(fixture, &files, bounds);
@@ -245,7 +251,7 @@ fn check_within(bounds: Bounds, fixture: &str, expect: &Expect) {
             _ => String::from(char),
         })
         .collect();
-    expect.assert_eq(&shown);
+    shown
 }
 
 /// What a stand-in build gives for an image: its number, from 1, in the order built, and an ID
@@ -3789,4 +3795,564 @@ workflow(name = "neutral/twice", roles = [], score = None)"#,
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 it is first called at text.star:1:1"#]],
     );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshots"
+)]
+fn json() {
+    // Keys sorted by their bytes; `"`, `\`, what is below U+0020 and U+007F escaped, U+0085 not.
+    check(
+        r#"
+X = json.encode([None, True, False, -123, (1, [2]), {"b": 1, "a": {}, "B": [], "é": "", "": 0}])
+Y = json.encode("q\"b\\s/\n\t\r\b\f\001\037\177'")
+Z = json.decode('"\\u0085\\u009fé😹"')
+fail(" ".join([X, Y, str(int(json.encode(Z) == '"' + Z + '"'))]))"#,
+        &expect![[r#"
+            text.star:4:1: fail: [null,true,false,-123,[1,[2]],{"":0,"B":[],"a":{},"b":1,"é":""}] "q\"b\\s/\n\t\r\b\f\u0001\u001f\u007f'" 1
+                4 | fail(" ".join([X, Y, str(int(json.encode(Z) == '"' + Z + '"'))]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    // An object's keys in the order the text gives them, as Starlark's `dict` keeps them.
+    check(
+        r#"
+D = json.decode(' {"b": [1, -0, null, true, false, -9223372036854775808], "a": {"c": "\\u00e9\\ud83d\\ude39\\/\\"\\\\"}, "z": []}\n')
+fail(" ".join([",".join(D.keys()), json.encode(D["b"]), D["a"]["c"], str(int(D["b"][2] == None))]))"#,
+        &expect![[r#"
+            text.star:2:1: fail: b,a,z [1,0,null,true,false,-9223372036854775808] é😹/"\ 1
+                2 | fail(" ".join([",".join(D.keys()), json.encode(D["b"]), D["a"]["c"], str(int(D["b"][2] == None))]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+V = {"k": [1, "a\n", {"x": None}, True], "": -5}
+fail(str(int(json.decode(json.encode(V)) == V)) + str(int(json.decode("[]") == [])))"#,
+        &expect![[r#"
+            text.star:2:1: fail: 11
+                2 | fail(str(int(json.decode(json.encode(V)) == V)) + str(int(json.decode("[]") == [])))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    // The cases of Bazel's and starlark-go's `json.star` that hold no float, nor anything else
+    // the subset leaves out, and that the other cases here don't take.
+    check(
+        r#"
+X = [
+    json.decode("\t[\t1,\r2,\n3]\n") == [1, 2, 3],
+    json.decode('\n{\t"a":\r1\t}\n') == {"a": 1},
+    json.decode('{"foo\\u0000bar": 42}') == {"foo\000bar": 42},
+    json.decode('"\\u0123"') == "ģ",
+    json.decode('"\\ud83d\\ude39\\ud83d\\udc8d"') == "😹💍",
+    json.decode('"\177"') == "\177",
+    json.decode('"\\b\\f\\n\\r\\t\\/"') == "\b\f\n\r\t/",
+    json.decode("[1]") == [1],
+    json.decode('{"one": 1, "two": 2}') == {"one": 1, "two": 2},
+    json.encode("hello") == '"hello"',
+    json.encode((1, 2, 3)) == "[1,2,3]",
+    json.encode(["'", "/", "", "¼Δ", "😹"]) == '["\'","/","","¼Δ","😹"]',
+    json.decode(json.encode(["😿", "🐱‍👤"])) == ["😿", "🐱‍👤"],
+]
+fail("".join([str(int(x)) for x in X]))"#,
+        &expect![[r#"
+            text.star:16:1: fail: 1111111111111
+                16 | fail("".join([str(int(x)) for x in X]))
+                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    let bytes = |bytes| Bounds {
+        bytes,
+        ..Bounds::WORKFLOW
+    };
+    // Each is refused one byte fewer: 160 of the list's elements and 11 of the text, `["ab","cd"]`;
+    // 2 of the string and 80 of the list's element.
+    let encoded = "X = json.encode([\"ab\", \"cd\"])\nfail(X)";
+    check_within(
+        bytes(171),
+        encoded,
+        &expect![[r#"
+        text.star:2:1: fail: ["ab","cd"]
+            2 | fail(X)
+              | ^^^^^^^"#]],
+    );
+    check_within(
+        bytes(170),
+        encoded,
+        &expect![[r#"
+        text.star:1:17: this evaluation's strings, lists, tuples and dicts take more than 170 bytes: make smaller values, as with fewer `+` of long ones
+            1 | X = json.encode(["ab", "cd"])
+              |                 ^^^^^^^^^^^^"#]],
+    );
+    let decoded = "X = json.decode('[\"ab\"]')\nfail(X[0])";
+    check_within(
+        bytes(82),
+        decoded,
+        &expect![[r#"
+        text.star:2:1: fail: ab
+            2 | fail(X[0])
+              | ^^^^^^^^^^"#]],
+    );
+    check_within(
+        bytes(81),
+        decoded,
+        &expect![[r#"
+        text.star:1:5: this evaluation's strings, lists, tuples and dicts take more than 81 bytes: make smaller values, as with fewer `+` of long ones
+            1 | X = json.decode('["ab"]')
+              |     ^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    let deep = |depth: usize| {
+        format!(
+            "T = \"{}{}\"\nX = json.decode(T)\nfail(json.encode(X))",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        )
+    };
+    check(
+        &deep(128),
+        &expect![[r#"
+        text.star:3:1: fail: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+            3 | fail(json.encode(X))
+              | ^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        &deep(129),
+        &expect![[r#"
+        text.star:2:17: `json.decode`'s text nests arrays and objects 129 deep at offset 128: nest them at most 128 deep
+            2 | X = json.decode(T)
+              |                 ^
+            the text, `"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[…"`, is made at text.star:1:5"#]],
+    );
+    // A closed array no longer counts towards how deep the next one nests.
+    let siblings = format!(
+        "X = json.decode(\"[{}[]]\")\nfail(str(len(X)))",
+        "[],".repeat(128)
+    );
+    check(
+        &siblings,
+        &expect![[r#"
+        text.star:2:1: fail: 129
+            2 | fail(str(len(X)))
+              | ^^^^^^^^^^^^^^^^^"#]],
+    );
+    // Each element is refused as it would pass the budget, before the text's error is reached.
+    let elements = "X = json.decode('[1, 1, 1')";
+    check_within(
+        bytes(200),
+        elements,
+        &expect![[r#"
+        text.star:1:5: this evaluation's strings, lists, tuples and dicts take more than 200 bytes: make smaller values, as with fewer `+` of long ones
+            1 | X = json.decode('[1, 1, 1')
+              |     ^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    // The elements of all the arrays open count together: these, 128 deep and 4 each, take 40960
+    // bytes, while each array alone takes 320.
+    let open = r#"
+A = "[0, 0, 0, 0, "
+B = A + A
+C = B + B
+D = C + C
+E = D + D
+F = E + E
+G = F + F
+H = G + G
+X = json.decode(H)"#;
+    check_within(
+        bytes(20_000),
+        open,
+        &expect![[r#"
+        text.star:9:5: this evaluation's strings, lists, tuples and dicts take more than 20000 bytes: make smaller values, as with fewer `+` of long ones
+            9 | X = json.decode(H)
+              |     ^^^^^^^^^^^^^^"#]],
+    );
+    let entries = r#"X = json.decode('{"a": 1, "b": 2, "c": 3')"#;
+    check_within(
+        bytes(400),
+        entries,
+        &expect![[r#"
+        text.star:1:5: this evaluation's strings, lists, tuples and dicts take more than 400 bytes: make smaller values, as with fewer `+` of long ones
+            1 | X = json.decode('{"a": 1, "b": 2, "c": 3')
+              |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    // A closed array or object no longer counts as pending: each passes at its exact bound, 321
+    // and 483 bytes, where counting a closed one's elements again would refuse it.
+    let closed = "X = json.decode('[[1], [2]]')\nfail(str(len(X)))";
+    check_within(
+        bytes(321),
+        closed,
+        &expect![[r#"
+        text.star:2:1: fail: 2
+            2 | fail(str(len(X)))
+              | ^^^^^^^^^^^^^^^^^"#]],
+    );
+    let closed = "X = json.decode('[{\"a\": 1}, {\"b\": 2}]')\nfail(str(len(X)))";
+    check_within(
+        bytes(483),
+        closed,
+        &expect![[r#"
+        text.star:2:1: fail: 2
+            2 | fail(str(len(X)))
+              | ^^^^^^^^^^^^^^^^^"#]],
+    );
+    check_within(
+        bytes(482),
+        closed,
+        &expect![[r#"
+        text.star:2:6: this evaluation's strings, lists, tuples and dicts take more than 482 bytes: make smaller values, as with fewer `+` of long ones
+            2 | fail(str(len(X)))
+              |      ^^^^^^^^^^^"#]],
+    );
+    // A string's escaped text is asked of the budget before it is written: this key's takes 6146
+    // bytes, and the value's refusal follows it.
+    let escaped = r#"
+A = "\001\001\001\001\001\001\001\001"
+B = A + A
+C = B + B
+D = C + C
+E = D + D
+F = E + E
+G = F + F
+H = G + G
+X = json.encode({H: len})"#;
+    check_within(
+        bytes(5000),
+        escaped,
+        &expect![[r#"
+        text.star:9:17: this evaluation's strings, lists, tuples and dicts take more than 5000 bytes: make smaller values, as with fewer `+` of long ones
+            9 | X = json.encode({H: len})
+              |                 ^^^^^^^^"#]],
+    );
+    check(
+        "fail(str(int(json == json)))",
+        &expect![[r#"
+        text.star:1:1: fail: 1
+            1 | fail(str(int(json == json)))
+              | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"X = json.encode({1: "a"})"#,
+        &expect![[r#"
+        text.star:1:17: `json.encode` can't encode a dict keyed by `1`: key each dict it encodes with strings
+            1 | X = json.encode({1: "a"})
+              |                 ^^^^^^^^
+            the key, `1`, is made at text.star:1:18"#]],
+    );
+    check(
+        r#"
+L = [1, {"x": len}]
+X = json.encode(L)"#,
+        &expect![[r#"
+            text.star:2:17: `json.encode` can't encode a function: give it `None`, bools, ints and strings, and lists, tuples and dicts of them
+                2 | X = json.encode(L)
+                  |                 ^
+                the value, a function, is made at text.star:1:15"#]],
+    );
+    check(
+        r#"X = json.encode(image("Dockerfile", context = "//images"))"#,
+        &expect![[r#"
+            text.star:1:17: `json.encode` can't encode an image: give it `None`, bools, ints and strings, and lists, tuples and dicts of them
+                1 | X = json.encode(image("Dockerfile", context = "//images"))
+                  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        "X = json.encode(json)",
+        &expect![[r#"
+        text.star:1:17: `json.encode` can't encode the module `json`: give it `None`, bools, ints and strings, and lists, tuples and dicts of them
+            1 | X = json.encode(json)
+              |                 ^^^^"#]],
+    );
+    check(
+        "X = json.encode(x = 1)",
+        &expect![[r#"
+        text.star:1:17: `json.encode` takes no keyword argument `x`: give it 1 argument, by position
+            1 | X = json.encode(x = 1)
+              |                 ^"#]],
+    );
+    check(
+        "X = json.encode(1, 2)",
+        &expect![[r#"
+        text.star:1:5: `json.encode` takes 1 argument, and is given 2: give it 1 argument
+            1 | X = json.encode(1, 2)
+              |     ^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        "X = json.indent(\"1\")",
+        &expect![[r#"
+        text.star:1:10: `indent` of the module `json` is not in Pumpkin's Starlark: call one of `decode`, `encode`
+            1 | X = json.indent("1")
+              |          ^^^^^^
+            the receiver, the module `json`, is made at text.star:1:5"#]],
+    );
+    check(
+        "X = json.dumps(1)",
+        &expect![[r#"
+        text.star:1:10: `dumps` is no method of the module `json`: call one of `decode`, `encode`
+            1 | X = json.dumps(1)
+              |          ^^^^^
+            the receiver, the module `json`, is made at text.star:1:5"#]],
+    );
+    check(
+        "F = json.encode",
+        &expect![[r#"
+        text.star:1:10: a method named but not called is not in Pumpkin's Starlark: call it here, as `.encode(…)`
+            1 | F = json.encode
+              |          ^^^^^^"#]],
+    );
+    check(
+        "X = {json: 1}",
+        &expect![[r#"
+        text.star:1:6: the module `json` can't be a dict's key: key a dict with strings or ints
+            1 | X = {json: 1}
+              |      ^^^^"#]],
+    );
+    check(
+        "X = json.decode(\"1\", None)",
+        &expect![[r#"
+        text.star:1:5: `json.decode` with 2 arguments is not in Pumpkin's Starlark: give it 1 argument
+            1 | X = json.decode("1", None)
+              |     ^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        "X = json.decode(\"1\", default = None)",
+        &expect![[r#"
+        text.star:1:22: `json.decode`'s `default` is not in Pumpkin's Starlark: give `json.decode` 1 argument, by position
+            1 | X = json.decode("1", default = None)
+              |                      ^^^^^^^"#]],
+    );
+    check(
+        "X = json.decode(1)",
+        &expect![[r#"
+        text.star:1:17: `json.decode`'s argument can't be `1`: give a string
+            1 | X = json.decode(1)
+              |                 ^"#]],
+    );
+    // Each a Starlark literal of a text that `json.decode` refuses.
+    let texts = [
+        r#""""#,
+        r#"" \n""#,
+        r#""truefalse""#,
+        r#""nul""#,
+        r#""'a'""#,
+        r#""+1""#,
+        r#""NaN""#,
+        r#""-Infinity""#,
+        r#""1.5""#,
+        r#""1e3""#,
+        r#""-""#,
+        r#""00""#,
+        r#""-01""#,
+        r#""1.2.3""#,
+        r#""9223372036854775808""#,
+        r#""[1, 2""#,
+        r#""[1, 2, ]""#,
+        r#""[1, 2}""#,
+        r#"'{"a" 1}'"#,
+        r#"'{1: 2}'"#,
+        r#"'{"a": 1, "b": 2, "a": 3}'"#,
+        r#"'{"a": 1]'"#,
+        r#"'"abc'"#,
+        r#"'"a\\gc"'"#,
+        r#"'"ab\\u12"'"#,
+        r#"'"\\ud83d"'"#,
+        r#"'"\\ud83d\\u0041"'"#,
+        r#"'"\\ude39"'"#,
+        r#"'"a\tb"'"#,
+        r#""--1""#,
+        r#""-+1""#,
+        r#""-abc""#,
+        r#""-00""#,
+        r#""0123""#,
+        r#""-0123""#,
+        r#""000.123""#,
+        r#""-000.123""#,
+        r#""0x123""#,
+        r#"".5""#,
+        r#"".5e1""#,
+        r#""5.""#,
+        r#""5.e1""#,
+        r#""5e""#,
+        r#""5ee1""#,
+        r#""1e1e1""#,
+        r#""[1, 2 ""#,
+        r#""[1, 2, ""#,
+        r#""[1, 2, }""#,
+        r#"'{"one": 1'"#,
+        r#"'{"one": 1 "two": 2'"#,
+        r#"'{"one": 1,'"#,
+        r#"'{"one": 1, }'"#,
+        r#"'"\\u123"'"#,
+        r#"'"\\u123'"#,
+        r#"'"\\u1'"#,
+        r#"'"\\udc8d\\ud83d"'"#,
+    ];
+    let shown: Vec<String> = (texts.iter())
+        .map(|text| shown(Bounds::WORKFLOW, &format!("X = json.decode({text})")))
+        .collect();
+    expect![[r#"
+        text.star:1:17: `json.decode` reads the text's end at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("")
+              |                 ^^
+        text.star:1:17: `json.decode` reads the text's end at offset 2 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode(" \n")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `f` at offset 4 of its text, where JSON has the end of the text: give it JSON text
+            1 | X = json.decode("truefalse")
+              |                 ^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `n` at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("nul")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `'` at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("'a'")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `+` at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("+1")
+              |                 ^^^^
+        text.star:1:17: `json.decode` reads `N` at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("NaN")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-Infinity")
+              |                 ^^^^^^^^^^^
+        text.star:1:17: `json.decode` of `1.5`, at offset 0, a float, is not in Pumpkin's Starlark: give ints
+            1 | X = json.decode("1.5")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` of `1e3`, at offset 0, a float, is not in Pumpkin's Starlark: give ints
+            1 | X = json.decode("1e3")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-")
+              |                 ^^^
+        text.star:1:17: `json.decode` reads `00` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("00")
+              |                 ^^^^
+        text.star:1:17: `json.decode` reads `-01` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-01")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `1.2.3` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("1.2.3")
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` of `9223372036854775808`, at offset 0, outside -2^63 to 2^63 - 1, is not in Pumpkin's Starlark: give smaller ints, since ints are 64-bit
+            1 | X = json.decode("9223372036854775808")
+              |                 ^^^^^^^^^^^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 5 of its text, where JSON has `,` or `]`: give it JSON text
+            1 | X = json.decode("[1, 2")
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` reads `]` at offset 7 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("[1, 2, ]")
+              |                 ^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `}` at offset 5 of its text, where JSON has `,` or `]`: give it JSON text
+            1 | X = json.decode("[1, 2}")
+              |                 ^^^^^^^^
+        text.star:1:17: `json.decode` reads `1` at offset 5 of its text, where JSON has `:`: give it JSON text
+            1 | X = json.decode('{"a" 1}')
+              |                 ^^^^^^^^^
+        text.star:1:17: `json.decode` reads `1` at offset 1 of its text, where JSON has a key, a string: give it JSON text
+            1 | X = json.decode('{1: 2}')
+              |                 ^^^^^^^^
+        text.star:1:17: `json.decode` of an object that gives its key `"a"` a second time, at offset 17, is not in Pumpkin's Starlark: give each key once
+            1 | X = json.decode('{"a": 1, "b": 2, "a": 3}')
+              |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `]` at offset 7 of its text, where JSON has `,` or `}`: give it JSON text
+            1 | X = json.decode('{"a": 1]')
+              |                 ^^^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 4 of its text, where JSON has `"`, which closes the string: give it JSON text
+            1 | X = json.decode('"abc')
+              |                 ^^^^^^
+        text.star:1:17: `json.decode` reads `g` at offset 3 of its text, where JSON has an escape: `"`, `\`, `/`, `b`, `f`, `n`, `r`, `t` or `u`: give it JSON text
+            1 | X = json.decode('"a\\gc"')
+              |                 ^^^^^^^^^
+        text.star:1:17: `json.decode` reads `\"` at offset 7 of its text, where JSON has a hexadecimal digit, as `\u` takes four: give it JSON text
+            1 | X = json.decode('"ab\\u12"')
+              |                 ^^^^^^^^^^^
+        text.star:1:17: `json.decode` of a string that holds a UTF-16 surrogate of no pair, escaped at offset 1, is not in Pumpkin's Starlark: escape a character outside the Basic Multilingual Plane as a surrogate pair
+            1 | X = json.decode('"\\ud83d"')
+              |                 ^^^^^^^^^^^
+        text.star:1:17: `json.decode` of a string that holds a UTF-16 surrogate of no pair, escaped at offset 1, is not in Pumpkin's Starlark: escape a character outside the Basic Multilingual Plane as a surrogate pair
+            1 | X = json.decode('"\\ud83d\\u0041"')
+              |                 ^^^^^^^^^^^^^^^^^^
+        text.star:1:17: `json.decode` of a string that holds a UTF-16 surrogate of no pair, escaped at offset 1, is not in Pumpkin's Starlark: escape a character outside the Basic Multilingual Plane as a surrogate pair
+            1 | X = json.decode('"\\ude39"')
+              |                 ^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `\t` at offset 2 of its text, where JSON has a character of the string, or an escape for it: give it JSON text
+            1 | X = json.decode('"a\tb"')
+              |                 ^^^^^^^^
+        text.star:1:17: `json.decode` reads `--1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("--1")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `-+1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-+1")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-abc")
+              |                 ^^^^^^
+        text.star:1:17: `json.decode` reads `-00` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-00")
+              |                 ^^^^^
+        text.star:1:17: `json.decode` reads `0123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("0123")
+              |                 ^^^^^^
+        text.star:1:17: `json.decode` reads `-0123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-0123")
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` reads `000.123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("000.123")
+              |                 ^^^^^^^^^
+        text.star:1:17: `json.decode` reads `-000.123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("-000.123")
+              |                 ^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `x` at offset 1 of its text, where JSON has the end of the text: give it JSON text
+            1 | X = json.decode("0x123")
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` reads `.` at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode(".5")
+              |                 ^^^^
+        text.star:1:17: `json.decode` reads `.` at offset 0 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode(".5e1")
+              |                 ^^^^^^
+        text.star:1:17: `json.decode` reads `5.` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("5.")
+              |                 ^^^^
+        text.star:1:17: `json.decode` reads `5.e1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("5.e1")
+              |                 ^^^^^^
+        text.star:1:17: `json.decode` reads `5e` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("5e")
+              |                 ^^^^
+        text.star:1:17: `json.decode` reads `5ee1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("5ee1")
+              |                 ^^^^^^
+        text.star:1:17: `json.decode` reads `1e1e1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+            1 | X = json.decode("1e1e1")
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 6 of its text, where JSON has `,` or `]`: give it JSON text
+            1 | X = json.decode("[1, 2 ")
+              |                 ^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 7 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("[1, 2, ")
+              |                 ^^^^^^^^^
+        text.star:1:17: `json.decode` reads `}` at offset 7 of its text, where JSON has a value: give it JSON text
+            1 | X = json.decode("[1, 2, }")
+              |                 ^^^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 9 of its text, where JSON has `,` or `}`: give it JSON text
+            1 | X = json.decode('{"one": 1')
+              |                 ^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `\"` at offset 10 of its text, where JSON has `,` or `}`: give it JSON text
+            1 | X = json.decode('{"one": 1 "two": 2')
+              |                 ^^^^^^^^^^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 10 of its text, where JSON has a key, a string: give it JSON text
+            1 | X = json.decode('{"one": 1,')
+              |                 ^^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `}` at offset 11 of its text, where JSON has a key, a string: give it JSON text
+            1 | X = json.decode('{"one": 1, }')
+              |                 ^^^^^^^^^^^^^^
+        text.star:1:17: `json.decode` reads `\"` at offset 6 of its text, where JSON has a hexadecimal digit, as `\u` takes four: give it JSON text
+            1 | X = json.decode('"\\u123"')
+              |                 ^^^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 6 of its text, where JSON has a hexadecimal digit, as `\u` takes four: give it JSON text
+            1 | X = json.decode('"\\u123')
+              |                 ^^^^^^^^^
+        text.star:1:17: `json.decode` reads the text's end at offset 4 of its text, where JSON has a hexadecimal digit, as `\u` takes four: give it JSON text
+            1 | X = json.decode('"\\u1')
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` of a string that holds a UTF-16 surrogate of no pair, escaped at offset 1, is not in Pumpkin's Starlark: escape a character outside the Basic Multilingual Plane as a surrogate pair
+            1 | X = json.decode('"\\udc8d\\ud83d"')
+              |                 ^^^^^^^^^^^^^^^^^^"#]].assert_eq(&shown.join("\n"));
 }

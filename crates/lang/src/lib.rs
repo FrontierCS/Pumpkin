@@ -23,6 +23,7 @@ extern crate alloc;
 mod builtins;
 mod eval;
 mod ir;
+mod json;
 mod plan;
 mod problem;
 mod pumpkin;

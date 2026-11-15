@@ -565,7 +565,8 @@ impl<'l, L: Loader> Evaluation<'l, L> {
             | Kind::List(_)
             | Kind::Tuple(_)
             | Kind::Dict(_)
-            | Kind::Image(_)) => {
+            | Kind::Image(_)
+            | Kind::Module(_)) => {
                 let message = format!("{} can't be called: call a function", other.describe());
                 let fault = Fault::new(callee, message);
                 let callee = Value {
@@ -682,7 +683,8 @@ fn assign<'t>(
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_)) => {
+        | Kind::Image(_)
+        | Kind::Module(_)) => {
             let message = format!(
                 "{} can't be unpacked into names: give a list or a tuple of {}",
                 other.describe(),
