@@ -229,9 +229,9 @@ items (`Item`), and takes a stream's first output where `serve` does, by the sam
 allows and nothing else of the model provider's: none of the state it keeps, the tools it runs or
 the URLs it fetches. `serve` sends upstream only the body that a `Route` admitted, and only the
 headers of its API's own and those its entry lists, of which `schema` refuses any that carries a
-credential, picks an account, signs a request or frames a message. The refusal covers the three
-APIs' own headers and HTTP's framing; the headers that a gateway in front of a provider gives
-meaning to are the operator's to keep off, since no list here can name every gateway's.
+credential, picks an account, signs a request, frames a message or sets its coding (`HeaderName`).
+The headers that a gateway in front of a provider gives meaning to are the operator's to keep off,
+since no list here can name every gateway's.
 
 **Architecture Invariant:** it holds all that reaches a model provider, so the HTTP client, `ureq`,
 is in this crate's manifest alone. It knows no run: the runtime depends on it, never the reverse.
@@ -450,21 +450,19 @@ model provider's HTTP server. A helper that one crate's tests use stays in that 
 
 ### `xtask`
 
-The contributor tasks. `ci` runs the checks every change passes, among them the checks of Rust
-files, of documents and their figures (`tidy`), of `.star` files (`star`), of the figure of the
-crates, which `figure` draws from `cargo metadata`, and of the types of the page that `view`
-serves (`page`); `live` runs those that reach a real environment; `install` installs `pumpkin`
-beside the static `sandboxd`, `ec2-boot`, the Modal helper and the pinned buildifier; `tools`
-pins the contributor tools.
+The contributor tasks, which `cargo xtask --help` says. `ci` runs the checks every change passes,
+among them the checks of Rust files, of documents and their figures (`tidy`), of `.star` files
+(`star`), of the figure of the crates (`figure`) and of the types of the page that `view` serves
+(`page`); `live` runs those that reach a real environment; `install` installs `pumpkin` and what it
+needs beside it; `tools` pins the contributor tools.
 
 ### `deploy/pumpkin`
 
 The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. It fetches
-the commit that the repository's `.pumpkinversion` names and a checksum-pinned `rustup-init`,
-which installs the toolchain that the commit's `rust-toolchain.toml` pins, then runs
-`cargo xtask install --root` into the repository's `.pumpkin`, and the `pumpkin` it installed.
-It keeps a git bundle of that commit in the install, which the controller target sends, so a
-controller builds the same commit with no credentials of its own.
+the commit that the repository's `.pumpkinversion` names, and a pinned toolchain, as its header
+says, then runs `cargo xtask install --root` into the repository's `.pumpkin`, and the `pumpkin`
+it installed. It keeps a git bundle of that commit in the install, which the controller target
+sends, so a controller builds the same commit with no credentials of its own.
 
 **Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
 consumer builds what a checkout builds.
@@ -555,13 +553,11 @@ publishes, and the controller stops itself when idle.
 
 ### The run record and observability
 
-Each run has a directory of its own in the runs directory, `.pumpkin/runs` by default, whose files
-the `record` module lays out: the arguments that started it, the IR, the providers, the run log
-(`log.jsonl`), each accepted payload by its digest, each sandbox's outputs and logs, each model
-exchange, and `outcome.json`. The run log holds each event that the core decided
-on, with the actions it took, timed as the runtime observed it, so a run can be read back event by
-event. It holds each fact once, and leaves to their own files what the record keeps elsewhere: a
-command's output, a model exchange's bodies and the outcome. A reader takes the log in typed parts,
+Each run has a directory of its own in the runs directory, whose files the `record` module lays
+out. The run log (`log.jsonl`) holds each event that the core decided on, with the actions it
+took, timed as the runtime observed it, so a run can be read back event by event. It holds each
+fact once, and leaves to their own files what the record keeps elsewhere: a command's output, a
+model exchange's bodies and the outcome. A reader takes the log in typed parts,
 each whole or not at all: a part that this build can't read is listed as unread (`Readout`), so no
 content of the log fails a read.
 
@@ -570,8 +566,7 @@ only grows, a whole line at a time, and `ir.json` and `provider.json` are writte
 never again, so a reader of a live run reads only what the log gained (`LogFold`). A record
 appears only once its `driver.pid` is locked (`Lock`), and the lock is held until the run's last
 write, so `outcome.json` and the lock tell an ended run from a live or a lost one. Only the lock's
-holder writes the record; once it has let go, only `Record::reap` does, which records a lost run
-as failed and appends each sandbox it deleted to `reaps.jsonl`.
+holder writes the record; once it has let go, only `Record::reap` does.
 
 The record keeps every model exchange as the route saw it pass, which no sandbox can alter: each
 request as it went upstream, or as its client sent it if the route refused it, each conversation
@@ -580,33 +575,24 @@ answer as the upstream sent it. `pumpkin ls`, `wait`, `view` and a run's ending 
 record, through `Record` and its `Readout`, so whatever ran the run, a machine shows it the same
 way; a controller's ended runs are copied into the machine's runs directory. `ls` keeps a copy of
 what it reads of each run that was live on a controller, whose log is only ever a prefix of the
-controller's that ends at a line's end. A run's record is never replaced (run ids are unique, and a
-record's directory is made once), so the copy's length alone says what the controller has yet to
-send, and each listing sends only that.
+controller's that ends at a line's end, since a run's record is never replaced (run ids are
+unique, and a record's directory is made once); the `listing` module's doc says how a listing
+uses that.
 
 ### Configuration
 
-Choices that differ per run are flags, such as a task's `--arg`s; facts about a machine are its
-configuration, `~/.config/pumpkin/pumpkin.toml`, which `config` reads and `pumpkin help config`
-describes; and the environment gives only where the system keeps things, such as `HOME`, and
-what must stay out of argv, such as the grant a `sandboxd` presents. Every key is required
-but the few that its doc names, and any other key is refused. Secrets are never in the
-configuration: it names the files that hold the keys.
+Where a setting lives follows [`docs/dev/style.md`](docs/dev/style.md): facts about a machine are
+its configuration, `pumpkin.toml`, which `config` reads and `pumpkin help config` describes.
+Secrets are never in the configuration: it names the files that hold the keys.
 
-A machine's configuration names its Docker engine, its providers, each by name and kind, the
-gateway's addresses for sandboxes that dial it over a network, and the model upstreams. A machine
-whose runs go to a controller names `[controller]` instead of the engine, providers and gateway,
-so where its runs go has one home. The controller's jobs read their settings from an SSM parameter
-that `deploy/aws` writes, and the module's outputs give the client's `[controller]` table.
+A machine's runs go either to its own engine and providers or to its controller, so where they go
+has one home; `pumpkin help config` says what each names.
 
 ### Errors and next commands
 
-Errors follow [`docs/dev/style.md`](docs/dev/style.md). An error type exists only for the cases a
-caller branches on;
-any other error is a message, saying what is wrong and then what is expected, with what was being
-done added as it passes up (`Context`). A check of an input reports each problem at its place:
-`workflow::Workflow::parse` every one it finds, each at a JSON Pointer into the IR, and an
-evaluation's `Problems` each at a file, line and column.
+Errors follow [`docs/dev/style.md`](docs/dev/style.md). A check of an input reports each problem
+at its place: `workflow::Workflow::parse` every one it finds, each at a JSON Pointer into the IR,
+and an evaluation's `Problems` each at a file, line and column.
 
 What `pumpkin` says of a run's ending or a refusal ends with the commands to run next (`next`):
 each a line that a POSIX shell runs as it is, with absolute paths, such as how to run the task
@@ -615,10 +601,10 @@ left.
 
 ### Stop, cancel and reap
 
-A run stops short of its outcome by a signal or a failure (`Stopped`). The driver notes SIGINT,
-SIGTERM and SIGHUP (`stdx::signal`), and deletes the run's sandboxes before it exits.
-`pumpkin cancel` sends its driver SIGTERM, or SIGKILL with `--force`, waits for the run to end,
-and reaps it.
+A run stops short of its outcome by a signal or a failure (`Stopped`). The driver notes the
+signals that stop a run, which `pumpkin run --help` names (`stdx::signal`), and deletes the run's
+sandboxes before it exits. `pumpkin cancel` signals the driver, waits for the run to end, and reaps
+it.
 
 A run whose driver died is lost: its record has no `outcome.json` and no lock held. A reap,
 `Record::reap`, waits for a driver that still runs, then deletes, through `Sweep` alone, on each
@@ -643,34 +629,26 @@ the formatter by version and checksum, and each contributor tool by version.
 A panic is a bug, and it ends the whole process: release builds abort, and each binary that runs
 threads installs `stdx::abort_on_panic` first. Clippy's configuration bans `catch_unwind`, and it
 bans `Command::new` in favour of `stdx::process::command`, so every child gets only the environment
-that its caller states. A system call that `std` lacks goes through `rustix`, but `sigaction`,
-which `rustix` can't make either: `stdx::signal::catch` makes it through `libc`.
+that its caller states.
 
 ### What Pumpkin writes on a machine
 
-All that `pumpkin` writes on a machine is below its workspace's `.pumpkin` directory, the one that
-holds the `pumpkin` that runs (`Workspace`): the runs' records, unless `--runs` names another
-directory, what its builds and providers keep, each provider kind in a directory of its own that it
-is handed as it connects, and the connections that its commands share to a controller. Outside it
-are only the configuration and the tools' credentials, which it reads; the files that `fmt` and
-`lock` rewrite, which their command lines name; the Docker engine's images and its ledger of CPUs,
-which every run on the engine shares; and the machine's key to its controllers, with the host keys
-it pinned, in `~/.config/pumpkin/ssh/`. On a controller, the jobs also keep the store of the files
-that clients sent, the trees of links into it, and each job's own directory, below the controller
+All that `pumpkin` writes on a machine is below its workspace's `.pumpkin` directory
+(`Workspace`), as `pumpkin --help` says, and each provider kind keeps what it keeps in a directory
+of its own that it is handed as it connects. Outside it are only the configuration and the tools'
+credentials, which it reads; the runs' records, where `--runs` names another directory; the files
+that `fmt` and `lock` rewrite, which their command lines name; the Docker engine's images and its
+ledger of CPUs, which every run on the engine shares; and the machine's key to its controllers,
+with the host keys it pinned. On a controller, the jobs also keep the store of the files that
+clients sent, the trees of links into it, and each job's own directory, below the controller
 user's home, as the `job` module lays out.
 
 ### Testing
 
-[`docs/dev/testing.md`](docs/dev/testing.md) holds the rules. `cargo xtask ci` is pure: its tests
-reach no Docker engine,
-network or cloud, so the core, the gateway, the route and the runtime are tested with Pumpkin's
-own processes, loopback sockets and a simulated host and provider.
-`cargo xtask live` runs the checks that reach a real environment. `docker` runs the tests that
-need a Docker engine or the static `sandboxd`, which `ci` ignores. `ec2` and `modal`, which cost
-money, run `examples/smoke` through the controller that the contributor's configuration names,
-probe each sandbox's confinement, and check that the provider holds nothing of the run afterwards;
-with `--lost`, they lose the run once the agent holds its leases, and check that each sandbox ends
-by itself by the run's hard end and that `pumpkin reap` removes what is left. No test runs against
-an invented model of a cloud. The conformance suite in `test-support` runs through the `Provider`
-trait alone, on the runtime's simulated provider in `ci` and on the Docker provider in
-`live docker`; the EC2 and Modal providers have no test of their own but the smoke run.
+[`docs/dev/testing.md`](docs/dev/testing.md) holds the rules, and `cargo xtask --help` says what
+`ci` and `live` run. `cargo xtask ci` is pure: its tests reach no Docker engine, network or cloud,
+so the core, the gateway, the route and the runtime are tested with Pumpkin's own processes,
+loopback sockets and a simulated host and provider. No test runs against an invented model of a
+cloud. The conformance suite runs on the runtime's simulated provider in `ci` and on the Docker
+provider in `live docker`; the EC2 and Modal providers have no test of their own but the smoke
+run.

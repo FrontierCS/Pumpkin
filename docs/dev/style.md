@@ -12,7 +12,8 @@ assertions, lints and errors.
   what real runs need: a value fixed in every real run is a constant, not a parameter, and each
   setting has one way to set it
 - PREFER flags for per-run choices, `pumpkin.toml` for per-machine facts, and the environment
-  only for secrets that must stay out of `argv`
+  only for where the system keeps things, such as `HOME`, and for secrets that must stay out of
+  `argv`
 - PREFER moving branches up to the caller and loops down into functions that take a batch
 - BOUND whatever input or time can grow, each queue, buffer, read, retry and recursion, by a
   limit from precedent or the protocol, named as a constant at its home; a loop meant never to
