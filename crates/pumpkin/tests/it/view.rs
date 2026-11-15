@@ -2033,6 +2033,9 @@ fn places_steps_whatever_their_answers_order() {
         page.extend(sent);
         spans.extend(thread_spans(&reply));
         end = reply["end"].clone();
+        // The held trace, extended by each line, says what a view started now reads in one pass.
+        let fresh = Served::start(&scratch).get(&format!("{}/steps", trace(live)));
+        assert_eq!(served.get(&format!("{}/steps", trace(live))), fresh);
     }
     drop(driver);
     // The page that replaced each row sent again holds what a fresh read of the log says.
@@ -2110,41 +2113,60 @@ fn places_steps_whatever_their_answers_order() {
 }
 
 #[test]
-fn holds_the_traces_asked_last() {
+fn holds_each_live_trace_and_the_last_three_ended() {
     let scratch = Scratch::new("holds-traces");
-    let id = "20261110-210000-00000017";
-    let mut model = Model::new(&scratch.0.join("runs").join(id));
+    let (ended, live) = ("20261110-210000-00000017", "20261110-210000-00000018");
     let callers = ["agent", "job-0", "job-1", "job-2"];
     let response = json!({ "status": "completed", "output": [said("done")] }).to_string();
-    let log: Vec<Value> = (0..)
-        .zip(callers)
-        .map(|(n, caller)| {
-            let items = [user(&format!("ask {caller}"))];
-            let kept = model.keep(n, "input", &items, &[], json!({}), Some(&response));
-            answered(n + 1, caller, n, 200, kept, Some("responses"))
-        })
-        .collect();
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let outcome = Some(json!({ "state": "failed" }));
-    write_run(&scratch, id, since, &log, outcome, &lease_places(true));
+    for (id, outcome) in [(ended, Some(json!({ "state": "failed" }))), (live, None)] {
+        let mut model = Model::new(&scratch.0.join("runs").join(id));
+        let log: Vec<Value> = (0..)
+            .zip(callers)
+            .map(|(n, caller)| {
+                let items = [user(&format!("ask {caller}"))];
+                let kept = model.keep(n, "input", &items, &[], json!({}), Some(&response));
+                answered(n + 1, caller, n, 200, kept, Some("responses"))
+            })
+            .collect();
+        write_run(&scratch, id, since, &log, outcome, &lease_places(true));
+    }
+    let driver = File::open(scratch.0.join("runs").join(live).join("driver.pid")).unwrap();
+    driver.lock().unwrap();
     let served = Served::start(&scratch);
-    let path = |caller: &str| format!("/api/runs/{id}/trace/{caller}/steps");
+    let path = |id: &str, caller: &str| format!("/api/runs/{id}/trace/{caller}/steps");
     // Each caller's held read costs the bytes of its request alone.
     let mut held = std::collections::BTreeMap::new();
-    for caller in callers {
-        served.get(&path(caller));
-        let before = served.read_bytes();
-        let reply = served.get(&path(caller));
-        held.insert(caller, (served.read_bytes() - before, reply));
+    for id in [ended, live] {
+        for caller in callers {
+            served.get(&path(id, caller));
+            let before = served.read_bytes();
+            let reply = served.get(&path(id, caller));
+            held.insert((id, caller), (served.read_bytes() - before, reply));
+        }
     }
     let mut said = Vec::new();
-    for caller in ["job-1", "job-0", "job-2", "agent", "job-1"] {
+    let asked = [
+        (ended, "job-1"),
+        (live, "agent"),
+        (ended, "job-0"),
+        (ended, "job-2"),
+        (live, "job-0"),
+        (ended, "agent"),
+        (live, "job-1"),
+        (ended, "job-1"),
+        (live, "job-2"),
+    ];
+    for (id, caller) in asked {
         let before = served.read_bytes();
-        let reply = served.get(&path(caller));
-        let (bytes, first) = &held[caller];
-        assert_eq!(&reply, first, "{caller}");
+        let reply = served.get(&path(id, caller));
+        let (bytes, first) = &held[&(id, caller)];
+        assert_eq!(&reply, first, "{id} {caller}");
         let read = served.read_bytes() - before != *bytes;
-        said.push(format!("{caller} asked: its record read again: {read}"));
+        let run = if id == live { "live" } else { "ended" };
+        said.push(format!(
+            "{run} run's {caller} asked: its record read again: {read}"
+        ));
     }
     check(
         &scratch,
@@ -2152,11 +2174,15 @@ fn holds_the_traces_asked_last() {
         false,
         &[],
         &expect![[r#"
-            job-1 asked: its record read again: false
-            job-0 asked: its record read again: false
-            job-2 asked: its record read again: false
-            agent asked: its record read again: true
-            job-1 asked: its record read again: true"#]],
+            ended run's job-1 asked: its record read again: false
+            live run's agent asked: its record read again: false
+            ended run's job-0 asked: its record read again: false
+            ended run's job-2 asked: its record read again: false
+            live run's job-0 asked: its record read again: false
+            ended run's agent asked: its record read again: true
+            live run's job-1 asked: its record read again: false
+            ended run's job-1 asked: its record read again: true
+            live run's job-2 asked: its record read again: false"#]],
     );
 }
 

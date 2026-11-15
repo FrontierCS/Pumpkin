@@ -42,8 +42,8 @@ mod stats;
 pub(super) use ask::{Answer, Asked, asked};
 pub(super) use ops::Ops;
 
-/// The most traces that the view holds, those read last: a page shows one, and a person opens a
-/// few side by side.
+/// The most traces that the view holds, those read last, besides those of live runs whose folds
+/// it holds: a page shows one, and a person opens a few side by side.
 pub(super) const TRACE_PASSES: usize = 3;
 
 /// The most steps up a thread that an output's call is looked for in, past its own step's parent:
@@ -301,15 +301,17 @@ impl Trace {
             touched.push(index);
         }
         self.taken = exchanges.lines.len();
-        let in_flight = (self.steps.iter().enumerate())
-            .filter(|(_, step)| !step.placed)
-            .map(|(index, _)| index);
-        touched.extend(in_flight);
-        let mut done = vec![false; self.steps.len()];
         let mut placed = Vec::new();
         for index in touched {
-            if !std::mem::replace(&mut done[index], true) && self.update(index, record, exchanges) {
+            if self.update(index, record, exchanges) {
                 placed.push(index);
+            }
+        }
+        // After the answered steps, whose answers name the API that a step in flight is read by,
+        // so that a pass reads it alike however much of the log it takes at a time.
+        for index in 0..self.steps.len() {
+            if !self.steps[index].placed {
+                self.read_so_far(index, record);
             }
         }
         // In the order of their requests, so that a pass makes the same forest however much of
@@ -332,30 +334,31 @@ impl Trace {
         }
     }
 
-    /// Reads step `index` as far as the log says of it; whether this call read its request, which
-    /// is then to be placed in the forest.
+    /// Reads the answer so far of step `index`, in flight, by the API its caller's answers have;
+    /// nothing while no answer of the caller says which.
+    fn read_so_far(&mut self, index: usize, record: &Record) {
+        let Some(api) = self.api else {
+            return;
+        };
+        let step = &mut self.steps[index];
+        step.api = Some(api);
+        if let Ok(bytes) = record.model_response(step.request, &Value::Null) {
+            let reply = read::answer(api, &bytes);
+            (step.answer, step.stop, step.whole) = (reply.items, reply.stop, reply.whole);
+        }
+    }
+
+    /// Reads step `index` once the log says it was answered; whether this call read its request,
+    /// which is then to be placed in the forest.
     fn update(&mut self, index: usize, record: &Record, exchanges: &Exchanges) -> bool {
         let request = self.steps[index].request;
         let Some(said) = exchanges.by_request.get(&request) else {
             return false;
         };
+        if said.answered.is_none() || self.steps[index].placed {
+            return false;
+        }
         let event = said.event();
-        if said.answered.is_none() {
-            // In flight: its answer so far, by the API its caller's answers have.
-            let Some(api) = self.api else {
-                return false;
-            };
-            let step = &mut self.steps[index];
-            step.api = Some(api);
-            if let Ok(bytes) = record.model_response(request, &Value::Null) {
-                let reply = read::answer(api, &bytes);
-                (step.answer, step.stop, step.whole) = (reply.items, reply.stop, reply.whole);
-            }
-            return false;
-        }
-        if self.steps[index].placed {
-            return false;
-        }
         let kept = &event["kept"];
         let api = api_of(&event);
         let step = &mut self.steps[index];

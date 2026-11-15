@@ -127,8 +127,8 @@ struct View {
     reads: u64,
     /// How many folds of a run the view has made ([`Held::made`]).
     made: u64,
-    /// The traces of runs' callers read last, the last read last, at most
-    /// [`trace::TRACE_PASSES`] ([`trace::Trace`]).
+    /// The traces of runs' callers, the last read last, as [`trace::TRACE_PASSES`] bounds them
+    /// ([`trace::Trace`]).
     trace: Vec<trace::Trace>,
     page: page::Page,
 }
