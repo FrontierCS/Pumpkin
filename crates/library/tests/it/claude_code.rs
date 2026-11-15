@@ -10,8 +10,7 @@ use schema::ir;
 use super::{check, evaluated, layer, route, show};
 
 /// A task's entry that gives `claude_code()` each of its arguments from an `--arg` of its name,
-/// `max_output_tokens` only if given, and builds its agent on the image of `//images/Dockerfile`,
-/// which the judge runs on too.
+/// and builds its agent on the image of `//images/Dockerfile`, which the judge runs on too.
 const ENTRY: &str = r#"
 load("@pumpkin//harness/claude_code/claude_code.star", "claude_code")
 
@@ -21,7 +20,7 @@ WORKSPACE = arg("workspace", str)
 PROMPT = arg("prompt", str)
 DEADLINE = arg("deadline_seconds", int)
 GRACE = arg("finalize_grace_seconds", int)
-MAX_OUTPUT_TOKENS = arg("max_output_tokens", int, default = None)
+MAX_OUTPUT_TOKENS = arg("max_output_tokens", int)
 
 BASE = image("Dockerfile", context = "//images")
 
@@ -75,11 +74,9 @@ const NAMES: [&str; 7] = [
     "max_output_tokens",
 ];
 
-/// The arguments of `case`, by their names, as `ENTRY` takes them; an empty
-/// `max_output_tokens` is not given.
+/// The arguments of `case`, by their names, as `ENTRY` takes them.
 fn args(case: &[&str; 7]) -> Args {
     let given: Vec<String> = (NAMES.iter().zip(case))
-        .filter(|(name, value)| !(**name == "max_output_tokens" && value.is_empty()))
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     Args::parse(given.iter().map(String::as_str)).unwrap()
@@ -102,7 +99,7 @@ fn roles() {
             FCS_PROMPT,
             "18000",
             "60",
-            "",
+            "64000",
         ],
         [
             "glm-5.3",
@@ -122,10 +119,18 @@ fn roles() {
             "0",
             "1",
         ],
-        ["model-small", "high", "/", "Go.", "60", "0", ""],
+        ["model-small", "high", "/", "Go.", "60", "0", "32000"],
     ];
     for effort in ["low", "medium", "xhigh"] {
-        cases.push(["model-small", effort, "/workspace", "Go.", "60", "0", ""]);
+        cases.push([
+            "model-small",
+            effort,
+            "/workspace",
+            "Go.",
+            "60",
+            "0",
+            "32000",
+        ]);
     }
     let mut shown = String::new();
     for (index, case) in cases.iter().enumerate() {
@@ -152,9 +157,9 @@ fn roles() {
     check(
         &shown,
         &expect![[r#"
-            claude-opus-5-5 max /workspace :
+            claude-opus-5-5 max /workspace 64000:
             argv: /harness/claude-code-2.1.296/claude --print --model claude-opus-5-5 --effort max --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
-            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_MODEL=claude-opus-5-5 ANTHROPIC_SMALL_FAST_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_FABLE_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_SONNET_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-opus-5-5 CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5 CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=claude-opus-5-5 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_MODEL=claude-opus-5-5 ANTHROPIC_SMALL_FAST_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_FABLE_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_SONNET_MODEL=claude-opus-5-5 ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-opus-5-5 CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5 CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=claude-opus-5-5 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
             dir 0700 /workspace/.claude-code/config
@@ -185,33 +190,33 @@ fn roles() {
             dir 0700 /srv/my "work" dir/.claude-code/config
             dir 0700 /srv/my "work" dir/.claude-code/tmp
             route: messages vendor/"quoted"\model
-            model-small high / :
+            model-small high / 32000:
             argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort high --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
-            env: HOME=/.claude-code CLAUDE_CONFIG_DIR=/.claude-code/config TMPDIR=/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+            env: HOME=/.claude-code CLAUDE_CONFIG_DIR=/.claude-code/config TMPDIR=/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /
             dir 0700 /.claude-code
             dir 0700 /.claude-code/config
             dir 0700 /.claude-code/tmp
             route: messages model-small
-            model-small low /workspace :
+            model-small low /workspace 32000:
             argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort low --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
-            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
             dir 0700 /workspace/.claude-code/config
             dir 0700 /workspace/.claude-code/tmp
             route: messages model-small
-            model-small medium /workspace :
+            model-small medium /workspace 32000:
             argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort medium --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
-            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
             dir 0700 /workspace/.claude-code/config
             dir 0700 /workspace/.claude-code/tmp
             route: messages model-small
-            model-small xhigh /workspace :
+            model-small xhigh /workspace 32000:
             argv: /harness/claude-code-2.1.296/claude --print --model model-small --effort xhigh --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
-            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+            env: HOME=/workspace/.claude-code CLAUDE_CONFIG_DIR=/workspace/.claude-code/config TMPDIR=/workspace/.claude-code/tmp ANTHROPIC_BASE_URL=http://127.0.0.1:11235 ANTHROPIC_API_KEY=pumpkin ANTHROPIC_MODEL=model-small ANTHROPIC_DEFAULT_MODEL=model-small ANTHROPIC_SMALL_FAST_MODEL=model-small ANTHROPIC_DEFAULT_FABLE_MODEL=model-small ANTHROPIC_DEFAULT_OPUS_MODEL=model-small ANTHROPIC_DEFAULT_SONNET_MODEL=model-small ANTHROPIC_DEFAULT_HAIKU_MODEL=model-small CLAUDE_CODE_SUBAGENT_MODEL=model-small CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=model-small DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000
             cwd: /workspace
             dir 0700 /workspace/.claude-code
             dir 0700 /workspace/.claude-code/config
@@ -224,14 +229,22 @@ fn roles() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn refusals() {
-    let given = ["model-small", "high", "/workspace", "Go.", "60", "0", ""];
+    let given = [
+        "model-small",
+        "high",
+        "/workspace",
+        "Go.",
+        "60",
+        "0",
+        "32000",
+    ];
     let mut refused = Vec::new();
     for (effort, workspace, prompt, max) in [
-        ("extreme", "/workspace", "Go.", ""),
-        ("High", "/workspace", "Go.", ""),
-        ("high", "/pumpkin/home", "Go.", ""),
-        ("high", "work", "Go.", ""),
-        ("high", "/workspace", "", ""),
+        ("extreme", "/workspace", "Go.", "32000"),
+        ("High", "/workspace", "Go.", "32000"),
+        ("high", "/pumpkin/home", "Go.", "32000"),
+        ("high", "work", "Go.", "32000"),
+        ("high", "/workspace", "", "32000"),
         ("high", "/workspace", "Go.", "0"),
     ] {
         let case = [given[0], effort, workspace, prompt, given[4], given[5], max];
@@ -250,6 +263,10 @@ fn refusals() {
             "finalize_grace_seconds = GRACE,",
             "finalize_grace_seconds = None,",
         ),
+        (
+            "max_output_tokens = MAX_OUTPUT_TOKENS,",
+            "max_output_tokens = None,",
+        ),
         ("model = MODEL,", "model = 5,"),
         ("prompt = PROMPT,", "prompt = [PROMPT],"),
         ("deadline_seconds = DEADLINE,", "deadline_seconds = \"60\","),
@@ -264,53 +281,53 @@ fn refusals() {
     check(
         &refused.join("\n"),
         &expect![[r#"
-            @pumpkin//harness/claude_code/claude_code.star:75:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
-                75 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
+                77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:75:9: fail: `High` is not a reasoning effort: use one of low, medium, high, xhigh, max
-                75 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `High` is not a reasoning effort: use one of low, medium, high, xhigh, max
+                77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:83:13: `/pumpkin/home/.claude-code` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                83 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
+            @pumpkin//harness/claude_code/claude_code.star:85:13: `/pumpkin/home/.claude-code` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+                85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
             task.star:6:13: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
                 6 | WORKSPACE = arg("workspace", str)
                   |             ^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/command/cwd
-            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: Claude Code runs only on a prompt: give a string that is not empty
-                77 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
+            @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
+                79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:79:9: fail: `0` is not a number of tokens: give a positive int
-                79 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
+            @pumpkin//harness/claude_code/claude_code.star:81:9: fail: `0` is not a number of tokens: give a positive int
+                81 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:14:9
             task.star:15:5: a value of `image`'s `contexts` can't be `None`: give an image, as `image()` makes
                 15 |     None,
                    |     ^^^^
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:95:21: `+` can't take a string and `None`: give it two ints, two strings, two lists or two tuples
-                95 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
+            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and `None`: give it two ints, two strings, two lists or two tuples
+                97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
-                the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:95:10
+                the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
                 the right operand, `None`, is made at task.star:16:13
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:75:69: `format` of `None` is not in Pumpkin's Starlark: give it an int or a string
-                75 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/claude_code/claude_code.star:77:69: `format` of `None` is not in Pumpkin's Starlark: give it an int or a string
+                77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |                                                                     ^^^^^^
                 the argument, `None`, is made at task.star:17:14
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:83:52: `+` can't take `None` and a string: give it two ints, two strings, two lists or two tuples
-                83 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
+            @pumpkin//harness/claude_code/claude_code.star:85:52: `+` can't take `None` and a string: give it two ints, two strings, two lists or two tuples
+                85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |                                                    ^
                 the left operand, `None`, is made at task.star:18:17
-                the right operand, `"/.claude-code"`, is made at @pumpkin//harness/claude_code/claude_code.star:83:54
+                the right operand, `"/.claude-code"`, is made at @pumpkin//harness/claude_code/claude_code.star:85:54
                 in `claude_code()`, called at task.star:14:9
-            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: Claude Code runs only on a prompt: give a string that is not empty
-                77 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
+            @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
+                79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:14:9
             task.star:20:24: `deadline_seconds` can't be `None`: expected an int
@@ -321,10 +338,16 @@ fn refusals() {
                 21 |     finalize_grace_seconds = None,
                    |                              ^^^^
                 the IR's /roles/0/runtime/agent/finalize_grace_seconds
-            @pumpkin//harness/claude_code/claude_code.star:95:21: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
-                95 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
+            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take `None` and an int: give it two ints or two strings
+                80 |     if max_output_tokens < 1:
+                   |                          ^
+                the left operand, `None`, is made at task.star:22:25
+                the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
+                in `claude_code()`, called at task.star:14:9
+            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
+                97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
-                the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:95:10
+                the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
                 the right operand, `5`, is made at task.star:16:13
                 in `claude_code()`, called at task.star:14:9
             task.star:19:14: `stdin` can't be a list: expected a string
@@ -335,11 +358,11 @@ fn refusals() {
                 20 |     deadline_seconds = "60",
                    |                        ^^^^
                 the IR's /roles/0/runtime/agent/deadline_seconds
-            @pumpkin//harness/claude_code/claude_code.star:78:56: `<` can't take a string and an int: give it two ints or two strings
-                78 |     if max_output_tokens != None and max_output_tokens < 1:
-                   |                                                        ^
+            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take a string and an int: give it two ints or two strings
+                80 |     if max_output_tokens < 1:
+                   |                          ^
                 the left operand, `"128000"`, is made at task.star:22:25
-                the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:78:58
+                the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
                 in `claude_code()`, called at task.star:14:9"#]],
     );
 }

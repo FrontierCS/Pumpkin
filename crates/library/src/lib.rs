@@ -5,12 +5,27 @@
 //! A harness is a directory of the library, `harness/<name>/`, such as `harness/codex/`: a
 //! `.star` file of its name, which exports one function, and the `Dockerfile` that adds the
 //! harness to an agent's image, which that function's `image()` builds with the agent's image as
-//! the named context `base`. The function takes that image by position and, by keyword, at least
-//! `model`, `effort`, `workspace`, `prompt`, `deadline_seconds` and `finalize_grace_seconds`, and
-//! gives a dict of an agent role's `image`, `runtime` and `egress`.
+//! the named context `base`. The function gives a dict of an agent role's `image`, `runtime` and
+//! `egress`. Every harness's function takes `base` by position and these by keyword, each in the
+//! same sense, and its own keywords, which its file documents with what it adds to these:
+//!
+//! - `model`: the model's name, which the route names, and the model the harness calls.
+//! - `effort`: how hard the model reasons, one of the values the harness's file lists.
+//! - `workspace`: the absolute path the harness works in, which holds its home.
+//! - `prompt`: the task the harness works on, a string.
+//! - `deadline_seconds`: how long the work phase may last, a positive int.
+//! - `finalize_grace_seconds`: how long the harness may keep running after a final submission.
+//! - `max_output_tokens`: how many tokens one of the model's answers may hold, a positive int.
+//! - `context_tokens`: how many tokens the model's context window holds, a positive int.
+//!
+//! A harness that uses either requires it: its own value for a model it doesn't know is a guess.
 //!
 //! `harness/node/` holds no harness: its `node()` gives the image of the Node.js that harnesses
 //! written in JavaScript run on, which their recipes take as a named context.
+
+// The arguments every harness takes are stated once, so that a task picks a harness by naming its
+// function and its own keywords, as Bazel states the attributes its rules share on one page
+// (https://bazel.build/reference/be/common-definitions) and each rule's page only its own.
 
 // The files are a table, as Buck2 bundles a test cell
 // (https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_external_cells_bundled/src/lib.rs#L42-L77),

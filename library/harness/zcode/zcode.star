@@ -31,25 +31,24 @@ def zcode(
         prompt,
         deadline_seconds,
         finalize_grace_seconds,
-        context_tokens,
-        output_tokens):
+        max_output_tokens,
+        context_tokens):
     """An agent role's `image`, `runtime` and `egress`, for ZCode on `model` at `effort`.
 
     ZCode runs once, as `zcode --prompt`, unattended, with its files readable by the agent's
-    user alone.
+    user alone. It takes the arguments every harness takes, `max_output_tokens` and
+    `context_tokens`, in the sense `crates/library` gives them, and none of its own.
 
     Args:
-      base: the agent's image, which `image()` makes, to which the image adds ZCode and Node.
-      model: the model's name, which the route names, and the one model ZCode calls.
-      effort: how hard the model reasons, the request's `reasoning_effort`: one of `_EFFORTS`.
-      workspace: the absolute path ZCode works in, which holds its home.
-      prompt: the task ZCode works on, a string that is not empty.
-      deadline_seconds: how long the work phase may last, a positive int.
-      finalize_grace_seconds: how long ZCode may keep running after a final submission.
-      context_tokens: how many tokens the model's context window holds, a positive int, by
-        which ZCode decides when to compact the conversation.
-      output_tokens: how many tokens one of the model's answers may hold at most, a positive
-        int.
+      base: as every harness; the image adds Node too.
+      model: as every harness.
+      effort: as every harness; the request's `reasoning_effort`: one of `_EFFORTS`.
+      workspace: as every harness.
+      prompt: as every harness; not empty.
+      deadline_seconds: as every harness.
+      finalize_grace_seconds: as every harness.
+      max_output_tokens: as every harness that takes it; the request's `max_tokens`.
+      context_tokens: as every harness that takes it.
 
     Returns:
       A dict of `image`, `base` with ZCode added; `runtime`, the agent's runtime that runs it;
@@ -62,8 +61,8 @@ def zcode(
         fail("ZCode runs only on a prompt: give a string that is not empty")
     if context_tokens < 1:
         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
-    if output_tokens < 1:
-        fail("`{}` is not a number of tokens: give a positive int".format(output_tokens))
+    if max_output_tokens < 1:
+        fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
 
     # A normalized absolute path ends in `/` only if it is `/`. The home is not `.zcode`, where
     # ZCode looks for a project's own configuration, plans and workflows.
@@ -116,7 +115,7 @@ def zcode(
                             "map": "{\"reasoning_effort\": reasoningLevel}",
                         },
                         "maxOutputTokens": {
-                            "max": output_tokens,
+                            "max": max_output_tokens,
                             "map": "{\"max_tokens\": maxOutputTokens}",
                         },
                     },

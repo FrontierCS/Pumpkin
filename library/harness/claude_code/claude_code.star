@@ -49,22 +49,24 @@ def claude_code(
         prompt,
         deadline_seconds,
         finalize_grace_seconds,
-        max_output_tokens = None):
+        max_output_tokens):
     """An agent role's `image`, `runtime` and `egress`, for Claude Code on `model` at `effort`.
 
     Claude Code runs once, as `claude --print`, on the prompt it reads on its standard input,
-    with its files readable by the agent's user alone.
+    with its files readable by the agent's user alone. It takes the arguments every harness takes,
+    and `max_output_tokens`, in the sense `crates/library` gives them, and none of its own.
 
     Args:
-      base: the agent's image, which `image()` makes, to which the image adds Claude Code.
-      model: the model's name, which the route names, and every model Claude Code calls.
-      effort: how hard the model reasons, Claude Code's `--effort`: one of `_EFFORTS`.
-      workspace: the absolute path Claude Code works in, which holds its home.
-      prompt: what Claude Code reads on its standard input, a string that is not empty.
-      deadline_seconds: how long the work phase may last, a positive int.
-      finalize_grace_seconds: how long Claude Code may keep running after a final submission.
-      max_output_tokens: if given, a positive int, how many tokens one of the model's answers may
-        hold at most, in place of Claude Code's own cap.
+      base: as every harness.
+      model: as every harness; every model Claude Code calls.
+      effort: as every harness; Claude Code's `--effort`: one of `_EFFORTS`.
+      workspace: as every harness.
+      prompt: as every harness; what Claude Code reads on its standard input, not empty.
+      deadline_seconds: as every harness.
+      finalize_grace_seconds: as every harness.
+      max_output_tokens: as every harness that takes it; Claude Code's
+        `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, which it lowers to the model's cap, 128,000 for a model
+        it can't resolve (https://code.claude.com/docs/en/env-vars).
 
     Returns:
       A dict of `image`, `base` with Claude Code added; `runtime`, the agent's runtime that runs
@@ -75,7 +77,7 @@ def claude_code(
         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
     if prompt == None or prompt == "":
         fail("Claude Code runs only on a prompt: give a string that is not empty")
-    if max_output_tokens != None and max_output_tokens < 1:
+    if max_output_tokens < 1:
         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
 
     # A normalized absolute path ends in `/` only if it is `/`. The home is not `.claude`, where
@@ -99,9 +101,8 @@ def claude_code(
         "DISABLE_TELEMETRY=1",
         "DISABLE_ERROR_REPORTING=1",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS=" + str(max_output_tokens),
     ]
-    if max_output_tokens != None:
-        env = env + ["CLAUDE_CODE_MAX_OUTPUT_TOKENS=" + str(max_output_tokens)]
     return {
         "image": image("Dockerfile", context = "@pumpkin//harness/claude_code/layer", contexts = {"base": base}),
         "runtime": {"agent": {
