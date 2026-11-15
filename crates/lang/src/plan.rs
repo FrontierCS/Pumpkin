@@ -2,9 +2,9 @@
 //! them, which the IR's types and rules check once the images have IDs.
 //!
 //! The images are declared in the order the calls of `image()` run, so that each comes after the
-//! images it is built on, and an image declared again, equal to one before, is
-//! that one. An image's problems, from its check or its build, are at the call that declares it,
-//! with the calls it is in.
+//! images it is built on, and an image declared again, equal to one before, is that one. An
+//! image's problems, from its check or its build, are at the call that declares it, with the calls
+//! it is in.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -20,15 +20,15 @@ use crate::problem::{Fault, Finding, Problem, Problems, Sources, list};
 use crate::value::{ImageId, Span, Value};
 use crate::{Args, Label};
 
+// What `pumpkin`'s functions have recorded of an evaluation so far.
 pub(crate) struct Planned<'a> {
     pub(crate) args: &'a Args,
     /// The entry file's directory below the root, such as `tasks/bench`, or empty for one at the
     /// root.
     pub(crate) package: String,
     pub(crate) workflow: Option<WorkflowCall>,
-    /// The name of each arg an `arg()` call declares, with that call.
+    /// Each arg an `arg()` call has declared, with its first call.
     pub(crate) declared: BTreeMap<String, Span>,
-    /// The images declared, in order.
     pub(crate) images: Vec<Declaration>,
 }
 
@@ -44,15 +44,13 @@ impl<'a> Planned<'a> {
         }
     }
 
-    /// The name of each `--arg` given that no `arg()` call has declared so far, sorted.
+    // The name of each `--arg` given that no `arg()` call has declared so far, sorted.
     pub(crate) fn given_undeclared(&self) -> impl Iterator<Item = &str> {
         (self.args.0.keys())
             .map(String::as_str)
             .filter(|name| !self.declared.contains_key(*name))
     }
 
-    /// The problem with each `--arg` given that no `arg()` call declares, a problem of the entry's
-    /// at `entry`, once the evaluation has run.
     fn undeclared(&self, entry: &Label) -> Vec<Problem> {
         let declared: Vec<&str> = self.declared.keys().map(String::as_str).collect();
         let expected = if declared.is_empty() {
@@ -70,27 +68,27 @@ impl<'a> Planned<'a> {
     }
 }
 
-/// What a `workflow()` call gives: a dict of its keyword arguments, the IR's fields.
+// What a `workflow()` call gives: a dict of its keyword arguments, the IR's fields.
 pub(crate) struct WorkflowCall {
     pub(crate) at: Span,
     /// Made at the call, with each key at its keyword.
     pub(crate) fields: Value,
 }
 
+// An image, and where it was first declared, for the problems that building it finds.
 pub(crate) struct Declaration {
     pub(crate) image: Image,
     place: Place,
 }
 
-/// `recipe`'s image, given each image of `contexts` as the named context of its key.
+// Two images that are equal are one: declaring the same one again gives the first.
 #[derive(PartialEq)]
 pub(crate) struct Image {
     pub(crate) recipe: Recipe,
     pub(crate) contexts: BTreeMap<String, ImageId>,
 }
 
-/// Where a call is made: its span, and the calls it is in, innermost first, each as the note that
-/// names it, with that call's span.
+// A call that declares an image, and the calls of functions that it is in, innermost first.
 pub(crate) struct Place {
     pub(crate) at: Span,
     pub(crate) calls: Vec<(String, Span)>,
@@ -105,8 +103,6 @@ impl Place {
     }
 }
 
-/// The image that `image` is among `images`, declared at `place`, unless an equal one is
-/// declared already.
 pub(crate) fn declare(images: &mut Vec<Declaration>, image: Image, place: Place) -> ImageId {
     if let Some(found) = images.iter().position(|declared| declared.image == image) {
         return ImageId(found);
@@ -115,7 +111,7 @@ pub(crate) fn declare(images: &mut Vec<Declaration>, image: Image, place: Place)
     ImageId(images.len() - 1)
 }
 
-/// An image built from a recipe, a Dockerfile, which `image()` declares.
+/// What builds an image, which `image()` declares.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Recipe {
     /// The directory the image is built from, with `mounts`.
@@ -128,25 +124,24 @@ pub struct Recipe {
     pub target: Option<recipe::Stage>,
     /// Each build argument's value, by its name.
     pub args: BTreeMap<String, String>,
-    /// The repository the image is built in, a name that Docker takes for a repository:
-    /// `pumpkin/` and the recipe's directory below the task's root, or `pumpkin-library/` and its
-    /// directory below the standard library's.
+    /// The repository that the image is tagged in, a name Docker takes for one: `pumpkin/`, the
+    /// context's path below the task's root and the recipe's directory in the context, or
+    /// `pumpkin-library/` and the same, for a context of the standard library.
     pub repository: String,
 }
 
-/// An image to build, as [`Plan::build`] asks for it, `B` being what a build gives: `recipe`'s
-/// image, given each image of `contexts`, each built before, as the named context of its key.
+/// An image to build, as [`Plan::build`] asks for it, `B` being what a build gives: its recipe,
+/// and each image of its named contexts, built before, by its name.
 #[derive(Debug)]
 pub struct Declared<'p, B> {
     pub recipe: &'p Recipe,
     pub contexts: BTreeMap<&'p str, &'p B>,
 }
 
-/// What an evaluation gives: the images it declares and the workflow that names them.
+/// What an evaluation declares: its images, and its workflow.
 pub struct Plan {
     sources: Sources,
     workflow: WorkflowCall,
-    /// No two equal, and each after the image it is built on.
     images: Vec<Declaration>,
 }
 
@@ -179,11 +174,12 @@ impl Plan {
         Err(Problems::new(sources, problems))
     }
 
-    /// `lint`'s findings in each file the evaluation read, given its label and text, in order.
+    /// Calls `lint` with the label and text of each file the evaluation read, and gives its
+    /// findings as problems.
     ///
     /// # Panics
     ///
-    /// If a finding's span isn't within its file's text, on characters' boundaries.
+    /// A finding's span isn't within its file's text, on characters' boundaries.
     pub fn lint<E>(
         &self,
         mut lint: impl FnMut(&Label, &str) -> Result<Vec<Finding>, E>,
@@ -210,9 +206,8 @@ impl Plan {
         }
     }
 
-    /// The recipe of each image that a recipe builds, in the order declared, with its named
-    /// contexts, each by the index among the plan's images of the image it names, which no other
-    /// index names, as no two images of a plan are equal.
+    /// Each image's recipe, in the order the images were declared, with the images that each
+    /// recipe names its contexts by: each name's image, as its index in this order.
     pub fn recipes(&self) -> impl Iterator<Item = (&Recipe, BTreeMap<&str, usize>)> {
         (self.images.iter()).map(|Declaration { image, .. }| {
             let Image { recipe, contexts } = image;
@@ -221,9 +216,9 @@ impl Plan {
         })
     }
 
-    /// Checks each image a recipe builds with `recipes`, which gives the problems it finds (such
-    /// as a recipe that is no file) given the recipe and the image's named contexts, sorted; and
-    /// gives the workflow, its images standing as IDs of their own.
+    /// Checks each image's recipe with `recipes`, which gives the problems it finds (such as a
+    /// recipe that is no file), sorted, given the recipe and the names of its contexts; and gives
+    /// the workflow, its images standing as IDs of their own, which no build gave.
     ///
     /// # Errors
     ///
@@ -251,15 +246,15 @@ impl Plan {
         }
     }
 
-    /// The workflow, once each image is built, the IR naming each by its build's ID. `step` gets
-    /// each image whose build may start, by index, at most `jobs` running; it starts them, giving
-    /// each ended one's result by index, waiting if none has ended and some run. After a failure
-    /// none starts; those running end. Panics if `step` gives an index not given, twice, or none.
+    /// The workflow, with every image built through `step`, which `build_for` describes.
     ///
     /// # Errors
     ///
-    /// Each image whose build failed, with why, at the call that declares it; or, as
-    /// [`Plan::check`] finds them, the workflow's problems.
+    /// Each build that fails, at the call that declares its image, or the workflow's problems.
+    ///
+    /// # Panics
+    ///
+    /// `step` gives no build while some run, or one that it wasn't given or gave already.
     pub fn build<B: AsRef<ir::Image>>(
         self,
         jobs: NonZeroUsize,
@@ -280,13 +275,15 @@ impl Plan {
         workflow.map_err(|problems| Problems::new(self.sources, problems))
     }
 
-    /// What `then` gives, called once with every image whose recipe `wanted` picks, in order,
-    /// once those they are built on are built as [`Plan::build`] builds them with `step`, and no
-    /// other; the picked images themselves aren't built. It panics as [`Plan::build`] does.
+    /// What `then` gives, called once with each image `wanted` picks, in order, with its built
+    /// contexts. The images they are built on are built, and no other, not even the picked ones.
     ///
-    /// # Errors
+    /// `step` is given images to build, and gives the builds that ended by index, at least one
+    /// while any run, waiting if given none. At most `jobs` run, and after a failure none starts.
     ///
-    /// Each image whose build failed, with why, at the call that declares it.
+    /// # Panics
+    ///
+    /// `step` gives no build while some run, or one that it wasn't given or gave already.
     pub fn build_for<B, T>(
         &self,
         jobs: NonZeroUsize,
@@ -297,8 +294,8 @@ impl Plan {
         let picked: Vec<bool> = (self.images.iter())
             .map(|Declaration { image, .. }| wanted(&image.recipe))
             .collect();
-        // Each image is declared after those it is built on, so a walk from the last marks all
-        // that a picked image needs.
+        // Each image is declared after those it is built on, so that walking back from the last
+        // reaches an image after every image that needs it.
         let mut needed = Vec::from_iter((0..self.images.len()).map(|_| false));
         for (index, Declaration { image, .. }) in self.images.iter().enumerate().rev() {
             if picked[index] || needed[index] {
@@ -316,8 +313,8 @@ impl Plan {
         Ok(then(declared))
     }
 
-    /// Each image that `needed` marks, by its index, built as [`Plan::build`] says by `step`,
-    /// and `None` for each other.
+    // Each image that `needed` marks, by its index, built as `build_for` says by `step`, and `None`
+    // for each other.
     fn built<B>(
         &self,
         jobs: NonZeroUsize,
@@ -326,6 +323,7 @@ impl Plan {
     ) -> Result<Vec<Option<B>>, Problems> {
         let count = self.images.len();
         let mut done: Vec<Option<B>> = (0..count).map(|_| None).collect();
+        // What isn't needed counts as started, so it never starts.
         let mut started = Vec::from_iter((0..count).map(|index| !needed[index]));
         let mut running = 0_usize;
         let mut failed: Vec<(usize, String)> = Vec::new();
@@ -386,7 +384,6 @@ impl Plan {
     }
 }
 
-/// The build of `image`, given `done`, which holds each image it is built on.
 fn declared<'p, B>(image: &'p Image, done: &'p [Option<B>]) -> Declared<'p, B> {
     let built = |base: &ImageId| match &done[base.0] {
         Some(built) => built,
@@ -401,8 +398,8 @@ fn declared<'p, B>(image: &'p Image, done: &'p [Option<B>]) -> Declared<'p, B> {
     }
 }
 
-/// The ID that stands in for the image at `place` among a plan's before it is built: a manifest
-/// digest, as a built one's is, and no other image's.
+// The ID that stands for the image at `place` among a plan's before it is built: a manifest
+// digest, as a built one's is, and no other image's.
 fn stand_in(place: usize) -> ir::Image {
     match ir::Image::try_from(format!("sha256:{:064x}", place + 1)) {
         Ok(image) => image,

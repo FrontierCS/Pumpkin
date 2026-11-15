@@ -14,11 +14,13 @@
 //! - a dict's keys are strings or ints, as `crate::value::Key` has them, and no method changes a
 //!   value, as none does in the subset.
 //!
-//! Each takes its arguments by position, as the specification has it, but `format`, which takes
-//! keyword ones too.
+//! Each takes its arguments by position, but `format`, which takes keyword ones too.
 //!
 //! `json` is the module of Bazel's and starlark-go's Starlark, with its functions `encode` and
 //! `decode`, as [`crate::json`] has them, and without `encode_indent` and `indent`.
+//!
+//! What the subset leaves out is refused where it is named, with what to write instead, not told
+//! to be unknown: a function by [`left_out`], a method by the lists of those it leaves out.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -47,8 +49,7 @@ pub(crate) fn predeclared(name: &str) -> Option<Kind> {
     }
 }
 
-/// The refusal of `name`, a builtin of the specification's that the subset leaves out, if it is
-/// one.
+// The refusal of the name of a Starlark function that the subset leaves out, if it is one.
 pub(crate) fn left_out(name: &str) -> Option<String> {
     let (why, instead) = match name {
         "print" => (" whose output nothing reads", "show a value with `fail`"),
@@ -68,22 +69,22 @@ pub(crate) fn left_out(name: &str) -> Option<String> {
     ))
 }
 
+// A call's arguments, evaluated.
 pub(crate) struct Call<'a> {
+    /// The whole call, where a fault of the call points.
     pub(crate) at: Span,
-    /// Each positional argument, with the span of the expression that gives it.
     pub(crate) positional: Vec<(Span, Value)>,
-    /// Each keyword argument, no two named alike.
     pub(crate) keyword: Vec<(&'a Name, Value)>,
     pub(crate) budget: &'a Budget,
 }
 
-/// The argument that `call` gives each of `function`'s parameters, `params`, of which the first
-/// `positional` may be given by position, or `None`.
+/// Each of `params`, in order, with the argument that `call` gives it by position or by name, or
+/// `None` where it gives none. Only the first `positional` of `params` may be given by position.
 ///
 /// # Errors
 ///
-/// The call gives more arguments by position, names no parameter by a keyword, or gives one
-/// both by position and by keyword.
+/// More arguments by position than `positional`, a keyword that names none of `params`, or a
+/// parameter given twice.
 pub(crate) fn place(
     function: &str,
     params: &[&str],
@@ -131,8 +132,6 @@ pub(crate) fn lacks(function: &str, missing: &[&str], at: Span) -> Fault {
     Fault::new(at, message)
 }
 
-/// The error of the positional argument at `at`, one more than `function`, whose parameters
-/// are `params`, takes: `positional` of them.
 fn surplus(function: &str, params: &[&str], positional: usize, at: Span) -> Fault {
     let message = match (positional, params.first()) {
         (_, None) => format!("`{function}` takes no argument: drop it"),
@@ -147,13 +146,11 @@ fn surplus(function: &str, params: &[&str], positional: usize, at: Span) -> Faul
     Fault::new(at, message)
 }
 
-/// The note that names a call of `def`, followed by the call's place.
 pub(crate) fn called(def: &Def) -> String {
     format!("in `{}()`, called at", def.name.text)
 }
 
-/// The specification's predeclared functions that the subset has (spec.md, "Built-in constants
-/// and functions").
+// The functions in scope in every file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Universal {
     Bool,
@@ -211,7 +208,6 @@ impl Universal {
         }
     }
 
-    /// What `call` of this function gives, as the module doc has it.
     pub(crate) fn call(self, call: &Call<'_>) -> Result<Value, Fault> {
         let name = self.name();
         let [argument] = positional::<1>(name, self.takes(), call)?;
@@ -258,7 +254,6 @@ impl Universal {
     }
 }
 
-/// `n`, a length, as an int.
 fn count(n: usize) -> i64 {
     let Ok(n) = i64::try_from(n) else {
         unreachable!(
@@ -269,8 +264,10 @@ fn count(n: usize) -> i64 {
     n
 }
 
-/// The arguments that Starlark lets a call of a builtin give, in any of its implementations:
-/// from `min` to `max` by position, and by keyword those `keywords` name.
+// What Starlark lets a call of a builtin give, in any of its implementations: from `min` to `max`
+// arguments by position, and by keyword those `keywords` name. The subset takes the arguments it
+// needs by position only, so a call that Starlark accepts and the subset does not is refused, and
+// any other call is Starlark's own error.
 #[derive(Clone, Copy)]
 struct Takes {
     min: usize,
@@ -279,7 +276,6 @@ struct Takes {
 }
 
 impl Takes {
-    /// Exactly `n` by position, as the subset takes them too.
     const fn exactly(n: usize) -> Self {
         Self {
             min: n,
@@ -289,13 +285,7 @@ impl Takes {
     }
 }
 
-/// The `N` arguments of `call`, a call of `function`, which takes them by position, of those
-/// that Starlark lets it give, `starlark`.
-///
-/// # Errors
-///
-/// The call gives a keyword argument, or another number of them: refused if Starlark takes
-/// them.
+// The `N` arguments by position that `function` takes, or the fault of a call that gives other.
 fn positional<'c, const N: usize>(
     function: &str,
     starlark: Takes,
@@ -330,7 +320,6 @@ fn positional<'c, const N: usize>(
     })
 }
 
-/// `n` arguments, for a message: "no argument", "1 argument", "2 arguments".
 fn arguments(n: usize) -> String {
     match n {
         0 => String::from("no argument"),
@@ -338,8 +327,7 @@ fn arguments(n: usize) -> String {
     }
 }
 
-/// The error of `argument`, given to `function`, which takes `takes` instead, as Starlark's
-/// `function` does.
+// The error of `argument`, which Starlark's `function` rejects too: it takes `takes`.
 fn rejected(function: &str, argument: &(Span, Value), takes: &str) -> Fault {
     let (at, value) = argument;
     let message = format!(
@@ -349,8 +337,8 @@ fn rejected(function: &str, argument: &(Span, Value), takes: &str) -> Fault {
     origin(Fault::new(*at, message), "the argument", value)
 }
 
-/// The refusal of `argument`, which Starlark's `function` takes, and the subset's takes `takes`
-/// instead.
+// The refusal of `argument`, which Starlark's `function` takes, and the subset's takes `takes`
+// instead.
 fn narrowed(function: &str, argument: &(Span, Value), takes: &str) -> Fault {
     let (at, value) = argument;
     let message = refusal(
@@ -360,8 +348,8 @@ fn narrowed(function: &str, argument: &(Span, Value), takes: &str) -> Fault {
     origin(Fault::new(*at, message), "the argument", value)
 }
 
-/// `fault`, with a note that names `what`, `value`, and where it is made, unless it is made
-/// where the fault is.
+/// `fault`, with a note on where `value`, which `what` names, was made, unless the fault is
+/// already there.
 pub(crate) fn origin(fault: Fault, what: &str, value: &Value) -> Fault {
     if value.span == fault.at() {
         return fault;
@@ -370,8 +358,7 @@ pub(crate) fn origin(fault: Fault, what: &str, value: &Value) -> Fault {
     fault.note(note, Some(value.span))
 }
 
-/// The string `str` makes of `argument`, given to `function`: an int in decimal, or a string
-/// itself.
+// What `str` makes of the argument: an int in decimal, or a string itself.
 fn text(function: &str, argument: &(Span, Value)) -> Result<String, Fault> {
     match &argument.1.kind {
         Kind::Int(int) => Ok(format!("{int}")),
@@ -425,8 +412,6 @@ fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
     Err(origin(Fault::new(*at, message), "the argument", value))
 }
 
-/// The elements of `argument`, a list, a tuple, or the keys of a dict, sorted, all ints or all
-/// strings, counted in `budget`.
 fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fault> {
     let (at, value) = argument;
     let elements: Vec<Value> = match &value.kind {
@@ -460,7 +445,7 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
         );
         return Err(origin(Fault::new(*at, message), "the argument", value));
     };
-    // Ints and strings, of one kind, compare as their keys do; the sort is stable.
+    // Ints alone, or strings alone, compare as their keys do; the sort is stable.
     keyed.sort_by(|(left, _), (right, _)| left.cmp(right));
     let elements = keyed.into_iter().map(|(_, element)| element).collect();
     Nested::new(elements, *at, budget)
@@ -468,7 +453,6 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
 
 type DictMethod = fn(&str, &Dict, &Call<'_>) -> Result<Value, Fault>;
 
-/// What a call of a string's method makes of the string, the receiver's, given the method's name.
 type StringMethod = fn(&str, &str, &(Span, Value), &Call<'_>) -> Result<Kind, Fault>;
 
 const DICT_METHODS: [(&str, DictMethod); 4] = [
@@ -487,20 +471,18 @@ const STRING_METHODS: [(&str, StringMethod); 6] = [
     ("startswith", starts_with),
 ];
 
-/// What a call of a function of a module gives.
 type ModuleMethod = fn(&Call<'_>) -> Result<Value, Fault>;
 
 const JSON_METHODS: [(&str, ModuleMethod); 2] = [("decode", decode), ("encode", encode)];
 
-/// The functions of Bazel's and starlark-go's `json` module that the subset leaves out.
+// The functions of Bazel's and starlark-go's `json` module that the subset leaves out.
 const JSON_LEFT_OUT: [&str; 2] = ["encode_indent", "indent"];
 
-/// Starlark's methods that would change a dict, and a list.
+// Methods that would change a value, which no value allows.
 const DICT_CHANGING: [&str; 5] = ["clear", "pop", "popitem", "setdefault", "update"];
 const LIST_CHANGING: [&str; 6] = ["append", "clear", "extend", "insert", "pop", "remove"];
 
-/// Starlark's other methods of a list, and of a string, which the subset leaves out (spec.md,
-/// "Built-in methods").
+// Starlark's other methods of a list, and of a string, which the subset leaves out.
 const LIST_LEFT_OUT: [&str; 1] = ["index"];
 const STRING_LEFT_OUT: [&str; 26] = [
     "capitalize",
@@ -531,9 +513,8 @@ const STRING_LEFT_OUT: [&str; 26] = [
     "upper",
 ];
 
-/// What `call` of the method `name` of `receiver`, with the span of the expression that gives
-/// it, gives (spec.md, "Built-in methods"), as the module doc has it. A method the subset doesn't
-/// give the receiver is refused.
+// What calling the method `name` on the receiver gives. A method that the subset lacks is refused
+// with the receiver's methods, or with a function to give the value to, where it has none.
 pub(crate) fn method(
     receiver: &(Span, Value),
     name: &Name,
@@ -604,7 +585,6 @@ pub(crate) fn method(
     ))
 }
 
-/// The refusal of `name`, a method that would change a `kind`, a value that never changes.
 fn changes(name: &Name, kind: &str, instead: &str) -> Fault {
     let message = refusal(
         format_args!("`{}`, which would change the {kind},", name.text),
@@ -700,14 +680,11 @@ fn format(_: &str, text: &str, receiver: &(Span, Value), call: &Call<'_>) -> Res
     Ok(Kind::Str(Text::new(&text, call.at, call.budget)?))
 }
 
-/// The string `separator.join(argument)` makes: `argument`'s strings, `separator` between each
-/// two.
 fn join(name: &str, separator: &str, _: &(Span, Value), call: &Call<'_>) -> Result<Kind, Fault> {
     let [argument] = positional::<1>(name, Takes::exactly(1), call)?;
     let (at, value) = argument;
     let items = match &value.kind {
         Kind::List(items) | Kind::Tuple(items) => items,
-        // Starlark joins a dict's keys.
         Kind::Dict(_) => return Err(narrowed(name, argument, "a list or a tuple of strings")),
         Kind::None
         | Kind::Bool(_)
@@ -743,7 +720,7 @@ fn split(name: &str, text: &str, _: &(Span, Value), call: &Call<'_>) -> Result<K
         keywords: &["sep", "maxsplit"],
     };
     let [separator] = positional::<1>(name, starlark, call)?;
-    // Some of Starlark's implementations split at white space given `None`.
+    // `None` splits at whitespace in Starlark.
     if let Kind::None = separator.1.kind {
         return Err(narrowed(name, separator, "a string"));
     }
@@ -778,15 +755,13 @@ fn ends_with(name: &str, text: &str, _: &(Span, Value), call: &Call<'_>) -> Resu
     Ok(Kind::Bool(text.ends_with(affix(name, suffix)?)))
 }
 
-/// What Starlark lets a call of `startswith` or `endswith` give: an affix, and where in the
-/// string to start and end.
+// Starlark's `startswith` and `endswith` take the affix, and then where to start and stop.
 const AFFIX: Takes = Takes {
     min: 1,
     max: 3,
     keywords: &[],
 };
 
-/// The string that `argument`, the affix given to `function`, `startswith` or `endswith`, is.
 fn affix<'v>(function: &str, argument: &'v (Span, Value)) -> Result<&'v str, Fault> {
     // Starlark tests each affix of a tuple.
     if let Kind::Tuple(_) = argument.1.kind {
@@ -803,8 +778,6 @@ fn replace(name: &str, text: &str, _: &(Span, Value), call: &Call<'_>) -> Result
     };
     let [old, new] = positional::<2>(name, starlark, call)?;
     let old_text = text_of(name, old)?;
-    // Starlark's implementations count a string's elements differently, so each puts `new` in
-    // other places between them.
     if old_text.is_empty() {
         let message = refusal(
             "`replace` of an empty string, which Starlark's implementations insert between \
@@ -829,7 +802,6 @@ fn text_of<'v>(function: &str, argument: &'v (Span, Value)) -> Result<&'v str, F
     )
 }
 
-/// The string that `value`, given as `what` by the expression at `at`, is.
 pub(crate) fn string(what: impl fmt::Display, at: Span, value: &Value) -> Result<&str, Fault> {
     let Kind::Str(text) = &value.kind else {
         let message = format!("{what} can't be {}: give a string", value.shown());
@@ -838,9 +810,8 @@ pub(crate) fn string(what: impl fmt::Display, at: Span, value: &Value) -> Result
     Ok(text)
 }
 
-/// The string `template.format(…)`, `call`, makes (spec.md, "string·format"): each `{}`, `{0}`
-/// or `{name}` field replaced by the argument it names, as `str` makes it, and `{{` and `}}` by
-/// `{` and `}`. The template is the string `receiver` is, whose faults are at its expression.
+// The string `receiver.format(…)` makes (spec.md, "string·format"): each field replaced by the
+// argument it names, as `str` makes it. The faults of the template are at `receiver`.
 fn format_text(template: &str, receiver: &(Span, Value), call: &Call<'_>) -> Result<String, Fault> {
     let reject = |message: &str| unformatted(receiver, message);
     let mut text = String::new();
@@ -880,25 +851,21 @@ fn format_text(template: &str, receiver: &(Span, Value), call: &Call<'_>) -> Res
     Ok(text)
 }
 
-/// The error of `receiver`, the string a `format` call's fields are read from, saying
-/// `message`.
 fn unformatted(receiver: &(Span, Value), message: &str) -> Fault {
     let (at, template) = receiver;
     origin(Fault::new(*at, message), "the string", template)
 }
 
-/// The fields of a `format` call's string, `receiver`, read so far.
 struct Fields<'c, 'a> {
     receiver: &'c (Span, Value),
     call: &'c Call<'a>,
-    /// Whether the fields are numbered, once the first has settled it.
+    /// Whether the fields are numbered, once one says: numbered and automatic ones don't mix.
     numbered: Option<bool>,
-    /// The argument the next `{}` names.
+    /// The argument that the next automatic field takes.
     next: usize,
 }
 
 impl Fields<'_, '_> {
-    /// The argument that `field`, the text of the next field between its braces, names.
     fn argument(&mut self, field: &str) -> Result<(Span, Value), Fault> {
         let reject = |message: String| unformatted(self.receiver, &message);
         let shown = escape(field);
@@ -916,7 +883,6 @@ impl Fields<'_, '_> {
             };
             return Ok((name.span, value.clone()));
         }
-        // Some of Starlark's implementations read a `-` before zeros as a number's sign.
         if let Some(zeros) = field.strip_prefix('-')
             && !zeros.is_empty()
             && zeros.bytes().all(|byte| byte == b'0')

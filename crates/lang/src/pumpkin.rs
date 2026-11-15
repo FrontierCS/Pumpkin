@@ -5,7 +5,8 @@
 //! `model_url()`, and `MAX_MODEL_REQUESTS`, the int of its `MAX_MODEL_REQUESTS_IN_FLIGHT`.
 //!
 //! Each function takes its arguments as a `def` of its signature would. All but `arg()` refuse a
-//! call made while a file other than the entry loads ([`Site::in_entry`]).
+//! call made while a file other than the entry loads ([`Site::in_entry`]). Each records what it
+//! declares in [`Planned`].
 
 use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::Entry as Slot;
@@ -25,7 +26,7 @@ use crate::value::{
 };
 use crate::{Label, Root, is_component};
 
-/// `MAX_MODEL_REQUESTS_IN_FLIGHT`, as an int of the language.
+// `MAX_MODEL_REQUESTS_IN_FLIGHT`, as an int of the language.
 #[expect(
     clippy::cast_possible_wrap,
     reason = "the assertion below holds the cap within an int"
@@ -72,7 +73,6 @@ impl Pumpkin {
         }
     }
 
-    /// What `call` of this function, made at `site`, gives, adding what it plans to `planned`.
     pub(crate) fn call(
         self,
         call: &Call<'_>,
@@ -88,15 +88,18 @@ impl Pumpkin {
     }
 }
 
+// Where a function of Pumpkin's is called.
 pub(crate) struct Site<'e> {
+    /// The file whose statements are running.
     pub(crate) module: &'e Label,
     pub(crate) entry: bool,
+    /// The functions running, outermost first, each with its call.
     pub(crate) calls: &'e [(Rc<Def>, Span)],
 }
 
 impl Site<'_> {
-    /// Refuses the call of `function`, at `at`, unless the entry file's statements run, whatever
-    /// function makes it, as no file may depend on what loads it (spec.md, "Module execution").
+    // A file may not depend on what loads it (spec.md, "Module execution"), so what a task
+    // declares, the entry file's own statements declare, and loading a file declares nothing.
     fn in_entry(&self, function: Pumpkin, at: Span) -> Result<(), Fault> {
         if self.entry {
             return Ok(());
@@ -118,16 +121,16 @@ impl Site<'_> {
     }
 }
 
-/// The parameters of one of Pumpkin's functions, by name: `P` that a call may give by position
-/// or by keyword, then `R` and `O` that it gives by keyword only; each of the `P` and the `R` is
-/// required.
+// The parameters of one of Pumpkin's functions, by name: `P` that a call may give by position or
+// by keyword, then `R` and `O` that it gives by keyword only; each of the `P` and the `R` is
+// required.
 struct Params<const P: usize, const R: usize, const O: usize> {
     positional: [&'static str; P],
     required: [&'static str; R],
     optional: [&'static str; O],
 }
 
-/// The arguments a call gives [`Params`], in their order.
+// The arguments a call gives [`Params`], in their order.
 struct Bound<const P: usize, const R: usize, const O: usize> {
     positional: [Value; P],
     required: [Value; R],
@@ -135,8 +138,8 @@ struct Bound<const P: usize, const R: usize, const O: usize> {
 }
 
 impl<const P: usize, const R: usize, const O: usize> Params<P, R, O> {
-    /// The arguments that `call` gives `function`, whose parameters these are; refused as
-    /// [`place`] refuses, or if a required one is missing.
+    // The arguments that `call` gives `function`, whose parameters these are; refused as [`place`]
+    // refuses, or if a required one is missing.
     fn bind(&self, function: Pumpkin, call: &Call<'_>) -> Result<Bound<P, R, O>, Fault> {
         let name = function.name();
         let params: Vec<&str> = (self.positional.iter())
@@ -170,13 +173,8 @@ impl<const P: usize, const R: usize, const O: usize> Params<P, R, O> {
     }
 }
 
-/// `workflow(*, name, roles, score)`: the evaluation's workflow is the one whose IR has these
-/// fields, at the version this crate reads. It returns `None`.
-///
-/// # Errors
-///
-/// A call made while a file other than the entry loads; a second call, where `planned` holds the
-/// first; or arguments that nest too deep in the dict of them.
+// `workflow(*, name, roles, score)`: the evaluation's workflow is the one whose IR has these
+// fields, at the version this crate reads. It returns `None`.
 fn workflow(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
     const PARAMS: Params<0, 3, 0> = Params {
         positional: [],
@@ -212,15 +210,9 @@ fn workflow(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Resu
     })
 }
 
-/// `arg(name, type, *, default)`: the value of the `--arg` named `name`, its text read as `type`,
-/// the builtin `str`, `int` or `bool`, reads it: whole, in decimal as `int` reads a string, or
-/// `true` or `false`; or else `default`, of that type or `None`. A value given is made at the call,
-/// and a default keeps its place. No `--arg` gives `None`: an arg is `None` only left out.
-///
-/// # Errors
-///
-/// A name no Starlark name, another type or a default of another; an arg declared already; or a
-/// value `type` can't read, or none without a default, noting each `--arg` no `arg()` declared.
+// `arg(name, type, *, default)`: the value of `--arg <name>=<value>`, read as `type`, which is
+// `str`, `int` or `bool`. A call with no `default` requires the arg, and `None` is a default for
+// any type.
 fn arg(call: &Call<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
     const PARAMS: Params<2, 0, 1> = Params {
         positional: ["name", "type"],
@@ -277,7 +269,6 @@ fn arg(call: &Call<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
     })
 }
 
-/// The type of an arg's value, which `arg()`'s `type` names by its builtin.
 #[derive(Clone, Copy)]
 enum Type {
     Str,
@@ -315,7 +306,6 @@ impl Type {
         })
     }
 
-    /// The builtin that names the type, and a value of it, for a message.
     fn words(self) -> (&'static str, &'static str) {
         match self {
             Self::Str => ("str", "a string"),
@@ -325,8 +315,8 @@ impl Type {
     }
 
     fn default(self, default: Value) -> Result<Value, Fault> {
-        // `None` leaves the program to pick the value of an arg not given, from what it knows,
-        // such as a task's own values.
+        // `None` leaves the program to pick the value of an arg not given, from what it knows, such
+        // as a task's own values.
         let fits = matches!(
             (self, &default.kind),
             (_, Kind::None)
@@ -345,8 +335,6 @@ impl Type {
         Err(Fault::new(default.span, message))
     }
 
-    /// The value of this type that `text`, given as `--arg <name>=<text>`, is, made at `at`,
-    /// counted in `budget`.
     fn read(self, name: &str, text: &str, at: Span, budget: &Budget) -> Result<Value, Fault> {
         let shown = quote(text);
         let kind = match self {
@@ -376,15 +364,11 @@ impl Type {
     }
 }
 
-/// `image(recipe, *, context = ".", mount = {}, target = None, args = {}, contexts = {})`: the
-/// [`Recipe`]'s image that the Dockerfile at `recipe`, in `context`, builds, with each directory
-/// of `mount` at its path in the context, and its stage `target`, in any case, given each string
-/// of `args` and image of `contexts` as the build argument and the named context of its key.
-///
-/// # Errors
-///
-/// A call made while a file other than the entry loads; a directory that names none below the
-/// root, or can't name a Docker repository; or another argument that isn't as above.
+// `image(recipe, *, context = ".", mount = {}, target = None, args = {}, contexts = {})`: the
+// image that `recipe`, a file of `context`, builds, with each directory of `mount` at its path in
+// the context, and its stage `target`, in any case, given each string of `args` and image of
+// `contexts` as the build argument and the named context of its key. The context may not be the
+// root.
 fn image(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
     const PARAMS: Params<1, 0, 5> = Params {
         positional: ["recipe"],
@@ -448,9 +432,6 @@ fn image(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<
     })
 }
 
-/// The entries of `dict`, `image()`'s argument `what`, if given, which gives a dict of `values`,
-/// each by `key`, a string: each entry, with its key; refused if `dict` is no dict, or, as the
-/// iterator reaches it, a key is no string.
 fn keyed<'v>(
     what: &'static str,
     dict: Option<&'v Value>,
@@ -556,9 +537,8 @@ fn build_args(args: Option<&Value>) -> Result<BTreeMap<String, String>, Fault> {
         .collect()
 }
 
-/// The directory that `text`, a path written at `at`, names in the package `package`, below the
-/// task's root: `.` is the package, a path below it is relative to it, `//` starts one below the
-/// root, and `@pumpkin//` one below the standard library's.
+// The directory that `text` names, as `image` is given one: `.` is the entry file's, a path is
+// below it, `//` starts one at the root, and `@pumpkin//` one of the standard library.
 fn directory(package: &str, text: &str, at: Span) -> Result<Label, Fault> {
     // A root's name, which a component can't start with.
     if text.starts_with('@') && text.contains("//") {
@@ -581,6 +561,7 @@ fn directory(package: &str, text: &str, at: Span) -> Result<Label, Fault> {
     })
 }
 
+// A path below the context, as a recipe's or a mount's.
 fn in_context(text: &str, at: Span) -> Result<RelativePath, Fault> {
     let path = RelativePath::try_from(String::from(text)).ok();
     let path = path.filter(|path| path.as_str().split('/').all(is_component));
@@ -594,24 +575,21 @@ fn in_context(text: &str, at: Span) -> Result<RelativePath, Fault> {
     })
 }
 
-/// The repository below which `image()`'s images are built, so that they are told apart from
-/// other images on the engine.
+// The first component of an image's repository: `pumpkin` for a task's directories, which tells
+// its images from others on the engine, and `pumpkin-library` for the standard library's, so that
+// no task's directory names the repository of one of them.
 const REPOSITORIES: &str = "pumpkin";
 
-/// The repository below which `image()`'s images of the standard library's directories are
-/// built, so that no task's directory names the repository of one of them.
 const LIBRARY_REPOSITORIES: &str = "pumpkin-library";
 
-/// The most characters that a Docker repository's name, below its registry, may hold.
-// `RepositoryNameTotalLengthMax` in Docker's reference grammar.
+// Docker's longest repository name, in characters:
+// https://github.com/distribution/distribution/blob/f49f48736337e8fc9f7816a044819b0f7967d557/vendor/github.com/distribution/reference/reference.go#L38-L39
 const MAX_REPOSITORY: usize = 255;
 
-/// Refuses `directory`, a path of the directories that hold a recipe, written at `at`, unless
-/// each of them can name a part of a Docker repository, as the recipe's image's repository is
-/// the recipe's directory below its root, below [`REPOSITORIES`] or [`LIBRARY_REPOSITORIES`].
+// A repository name is made of its directories, so each must be a component of Docker's grammar:
+// lowercase letters and digits, joined by one `.`, one or two `_`, or dashes:
+// https://github.com/distribution/distribution/blob/f49f48736337e8fc9f7816a044819b0f7967d557/vendor/github.com/distribution/reference/regexp.go#L42-L52
 fn names_repository(directory: &str, at: Span) -> Result<(), Fault> {
-    // Docker's reference grammar's `path-component`: lowercase letters and digits, in runs
-    // joined by one `.`, one or two `_`, or any number of dashes.
     let alphanumeric = |char: char| char.is_ascii_lowercase() || char.is_ascii_digit();
     let names = |component: &str| {
         component.starts_with(alphanumeric)
@@ -632,8 +610,6 @@ fn names_repository(directory: &str, at: Span) -> Result<(), Fault> {
     Err(Fault::new(at, message))
 }
 
-/// `repository`, the repository of the image declared at `at`, unless it is too long for Docker
-/// to name.
 fn fits(repository: String, at: Span) -> Result<String, Fault> {
     // The repository is ASCII, as each of its parts is.
     let length = repository.len();
@@ -648,12 +624,8 @@ fn fits(repository: String, at: Span) -> Result<String, Fault> {
     Err(Fault::new(at, message))
 }
 
-/// `package_name()`: the entry file's directory below the root, such as `tasks/bench`, or the
-/// empty string for an entry at the root.
-///
-/// # Errors
-///
-/// A call given an argument, or made while a file other than the entry loads.
+// `package_name()`: the entry file's directory below the root, such as `tasks/bench`, or the empty
+// string for an entry at the root.
 fn package_name(
     call: &Call<'_>,
     site: &Site<'_>,

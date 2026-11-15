@@ -1,18 +1,17 @@
-//! A file's tokens, as the specification has them (spec.md, "Lexical elements"), but for what
-//! the subset refuses at its text:
-//! - a name is ASCII letters, digits and `_`, not starting with a digit, where the specification
-//!   also allows Unicode letters;
+//! A file's tokens, as the specification has them (spec.md, "Lexical elements"), but for what the
+//! subset refuses at its text:
+//! - a name is ASCII letters, digits and `_`, not starting with a digit, since some
+//!   implementations take any Unicode letter;
 //! - an int is decimal, `0x` or `0o`, and at most 2^63 - 1, since ints are 64-bit;
 //! - floats, bytes literals and f-strings, which have no value in the subset;
-//! - a `\` before a quote in a raw string, which Starlark's implementations read differently;
-//! - a `\x`, `\u` or `\U` escape, which some of them lack, and an octal one over 127, which they
-//!   read differently;
+//! - a `\` before a quote in a raw string, which implementations read differently;
+//! - a `\x`, `\u` or `\U` escape, which some lack, and an octal one over 127, which they read
+//!   differently;
 //! - a carriage return that doesn't end a line with the `\n` after it;
 //! - a reserved word, wherever it appears;
-//! - a tab outside a string or a comment, but on a line outside brackets that holds no token:
-//!   indentation ("Special tokens") and the white space between tokens are spaces.
+//! - a tab outside a string or a comment, but on a line outside brackets that holds no token.
 //!
-//! A line's indentation is counted only outside brackets, inside which lines join.
+//! A line's indentation counts only outside brackets, inside which lines join.
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -33,17 +32,17 @@ pub(crate) enum TokenKind {
     Str(Rc<str>),
     Keyword(Keyword),
     Punct(Punct),
-    /// The end of a line outside brackets that holds a token.
+    /// Ends a statement: not given inside brackets, where a line break is blank.
     Newline,
     Indent,
     Outdent,
     Eof,
-    /// Text that is no token, with the message that says why. It is the last token.
+    /// The first thing refused, which ends the tokens.
     Error(String),
 }
 
-/// Defines `$kind`, an enum of tokens, each written as its text: `text()`, and `ALL`, each token
-/// in the order listed.
+// Defines `$kind`, an enum of tokens each written as its text, with `text()` and `ALL`, the tokens
+// in the order listed.
 macro_rules! tokens {
     ($(#[$doc:meta])* $kind:ident { $($token:ident = $text:literal,)* }) => {
         $(#[$doc])*
@@ -65,7 +64,6 @@ macro_rules! tokens {
 }
 
 tokens! {
-    /// The specification's keywords.
     Keyword {
         And = "and", Break = "break", Continue = "continue", Def = "def", Elif = "elif",
         Else = "else", For = "for", If = "if", In = "in", Lambda = "lambda", Load = "load",
@@ -73,9 +71,9 @@ tokens! {
     }
 }
 
+// The first that the text starts with is the token, so a text comes before each shorter one it
+// starts with, as `//=` before `//`.
 tokens! {
-    /// The specification's punctuation, the longest first, so that the first that matches is the
-    /// token.
     Punct {
         SlashSlashEq = "//=", LessLessEq = "<<=", GreaterGreaterEq = ">>=", StarStar = "**",
         SlashSlash = "//", LessLess = "<<", GreaterGreater = ">>", LessEq = "<=", GreaterEq = ">=",
@@ -88,14 +86,13 @@ tokens! {
     }
 }
 
-/// The words the specification reserves, which are neither keywords nor names.
+// Words that Starlark's specification reserves, which no program of the subset may use.
 const RESERVED: [&str; 18] = [
     "as", "assert", "async", "await", "class", "del", "except", "finally", "from", "global",
     "import", "is", "nonlocal", "raise", "try", "while", "with", "yield",
 ];
 
-/// The tokens of `text`, the text of `file`, ending with [`TokenKind::Eof`], or with
-/// [`TokenKind::Error`] at the first text that is no token.
+/// The tokens of `text`, which end with `Eof`, or with the `Error` that refuses its first fault.
 pub(crate) fn lex(file: FileId, text: &str) -> Vec<Token> {
     let mut lexer = Lexer {
         file,
@@ -132,7 +129,7 @@ fn in_name(char: char) -> bool {
     char.is_ascii_alphanumeric() || char == '_'
 }
 
-/// Where text that is no token starts, and the message that says why.
+// Where the refused text starts, and what to tell the author.
 type LexError = (usize, String);
 
 struct Lexer<'t> {
@@ -140,11 +137,11 @@ struct Lexer<'t> {
     text: &'t str,
     pos: usize,
     tokens: Vec<Token>,
-    /// The indentation of each block the lexer is in, innermost last; the file's own is 0.
+    /// The width of each open block's indentation, innermost last.
     indents: Vec<usize>,
     /// How many brackets are open.
     depth: usize,
-    /// Whether the next token starts a line outside brackets, so its indentation counts.
+    /// Whether the next token starts a line outside brackets, so that its indentation counts.
     line_start: bool,
 }
 
@@ -182,9 +179,8 @@ impl Lexer<'_> {
         }
     }
 
-    /// Reads the indentation of the next line that holds a token, and pushes the
-    /// [`TokenKind::Indent`] or [`TokenKind::Outdent`]s it makes. Returns false at the end of
-    /// the text.
+    // Reads the indentation of the next line that has a token, skipping lines of blanks and
+    // comments, which neither end a statement nor move a block. False at the end of the text.
     fn indentation(&mut self) -> Result<bool, LexError> {
         loop {
             let start = self.pos;
@@ -226,19 +222,19 @@ impl Lexer<'_> {
         }
     }
 
-    /// Skips spaces and a comment, refusing a tab, and joins the next line where a `\` ends this
-    /// one.
     fn skip_blanks(&mut self) -> Result<(), LexError> {
         loop {
             match self.peek() {
                 Some(' ') => self.pos += 1,
-                // starlark-rust refuses a tab between tokens, and so does the subset, so that
-                // starlark-rust could evaluate any file the subset accepts.
+                // So that starlark-rust, which refuses a tab here, evaluates every file the subset
+                // accepts:
+                // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark_syntax/src/lexer.rs#L705-L712
                 Some('\t') => {
                     let message = refusal("a tab between tokens", "separate them with spaces");
                     return Err((self.pos, message));
                 }
                 Some('#') => self.comment(),
+                // A `\` before a line break joins the next line to this one.
                 Some('\\') => {
                     let start = self.pos;
                     self.pos += 1;
@@ -272,7 +268,6 @@ impl Lexer<'_> {
         Ok(())
     }
 
-    /// Reads a name, a keyword, a reserved word, or a string's prefix and its string.
     fn word(&mut self, start: usize) -> Result<(), LexError> {
         self.skip(in_name);
         let word = &self.text[start..self.pos];
@@ -392,8 +387,7 @@ impl Lexer<'_> {
         self.skip(|char| char.is_digit(radix));
     }
 
-    /// The refusal of the float that starts at `start`, after reading the rest of it, past its
-    /// whole part: a fraction, then an exponent.
+    // The refusal of the float that starts at `start`, after reading the rest of it.
     fn float(&mut self, start: usize) -> LexError {
         if self.peek() == Some('.') {
             self.pos += 1;
@@ -411,8 +405,7 @@ impl Lexer<'_> {
         (start, message)
     }
 
-    /// Reads a string literal that starts at `start` and whose quote, `quote`, is next, and
-    /// returns its value.
+    // Reads the string whose opening quote, `quote`, is next, and gives its value.
     fn string(&mut self, start: usize, quote: char, raw: bool) -> Result<String, LexError> {
         let three = if quote == '"' { "\"\"\"" } else { "'''" };
         let triple = self.text[self.pos..].starts_with(three);
@@ -458,7 +451,6 @@ impl Lexer<'_> {
         }
     }
 
-    /// Reads what follows a `\` at `at` in a raw string, where both stand for themselves.
     fn raw_escape(&mut self, at: usize, value: &mut String) -> Result<(), LexError> {
         value.push('\\');
         match self.peek() {
@@ -486,8 +478,6 @@ impl Lexer<'_> {
         }
     }
 
-    /// Reads the escape whose `\` is at `at` (spec.md, "String escapes"), adding what it stands
-    /// for to `value`.
     fn escape(&mut self, at: usize, value: &mut String) -> Result<(), LexError> {
         let Some(char) = self.next() else {
             return Ok(());
@@ -510,8 +500,6 @@ impl Lexer<'_> {
                 self.pos -= 1;
                 return self.octal(at, value);
             }
-            // Some of Starlark's implementations have no such escape, and refuse a file that
-            // writes one.
             'x' | 'u' | 'U' => {
                 let message = refusal(
                     format_args!("`\\{char}`, an escape that some Starlark implementations lack,"),
@@ -521,7 +509,6 @@ impl Lexer<'_> {
             }
             _ => {
                 let escape = &self.text[at..self.pos];
-                // Some of Starlark's implementations keep the `\\` and the character after it.
                 let message = refusal(
                     format_args!("`{escape}`, which some Starlark implementations read as itself,"),
                     "write `\\\\` for a `\\`",
@@ -533,16 +520,12 @@ impl Lexer<'_> {
         Ok(())
     }
 
-    /// Reads the 1 to 3 octal digits of an escape whose `\` is at `at`, the first of them next,
-    /// and adds the character they number to `value`.
     fn octal(&mut self, at: usize, value: &mut String) -> Result<(), LexError> {
         let digits = self.text[self.pos..].chars().take(3);
         let (len, number) = (digits.map_while(|char| char.to_digit(8)))
             .fold((0, 0), |(len, number), digit| (len + 1, number * 8 + digit));
-        // Each digit is ASCII, a byte.
+        // Each digit is ASCII, one byte.
         self.pos += len;
-        // An octal escape numbers a byte, which Starlark's implementations take as a character
-        // only up to 127.
         let Some(char) = char::from_u32(number).filter(char::is_ascii) else {
             let escape = &self.text[at..self.pos];
             let message = refusal(
@@ -561,7 +544,6 @@ impl Lexer<'_> {
     fn punctuation(&mut self, start: usize, char: char) -> Result<(), LexError> {
         let rest = &self.text[start..];
         let Some(&punct) = (Punct::ALL.iter()).find(|punct| rest.starts_with(punct.text())) else {
-            // Some of Starlark's implementations take any Unicode letter in a name.
             let message = if char.is_alphabetic() {
                 refusal(
                     format_args!("a letter outside ASCII in a name, `{char}`,"),
@@ -576,6 +558,7 @@ impl Lexer<'_> {
         match punct {
             Punct::LeftParen | Punct::LeftBracket | Punct::LeftBrace => self.depth += 1,
             Punct::RightParen | Punct::RightBracket | Punct::RightBrace => {
+                // A closing bracket with no opener is the parser's to refuse.
                 self.depth = self.depth.saturating_sub(1);
             }
             _ => {}
@@ -584,10 +567,9 @@ impl Lexer<'_> {
         Ok(())
     }
 
-    /// Ends the tokens: a line's end if the last line lacks one, the end of each block, and
-    /// the end of the file.
     fn finish(&mut self) {
-        // Inside a bracket, the line goes on: the parser finds the end of the file there.
+        // A last line without a line break still ends its statement, but an unclosed bracket's
+        // goes on: the parser refuses the end of the file there.
         let last_line_open =
             (self.tokens.last()).is_some_and(|token| !matches!(token.kind, TokenKind::Newline));
         if last_line_open && self.depth == 0 {
@@ -609,8 +591,8 @@ impl Lexer<'_> {
         Some(char)
     }
 
-    /// The span from `start` to where the lexer is, or the first character's at `start` when
-    /// the lexer is there.
+    // A token with no text of its own, as an outdent, takes the character at `start`, so that a
+    // message can point at something.
     fn span(&self, start: usize) -> Span {
         let end = if self.pos > start {
             self.pos
