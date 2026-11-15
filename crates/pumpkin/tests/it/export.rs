@@ -281,6 +281,16 @@ fn exports_what_the_view_answers() {
             assert!(files.contains_key(&item), "{key} names {item}");
         }
     }
+    let file = |key: String| serde_json::from_slice::<Value>(&files[&key]).unwrap();
+    let run = file(format!("runs/{EXPORTED}/run.json"));
+    let stats = file(format!("runs/{EXPORTED}/trace/agent/stats-thread.json"));
+    said.push(format!(
+        "its cost: {}; the list's: {}; its agent's steps': {}, {} of unknown cost",
+        run["cost"],
+        file("runs.json".to_owned())["runs"][0]["usd"],
+        stats["totals"]["usd"],
+        stats["totals"]["usd_unknown"]
+    ));
     let request = String::from_utf8(files[&format!("runs/{EXPORTED}/kept/12.request")].clone());
     said.push(format!("request 12, as kept: {}", request.unwrap()));
     for (caller, query) in [("agent", "A.TXT"), ("agent", "a.txt\nb"), ("job-0", "is")] {
@@ -390,6 +400,7 @@ fn exports_what_the_view_answers() {
             runs/<id>/trace/job-4/stats-turn.json: /api/runs/<id>/trace/job-4/stats?by=turn
             runs/<id>/trace/job-4/steps.json: /api/runs/<id>/trace/job-4/steps
 
+            its cost: {"said":"$2.48, $2.05 of it for tokens and $0.44 for sandboxes, and more without a price","shown":"$2.48+"}; the list's: "$2.48+"; its agent's steps': 1.65375, 1 of unknown cost
             request 12, as kept: {"conversation":{"field":"input","items":[{"item":"0000000000000000000000000000000000000000000000000000000000000000"},{"item":"0000000000000000000000000000000000000000000000000000000000000003"},{"item":"0000000000000000000000000000000000000000000000000000000000000004"},{"item":"0000000000000000000000000000000000000000000000000000000000000005"},{"item":"0000000000000000000000000000000000000000000000000000000000000006"}]},"fields":[{"item":"0000000000000000000000000000000000000000000000000000000000000007","name":"instructions"},{"name":"model","sent":"glm-5.3"},{"name":"stream","sent":false},{"item":"0000000000000000000000000000000000000000000000000000000000000002","name":"tools"}]}
             agent's "A.TXT": 2 found, as the view's search finds them
             agent's "a.txt\nb": 1 found, as the view's search finds them

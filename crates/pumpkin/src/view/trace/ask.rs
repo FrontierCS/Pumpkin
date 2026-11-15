@@ -3,6 +3,8 @@
 //! item as the record keeps them. The trace is the parent module's, and the JSON forms of its
 //! answers are [`json`](mod@super::json)'s.
 
+use std::collections::BTreeMap;
+
 use runtime::Record;
 use schema::ir::Sha256Digest;
 use serde_json::{Value, json};
@@ -316,6 +318,9 @@ impl Trace {
     /// The answer to `asked`, of the pass, read from the fold `held`.
     fn answer(&self, held: &Held, asked: Asked) -> Result<Value, Failed> {
         let exchanges = &held.exchanges;
+        let unpriced = BTreeMap::new();
+        let prices =
+            (held.readout.progress.as_ref()).map_or(&unpriced, |progress| &progress.token_prices);
         match asked {
             Asked::Steps { since, .. } => {
                 let mut steps = self.steps_json(exchanges, since);
@@ -342,11 +347,11 @@ impl Trace {
                 ..
             } => Ok(self.search_json(&query, kind.as_deref(), thread)),
             Asked::SearchChunk { chunk, .. } => Ok(self.search_chunk_json(chunk)),
-            Asked::Stats { by, .. } => Ok(self.stats_json(exchanges, by)),
+            Asked::Stats { by, .. } => Ok(self.stats_json(exchanges, prices, by)),
             Asked::Diff { a, b, part } => Ok(self.diff_json(&held.record, a, b, part)),
             Asked::Exchange { request, .. } => {
                 let mut said = exchange_json(&held.record, exchanges, request);
-                said["stats"] = self.step_stats(exchanges, self.at[&request]);
+                said["stats"] = self.step_stats(exchanges, prices, self.at[&request]);
                 Ok(said)
             }
             Asked::Item { .. } | Asked::Ops { .. } => {

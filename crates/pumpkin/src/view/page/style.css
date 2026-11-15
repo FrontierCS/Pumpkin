@@ -266,7 +266,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .srow > * { flex: none; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srow > .key { width: 7ch; text-align: left; color: var(--text); font-weight: 600; }
 .srow > .n { width: 7ch; } .srow > .pct { width: 6ch; } .srow > .time { width: 7ch; }
-.srow > .tok { width: 9ch; } .srow > .rate { width: 8ch; }
+.srow > .tok { width: 9ch; } .srow > .rate { width: 8ch; } .srow > .usd { width: 9ch; }
 .srow > .word { width: 9ch; text-align: left; }
 .srow.failed > :last-child { color: var(--fail); }
 .srow > .share { background: linear-gradient(to right, color-mix(in srgb, var(--model) 30%, transparent) calc(var(--share, 0) * 100%), transparent 0); }

@@ -1,5 +1,5 @@
-//! A trace's statistics: each step's tokens, times and calls, and their folds by turn, by thread
-//! and over the caller, from the held pass alone.
+//! A trace's statistics: each step's tokens, cost, times and calls, and their folds by turn, by
+//! thread and over the caller, from the held pass alone and the prices that the run's record keeps.
 //!
 //! An unknown value stays unknown: a fold sums the values its steps know and says how many of
 //! its steps lacked one, and a rate or share is the fold's sums divided, never an average of its
@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use route::read::Item;
+use runtime::{TokenPrices, Tokens};
 use serde_json::{Map, Value, json};
 
 use super::{Exchanges, Trace, nanos};
@@ -48,6 +49,7 @@ struct Measured {
     turn: Option<u64>,
     /// In the order of [`TOKENS`].
     tokens: [Option<u64>; 5],
+    usd: Option<f64>,
     start: Option<u64>,
     end: Option<u64>,
     /// From its parent's end to its start: the tools' and the harness's time.
@@ -72,9 +74,15 @@ pub(super) fn span(from: Option<u64>, to: Option<u64>) -> Option<u64> {
 
 impl Trace {
     /// The statistics of the trace's steps, as rows of columns, a step's each or a fold's of
-    /// `by`'s groups, and the fold of them all.
-    pub(super) fn stats_json(&self, exchanges: &Exchanges, by: By) -> Value {
-        let measured = self.measured(exchanges);
+    /// `by`'s groups, and the fold of them all; each model's tokens cost `prices`, by the route's
+    /// name for it.
+    pub(super) fn stats_json(
+        &self,
+        exchanges: &Exchanges,
+        prices: &BTreeMap<String, TokenPrices>,
+        by: By,
+    ) -> Value {
+        let measured = self.measured(exchanges, prices);
         let rows: Vec<Vec<(String, Value)>> = match by {
             By::Step => measured.iter().map(step_row).collect(),
             By::Turn | By::Thread => {
@@ -125,14 +133,23 @@ impl Trace {
     }
 
     /// Each step's measures, in the order of their requests.
-    fn measured(&self, exchanges: &Exchanges) -> Vec<Measured> {
+    fn measured(
+        &self,
+        exchanges: &Exchanges,
+        prices: &BTreeMap<String, TokenPrices>,
+    ) -> Vec<Measured> {
         (self.at.values())
-            .filter_map(|&index| self.measure(exchanges, index))
+            .filter_map(|&index| self.measure(exchanges, prices, index))
             .collect()
     }
 
     /// The measures of step `index`, if the log names its request.
-    fn measure(&self, exchanges: &Exchanges, index: usize) -> Option<Measured> {
+    fn measure(
+        &self,
+        exchanges: &Exchanges,
+        prices: &BTreeMap<String, TokenPrices>,
+        index: usize,
+    ) -> Option<Measured> {
         let ended = |index: usize| {
             let said = exchanges.by_request.get(&self.steps[index].request)?;
             said.answered.as_ref().and_then(|(_, ns, _)| *ns)
@@ -145,6 +162,20 @@ impl Trace {
         let first_byte = nanos(&event["first_byte_ns"]);
         let first_token = nanos(&event["first_token_ns"]);
         let usage = &event["usage"];
+        let tokens = TOKENS.map(|name| usage[format!("{name}_tokens")].as_u64());
+        let usd = (event["model"].as_str())
+            .and_then(|model| prices.get(model))
+            .and_then(|prices| {
+                let [input, cached, cache_write, output, reasoning] = tokens;
+                prices.usd(&Tokens {
+                    reported: 1,
+                    input: input?,
+                    output: output?,
+                    cached,
+                    cache_write,
+                    reasoning,
+                })
+            });
         let (retry_of, repeat_of) = self.same(exchanges, step);
         let refused = matches!(event["answer"]["kind"].as_str(), Some("refused" | "barred"));
         let outcome = match self.answered_ok(exchanges, index) {
@@ -163,7 +194,8 @@ impl Trace {
             request: step.request,
             thread: step.thread,
             turn: step.turn,
-            tokens: TOKENS.map(|name| usage[format!("{name}_tokens")].as_u64()),
+            tokens,
+            usd,
             start,
             end,
             queue: span(step.parent.and_then(ended), start),
@@ -180,10 +212,16 @@ impl Trace {
     }
 
     /// The statistics of step `index`, as the `stats` reply's row of it gives them, as an object.
-    pub(super) fn step_stats(&self, exchanges: &Exchanges, index: usize) -> Value {
-        self.measure(exchanges, index).map_or(Value::Null, |step| {
-            Value::Object(step_row(&step).into_iter().collect())
-        })
+    pub(super) fn step_stats(
+        &self,
+        exchanges: &Exchanges,
+        prices: &BTreeMap<String, TokenPrices>,
+        index: usize,
+    ) -> Value {
+        self.measure(exchanges, prices, index)
+            .map_or(Value::Null, |step| {
+                Value::Object(step_row(&step).into_iter().collect())
+            })
     }
 
     /// The span of each of `threads`, as the `stats` reply's fold by thread gives it, from its
@@ -259,6 +297,7 @@ fn step_row(step: &Measured) -> Vec<(String, Value)> {
             .zip(step.tokens)
             .map(|(name, tokens)| ((*name).to_owned(), json!(tokens))),
     );
+    row.push(("usd".to_owned(), json!(step.usd)));
     let tok_s = output
         .zip(step.decode)
         .and_then(|(output, decode)| rate(output, decode));
@@ -307,6 +346,19 @@ fn sum(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
     (if known { json!(sum) } else { Value::Null }, unknown)
 }
 
+/// The sum of the known among `values`, in dollars, `null` if none is, and the count of those
+/// unknown.
+fn sum_usd(values: impl Iterator<Item = Option<f64>>) -> (Value, usize) {
+    let (mut sum, mut known, mut unknown) = (0.0, false, 0);
+    for value in values {
+        match value {
+            Some(value) => (sum, known) = (sum + value, true),
+            None => unknown += 1,
+        }
+    }
+    (if known { json!(sum) } else { Value::Null }, unknown)
+}
+
 /// The median of the known among `values`, the lower of the middle two of an even count, and
 /// the count of those unknown.
 fn median(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
@@ -318,10 +370,11 @@ fn median(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
 }
 
 /// The fold of `steps`: their count and first request, their span from first start to last end,
-/// their sums of tokens and of the queue, decode and model times, the medians of their times to
+/// their sums of tokens, cost, and the queue, decode and model times, the medians of their times to
 /// a first byte and token, each with the count that lacked it; the cache's share of the input
 /// and the rate of output, of the steps that know both; their calls by name, and how many were
 /// retries, repeats, refused, failed and in flight.
+#[expect(clippy::too_many_lines, reason = "a column of the fold after another")]
 fn fold(steps: &[&Measured]) -> Vec<(String, Value)> {
     let mut row = vec![
         ("steps".to_owned(), json!(steps.len())),
@@ -344,6 +397,7 @@ fn fold(steps: &[&Measured]) -> Vec<(String, Value)> {
     for (at, name) in TOKENS.iter().enumerate() {
         with_unknown(name, sum(steps.iter().map(|step| step.tokens[at])));
     }
+    with_unknown("usd", sum_usd(steps.iter().map(|step| step.usd)));
     with_unknown("queue_ns", sum(steps.iter().map(|step| step.queue)));
     with_unknown("decode_ns", sum(steps.iter().map(|step| step.decode)));
     with_unknown("model_ns", sum(steps.iter().map(|step| step.model)));

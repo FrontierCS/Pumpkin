@@ -3,7 +3,7 @@
 // order (`sort=<column>`, `-` first for the largest first) and the row selected (`srow=<request
 // or thread>`); choosing a row selects its step or thread in the Steps tab (`go`).
 
-import { count, fill, get, h, plural, route, setQuery, span } from "./h.js";
+import { count, fill, get, h, plural, route, setQuery, span, usd } from "./h.js";
 import { RowList } from "./rows.js";
 
 /**
@@ -16,7 +16,8 @@ import { RowList } from "./rows.js";
  * @property {string} name the server's column
  * @property {string} head
  * @property {string} title what it measures
- * @property {(value: any) => string} text
+ * @property {(value: any, rows: Record<string, any[]>, r: number) => string} text of row `r`'s value
+ * @property {(rows: Record<string, any[]>, r: number) => string | null} [note] row `r`'s cell's hover
  * @property {string} [class]
  */
 
@@ -31,6 +32,10 @@ const callCount = (calls) => String(Object.values(calls || {}).reduce((sum, n) =
 /** @param {number | null} n */
 const number = (n) => (n === null ? "-" : n.toLocaleString("en-US"));
 
+// A step's cost is unknown if its model has no price, or its response reported no tokens.
+/** @param {number} unknown */
+const unknownCost = (unknown) => plural(unknown, "step") + " of unknown cost";
+
 /** @type {Column[]} */
 const TIMES = [
   { name: "input", head: "In", title: "Input tokens", text: (v) => count(v, "tok"), class: "tok" },
@@ -38,12 +43,26 @@ const TIMES = [
   { name: "output", head: "Out", title: "Output tokens", text: (v) => count(v, "tok"), class: "tok" },
 ];
 
+/** @type {Record<"step" | "thread", Column>} */
+const COST = {
+  step: { name: "usd", head: "Cost", title: "What its tokens cost at its model's prices", text: usd, class: "usd" },
+  thread: {
+    name: "usd",
+    head: "Cost",
+    title: "The sum of its steps' costs",
+    text: (v, rows, r) => usd(v) + (v !== null && rows.usd_unknown[r] ? "+" : ""),
+    note: (rows, r) => (rows.usd_unknown[r] ? unknownCost(rows.usd_unknown[r]) : null),
+    class: "usd",
+  },
+};
+
 /** @type {Record<"step" | "thread", Column[]>} */
 const COLUMNS = {
   step: [
     { name: "request", head: "#", title: "The step's request", text: (v) => "#" + v, class: "key" },
     { name: "thread", head: "Thread", title: "The root request of its thread", text: (v) => (v === null ? "-" : String(v)), class: "n" },
     ...TIMES,
+    COST.step,
     { name: "to_first_byte_ns", head: "TTFB", title: "From its start to the response's first byte", text: time, class: "time" },
     { name: "to_first_token_ns", head: "TTFT", title: "From its start to the first token", text: time, class: "time" },
     { name: "decode_ns", head: "Decode", title: "From the first token to its end", text: time, class: "time" },
@@ -59,6 +78,7 @@ const COLUMNS = {
     { name: "steps", head: "Steps", title: "Its steps", text: number, class: "n" },
     { name: "span_ns", head: "Span", title: "From its first step's start to its last step's end", text: time, class: "time" },
     ...TIMES,
+    COST.thread,
     { name: "median_to_first_token_ns", head: "TTFT", title: "The median time to the first token", text: time, class: "time" },
     { name: "decode_ns", head: "Decode", title: "The sum of its steps' decoding", text: time, class: "time" },
     { name: "model_ns", head: "Model", title: "The sum of its steps' model times", text: time, class: "time share" },
@@ -77,6 +97,7 @@ function totalsLine(t) {
     part("Steps", number(t.steps), "Its steps, in " + plural(t.threads, "thread") + " and " + plural(t.turns, "turn")),
     part("Threads", number(t.threads), "Its threads"),
     part("Tokens", count(t.input, "tok") + " in · " + percent(t.cache_hit) + " cached · " + (t.cache_write === null ? "" : count(t.cache_write, "tok") + " written to the cache · ") + count(t.output, "tok") + " out", "The sums of the tokens its steps report"),
+    part("Cost", usd(t.usd), "The sum of its steps' costs" + (t.usd_unknown ? "; " + unknownCost(t.usd_unknown) : "")),
     part("Model", time(t.model_ns), "The sum of its steps' model times"),
     part("Between", time(t.queue_ns), "The sum of the times between steps: tool calls and the harness"),
     part("TTFT", time(t.median_to_first_token_ns), "The median time to the first token"),
@@ -109,7 +130,7 @@ export function statsView(ctx) {
       const rows = /** @type {StatsReply} */ (state.reply).rows;
       const cells = columns().map((column) => {
         const value = rows[column.name][r];
-        const cell = h("span", { class: column.class || null }, column.text(value));
+        const cell = h("span", { class: column.class || null, title: column.note?.(rows, r) ?? null }, column.text(value, rows, r));
         if (column.class?.includes("share") && value !== null && state.max) cell.style.setProperty("--share", String(value / state.max));
         return cell;
       });
