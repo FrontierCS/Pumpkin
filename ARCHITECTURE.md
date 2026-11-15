@@ -553,8 +553,8 @@ publishes, and the controller stops itself when idle.
 
 Each run has a directory of its own in the runs directory, `.pumpkin/runs` by default, whose files
 the `record` module lays out: the arguments that started it, the IR, the providers, the run log
-(`log.jsonl`), each accepted payload by its digest, each sandbox's report, console, outputs and
-logs, each model exchange, and `outcome.json`. The run log holds each event that the core decided
+(`log.jsonl`), each accepted payload by its digest, each sandbox's outputs and logs, each model
+exchange, and `outcome.json`. The run log holds each event that the core decided
 on, with the actions it took, timed as the runtime observed it, so a run can be read back event by
 event. It holds each fact once, and leaves to their own files what the record keeps elsewhere: a
 command's output, a model exchange's bodies and the outcome. A reader takes the log in typed parts,

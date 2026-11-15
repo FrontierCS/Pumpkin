@@ -42,7 +42,7 @@ use crate::host::{LateTake, SimHost, SlowSync, Synced};
 use crate::run::{PROVIDER, Runs, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
     self, BRIEF, DAWDLING, HUNG, Journal, LAST, LATER, LOST, MUTE, REFUSED_ONCE, SLOW, Sim,
-    UNDELETABLE, UNLISTABLE, UNPUBLISHED, UNSHOWN, VANISHING,
+    UNDELETABLE, UNLISTABLE, UNPUBLISHED, VANISHING,
 };
 
 /// A `sandboxd` that dials.
@@ -280,14 +280,6 @@ fn shown(sim: &Sim) -> Vec<String> {
     lines
 }
 
-/// The build tag of the agent's image alone, so that a record shows a role with one and one
-/// without.
-fn agent_tag(placed: &Placed) -> BTreeMap<ir::Image, String> {
-    let workflow = placed.workflow();
-    let image = workflow.sandbox(workflow.agent().role).image.clone();
-    BTreeMap::from([(image, "pumpkin/agent:0123".to_owned())])
-}
-
 /// Prepares `ir` as test `name`, its agent's model route served by a [`StandIn`] if it has one, on
 /// `host`, executes it on `providers`, where its roles are placed ([`placed_on`]), with
 /// `sandboxd`, and checks what becomes of it ([`executed`]).
@@ -349,10 +341,6 @@ fn interruption(also: &[Also]) -> Option<At> {
 /// sandboxes printed, the stand-in's hang-ups, and what departs from the normal run. It shows the
 /// socket directories, the stand-in's address, the record, as made and once made, and the runs
 /// directory as `<sockets>`, `<stand-in>`, `<partial>`, `<record>` and `<runs>`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "it runs the workflow and shows each part of what became of it"
-)]
 fn executed<H: Shown>(
     host: &H,
     name: &str,
@@ -375,11 +363,7 @@ fn executed<H: Shown>(
     let record = runs.dir.join(id.as_str());
     let interrupting = interrupting(providers, at, &record);
     let on = providers_of(&placed, |name| named(&interrupting, name));
-    let tags = agent_tag(&placed);
-    let recorded = Recorded {
-        args: &[],
-        tags: &tags,
-    };
+    let recorded = Recorded { args: &[] };
     let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, &servings, recorded);
     let run = run.unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
@@ -584,9 +568,9 @@ fn read_log(record: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// Each `sandbox.json` in `record`, a run's, that isn't of a sandbox deleted with no report, and
-/// each console that a sandbox printed ([`sandboxes`]). It fails, as test `name`, unless `log`,
-/// the run's, records the delete of each sandbox that it leaves out, by its id and provider.
+/// Each `sandbox.json` in `record`, a run's, that isn't of a deleted sandbox ([`sandboxes`]). It
+/// fails, as test `name`, unless `log`, the run's, records the delete of each sandbox that it
+/// leaves out, by its id and provider.
 fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
     let deletes: Vec<&Value> = (log.iter())
         .filter(|logged| logged["event"]["kind"] == "sandbox_deleted")
@@ -596,7 +580,7 @@ fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
         let (whose, sandbox) = line.split_once("/sandbox.json: ")?;
         let sandbox: Value = serde_json::from_str(sandbox).unwrap();
         let gone = sandbox["delete"] == json!({ "state": "deleted" });
-        (gone && sandbox["report"].is_null()).then(|| {
+        gone.then(|| {
             let (_, dir) = whose.rsplit_once(", ").unwrap();
             let named = match dir.split_once('/') {
                 Some(("jobs", number)) => format!("job-{number}"),
@@ -755,21 +739,25 @@ fn sandboxes_hold(
     );
 }
 
-/// Whether `provider.json` in `record`, a run's, holds what each of `providers` declared, by its
-/// name, with how its sandboxes meet the gateway, and holds `routes`, which fails test `name` if
-/// not; the routes, if a role has one; and, of a run on more than one, where it places each role.
+/// Whether `provider.json` in `record`, a run's, holds the report of each of `providers`, by its
+/// name, and of each class it declared, its startup and its price, and holds `routes`, which
+/// fails test `name` if not; the routes, if a role has one; and, of a run on more than one, where
+/// it places each role.
 fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
     let recorded = fs::read_to_string(record.join("provider.json")).unwrap();
     let recorded: Value = serde_json::from_str(&recorded).unwrap();
-    let reach = |provider: &Sim| match provider.meeting() {
-        Meeting::Local(_) => "local",
-        Meeting::Private(_) => "private",
-        Meeting::Listen(_) => "listen",
-    };
     let expected = (providers.iter()).map(|(name, provider)| {
-        let mut ready = json!(provider.ready());
-        ready["reach"] = reach(provider).into();
-        ((*name).to_owned(), ready)
+        let ready = provider.ready();
+        let classes = (ready.classes.iter()).map(|(class, declared)| {
+            let mut class_json = json!({ "startup_seconds": declared.startup_seconds });
+            if let Some(price) = declared.usd_per_hour {
+                class_json["usd_per_hour"] = json!(price);
+            }
+            (class.to_string(), class_json)
+        });
+        let classes = Value::Object(classes.collect());
+        let declared = json!({ "report": ready.report, "classes": classes });
+        ((*name).to_owned(), declared)
     });
     let expected = Value::Object(expected.collect());
     assert_eq!(
@@ -1336,7 +1324,7 @@ fn sweep_unrecorded() {
         REFUSED_ONCE,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agent/.sandbox.json.partial: the simulated host's sync failed
-            the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -1346,35 +1334,6 @@ fn sweep_unrecorded() {
             {"at_ns":"0","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agent/.sandbox.json.partial: the simulated host's sync failed","seq":5}
             its last record came before the agent's teardown was to end"#]],
     );
-}
-
-#[test]
-fn unshown() {
-    let mut ir = workflow(&["exit", "0"]);
-    ir["roles"][0]["image"] = json!(sim::image(UNSHOWN).as_str());
-    let shown = executed(
-        &System,
-        "unshown",
-        &[(PROVIDER, &Sim::new())],
-        &ir,
-        UNDELETABLE,
-        &[Also::Listing],
-    );
-    expect![[r#"
-        failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-        record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-        the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
-        log.jsonl:
-        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
-        {"at_ns":"<ns>","note":"sandbox sim-1's console wasn't kept: the simulated console of sim-1 can't be read: create one with another `sandboxd`","seq":4}
-        {"at_ns":"<ns>","note":"sandbox sim-1's console wasn't kept: the simulated console of sim-1 can't be read: create one with another `sandboxd`","seq":5}
-        {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":6}
-        its last record came before the agent's teardown was to end
-        listed once it ended: ["sim-1"]"#]]
-    .assert_eq(&shown);
 }
 
 #[test]
@@ -1391,9 +1350,8 @@ fn unstarted_undeletable() {
     );
     expect![[r#"
         failed: deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-        record: agent/console.txt, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-        the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
-        the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
+        record: agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
+        the agent's sandbox, agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`"},"observed_ns":"<ns>","seq":1}
@@ -1521,7 +1479,6 @@ fn unstarted() {
     );
     expect![[r#"
         finished, with score None
-        the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
         outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -1605,7 +1562,6 @@ fn interrupted_agent_start() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/hung", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18360000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":1}
@@ -1631,7 +1587,6 @@ fn interrupted_judge_start() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -1688,7 +1643,6 @@ fn interrupted_lease_start() {
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
-            lease 0's console, leases/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1742,7 +1696,6 @@ fn unlistable() {
         UNLISTABLE,
         &expect![[r#"
             finished, with score None
-            the agent's console, agent/console.txt: "sandboxd: a simulated one, which never dials\n"
             outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"184000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -1809,7 +1762,7 @@ fn undeletable() {
         UNDELETABLE,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"simulated","report":null}
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1960,7 +1913,7 @@ fn result_over_the_limit() {
     );
     expect![[r#"
         finished, with score None
-        record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
+        record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
         payloads hold: ["large"]
         outcome.json: {"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
@@ -2059,7 +2012,6 @@ fn judge_placed_apart() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
             outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
@@ -2109,7 +2061,7 @@ fn spans_providers() {
         expect![[r#"
             finished, with score Some(Number(6))
             payloads hold: ["xxxxxx"]
-            provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"here"},"final_judge":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"train_judge":{"class":"brief","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"}}
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"brief","provider":"there"}}
             outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}
             log.jsonl:
@@ -2152,9 +2104,9 @@ fn sweeps_each_provider() {
         SANDBOXD,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
-            the agent's sandbox, agent/sandbox.json: {"delete":{"reason":"sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-1","provider":"here","report":null}
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"here"}
             payloads hold: ["xxxxxx"]
-            provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000"},"provider":"here"},"final_judge":{"class":"sim","image":{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"train_judge":{"class":"sim","image":{"digest":"sha256:2f73696d2f6c6f73740000000000000000000000000000000000000000000000"},"provider":"there"}}
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"sim","provider":"there"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2214,10 +2166,8 @@ fn watches_each_provider() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
-            job 1's console, jobs/1/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
-            provider.json places the roles: {"agent":{"class":"sim","image":{"build_tag":"pumpkin/agent:0123","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"provider":"here"},"final_judge":{"class":"sim","image":{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"provider":"there"},"near_judge":{"class":"sim","image":{"digest":"sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"},"provider":"here"},"train_judge":{"class":"brief","image":{"digest":"sha256:2f73696d2f6d7574650000000000000000000000000000000000000000000000"},"provider":"there"}}
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"near_judge":{"class":"sim","provider":"here"},"train_judge":{"class":"brief","provider":"there"}}
             outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -2264,7 +2214,7 @@ fn judge_stalls() {
         SANDBOXD,
         &expect![[r#"
             failed: deleting the sandbox failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`
-            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"reason":"sim-3 can't be deleted by the simulated provider: create one with another `sandboxd`","state":"failed"},"id":"sim-3","provider":"simulated","report":null}
+            job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"failed"},"id":"sim-3","provider":"simulated"}
             payloads hold: ["stall", "xxxxxx"]
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -2378,7 +2328,6 @@ fn reported_before_the_hard_end() {
         SANDBOXD,
         &expect![[r#"
             finished, with score None
-            job 0's console, jobs/0/console.txt: "sandboxd: a simulated one, which never dials\n"
             payloads hold: ["xxxxxx"]
             outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
@@ -2741,8 +2690,6 @@ fn syncs() {
               fdatasync <record>/log.jsonl, through record 3
               a session read op 1's reply: refused
               fdatasync <record>/log.jsonl, through record 4
-              fsync <record>/agent/.console.txt.partial
-              fsync <record>/agent
               deleted sim-1
               fsync <record>/agent/.sandbox.json.partial
               fsync <record>/agent
@@ -3448,7 +3395,6 @@ fn holds_until_its_end() {
     let runs = Runs::new("holds-until-its-end");
     let sim = Sim::new().with_cpus(16);
     let ir: ir::Workflow = serde_json::from_value(workflow(&["exit", "0"])).unwrap();
-    let no_tags = BTreeMap::new();
     let prepare = |name: &str| {
         let placed = placed(&ir, sim.ready()).unwrap();
         let dir = runs.dir.join(name);
@@ -3456,10 +3402,7 @@ fn holds_until_its_end() {
             .workflow()
             .by_role(|_| Ok::<_, Infallible>(Vec::new()));
         let on = providers_of(&placed, |_| &sim);
-        let recorded = Recorded {
-            args: &[],
-            tags: &no_tags,
-        };
+        let recorded = Recorded { args: &[] };
         let id = new_id(SystemTime::now()).unwrap();
         Run::prepare(&System, placed, on, &dir, id, &unrouted, recorded)
     };
@@ -3732,7 +3675,7 @@ fn lease_transfers() {
     );
     expect![[r#"
         finished, with score Some(Number(6))
-        record: agent/console.txt, agent/log/collected, agent/out/back/collected, agent/out/back/config.toml, agent/out/back/ro, agent/out/back/shared, agent/out/back/shut/key, agent/out/back/tool*, agent/out/collected, agent/out/got/collected, agent/out/got/command.stdout, agent/out/replaced/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        record: agent/log/collected, agent/out/back/collected, agent/out/back/config.toml, agent/out/back/ro, agent/out/back/shared, agent/out/back/shut/key, agent/out/back/tool*, agent/out/collected, agent/out/got/collected, agent/out/got/command.stdout, agent/out/replaced/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
         payloads hold: ["xxxxxx"]
         outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
@@ -3799,7 +3742,7 @@ fn transfer_cut() {
     );
     expect![[r#"
         finished, with score Some(Number(6))
-        record: agent/console.txt, agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/console.txt, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/console.txt, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
         payloads hold: ["xxxxxx"]
         outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:

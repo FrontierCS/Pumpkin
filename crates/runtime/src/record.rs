@@ -13,9 +13,9 @@
 //! - `log.jsonl`: the run log, which the `log` module lays out;
 //! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256;
 //! - `agent/`, `jobs/<n>/` and `leases/<n>/`, for the sandbox of the agent, of job `n`'s judge
-//!   call and of lease `n`'s runner, once created: its `sandbox.json` ([`write_sandbox`]), its
-//!   `console.txt` as the run deleted it ([`write_console`]), and its `out` and `log` as far as
-//!   collected, but a result over [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
+//!   call and of lease `n`'s runner, once created: its `sandbox.json` ([`write_sandbox`]), and its
+//!   `out` and `log` as far as collected, but a result over
+//!   [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
 //! - `model/`: each model exchange, each conversation item and each field kept whole, such as a
 //!   list of tools, once (`Exchange`);
 //! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
@@ -34,11 +34,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use decision::PayloadRef;
-use provider::{Meeting, Provider, RunTag, SandboxId, Sweep, UnixTime};
+use provider::{Provider, Ready, RunTag, SandboxId, Sweep, UnixTime};
 use route::Serving;
-use schema::ir::{Api, GpuModel, Image, Name, Sha256Digest};
+use schema::ir::{Api, GpuModel, Name, Sha256Digest};
 use schema::sandbox::{command_stderr, log_dir, out_dir};
-use schema::workflow::{ByProvider, ByRole, Placed, Placement, Workflow};
+use schema::workflow::{ByProvider, ByRole, Class, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
@@ -730,7 +730,7 @@ impl Record {
                 .collect();
             // A lost run's sandboxes' records keep what its own deletes said.
             let after = |_: &[SandboxId], _: &Result<(), String>| Ok(());
-            sweep(name, provider, &run, &held, |_| {}, after).map(|ids| (name.clone(), ids))
+            sweep(name, provider, &run, &held, after).map(|ids| (name.clone(), ids))
         });
         let sandboxes: Vec<(Name, Vec<SandboxId>)> = swept.collect::<Result<_, _>>()?;
         let ended: Vec<(Name, SandboxId)> = (undeleted.into_iter())
@@ -1228,28 +1228,34 @@ fn utc_stamp(seconds: u64) -> String {
 }
 
 /// What `provider.json` holds of `placed`, whose roles are placed on `providers` and served by
-/// `routes`: `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c, "image": {"digest":
-/// d, "build_tag": t}}}, "routes": {n: [{"api": a, "upstream": u, "models": {m: {"upstream_name":
-/// v}}}]}}`, where `r` is what `p` declared ([`Ready`](provider::Ready)), with how its sandboxes
-/// meet the gateway, `"reach"`: `local`, `private` or `listen` ([`Meeting`]); role `n` is placed
-/// on `p`, in class `c`, and runs image `d`, built as tag `t`; and each entry of `n`'s model
-/// route, in its order, takes API `a` to the upstream that the deployment names `u`, which takes
-/// model `m` as `v`. A role without a model route is not in `routes`.
+/// `routes`: `{"providers": {p: {"report": r, "classes": {c: {"startup_seconds": s,
+/// "usd_per_hour": h}}}}, "roles": {n: {"provider": p, "class": c}}, "routes": {n: [{"api": a,
+/// "upstream": u, "models": {m: {"upstream_name": v}}}]}}`, where `r` is `p`'s report and each
+/// class `c` takes `s` to start and costs `h`, if `p` states a price, as `p` declared
+/// ([`Ready`](provider::Ready)); role `n` is placed on `p`, in class `c`; and each entry of
+/// `n`'s model route, in its order, takes API `a` to the upstream that the deployment names `u`,
+/// which takes model `m` as `v`. A role without a model route is not in `routes`.
 pub(super) fn provided(
     placed: &Placed,
     providers: &ByProvider<&dyn Provider>,
-    tags: &BTreeMap<Image, String>,
     routes: &ByRole<Vec<Serving>>,
 ) -> Value {
     let declared = (providers.iter())
         .map(|(name, provider)| {
-            let mut declared = json!(provider.ready());
-            declared["reach"] = match provider.meeting() {
-                Meeting::Local(_) => "local",
-                Meeting::Private(_) => "private",
-                Meeting::Listen(_) => "listen",
-            }
-            .into();
+            let Ready { report, classes } = provider.ready();
+            let classes = (classes.iter()).map(|(name, class)| {
+                let Class {
+                    offers: _,
+                    startup_seconds,
+                    usd_per_hour,
+                } = class;
+                let mut class = json!({ "startup_seconds": startup_seconds });
+                if let Some(price) = usd_per_hour {
+                    class["usd_per_hour"] = json!(price);
+                }
+                (name.to_string(), class)
+            });
+            let declared = json!({ "report": report, "classes": classes.collect::<Map<_, _>>() });
             (name.to_string(), declared)
         })
         .collect::<Map<_, _>>();
@@ -1260,11 +1266,7 @@ pub(super) fn provided(
             class,
             declared: _,
         } = placed.placement(role);
-        let mut at = json!({ "provider": provider, "class": class });
-        at["image"] = json!({ "digest": sandbox.image });
-        if let Some(tag) = tags.get(&sandbox.image) {
-            at["image"]["build_tag"] = json!(tag);
-        }
+        let at = json!({ "provider": provider, "class": class });
         (sandbox.name.to_string(), at)
     });
     // Names alone: the upstream's URL and key are the deployment's, and stay out of the record.
@@ -1327,37 +1329,27 @@ pub(super) fn write_ir(host: &impl Host, dir: &Path, workflow: &Workflow) -> Res
     replace(host, dir, "ir.json", ir_json(workflow).as_bytes())
 }
 
-/// Writes `console`, a sandbox's, as `console.txt` in `dir`, its directory in the record, made if
-/// need be, by [`replace`] on `host`.
-pub(super) fn write_console(host: &impl Host, dir: &Path, console: &str) -> Result<(), String> {
-    fs::create_dir_all(dir).context(dir.display())?;
-    replace(host, dir, "console.txt", console.as_bytes())
-}
-
 /// Writes `sandbox.json` in `dir`, a sandbox's directory in the record, made if need be, by
-/// [`replace`] on `host`: `{"provider": p, "id": i, "report": r}`, sandbox `i` that provider `p`
-/// created, and what it made beside it, its
-/// [`Created::report`](provider::Created::report); with `"gpus": [m, ...]` once its session
-/// says the GPUs its `sandboxd` saw ([`Session::gpus`](gateway::Session::gpus)); and, once
-/// `deleted` is the outcome of its latest delete, `"delete": {"state": "deleted"}`, or
-/// `{"state": "failed", "reason": e}`.
+/// [`replace`] on `host`: `{"provider": p, "id": i}`, sandbox `i` that provider `p` created;
+/// with `"gpus": [m, ...]` once its session says the GPUs its `sandboxd` saw
+/// ([`Session::gpus`](gateway::Session::gpus)); and, once `deleted` is the outcome of its latest
+/// delete, `"delete": {"state": "deleted"}`, or `{"state": "failed"}`.
 pub(super) fn write_sandbox(
     host: &impl Host,
     dir: &Path,
     provider: &Name,
     id: &SandboxId,
-    report: &Value,
     gpus: Option<&[GpuModel]>,
     deleted: Option<&Result<(), String>>,
 ) -> Result<(), String> {
-    let mut sandbox = json!({ "provider": provider, "id": id.as_str(), "report": report });
+    let mut sandbox = json!({ "provider": provider, "id": id.as_str() });
     if let Some(gpus) = gpus {
         sandbox["gpus"] = json!(gpus);
     }
     if let Some(deleted) = deleted {
         sandbox["delete"] = match deleted {
             Ok(()) => json!({ "state": "deleted" }),
-            Err(reason) => json!({ "state": "failed", "reason": reason }),
+            Err(_) => json!({ "state": "failed" }),
         };
     }
     fs::create_dir_all(dir).context(dir.display())?;

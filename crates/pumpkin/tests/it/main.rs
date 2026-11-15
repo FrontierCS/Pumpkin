@@ -407,7 +407,7 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// The files of `record`, a run's, each sandbox's `sandbox.json` and console it holds, the model
+/// The files of `record`, a run's, each `sandbox.json` it holds, the model
 /// routes that `provider.json` holds, if a role has one, its run log's record of how each model
 /// request was answered, if it has a run log, what the agent's `out` and the first job's evidence
 /// held of a model's answer, if anything, what the driver wrote to `driver.log`, if anything, its

@@ -107,7 +107,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <path class="arrow" d="M649 224H686" marker-end="url(#head)"/>
 <rect class="box" x="688" y="254" width="164" height="44" rx="8"/>
 <text class="name" x="700" y="274"><tspan class="code">agent</tspan> <tspan class="code">jobs</tspan> <tspan class="code">leases</tspan></text>
-<text class="note" x="700" y="290">out, log and console</text>
+<text class="note" x="700" y="290">out and log</text>
 <path class="arrow" d="M649 276H686" marker-end="url(#head)"/>
 <rect class="box" x="688" y="306" width="164" height="44" rx="8"/>
 <text class="code" x="700" y="326">outcome.json</text>

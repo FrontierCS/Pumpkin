@@ -144,12 +144,12 @@ pub fn standard_outputs(record: &Path) -> Vec<String> {
 /// What `record`, a run's record, keeps of each sandbox, the agent's, each judge call's, each
 /// lease's.
 ///
-/// Its `sandbox.json`, on one line, and its console, unless empty, each after whose it is.
+/// Its `sandbox.json`, on one line, after whose it is.
 ///
 /// # Panics
 ///
-/// Panics if a job's directory isn't named by its number, a console can't be read as UTF-8, or
-/// a `sandbox.json` can't be read as JSON.
+/// Panics if a job's directory isn't named by its number, or a `sandbox.json` can't be read as
+/// JSON.
 pub fn sandboxes(record: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     for (whose, dir) in sandbox_dirs(record) {
@@ -161,13 +161,6 @@ pub fn sandboxes(record: &Path) -> Vec<String> {
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => panic!("{dir}/sandbox.json can't be read: {error}"),
-        }
-        let console = fs::read_to_string(record.join(&dir).join("console.txt"));
-        match console {
-            Ok(console) if console.is_empty() => {}
-            Ok(console) => lines.push(format!("{whose} console, {dir}/console.txt: {console:?}")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => panic!("{dir}/console.txt can't be read: {error}"),
         }
     }
     lines

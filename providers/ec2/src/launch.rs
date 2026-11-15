@@ -59,7 +59,7 @@ const DESCRIBE_EVERY: Duration = Duration::from_secs(5);
 
 impl Ec2<'_> {
     /// Creates `create`'s sandbox on an instance of its own, with its timer, and returns once its
-    /// run's list finds it, reporting `{"ami": a, "timer": {"group": g, "name": n}}`.
+    /// run's list finds it.
     ///
     /// # Errors
     ///
@@ -120,7 +120,7 @@ impl Ec2<'_> {
         };
         let by = Deadline::at_unix(by.since_epoch());
         let tags = tag_specifications(run, name, role_name);
-        let (id, ami) = self.launch(
+        let id = self.launch(
             class,
             run,
             name,
@@ -128,18 +128,15 @@ impl Ec2<'_> {
             &user_data(&start, self.region.as_str()),
             by,
         )?;
-        let timer = self.set_timer(run, &id, hard_end, by)?;
-        let group = &self.reached.group.0;
+        self.set_timer(run, &id, hard_end, by)?;
         self.listed(run, &id, by)?;
         Ok(Created {
             id: SandboxId::from(id.0),
-            report: json!({ "ami": ami, "timer": { "group": group, "name": timer } }),
         })
     }
 
     /// Launches one instance from `class`'s template, at its version, for sandbox `name` of run
-    /// `run`, with tags `tags` and user data `user_data`, by `by`, and returns its ID and the ID
-    /// of the AMI it launched with.
+    /// `run`, with tags `tags` and user data `user_data`, by `by`, and returns its ID.
     fn launch(
         &self,
         class: &InstanceClass,
@@ -148,7 +145,7 @@ impl Ec2<'_> {
         tags: &str,
         user_data: &str,
         by: Deadline,
-    ) -> Result<(InstanceId, String), String> {
+    ) -> Result<InstanceId, String> {
         // The user data holds the grant, so it reaches `aws` in a file only this user can read,
         // never on its command line, which every process can read. Neither a run's tag nor a
         // name holds a `+`, so no other launch of this process names the file.
@@ -184,26 +181,20 @@ impl Ec2<'_> {
         // its registration.
         let _ = fs::remove_file(&file);
         let Launched {
-            instances:
-                [
-                    LaunchedInstance {
-                        instance_id,
-                        image_id,
-                    },
-                ],
+            instances: [LaunchedInstance { instance_id }],
         } = launched?;
-        Ok((instance_id, image_id))
+        Ok(instance_id)
     }
 
     /// Makes the timer ([`Timer`](crate::Timer)) of instance `id`, of run `run`, which was just
-    /// launched, at `hard_end`, by `by`, and returns its name.
+    /// launched, at `hard_end`, by `by`.
     fn set_timer(
         &self,
         run: &RunTag,
         id: &InstanceId,
         hard_end: HardEnd,
         by: Deadline,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let (group, role_arn) = (&self.reached.group, &self.timer_role);
         let name = timer_name(run, id);
         // In UTC, as `--schedule-expression-timezone` says.
@@ -238,8 +229,7 @@ impl Ec2<'_> {
         made.context(format_args!(
             "making instance `{id}`'s timer, schedule `{}/{name}`, failed",
             group.0
-        ))?;
-        Ok(name)
+        ))
     }
 
     /// Lists run `run` until its list finds instance `id`, in whatever state, for up to
@@ -565,7 +555,6 @@ struct Launched {
 #[serde(rename_all = "PascalCase")]
 struct LaunchedInstance {
     instance_id: InstanceId,
-    image_id: String,
 }
 
 /// What `aws ec2 describe-instances` prints.
