@@ -40,6 +40,7 @@ mod cancel;
 mod check;
 mod controller;
 mod driver;
+mod export;
 mod fmt;
 mod lock;
 mod ls;

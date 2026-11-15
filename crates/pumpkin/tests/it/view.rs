@@ -402,14 +402,14 @@ fn serves_runs() {
 
 /// `pumpkin controller view` of the runs in `scratch`'s default runs directory, asked over its
 /// standard input.
-struct Piped {
+pub(super) struct Piped {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
 impl Piped {
-    fn start(scratch: &Scratch) -> Self {
+    pub(super) fn start(scratch: &Scratch) -> Self {
         let mut command = scratch.pumpkin(&["controller", "view"]);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command.spawn().unwrap();
@@ -421,7 +421,7 @@ impl Piped {
     }
 
     /// The reply to a request of `target`, deflated if `deflate`: its head, then its body.
-    fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
+    pub(super) fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
         let asking = json!({ "target": target, "deflate": deflate });
         writeln!(self.stdin, "{asking}").unwrap();
         let mut head = String::new();
@@ -1225,13 +1225,13 @@ fn pages_the_list() {
 
 /// The model files of a record in the making, `model/` of `dir`: its items, each named by its
 /// number, as a test needs no SHA-256, and each request's and response's file.
-struct Model {
+pub(super) struct Model {
     dir: std::path::PathBuf,
     items: Vec<String>,
 }
 
 impl Model {
-    fn new(dir: &std::path::Path) -> Self {
+    pub(super) fn new(dir: &std::path::Path) -> Self {
         fs::create_dir_all(dir.join("model/items")).unwrap();
         Self {
             dir: dir.join("model"),
@@ -1255,7 +1255,7 @@ impl Model {
     /// Keeps request `n`, whose conversation is `items` in `field`, with its fields `whole`
     /// kept whole, if this build's form, and `rest` as sent, and its response `response`; the
     /// `kept` of its `model_answered`.
-    fn keep(
+    pub(super) fn keep(
         &mut self,
         n: u64,
         field: &str,
@@ -1287,7 +1287,7 @@ impl Model {
 }
 
 /// The `model_request_started` of `caller`'s request `n`, at `seconds`.
-fn started(seconds: u64, caller: &str, n: u64) -> Value {
+pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
     let event = json!({ "kind": "model_request_started", "caller": caller, "request": n });
     let mut record = logged(seconds, event, json!([]));
     record["observed_ns"] = json!((seconds * 1_000_000_000 - 1).to_string());
@@ -1295,7 +1295,7 @@ fn started(seconds: u64, caller: &str, n: u64) -> Value {
 }
 
 /// The `model_answered` of `caller`'s request `n`, at `seconds`, with `status`, kept as `kept`.
-fn answered(
+pub(super) fn answered(
     seconds: u64,
     caller: &str,
     n: u64,
@@ -1374,12 +1374,12 @@ fn entries_counted(served: &Served, trace: &str, steps: &Value) {
 }
 
 /// A user's message, in the Responses API's form.
-fn user(text: &str) -> Value {
+pub(super) fn user(text: &str) -> Value {
     json!({ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] })
 }
 
 /// An assistant's message, in the Responses API's form.
-fn said(text: &str) -> Value {
+pub(super) fn said(text: &str) -> Value {
     json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": text }] })
 }
 

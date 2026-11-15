@@ -163,6 +163,33 @@ impl Page {
     }
 }
 
+impl Page {
+    /// The page's files as a static copy serves them, each with its path there, relative, and
+    /// whether it is the same at that path in every build: `index.html`, which reads the data
+    /// from files beside it, as `data-source="static"` on its `<html>` says, and the rest, below
+    /// the directory named by their digest.
+    pub(super) fn exported(&self) -> Vec<(String, Vec<u8>, bool)> {
+        let (html, marked) = (
+            "<html lang=\"en\">",
+            "<html lang=\"en\" data-source=\"static\">",
+        );
+        let files = FILES.iter().zip(&self.files);
+        let files = files.map(|((path, ..), (body, _))| {
+            if *path != "/" {
+                return (format!("{}{path}", &self.dir[1..]), body.clone(), true);
+            }
+            let index = String::from_utf8_lossy(body);
+            assert!(
+                index.contains(html),
+                "the page's index.html opens with {html}"
+            );
+            let index = index.replacen(html, marked, 1).into_bytes();
+            ("index.html".to_owned(), index, false)
+        });
+        files.collect()
+    }
+}
+
 /// `index.html`, `body`, with each file of [`FILES`] that it names named below `dir`, and each
 /// module preloaded, so that the browser asks for every module at once instead of a level of
 /// imports at a time.

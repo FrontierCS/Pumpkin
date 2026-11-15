@@ -25,6 +25,7 @@
 //! form of what it answers with is a module's of its own ([`json`](mod@json)).
 
 mod cancel;
+mod export;
 mod frame;
 mod http;
 mod json;
@@ -75,7 +76,10 @@ const HELD_ENDED_RUNS: usize = 8;
 /// Serves the runs in the directory `flags` name, or else, with `[controller]` in the
 /// configuration, the controller's runs, until the process is stopped.
 pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
-    let cli::View { runs, port } = flags;
+    let cli::View { runs, port, export } = flags;
+    if let Some(export) = export {
+        return export::export(runs, &export);
+    }
     let (source, serving) = if runs.is_none()
         && let Some(client) = config::client(None)?
     {
