@@ -1,15 +1,10 @@
 //! The operator's Docker engine, on which Pumpkin builds the images that its sandboxes run,
 //! whichever provider runs them, and from which it publishes them.
 //!
-//! [`Engine`] runs `docker` as an ordinary user against the engine of the context that the
-//! operator names ([`ContextName`]), which nothing in the environment overrides. Outside the
-//! engine, it writes only in the directory it is given. It needs Docker 28.0 or later, the first
-//! whose `docker image inspect` says what an image's ID is the digest of
-//! ([`Engine::check_platform`]), with the containerd image store, rootful or rootless
-//! ([`Security::rootless`]).
-//!
-//! Production code reaches the operator's engine only through this crate; an EC2 instance's boot
-//! runs that instance's own `docker`.
+//! [`Engine`] runs `docker` as an ordinary user, and writes outside the engine only in the
+//! directory it is given. It needs Docker 28.0 or later, the first whose `docker image inspect`
+//! says what an image's ID is the digest of ([`Engine::check_platform`]), with the containerd image
+//! store, rootful or rootless ([`Security::rootless`]).
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -37,68 +32,63 @@ mod sandboxd;
 pub use build::{Admit, BuildContext, Building, Built, Recipe, Started, finish, mounted};
 
 // How long a `docker` command that is neither a create's nor a removal may run before it is
-// killed: each such command makes one request of the engine, or a few, and none waits
-// on a pull or a build.
+// killed: each such command makes one request of the engine, or a few, and none waits on a pull or
+// a build.
 const CALL_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// How long a removal that isn't a create's may run before it is killed ([`Engine`]).
 // A removal deletes the container's writable layer and anonymous volumes, which have no size
-// limit, so its time grows with what the sandbox wrote there, as a tree of many small files.
-// And a run tries each removal once, and fails with it, while the engine goes on to finish one
-// whose `docker rm` was killed: so the bound is sized only to catch an engine that hangs.
+// limit, so its time grows with what the sandbox wrote there, as a tree of many small files. And
+// a run tries each removal once, and fails with it, while the engine goes on to finish one whose
+// `docker rm` was killed: so the bound is sized only to catch an engine that hangs.
 pub const REMOVE_TIMEOUT: Duration = Duration::from_mins(10);
 
 // How long a push may run before it is killed. A push uploads the layers the registry lacks, so
 // its time grows with their size and falls with the host's bandwidth, which no bound can know:
-// this one is sized only to turn a push that hangs into a failure, rather than a wait without
-// end. A later push of the image uploads only the layers the registry still lacks.
+// this one is sized only to turn a push that hangs into a failure, rather than a wait without end.
+// A later push of the image uploads only the layers the registry still lacks.
 const PUSH_TIMEOUT: Duration = Duration::from_hours(2);
 
-/// The first release of Docker's command line whose push takes its login from its environment
-/// alone, from `DOCKER_AUTH_CONFIG` ([`Pusher`]).
-// An older one ignores the variable, and pushes with whatever the operator's own configuration
-// holds for the registry, such as another identity's, from a credential helper.
+// The first release of Docker's command line whose push takes its login from its environment
+// alone, from `DOCKER_AUTH_CONFIG` ([`Pusher`]). An older one ignores the variable, and pushes with
+// whatever the operator's own configuration holds for the registry, such as another identity's,
+// from a credential helper.
 const PUSHING_CLI: [u64; 3] = [28, 3, 0];
 
-/// How many of the calls on the engine that publish an image run at once, of every `pumpkin`
-/// whose engine has the same directory, as of a workspace ([`Engine::connect`]): a look at an
-/// image's platform ([`Engine::check_platform`]), a push ([`Pusher::push`]) and a load of
-/// `sandboxd`'s image ([`Engine::load_sandboxd`]). The rest wait for a slot.
-// Few, and the same on any machine, as the engine's API, not its CPUs, is what they wait on: 28
-// runs that looked at their images' platforms in the same second hung an engine until it was
-// restarted, as 16 publishes at once hung another. A push already uploads up to 5 layers at once,
-// dockerd's default `max-concurrent-uploads`, so 4 keep up to 20 uploads going.
+// How many of the calls on the engine that publish an image run at once, of every `pumpkin` whose
+// engine has the same directory, as of a workspace: a look at an image's platform, a push and a
+// load of `sandboxd`'s image. The rest wait for a slot. Few, and the same on any machine, as the
+// engine's API, not its CPUs, is what they wait on, and too many calls at once have hung an engine
+// until it was restarted. A push already uploads up to 5 layers at once, dockerd's default
+// `max-concurrent-uploads`, so 4 keep up to 20 uploads going.
 const PUBLISH_SLOTS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 const PUBLISH_SLOTS_DIR: &str = "publish-slots";
 
-/// The most the container's log may hold, in bytes, in one file.
-// The log is kept on the host's disk, outside the container's other limits, so it is capped
-// whatever writes there, with the `json-file` driver named, so that the cap doesn't rest on the
-// daemon's default. It holds the output of `sandboxd` alone, which is a line if it fails: its
-// commands' output goes to files, and they can't open its own, since it is non-dumpable.
+// The most the container's log may hold, in bytes, in one file. The log is kept on the host's
+// disk, outside the container's other limits, so it is capped whatever writes there, with the
+// `json-file` driver named, so that the cap doesn't rest on the daemon's default. It holds the
+// output of `sandboxd` alone, which is a line if it fails: its commands' output goes to files, and
+// they can't open its own, since it is non-dumpable.
 const LOG_BYTES: u64 = 1 << 20;
 
-/// The most processes and threads a container may have.
+// The most processes and threads a container may have.
 const PIDS_LIMIT: u32 = 4096;
 
-/// The entry of `docker info`'s `DriverStatus` that an engine whose images are in the containerd
-/// image store reports.
 const CONTAINERD_STORE: (&str, &str) = ("driver-type", "io.containerd.snapshotter.v1");
 
-/// The media types of an image's manifest: the OCI image format's, and Docker's schema 2, which
-/// it was made from, and which some engines' builds still write.
+/// The media types of an image's manifest: the OCI image format's, and Docker's schema 2, which it
+/// was made from, and which some engines' builds still write.
 pub const MANIFEST_TYPES: [&str; 2] = [
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 ];
 
-/// The name of a Docker context, which says what engine `docker` reaches, and how. `default`
-/// is Docker's own context, which reaches the engine at Docker's default socket.
+/// The name of a Docker context, which says what engine `docker` reaches, and how. `default` is
+/// Docker's own context, which reaches the engine at Docker's default socket.
 ///
-/// Any name but the empty one, which `docker` would take for no name, and so reach the engine
-/// of the command line's current context. A name no context has is refused by
-/// [`Engine::connect`].
+/// Any name but the empty one, which `docker` would take for no name, and so reach the engine of
+/// the command line's current context. A name no context has is refused by [`Engine::connect`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct ContextName(String);
@@ -124,8 +114,8 @@ impl TryFrom<String> for ContextName {
     }
 }
 
-/// A platform that images are for, as an image's configuration names it: an operating system
-/// and an architecture, which Docker writes `<os>/<architecture>`, such as `linux/amd64`.
+/// A platform that images are for, as an image's configuration names it: an operating system and
+/// an architecture, which Docker writes `<os>/<architecture>`, such as `linux/amd64`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Platform {
     os: String,
@@ -133,8 +123,8 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// Linux on x86-64, `linux/amd64`: the platform of the static `sandboxd`, which is built for
-    /// it alone.
+    /// Linux on x86-64, `linux/amd64`: the platform of the static `sandboxd`, which is built for it
+    /// alone.
     pub fn sandboxd() -> Self {
         Self {
             os: "linux".to_owned(),
@@ -202,17 +192,9 @@ impl fmt::Debug for Login {
 }
 
 /// The Docker engine a context reaches, and its report.
-///
-/// Each `docker` command it runs but `docker build` is killed if it hasn't ended in time, so
-/// that each call returns within a bound, counted from the command's start: a removal at
-/// [`REMOVE_TIMEOUT`], a [push](Pusher::push) at 2 h (`PUSH_TIMEOUT`), the resolver of a
-/// [lock](Engine::lock) at 30 min, any other at 2 min (`CALL_TIMEOUT`); or one that its caller
-/// bounds ([`docker_to`]) at that bound.
 #[derive(Debug)]
 pub struct Engine {
     report: Report,
-    /// What `docker info` said of the engine's host when [`connect`](Self::connect) reached the
-    /// engine, or why it can't be read.
     // Read at the connect, but refused only by a caller that needs it ([`Engine::host`]): a build
     // or a push needs none of it.
     host: Result<Host, String>,
@@ -248,8 +230,8 @@ pub struct Security {
     // runs as root, and whoever may use its socket, as the `docker` group may, can make it do
     // anything root can.
     pub rootless: bool,
-    /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own,
-    /// or `None` if the engine has no seccomp.
+    /// The seccomp profile containers get unless told otherwise, `builtin` for Docker's own, or
+    /// `None` if the engine has no seccomp.
     pub seccomp_profile: Option<String>,
     /// Whether the engine confines containers with `AppArmor`.
     pub apparmor: bool,
@@ -258,8 +240,8 @@ pub struct Security {
 }
 
 /// What `docker info` says of the engine's host and of the limits that the engine enforces on a
-/// container, as it said when [`Engine::connect`] reached the engine: facts that change only as
-/// the engine restarts.
+/// container, as it said when [`Engine::connect`] reached the engine: facts that change only as the
+/// engine restarts.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 #[expect(
@@ -271,28 +253,26 @@ pub struct Host {
     pub swap_limit: bool,
     /// Whether the engine supports CPU limits.
     pub cpu_cfs_quota: bool,
-    /// Whether the engine supports confining a container to a set of CPUs.
     #[serde(rename = "CPUSet")]
+    /// Whether the engine supports confining a container to a set of CPUs.
     pub cpu_set: bool,
     pub pids_limit: bool,
-    /// The memory of the engine's host.
     #[serde(rename = "MemTotal")]
+    /// The memory of the engine's host.
     pub memory_bytes: NonZeroU64,
-    /// The engine's ID, which it keeps from one start to the next.
     #[serde(rename = "ID")]
+    /// The engine's ID, which it keeps from one start to the next.
     pub id: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct InfoJson {
-    /// What the engine says of the store its images are in, as pairs of a name and a value.
     driver_status: Option<Vec<(String, String)>>,
     security_options: Option<Vec<String>>,
     kernel_version: String,
     operating_system: String,
     server_version: String,
-    /// The `docker` command line's version, among what it says of itself.
     client_info: ClientInfoJson,
 }
 
@@ -303,10 +283,9 @@ struct ClientInfoJson {
 }
 
 impl Engine {
-    /// Reaches the engine through `context`, and reports it, refusing one that keeps no
-    /// containerd image store. What it writes on this machine goes in `dir`, made once a build or
-    /// a load needs it: a directory of its own for each while it runs, and Buildx's state, in
-    /// `buildx`.
+    /// Reaches the engine through `context`, and reports it, refusing one that keeps no containerd
+    /// image store. What it writes on this machine goes in `dir`, made once a build or a load needs
+    /// it: a directory of its own for each while it runs, and Buildx's state, in `buildx`.
     pub fn connect(context: ContextName, dir: &Path) -> Result<Self, String> {
         let Reach { endpoint, info } = reach(&context)?;
         let InfoJson {
@@ -337,8 +316,8 @@ impl Engine {
         })
     }
 
-    /// Reaches the engine through `context`, as [`connect`](Self::connect) does, but checks
-    /// nothing more of it.
+    /// Reaches the engine through `context`, as [`connect`](Self::connect) does, but checks nothing
+    /// more of it.
     pub fn reach(context: &ContextName) -> Result<(), String> {
         reach(context).map(drop)
     }
@@ -388,9 +367,9 @@ impl Engine {
             image.as_str(),
         ];
         // One call, rather than a listing of every image before it, as many runs that publish at
-        // once each call the engine. `docker image inspect` fails alike whatever went wrong, so
-        // an image it lacks is told by its text, as `image_id` tells one; and in the containerd
-        // image store an image's full ID names that image alone.
+        // once each call the engine. `docker image inspect` fails alike whatever went wrong, so an
+        // image it lacks is told by its text, as `image_id` tells one; and in the containerd image
+        // store an image's full ID names that image alone.
         let inspected = match docker(context, inspect) {
             Ok(inspected) => inspected,
             Err(Failure::Exited { stderr, .. }) if stderr.contains("No such image") => {
@@ -419,9 +398,9 @@ impl Engine {
             ));
         };
         // An index names a manifest for each of several platforms, of which a container runs the
-        // engine's: so the digest the workflow names, which the run's record holds, wouldn't be
-        // the digest of what ran. A build for one platform makes an index too when it attaches
-        // an attestation, as `docker build` does by default. And the engine finds no image by the
+        // engine's: so the digest the workflow names, which the run's record holds, wouldn't be the
+        // digest of what ran. A build for one platform makes an index too when it attaches an
+        // attestation, as `docker build` does by default. And the engine finds no image by the
         // digest of a manifest that an index holds, so an image to name is built as a manifest
         // alone.
         if !MANIFEST_TYPES.contains(&media_type.as_str()) {
@@ -435,16 +414,16 @@ impl Engine {
         Ok(Platform { os, architecture })
     }
 
-    /// Takes one of the engine's publish slots ([`PUBLISH_SLOTS`]), held until the file returned
-    /// is dropped; the first time that this engine waits for one, it says so, and which processes
-    /// hold them.
+    // Takes one of the engine's publish slots ([`PUBLISH_SLOTS`]), held until the file returned is
+    // dropped; the first time that this engine waits for one, it says so, and which processes hold
+    // them.
     fn publishing(&self) -> Result<fs::File, String> {
         let dir = self.dir.join(PUBLISH_SLOTS_DIR);
         let holder = format!("process {}", std::process::id());
         stdx::slots::take(&dir, PUBLISH_SLOTS, &holder, |holders| {
             if !self.said_waiting.swap(true, Ordering::Relaxed) {
-                // As `pumpkin` says everything else: a standard error that can't be written is
-                // left unwritten, as the publish goes on all the same.
+                // As `pumpkin` says everything else: a standard error that can't be written is left
+                // unwritten, as the publish goes on all the same.
                 let _ = writeln!(
                     io::stderr(),
                     "pumpkin: waiting for a publish slot: all {PUBLISH_SLOTS} held, by {}",
@@ -474,8 +453,8 @@ impl Engine {
         self.inspected(&images)
     }
 
-    /// Each of `images` that the engine has, with its size, as `docker image inspect` gives it,
-    /// and its tags, as they are now; but none the engine has no more.
+    /// Each of `images` that the engine has, with its size, as `docker image inspect` gives it, and
+    /// its tags, as they are now; but none the engine has no more.
     pub fn inspected(&self, images: &[Image]) -> Result<Vec<prune::Cached>, String> {
         let context = &self.report.context;
         let mut inspected = Vec::new();
@@ -519,9 +498,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Removes what the engine's build cache holds, least recently used first, until the
-    /// engine's disk has `free_bytes` free, as the engine's builder counts it, or the cache
-    /// holds nothing that it can remove.
+    /// Removes what the engine's build cache holds, least recently used first, until the engine's
+    /// disk has `free_bytes` free, as the engine's builder counts it, or the cache holds nothing
+    /// that it can remove.
     pub fn prune_build_cache(&self, free_bytes: u64) -> Result<(), String> {
         let free = free_bytes.to_string();
         let pruned = docker_to(
@@ -537,8 +516,8 @@ impl Engine {
     pub fn pusher(&self) -> Result<Pusher<'_>, String> {
         let version = &self.report.client_version;
         // As semantic versioning orders versions, such as `28.3.1`, `28.3.0-rc.1` or
-        // `26.1.5+dfsg1`: build metadata doesn't count, and a pre-release comes before its
-        // release, as `28.3.0-rc.1`, which ignores the variable, does.
+        // `26.1.5+dfsg1`: build metadata doesn't count, and a pre-release comes before its release,
+        // as `28.3.0-rc.1`, which ignores the variable, does.
         let release = version
             .split_once('+')
             .map_or(version.as_str(), |(release, _)| release);
@@ -562,8 +541,8 @@ impl Engine {
     }
 }
 
-/// An [`Engine`] whose Docker command line can push with a [`Login`] that reaches that push
-/// alone ([`Engine::pusher`]).
+/// An [`Engine`] whose Docker command line can push with a [`Login`] that reaches that push alone
+/// ([`Engine::pusher`]).
 #[derive(Debug)]
 pub struct Pusher<'e> {
     engine: &'e Engine,
@@ -574,10 +553,10 @@ impl<'e> Pusher<'e> {
         self.engine
     }
 
-    /// Pushes `image`, an image the engine has, by its ID, to `repository`, such as `team/app`,
-    /// of the registry that `login` names, as `<registry>/<repository>:<tag>`, which the image
-    /// keeps as a tag; with `login`'s credentials, which reach that push alone: neither the
-    /// operator's Docker configuration nor a credential store holds them.
+    /// Pushes `image`, an image the engine has, by its ID, to `repository`, such as `team/app`, of
+    /// the registry that `login` names, as `<registry>/<repository>:<tag>`, which the image keeps
+    /// as a tag; with `login`'s credentials, which reach that push alone: neither the operator's
+    /// Docker configuration nor a credential store holds them.
     pub fn push(
         &self,
         image: &Image,
@@ -598,10 +577,8 @@ impl<'e> Pusher<'e> {
     }
 }
 
-/// What `docker` says of the engine that a context reaches, once it has reached it.
 struct Reach {
     endpoint: String,
-    /// What `docker info` printed, as JSON.
     info: Vec<u8>,
 }
 
@@ -646,8 +623,6 @@ fn read_info<T: DeserializeOwned>(info: &[u8]) -> Result<T, String> {
 }
 
 impl Security {
-    /// The security options `docker info` lists, each a list of `key=value`, such as
-    /// `name=seccomp,profile=builtin`.
     fn parse(options: &[String]) -> Self {
         let mut security = Self {
             rootless: false,
@@ -680,9 +655,8 @@ impl Security {
 }
 
 fn platform(context: &ContextName) -> Result<Platform, String> {
-    // `docker version` names the platform the engine is built for as an image's configuration
-    // names one; `docker info` names the host's machine as the kernel does, such as `x86_64` for
-    // `amd64`.
+    // `docker version` names the platform the engine is built for as an image's configuration names
+    // one; `docker info` names the host's machine as the kernel does, such as `x86_64` for `amd64`.
     let format = "{{.Server.Os}}/{{.Server.Arch}}";
     let unread = |error: String| {
         let name = context.as_str();
@@ -703,12 +677,10 @@ fn platform(context: &ContextName) -> Result<Platform, String> {
     })
 }
 
-/// Fails unless the engine of `context` keeps its images in the containerd image store, as
-/// `status`, the `DriverStatus` of its `docker info`, says.
 fn check_store(context: &ContextName, status: &[(String, String)]) -> Result<(), String> {
-    // There an image's ID is the digest of what its name points to, a manifest for an image of
-    // one platform, which a workflow names it by; in the classic store, it is the digest of the
-    // image's configuration, which no workflow names.
+    // There an image's ID is the digest of what its name points to, a manifest for an image of one
+    // platform, which a workflow names it by; in the classic store, it is the digest of the image's
+    // configuration, which no workflow names.
     let (key, value) = CONTAINERD_STORE;
     if status.iter().any(|(name, set)| name == key && set == value) {
         return Ok(());
@@ -727,25 +699,23 @@ fn check_store(context: &ContextName, status: &[(String, String)]) -> Result<(),
 struct ImageJson {
     os: String,
     architecture: String,
-    /// What the image's ID is the digest of, which an engine of Docker 28.0 or later describes.
     // Moby's API marks the field experimental, liable to change without notice. An engine that
-    // drops it gives none here, and one that renames it, none by this name, so either fails
-    // every publish, as an engine before 28.0 does, rather than taking an image unchecked.
+    // drops it gives none here, and one that renames it, none by this name, so either fails every
+    // publish, as an engine before 28.0 does, rather than taking an image unchecked.
     descriptor: Option<DescriptorJson>,
 }
 
-/// An OCI descriptor, as `docker image inspect` prints one.
 #[derive(Deserialize)]
 struct DescriptorJson {
     #[serde(rename = "mediaType")]
     media_type: String,
 }
 
-/// The options of `docker create` or `docker run` that confine a container to its role's `user`
-/// and `resources`, wherever a provider's sandbox is a Docker container.
+/// The options of `docker create` or `docker run` that confine a container to its role's `user` and
+/// `resources`, wherever a provider's sandbox is a Docker container.
 ///
-/// The container's network, bind mounts and command, which say how it reaches its gateway and
-/// what it runs, are the caller's to give.
+/// The container's network, bind mounts and command, which say how it reaches its gateway and what
+/// it runs, are the caller's to give.
 pub fn confinement(user: User, resources: Resources) -> Vec<String> {
     let User { uid, gid } = user;
     let Resources {
@@ -760,11 +730,11 @@ pub fn confinement(user: User, resources: Resources) -> Vec<String> {
         // The daemon's `init` setting would otherwise make `docker-init` the first process, in
         // place of `sandboxd`.
         "--init=false".to_owned(),
-        // An image's `HEALTHCHECK` would otherwise run as the role's user outside `sandboxd`,
-        // after freezing too, with its output kept on the host.
+        // An image's `HEALTHCHECK` would otherwise run as the role's user outside `sandboxd`, after
+        // freezing too, with its output kept on the host.
         "--no-healthcheck".to_owned(),
-        // Images are the operator's or the build's: a pull would fetch one that no run owns,
-        // with the operator's registry credentials.
+        // Images are the operator's or the build's: a pull would fetch one that no run owns, with
+        // the operator's registry credentials.
         "--pull=never".to_owned(),
         format!(
             "--cpus={}.{:03}",
@@ -778,9 +748,9 @@ pub fn confinement(user: User, resources: Resources) -> Vec<String> {
         "--log-opt=max-file=1".to_owned(),
         format!("--pids-limit={PIDS_LIMIT}"),
         // A crash would otherwise dump core where the host's `core_pattern` says: into the
-        // container's own files, such as its writable layer, or to a helper that may store it
-        // on the host's disk, outside the session and every limit. A helper still runs, but is
-        // told the limit is 0.
+        // container's own files, such as its writable layer, or to a helper that may store it on
+        // the host's disk, outside the session and every limit. A helper still runs, but is told
+        // the limit is 0.
         "--ulimit=core=0".to_owned(),
         format!(
             "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
@@ -790,8 +760,6 @@ pub fn confinement(user: User, resources: Resources) -> Vec<String> {
     ]
 }
 
-/// The ID of the image that `reference`, such as `<repository>:<tag>`, names on the engine of
-/// `context`, or `None` if the engine has no such image.
 fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Failure> {
     let inspect = ["image", "inspect", "--format", "{{.Id}}", "--", reference];
     match docker(context, inspect) {
@@ -803,11 +771,11 @@ fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Fa
     }
 }
 
-/// `error`, from a `docker` command that failed for a reason its caller doesn't foresee, and
-/// what to do about it.
+/// `error`, from a `docker` command that failed for a reason its caller doesn't foresee, and what
+/// to do about it.
 ///
-/// That is to check the engine, if it was killed at its bound, as Docker reported nothing; or
-/// else to fix what Docker reports, which says what is wrong.
+/// That is to check the engine, if it was killed at its bound, as Docker reported nothing; or else
+/// to fix what Docker reports, which says what is wrong.
 pub fn fix_reported(error: &Failure) -> String {
     let todo = match error {
         Failure::Unended { .. } => "check that the engine runs and isn't overloaded",
@@ -832,8 +800,8 @@ where
 /// output. Of the environment, `docker` gets only `HOME`, `PATH` and `DOCKER_CONFIG`, so that the
 /// context named alone steers it.
 ///
-/// A [`Failure`] says whether `docker` didn't run, failed or was killed at `bound`, and what
-/// Docker reported, for the caller to add what that means and what to do.
+/// A [`Failure`] says whether `docker` didn't run, failed or was killed at `bound`, and what Docker
+/// reported, for the caller to add what that means and what to do.
 pub fn docker_to<I, S>(context: &ContextName, args: I, bound: Bound) -> Result<Output, Failure>
 where
     I: IntoIterator<Item = S>,
@@ -850,15 +818,13 @@ where
     // A context reached over `ssh://` would need `SSH_AUTH_SOCK` too, which isn't passed.
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
     let mut command = stdx::process::command("docker", kept);
-    // One argument, so that a name that begins with `-` can't be taken for an option.
     command
+        // One argument, so that a name that begins with `-` can't be taken for an option.
         .arg(format!("--context={}", context.as_str()))
         .args(args);
     command
 }
 
-/// Runs `docker` as [`docker_to`] does, with `login`'s credentials, if given, in its environment,
-/// as `DOCKER_AUTH_CONFIG`, which no command line shows.
 fn docker_as<I, S>(
     context: &ContextName,
     args: I,
@@ -870,8 +836,8 @@ where
     S: AsRef<OsStr>,
 {
     let args: Vec<S> = args.into_iter().collect();
-    // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`, but
-    // none of its options, which can be long.
+    // `docker`, its command, such as `container ls`, and its argument, as in `start <id>`, but none
+    // of its options, which can be long.
     let mut shown = "docker".to_owned();
     let words = args.iter().map(|arg| arg.as_ref().to_string_lossy());
     for word in words.take(2).take_while(|word| !word.starts_with('-')) {
@@ -892,9 +858,8 @@ where
             let command = shown;
             return Err(Failure::Unended { command, bound });
         }
-        // A spawn fails so when it finds no `docker`, or one it can't execute; any other
-        // error, such as a failed read of its output, isn't one that installing `docker`
-        // would mend.
+        // A spawn fails so when it finds no `docker`, or one it can't execute; any other error,
+        // such as a failed read of its output, isn't one that installing `docker` would mend.
         Err(error)
             if matches!(
                 error.kind(),
@@ -923,15 +888,14 @@ where
 pub enum Failure {
     /// `docker` didn't run.
     Unrun(io::Error),
-    /// It ran, but couldn't be followed to its end, as when its output couldn't be read:
-    /// `command` shows which, as for [`Exited`](Self::Exited).
+    /// It ran, but couldn't be followed to its end, as when its output couldn't be read: `command`
+    /// shows which, as for [`Exited`](Self::Exited).
     Unwatched { command: String, error: io::Error },
-    /// It hadn't ended by `bound`, and was killed then, or never started, if a deadline had
-    /// passed before it.
+    /// It hadn't ended by `bound`, and was killed then, or never started, if a deadline had passed
+    /// before it.
     Unended { command: String, bound: Bound },
-    /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what
-    /// Docker reported, or, where its report went to this process's standard error, that it
-    /// says why.
+    /// It failed: `command` shows which, such as `docker container ls`, and `stderr` is what Docker
+    /// reported, or, where its report went to this process's standard error, that it says why.
     Exited {
         command: String,
         status: ExitStatus,
@@ -957,7 +921,6 @@ impl fmt::Display for Failure {
                     "`{command}` didn't end within {secs} s, so it was killed"
                 )
             }
-            // A command whose deadline had passed before it began never started.
             Self::Unended {
                 command,
                 bound: Bound::Until(_),
@@ -971,10 +934,12 @@ impl fmt::Display for Failure {
     }
 }
 
-/// When a `docker` command is killed if it hasn't ended ([`Engine`]).
 #[derive(Clone, Copy)]
+/// When a `docker` command is killed if it hasn't ended ([`Engine`]).
 pub enum Bound {
     /// This long after it starts.
     Within(Duration),
+    /// At this deadline, however late the command starts: a command whose deadline has passed
+    /// never starts.
     Until(Deadline),
 }
