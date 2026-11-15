@@ -20,6 +20,7 @@ use docker::CpuList;
 use engine::ContextName;
 use gateway::GatewayAddress;
 use route::{Headers, Key, Serving, UpstreamUrl};
+use runtime::TokenPrices;
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
@@ -169,6 +170,7 @@ struct Model {
     name: ModelName,
     /// The name that the upstream takes for it.
     upstream_name: ModelName,
+    usd_per_mtok: Option<TokenPrices>,
 }
 
 impl Providers<Kind> {
@@ -240,6 +242,13 @@ impl Upstreams {
             .iter()
             .map(|entry| self.serves(entry))
             .collect()
+    }
+
+    /// The price of each model that is given one, by its name.
+    pub(crate) fn prices(&self) -> BTreeMap<ModelName, TokenPrices> {
+        let models = self.0.values().flat_map(|upstream| &upstream.models);
+        let priced = models.filter_map(|model| Some((model.name.clone(), model.usd_per_mtok?)));
+        priced.collect()
     }
 
     /// How a run serves `entry`, an entry of a route, as [`Upstreams::serving`] says.

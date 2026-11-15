@@ -36,7 +36,7 @@ use std::time::{Duration, SystemTime};
 use decision::PayloadRef;
 use provider::{Provider, Ready, RunTag, SandboxId, Sweep, UnixTime};
 use route::Serving;
-use schema::ir::{Api, GpuModel, Name, Sha256Digest};
+use schema::ir::{Api, GpuModel, ModelName, Name, Sha256Digest};
 use schema::sandbox::{command_stderr, log_dir, out_dir};
 use schema::workflow::{ByProvider, ByRole, Class, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
@@ -46,7 +46,7 @@ use stdx::{Context, Utc};
 use super::log::{self, LogFold, Place, Readout, Used};
 use super::model::{KeptPart, KeptRequest};
 use super::sandbox::sweep;
-use super::{Durable, Host, Signal, Stopped, System};
+use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
 
 /// Why [`Record::reap`] records a lost run as failed.
 const LOST: &str = "its driver ended without an outcome";
@@ -1243,17 +1243,19 @@ fn utc_stamp(seconds: u64) -> String {
 }
 
 /// What `provider.json` holds of `placed`, whose roles are placed on `providers` and served by
-/// `routes`: `{"providers": {p: {"report": r, "classes": {c: {"startup_seconds": s,
+/// `routes`, at `prices`: `{"providers": {p: {"report": r, "classes": {c: {"startup_seconds": s,
 /// "usd_per_hour": h}}}}, "roles": {n: {"provider": p, "class": c}}, "routes": {n: [{"api": a,
-/// "upstream": u, "models": {m: {"upstream_name": v}}}]}}`, where `r` is `p`'s report and each
-/// class `c` takes `s` to start and costs `h`, if `p` states a price, as `p` declared
-/// ([`Ready`](provider::Ready)); role `n` is placed on `p`, in class `c`; and each entry of
-/// `n`'s model route, in its order, takes API `a` to the upstream that the deployment names `u`,
-/// which takes model `m` as `v`. A role without a model route is not in `routes`.
+/// "upstream": u, "models": {m: {"upstream_name": v, "usd_per_mtok": t}}}]}}`, where `r` is
+/// `p`'s report and each class `c` takes `s` to start and costs `h`, if `p` states a price, as
+/// `p` declared ([`Ready`](provider::Ready)); role `n` is placed on `p`, in class `c`; and each
+/// entry of `n`'s model route, in its order, takes API `a` to the upstream that the deployment
+/// names `u`, which takes model `m` as `v`, whose tokens cost `t`, if `prices` give it one. A role
+/// without a model route is not in `routes`.
 pub(super) fn provided(
     placed: &Placed,
     providers: &ByProvider<&dyn Provider>,
     routes: &ByRole<Vec<Serving>>,
+    prices: &BTreeMap<ModelName, TokenPrices>,
 ) -> Value {
     let declared = (providers.iter())
         .map(|(name, provider)| {
@@ -1296,7 +1298,11 @@ pub(super) fn provided(
         } = serving;
         let models = (models.iter())
             .map(|(model, upstream_name)| {
-                (model.to_string(), json!({ "upstream_name": upstream_name }))
+                let mut served = json!({ "upstream_name": upstream_name });
+                if let Some(price) = prices.get(model) {
+                    served["usd_per_mtok"] = json!(price);
+                }
+                (model.to_string(), served)
             })
             .collect::<Map<_, _>>();
         json!({ "api": api, "upstream": name, "models": models })

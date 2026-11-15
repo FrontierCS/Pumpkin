@@ -548,7 +548,8 @@ that dials finds its registration gone, and one that listens gives up soon after
 deadline (`--by`).
 
 A run's spend is in its record: each sandbox's class and its price an hour, as the provider's
-settings give it, and what each model response reports of its tokens; `ls` totals the cost, and
+settings give it, each model's prices for its tokens, as the machine's configuration gives them
+when the run starts, and what each model response reports of its tokens; `ls` totals the cost, and
 a run's summary the tokens too. On a controller, slots and a disk watermark admit builds and
 publishes, and the controller stops itself when idle.
 

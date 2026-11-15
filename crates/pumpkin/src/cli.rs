@@ -1024,7 +1024,11 @@ Example, of a machine whose runs go to EC2 and Modal:
   [upstreams.gateway]
   url = \"https://gateway.example/v1\"
   key_file = \"gateway-key\"
-  models = [{ name = \"model-a\", upstream_name = \"provider/model-a\" }]
+
+  [[upstreams.gateway.models]]
+  name = \"model-a\"
+  upstream_name = \"provider/model-a\"
+  usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
 
 Example, of a machine whose runs go to the person's controller, and Modal:
   [controller]
@@ -1123,8 +1127,14 @@ settings:
                 absolute. The route sends it as `authorization: Bearer <key>`,
                 and to /messages as `x-api-key: <key>`.
   models        The models it serves, each with the `name` that a route allows
-                and the `upstream_name` that the upstream takes for it. No model
-                is listed twice, under one upstream or two.
+                and the `upstream_name` that the upstream takes for it, and,
+                if given, `usd_per_mtok`, what its tokens cost in US dollars a
+                million: `input` and `output`, and `cached` and `cache_write`,
+                the input that the upstream read from its cache and wrote to
+                it. Reasoning is output. A model without `usd_per_mtok` has no
+                cost, and nor has one whose responses report a kind of token
+                that its prices lack. No model is listed twice, under one
+                upstream or two.
 
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.

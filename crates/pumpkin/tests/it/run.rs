@@ -594,7 +594,11 @@ fn usage() {
                 [upstreams.gateway]
                 url = "https://gateway.example/v1"
                 key_file = "gateway-key"
-                models = [{ name = "model-a", upstream_name = "provider/model-a" }]
+
+                [[upstreams.gateway.models]]
+                name = "model-a"
+                upstream_name = "provider/model-a"
+                usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
 
               Example, of a machine whose runs go to the person's controller, and Modal:
                 [controller]
@@ -693,8 +697,14 @@ fn usage() {
                               absolute. The route sends it as `authorization: Bearer <key>`,
                               and to /messages as `x-api-key: <key>`.
                 models        The models it serves, each with the `name` that a route allows
-                              and the `upstream_name` that the upstream takes for it. No model
-                              is listed twice, under one upstream or two.
+                              and the `upstream_name` that the upstream takes for it, and,
+                              if given, `usd_per_mtok`, what its tokens cost in US dollars a
+                              million: `input` and `output`, and `cached` and `cache_write`,
+                              the input that the upstream read from its cache and wrote to
+                              it. Reasoning is output. A model without `usd_per_mtok` has no
+                              cost, and nor has one whose responses report a kind of token
+                              that its prices lack. No model is listed twice, under one
+                              upstream or two.
 
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
@@ -1439,6 +1449,9 @@ fn configurations() {
         "missing", "undocked", "nameless", "broken", "inline", "priced", "keyless", "invalid",
     ];
     let refused = (refused.into_iter()).chain([
+        "negative",
+        "outputless",
+        "reasoned",
         "twice",
         "again",
         "query",
@@ -1514,7 +1527,7 @@ fn configurations() {
               |
             7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", price = 1 }]
               |                                                                         ^^^^^
-            unknown field `price`, expected `name` or `upstream_name`
+            unknown field `price`, expected one of `name`, `upstream_name`, `usd_per_mtok`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/priced.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config keyless.toml
             exit status: Some(1)
@@ -1532,6 +1545,30 @@ fn configurations() {
               |            ^^^^^^^
             `Gateway` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/invalid.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config negative.toml
+            exit status: Some(1)
+            pumpkin: negative.toml: TOML parse error at line 7, column 88
+              |
+            7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", usd_per_mtok = { input = -1, output = 10 } }]
+              |                                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            `input` is -1, not a price in US dollars a million tokens: give one from 0 to 1000000, such as 1.25
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/negative.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config outputless.toml
+            exit status: Some(1)
+            pumpkin: outputless.toml: TOML parse error at line 7, column 88
+              |
+            7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", usd_per_mtok = { input = 1.25 } }]
+              |                                                                                        ^^^^^^^^^^^^^^^^
+            missing field `output`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/outputless.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config reasoned.toml
+            exit status: Some(1)
+            pumpkin: reasoned.toml: TOML parse error at line 7, column 117
+              |
+            7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", usd_per_mtok = { input = 1.25, output = 10, reasoning = 10 } }]
+              |                                                                                                                     ^^^^^^^^^
+            unknown field `reasoning`, expected one of `input`, `cached`, `cache_write`, `output`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/reasoned.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config twice.toml
             exit status: Some(1)
             pumpkin: twice.toml: TOML parse error at line 9, column 12
@@ -1673,9 +1710,10 @@ fn configurations() {
 
 /// Writes into `scratch` the stand-in `sandboxd` that [`configurations`] and [`refusals`] give
 /// `run`, and the machine's configurations, each named for what it holds: `conf/served`, of the
-/// context `nowhere` and two upstreams, its key in `conf/key`; `docked`, without upstreams; and,
-/// to be refused, one for each rule a configuration breaks, as its name says (a missing context,
-/// TOML errors, keys, upstreams, URLs, unserved models, `[placement]`, provider kinds and their
+/// context `nowhere` and two upstreams, one of whose models has a price, its key in `conf/key`;
+/// `docked`, without upstreams; and, to be refused, one for each rule a configuration breaks, as
+/// its name says (a missing context, TOML errors, keys, upstreams, URLs, prices, unserved models,
+/// `[placement]`, provider kinds and their
 /// settings, [`EC2`]'s and Modal's tables, the gateway's address); and `conf/unkeyed`, whose key
 /// file is missing. Each but `undocked` ends with [`LOCAL`]'s tables, changed as its name says.
 #[expect(
@@ -1694,10 +1732,18 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
     };
     let gateway = table("gateway", "gpt-6-astra");
     let direct = table("direct", "flash");
+    let priced =
+        |prices: &str| gateway.replace(" }", &format!(", usd_per_mtok = {{ {prices} }} }}"));
     scratch.write_sandboxd("sandboxd");
     scratch.write("conf/key", "sk-test\n");
     let configs = [
-        ("conf/served", format!("{gateway}\n{direct}")),
+        (
+            "conf/served",
+            format!(
+                "{gateway}\n{}",
+                direct.replace(" }", ", usd_per_mtok = { input = 0.3, output = 2.5 } }")
+            ),
+        ),
         ("docked", String::new()),
         ("nameless", gateway.clone()),
         (
@@ -1709,6 +1755,12 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
             gateway.replace("key_file = \"key\"", "key = \"sk-1\""),
         ),
         ("priced", gateway.replace(" }", ", price = 1 }")),
+        ("negative", priced("input = -1, output = 10")),
+        ("outputless", priced("input = 1.25")),
+        (
+            "reasoned",
+            priced("input = 1.25, output = 10, reasoning = 10"),
+        ),
         ("keyless", gateway.replace("key_file = \"key\"\n", "")),
         ("invalid", table("Gateway", "gpt-6-astra")),
         ("twice", format!("{gateway}\n{}", table("gateway", "flash"))),
@@ -1780,14 +1832,14 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
 /// whose agent asks its model and keeps the answer in its `out`; and the configuration
 /// `conf/pumpkin.toml`, of the Docker context `context`, which places the roles as [`LOCAL`]
 /// does, and whose one upstream, the stand-in at `address`, serves the route's model as
-/// `vendor/gpt-6-astra`, with its key in `conf/key`.
+/// `vendor/gpt-6-astra`, with a price, and with its key in `conf/key`.
 fn write_asks(scratch: &Scratch, context: &str, address: &str) {
     let config = format!(
         r#"{}
 [upstreams.provider]
 url = "http://{address}/v1/"
 key_file = "key"
-models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra" }}]
+models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", usd_per_mtok = {{ input = 1.25, output = 10 }} }}]
 "#,
         machine(context)
     );
@@ -1942,7 +1994,7 @@ fn runs_on_docker() {
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/answer, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/answer, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/06651be039f9e5a47490f8ea118fd0931e7824702c693557a77a7df2d5114aa4, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-            provider.json routes: {"agent":[{"api":"responses","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra"}},"upstream":"provider"}],"final_judge":[{"api":"chat","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra"}},"upstream":"provider"}]}
+            provider.json routes: {"agent":[{"api":"responses","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra","usd_per_mtok":{"input":1.25,"output":10.0}}},"upstream":"provider"}],"final_judge":[{"api":"chat","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra","usd_per_mtok":{"input":1.25,"output":10.0}}},"upstream":"provider"}]}
             the run log records: {"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":57,"body_sha256":"8e1b803c11e5437c46a8ea56e92d591b284778ce8209d56a347f8c8fdc0ca260","bytes":57,"dropped_headers":["user-agent"]},"response":{"bytes":116}},"kind":"model_answered","request":0,"upstream":"provider","upstream_status":200}
             the run log records: {"answer":{"kind":"forwarded"},"api":"chat","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":77,"body_sha256":"018fa791e56a2db8c8c065da57294d744c30e14181cf2fdbfd272d3e8f009efd","bytes":117,"items":{"count":1,"field":"messages"}},"response":{"bytes":143}},"kind":"model_answered","request":1,"upstream":"provider","upstream_status":200}
             the agent's answer: data: POST /v1/responses HTTP/1.1 Some("Bearer sk-test") {"input":"hi","model":"vendor/gpt-6-astra","store":false}\n\n
