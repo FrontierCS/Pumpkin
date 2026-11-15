@@ -104,6 +104,12 @@ const fn commit(hash: &'static str, date: &'static str) -> Option<Commit> {
 }
 
 impl Build {
+    /// The hash of the commit it was built from, in hexadecimal digits, if it has one.
+    #[must_use]
+    pub fn commit_hash(self) -> Option<&'static str> {
+        self.commit.map(|commit| commit.hash)
+    }
+
     /// Its JSON form in `record.json`.
     fn json(self) -> Value {
         let Self { version, commit } = self;

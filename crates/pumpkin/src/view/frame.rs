@@ -11,7 +11,7 @@
 //! ([`super::http`]): a `GET` of the runs' data, answered as [`super::api`] answers it.
 
 use std::fs::File;
-use std::io::{self, BufRead as _, BufReader, Read as _, Write};
+use std::io::{self, BufRead, BufReader, Read as _, Write};
 use std::os::fd::AsFd as _;
 use std::time::Duration;
 
@@ -27,6 +27,10 @@ use super::http::{self, Request, Response, Sent};
 /// a minute with none is a closed page or a lost connection, and ending lets the `ssh` session,
 /// and the master it goes over, end too.
 pub(super) const IDLE: Duration = Duration::from_mins(1);
+
+// Well past the largest reply: a body that a record keeps, at most the 64 MiB that the gateway
+// takes of a request, or JSON of a few MiB.
+const BODY_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// A request: its path and query, as a request's line gives them, and whether the reply may be
 /// deflated.
@@ -120,8 +124,8 @@ fn reply(output: &mut impl Write, response: Response, deflate: bool) -> io::Resu
         immutable: _,
     } = response.sent(deflate);
     let head = Head {
-        status: status.to_owned(),
-        content_type: content_type.to_owned(),
+        status: status.into_owned(),
+        content_type: content_type.into_owned(),
         deflated,
         body_bytes: body.len() as u64,
     };
@@ -130,4 +134,73 @@ fn reply(output: &mut impl Write, response: Response, deflate: bool) -> io::Resu
     output.write_all(&line)?;
     output.write_all(&body)?;
     output.flush()
+}
+
+/// The reply to `request`, a `GET` of the runs' data, asked on `to`, the standard input of
+/// `pumpkin controller view`, and read from `from`, its standard output.
+///
+/// # Errors
+///
+/// Fails as [`io::ErrorKind::UnexpectedEof`] or [`io::ErrorKind::BrokenPipe`] if the view there
+/// ended before it replied in full, and else if the reply is not one that it writes.
+pub(super) fn ask(
+    request: &Request,
+    to: &mut impl Write,
+    from: &mut impl BufRead,
+) -> io::Result<Response> {
+    let asking = Asking {
+        target: request.target.clone(),
+        deflate: request.deflate,
+    };
+    let mut line = serde_json::to_vec(&asking)?;
+    line.push(b'\n');
+    to.write_all(&line)?;
+    to.flush()?;
+    let ended = || {
+        io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "it ended before it replied in full",
+        )
+    };
+    let mut line = Vec::new();
+    from.take(http::HEAD_MAX_BYTES)
+        .read_until(b'\n', &mut line)?;
+    if !line.ends_with(b"\n") {
+        if line.len() as u64 == http::HEAD_MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "its reply's head is longer than {} KiB: expected a line of JSON",
+                    http::HEAD_MAX_BYTES / 1024
+                ),
+            ));
+        }
+        return Err(ended());
+    }
+    let Head {
+        status,
+        content_type,
+        deflated,
+        body_bytes,
+    } = serde_json::from_slice(&line).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("its reply's head is no JSON head of a reply: {error}"),
+        )
+    })?;
+    if body_bytes > BODY_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "its reply's body is of {body_bytes} bytes: expected {} MiB at most",
+                BODY_MAX_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+    let mut body = Vec::new();
+    from.take(body_bytes).read_to_end(&mut body)?;
+    if body.len() as u64 != body_bytes {
+        return Err(ended());
+    }
+    Ok(Response::relayed(status, content_type, body, deflated))
 }
