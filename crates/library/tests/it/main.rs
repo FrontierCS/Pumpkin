@@ -10,6 +10,7 @@
 mod claude_code;
 mod codex;
 mod docker;
+mod qwen_code;
 mod zcode;
 
 use std::fmt::Write as _;
@@ -55,6 +56,8 @@ fn bundled() {
             harness/codex/layer/Dockerfile
             harness/node/layer/Dockerfile
             harness/node/node.star
+            harness/qwen_code/layer/Dockerfile
+            harness/qwen_code/qwen_code.star
             harness/zcode/layer/Dockerfile
             harness/zcode/zcode.star"#]],
     );
