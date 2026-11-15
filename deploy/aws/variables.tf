@@ -122,3 +122,36 @@ variable "client_users" {
     error_message = "A client user is not an IAM user name (1 to 64 of A-Z, a-z, 0-9 and `+=,.@_-`, with no path): give one such as `alice`."
   }
 }
+
+variable "public_page" {
+  description = "Whether to make the public page: a bucket, the CloudFront distribution that serves it, and the controller's right to upload to it."
+  type        = bool
+  default     = false
+}
+
+variable "publish_from_jobs" {
+  description = "Whether the controller's settings name the public page, so that each job publishes the runs to it; requires `public_page`."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.publish_from_jobs || var.public_page
+    error_message = "`publish_from_jobs` names the public page, which `public_page = false` does not make: set `public_page = true` too."
+  }
+}
+
+variable "publish_since" {
+  description = "If not empty, the `since` of the `[publish]` table, as RFC 3339 writes an instant with its offset, such as `2026-11-15T00:00:00Z`; requires `publish_from_jobs`."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.publish_since == "" || can(formatdate("YYYY", var.publish_since))
+    error_message = "`publish_since` is no RFC 3339 date-time with an offset: give one such as `2026-11-15T00:00:00Z`."
+  }
+
+  validation {
+    condition     = var.publish_since == "" || var.publish_from_jobs
+    error_message = "`publish_since` sets the `[publish]` table's `since`, which `publish_from_jobs = false` does not write: set `publish_from_jobs = true` too, or leave `publish_since` empty."
+  }
+}
