@@ -99,6 +99,7 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
         reads: 0,
         made: 0,
         trace: Vec::new(),
+        page: page::Page::new(),
     };
     match serve(&listener, &mut view)? {}
 }
@@ -129,6 +130,7 @@ struct View {
     /// The traces of runs' callers read last, the last read last, at most
     /// [`trace::TRACE_PASSES`] ([`trace::Trace`]).
     trace: Vec<trace::Trace>,
+    page: page::Page,
 }
 
 /// The list's row of a run that has ended, or is lost, kept as the module's doc says.
@@ -346,13 +348,13 @@ fn answer(stream: TcpStream, view: &mut View) -> std::io::Result<()> {
     // A request sent in part holds back every other connection until `STALL` after its first
     // byte; a browser sends each request whole.
     let read = http::read(&stream, Instant::now() + http::STALL)?;
-    // The answer's deadline starts once it is made: it is made of this machine's records, which
-    // no client can slow, and one cut off while it was made would waste its cost.
-    let response = match read {
-        Ok(request) => route(&request, view),
-        Err(refused) => refused,
+    // Making the answer has no deadline: it is made of this machine's records, which no client
+    // can slow, and one cut off while it was made would waste its cost.
+    let (response, deflate) = match read {
+        Ok(request) => (route(&request, view), request.deflate),
+        Err(refused) => (refused, false),
     };
-    http::write(stream, &response, Instant::now() + http::STALL)
+    http::write(stream, response, deflate)
 }
 
 /// What a request asks for, as the module's doc says.
@@ -401,7 +403,7 @@ impl From<String> for Failed {
 /// The answer to `request`, of `view`.
 fn route(request: &Request, view: &mut View) -> Response {
     if request.method == Method::Get
-        && let Some(file) = page::file(&request.path)
+        && let Some(file) = view.page.file(&request.path)
     {
         return file;
     }

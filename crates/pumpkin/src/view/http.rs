@@ -1,11 +1,13 @@
 //! The view's HTTP, as little of HTTP/1.1 as a browser's page needs: a `GET` of a path and a
-//! query, or a `POST` with no body, answered whole, with its length, and the connection closed,
-//! one at a time.
+//! query, or a `POST` with no body, answered whole, with its length, deflated if the request
+//! accepts it and that is shorter, and the connection closed, one at a time.
 
 use std::borrow::Borrow;
 use std::io::{self, BufRead as _, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
+
+use miniz_oxide::deflate::{CompressionLevel, compress_to_vec_zlib};
 
 /// The most bytes of a request's line and headers that are read: a browser's `GET`, with the
 /// cookies it keeps for `localhost`, takes a few KiB.
@@ -47,6 +49,8 @@ pub(super) struct Request {
     pub(super) origin: Option<String>,
     /// The view's token, as its [`TOKEN_HEADER`] gives it.
     pub(super) token: Option<String>,
+    /// Whether its `Accept-Encoding` accepts `deflate` ([`accepts_deflate`]).
+    pub(super) deflate: bool,
 }
 
 /// The methods that the view takes.
@@ -83,7 +87,18 @@ impl Request {
 pub(super) struct Response {
     status: &'static str,
     content_type: &'static str,
-    body: Vec<u8>,
+    body: Body,
+}
+
+/// An answer's body.
+enum Body {
+    /// Made for one request, so deflated as it is written, at the fastest level.
+    Made(Vec<u8>),
+    /// Kept for every request, so deflated once beforehand: `deflated` is that form, if shorter.
+    Held {
+        plain: Vec<u8>,
+        deflated: Option<Vec<u8>>,
+    },
 }
 
 impl Response {
@@ -91,7 +106,7 @@ impl Response {
         Self {
             status: "200 OK",
             content_type: "application/json; charset=utf-8",
-            body: value.to_string().into_bytes(),
+            body: Body::Made(value.to_string().into_bytes()),
         }
     }
 
@@ -105,16 +120,20 @@ impl Response {
         Self {
             status: "200 OK",
             content_type,
-            body,
+            body: Body::Made(body),
         }
     }
 
-    /// A file of the page's, of the type `content_type`.
-    pub(super) fn file(content_type: &'static str, body: &[u8]) -> Self {
+    /// A file of the page's, `body`, of the type `content_type`; `deflated` is its [`deflated`]
+    /// form, if shorter.
+    pub(super) fn file(content_type: &'static str, body: &[u8], deflated: Option<Vec<u8>>) -> Self {
         Self {
             status: "200 OK",
             content_type,
-            body: body.to_vec(),
+            body: Body::Held {
+                plain: body.to_vec(),
+                deflated,
+            },
         }
     }
 
@@ -125,9 +144,30 @@ impl Response {
         Self {
             status,
             content_type: "application/json; charset=utf-8",
-            body: body.into_bytes(),
+            body: Body::Made(body.into_bytes()),
         }
     }
+}
+
+/// `body` deflated at `level`, in zlib's format, which HTTP's `deflate` names (RFC 9110, section
+/// 8.4.1.2), if that is shorter.
+pub(super) fn deflated(body: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
+    let deflated = compress_to_vec_zlib(body, level as u8);
+    (deflated.len() < body.len()).then_some(deflated)
+}
+
+/// Whether `codings`, a request's `Accept-Encoding`, names `deflate` with a weight other than 0
+/// (RFC 9110, section 12.5.3).
+fn accepts_deflate(codings: &str) -> bool {
+    codings.split(',').any(|coding| {
+        let mut parts = coding.split(';').map(str::trim);
+        let named = parts
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("deflate"));
+        let refused =
+            |part: &str| part.strip_prefix("q=").and_then(|q| q.parse().ok()) == Some(0.0);
+        named && !parts.any(refused)
+    })
 }
 
 /// Reads the request on `stream`: `Ok(Err(response))` for one that is refused, with the refusal.
@@ -140,6 +180,7 @@ pub(super) fn read(stream: &TcpStream, due: Instant) -> io::Result<Result<Reques
     let mut line = String::new();
     head.read_line(&mut line)?;
     let (mut host, mut origin, mut token, mut length) = (None, None, None, None);
+    let mut deflate = false;
     loop {
         let mut header = String::new();
         if head.read_line(&mut header)? == 0 {
@@ -163,6 +204,8 @@ pub(super) fn read(stream: &TcpStream, due: Instant) -> io::Result<Result<Reques
                 length = value;
             } else if name.eq_ignore_ascii_case(TOKEN_HEADER) {
                 token = value;
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                deflate = value.as_deref().is_some_and(accepts_deflate);
             }
         }
     }
@@ -194,6 +237,7 @@ pub(super) fn read(stream: &TcpStream, due: Instant) -> io::Result<Result<Reques
         query: pairs,
         origin,
         token,
+        deflate,
     }))
 }
 
@@ -294,18 +338,34 @@ fn on_loopback(host: Option<&str>) -> Result<(), Response> {
     ))
 }
 
-/// Writes `response` on `stream`, whole, and closes it.
+/// Writes `response` on `stream`, whole, deflated if `deflate`, which the request accepts, and
+/// that is shorter; and closes it.
 ///
 /// # Errors
 ///
-/// Fails if the connection fails, or has yet to take it all at `due`.
-pub(super) fn write(stream: TcpStream, response: &Response, due: Instant) -> io::Result<()> {
-    let mut stream = Due { stream, due };
+/// Fails if the connection fails, or has yet to take it all [`STALL`] after it is ready to write.
+pub(super) fn write(stream: TcpStream, response: Response, deflate: bool) -> io::Result<()> {
     let Response {
         status,
         content_type,
         body,
     } = response;
+    let (body, deflated) = match body {
+        Body::Made(plain) => {
+            let deflated = deflate.then(|| deflated(&plain, CompressionLevel::BestSpeed));
+            (plain, deflated.flatten())
+        }
+        Body::Held { plain, deflated } => (plain, deflated.filter(|_| deflate)),
+    };
+    let (body, encoding) = match deflated {
+        Some(deflated) => (deflated, "Content-Encoding: deflate\r\n"),
+        None => (body, ""),
+    };
+    // The deadline starts here: deflating is part of making the answer.
+    let mut stream = Due {
+        stream,
+        due: Instant::now() + STALL,
+    };
     // A 401 must name how to authenticate (RFC 9110, section 15.5.2): by the token's header.
     let challenge = if status.starts_with("401 ") {
         format!("WWW-Authenticate: {TOKEN_HEADER}\r\n")
@@ -315,12 +375,13 @@ pub(super) fn write(stream: TcpStream, response: &Response, due: Instant) -> io:
     // A live record is read again and again, so nothing is kept to be shown stale.
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n\
-         Content-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
+         Content-Length: {}\r\n{encoding}Vary: Accept-Encoding\r\nCache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
          Content-Security-Policy: {CONTENT_SECURITY_POLICY}\r\n{challenge}Connection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes())?;
-    stream.write_all(body)?;
+    stream.write_all(&body)?;
     stream.flush()
 }
 

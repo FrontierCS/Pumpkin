@@ -3,7 +3,9 @@
 //! page carries no data, so no request of it needs the token: the page takes the token from the
 //! address that `pumpkin view` printed, and sends it with each request of the data.
 
-use super::http::Response;
+use miniz_oxide::deflate::CompressionLevel;
+
+use super::http::{self, Response};
 
 /// The page's files, by the path each is served at, with its type.
 const FILES: [(&str, &str, &[u8]); 19] = [
@@ -106,8 +108,31 @@ const FILES: [(&str, &str, &[u8]); 19] = [
     ),
 ];
 
-/// The page's file at `path`, if it is one.
-pub(super) fn file(path: &str) -> Option<Response> {
-    let (_, content_type, body) = FILES.iter().find(|(at, ..)| *at == path)?;
-    Some(Response::file(content_type, body))
+/// The page's files, each with its form deflated ([`http::deflated`]).
+pub(super) struct Page {
+    /// By the order of [`FILES`].
+    deflated: Vec<Option<Vec<u8>>>,
+}
+
+impl Page {
+    /// The page, each file deflated once, so at the level that makes it shortest.
+    pub(super) fn new() -> Self {
+        let deflated = FILES
+            .iter()
+            .map(|(_, _, body)| http::deflated(body, CompressionLevel::UberCompression));
+        Self {
+            deflated: deflated.collect(),
+        }
+    }
+
+    /// The page's file at `path`, if it is one.
+    pub(super) fn file(&self, path: &str) -> Option<Response> {
+        let index = FILES.iter().position(|(at, ..)| *at == path)?;
+        let (_, content_type, body) = FILES[index];
+        Some(Response::file(
+            content_type,
+            body,
+            self.deflated[index].clone(),
+        ))
+    }
 }
