@@ -1,4 +1,13 @@
-//! The model routes that a run serves, by the rules of [`route`].
+//! A role's model route as the runtime serves it, and the record's `model/` directory, where each
+//! exchange that the route carries is kept.
+//!
+//! Request number `n` has `model/<n>.request`, its body as it went upstream or, if the route
+//! refused it, as its client sent it, and `model/<n>.response`, the answer's bytes as they came; a
+//! file that the exchange never wrote isn't there. A body that the route read is kept with its
+//! conversation's items and its whole fields, such as a list of tools, each replaced by the digest
+//! of its JSON text, which `model/items/<digest>` holds once for every request that sent it. The
+//! run log's `model_answered` line says what an exchange kept ([`Exchange::kept`]), so that the
+//! body can be rebuilt and checked against the digest of what went upstream.
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -20,38 +29,28 @@ use stdx::{Context as _, Deadline, unpoisoned};
 
 use crate::{Clock, Stopped};
 
-/// A sandbox's model route, as the run serves it: for each entry, the route that closes its
-/// requests and the upstream that they reach, with the name that the deployment gives it and the
-/// entry's API.
+/// A role's route as served: each entry of it with the upstream that it reaches.
 pub(super) struct Served {
     entries: Vec<(Route, Upstream)>,
     names: Vec<(Name, Api)>,
-    /// How the model provider is failing the sandbox: the failure, if the last request answered
-    /// while the route was open got one, and no 2xx came after it.
     failing: Mutex<Option<Failing>>,
 }
 
-/// The model provider's failure of a sandbox's requests, as the last one answered shows.
 #[derive(Debug)]
 struct Failing {
-    /// The number of the first request of the failure.
     since: u64,
-    /// The number of the last request answered, the upstream that answered it, and how it
-    /// failed.
     last: (u64, Name, String),
 }
 
 impl fmt::Debug for Served {
-    // The upstreams show nothing, as they hold the keys.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The upstreams show nothing, as they hold the keys.
         (f.debug_struct("Served").field("names", &self.names)).finish_non_exhaustive()
     }
 }
 
-/// Each role's model route in `workflow`, as `servings` serve it: for each entry of the route,
-/// in its order, the serving of the entry's API, which takes the models that the entry allows
-/// alone; none for a role without a route. Fails if an entry has no serving of its API, or
-/// allows a model that its serving doesn't serve.
+/// The servings of each role's route, with the models that the role's route allows, or why a role's
+/// route can't be served: no upstream serves an entry's API, or serves a model that it allows.
 pub(super) fn routes(
     workflow: &Workflow,
     servings: &ByRole<Vec<Serving>>,
@@ -102,8 +101,7 @@ fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String
 }
 
 impl Served {
-    /// The route that `servings` serve, a role's as [`routes`] gives it, with upstreams of its
-    /// own, or `None` for a role without one.
+    /// `None` if `servings` is empty.
     pub(super) fn new(servings: &[Serving]) -> Option<Self> {
         let entries = servings.iter().map(|serving| {
             let route = Route::new(serving.api, serving.models.clone(), &serving.headers);
@@ -120,10 +118,9 @@ impl Served {
         })
     }
 
-    /// Answers `incoming`, the sandbox's model request numbered `number`, as [`route::serve`] does,
-    /// keeping it in `exchange`, calling `forwarding` just before it sends it upstream, and
-    /// telling `answered` how it answered it, and the upstream and API of the entry that took it,
-    /// if one did, before the answer's end is written.
+    /// Serves one model request, number `number`, with its `exchange` keeping it: `forwarding` is
+    /// called once if the request goes upstream, and `answered` once, with the name and API of the
+    /// entry that took it, if one did, and the answer.
     pub(super) fn serve(
         &self,
         (number, exchange): (u64, &Exchange<impl Clock>),
@@ -146,8 +143,9 @@ impl Served {
         );
     }
 
-    /// Notes how upstream `name` answered request `number`, if the route is open, in what the
-    /// provider is failing the sandbox in.
+    /// Notes, if the route is open, how upstream `name` answered request `number` in what the
+    /// provider is failing the sandbox in: a failure extends it, a barred answer leaves it, and any
+    /// other answer ends it.
     fn bear(&self, number: u64, name: &Name, answer: &Answer) {
         if self.ended() || matches!(answer, Answer::Barred { .. }) {
             return;
@@ -173,14 +171,11 @@ impl Served {
         refused.map(|entry| &self.names[entry].0)
     }
 
-    /// Checks that the sandbox's last request answered while the route was open got no failure
-    /// from the model provider, if the agent's exit ended the work phase of a run that ended with
+    /// Checks that the sandbox's last request answered while the route was open got no failure from
+    /// the model provider, if the agent's exit ended the work phase of a run that ended with
     /// `outcome` with no submission finalized. Fails, naming the upstream and the failure, if it
-    /// did.
+    /// did: the failure is then the deployment's, not the agent's result.
     pub(super) fn failed_last(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
-        // An agent that ran to the deadline, or finalized, is scored as usual: Harbor scores an
-        // agent that timed out in its provider's backoff, and Inspect's `time_limit` is wall
-        // clock, while none of the harnesses studied voids such a run.
         let failing = unpoisoned(self.failing.lock());
         let failed = failing.as_ref().filter(|_| exited_unfinalized(outcome));
         let Some(Failing { since, last }) = failed else {
@@ -194,8 +189,7 @@ impl Served {
         ))
     }
 
-    /// Ends the route's every exchange in flight and every later one ([`Upstream::shutdown`]),
-    /// unless it has ended.
+    /// Ends the route's every exchange in flight and every later one, unless it has ended.
     pub(super) fn end(&self) {
         if self.ended() {
             return;
@@ -212,8 +206,6 @@ impl Served {
     }
 }
 
-/// Whether `outcome` is one where the agent's exit ended the work phase, with no submission
-/// finalized.
 fn exited_unfinalized(outcome: &Result<Outcome, Stopped>) -> bool {
     let Ok(Outcome { work_end, verdict }) = outcome else {
         return false;
@@ -230,13 +222,13 @@ fn exited_unfinalized(outcome: &Result<Outcome, Stopped>) -> bool {
     }
 }
 
-/// How the provider failed the request that `answer` answers, or `None` if it didn't: a
-/// provider's answer that the request caused, or a 2xx, clears a failure.
+/// How `answer` failed for a reason that isn't its request's: a status that says the deployment
+/// can't serve it, such as 401, 429 or 500, or a response cut short, or a refusal with no answer.
+/// `None` if it succeeded, or its status says the request was wrong, as 400 does.
 fn failure(answer: &Answer) -> Option<String> {
-    // Inspect, Harbor and the OpenHands benchmarks keep out of their scores an agent whose model
-    // calls failed past their retries. The route fixes the path and the deployment the model, so
-    // a redirect, a 402 or a 404 (`model_not_found`) is the deployment's fault, as Harbor and
-    // LiteLLM treat a 404; the other 4xx are the request's.
+    // The route fixes the path and the deployment the model, so a redirect, a 402 or a 404
+    // (`model_not_found`) is the deployment's fault, as are authentication, rate and server errors;
+    // the other 4xx are the request's.
     match answer {
         Answer::Forwarded { status, .. } => match status {
             0..=299 | 400 | 405..=407 | 409..=428 | 430..=499 => None,
@@ -260,35 +252,21 @@ fn failure(answer: &Answer) -> Option<String> {
     }
 }
 
-/// A model exchange, as the record keeps it while it passes ([`Keep`]), in `model/` of the
-/// record, numbered as the run log numbers requests: its request as `<n>.request` and its
-/// answer's body as `<n>.response`, each made as its first bytes come. A request whose body the
-/// route read keeps apart what its API lets it ([`Apart`]): each item of its conversation, and
-/// each field kept whole that the body holds, such as its tools, once in `items/<hex>`, the JSON
-/// named by its SHA-256; its body holds the digest of each in its place, and
-/// [`Record::model_request`](super::Record::model_request) rebuilds it. It notes, by the run's
-/// clock `C`, when its answer's first bytes came, and when its stream's output began.
+/// The files of one model request that the route keeps as the exchange passes ([`Keep`]), on the
+/// thread that serves it.
 pub(super) struct Exchange<C> {
     clock: C,
-    /// When its answer's first bytes came, once they have, and its stream's output began, once
-    /// it has.
     first: Cell<Option<(Duration, Option<Duration>)>>,
     dir: PathBuf,
     number: u64,
     request: Part,
     response: Part,
-    /// The request's body, once it has come.
     body: RefCell<Option<Body>>,
-    /// The names of the request's headers that the route left behind.
     dropped_headers: RefCell<Vec<String>>,
-    /// The items it made, to sync at its end.
     items: RefCell<Vec<File>>,
-    /// Why keeping it failed, if it did: it is then kept no further.
     failed: RefCell<Option<String>>,
 }
 
-/// What an exchange keeps of its request's body: its size and SHA-256, the field whose items are
-/// kept apart, with their count, if they are, and the fields kept whole.
 struct Body {
     bytes: u64,
     sha256: Sha256Digest,
@@ -297,7 +275,6 @@ struct Body {
 }
 
 impl Body {
-    /// What is kept of `body`, which went upstream, with `items` and `whole` kept apart.
     fn of(body: &[u8], items: Option<(&'static str, usize)>, whole: Vec<&'static str>) -> Self {
         Self {
             bytes: body.len() as u64,
@@ -319,7 +296,6 @@ struct Part {
 }
 
 impl<C: Clock> Exchange<C> {
-    /// Exchange `number`, to keep in the record at `record`, timed by `clock`.
     pub(super) fn new(record: &Path, number: u64, clock: C) -> Self {
         let part = |name| Part {
             name,
@@ -340,14 +316,11 @@ impl<C: Clock> Exchange<C> {
         }
     }
 
-    /// What the run log's `model_answered` says of how the exchange is kept so far: `{"request":
-    /// {"bytes": b, "body_bytes": s, "body_sha256": h, "items": {"field": f, "count": c}, "whole":
-    /// [w], "dropped_headers": [d]}, "response": {"bytes": b}}`, each part once it has bytes, `b`
-    /// the size of its file ([`kept_file`]): `s` the size of the request's body and `h`
-    /// its SHA-256's 64 hexadecimal digits, `items` the field whose `c` items are kept apart, if
-    /// any, `whole` the fields kept whole, in their API's order, if any, and `dropped_headers` the
-    /// names of the request's headers that the route left behind ([`Keep::dropped_headers`]), if
-    /// any.
+    /// The `kept` of the exchange's `model_answered` line: `request` and `response`, each present
+    /// if the exchange wrote the file and holding its `bytes`. A request that the route read has
+    /// also its `body_bytes` and `body_sha256`, those of the whole body as it went upstream;
+    /// `items`, the conversation's `field` and `count`; `whole`, the fields kept whole, in their
+    /// API's order; and `dropped_headers`.
     pub(super) fn kept(&self) -> Value {
         let mut kept = json!({});
         for part in [&self.request, &self.response] {
@@ -378,12 +351,14 @@ impl<C: Clock> Exchange<C> {
         kept
     }
 
-    /// When its answer's first bytes came, if they have, and its stream's output began, if it has.
+    /// When the response's first byte arrived, and its first token of output if that began; `None`
+    /// if no byte did. Both are times since the run started.
     pub(super) fn timed(&self) -> Option<(Duration, Option<Duration>)> {
         self.first.get()
     }
 
-    /// Syncs what it kept to the record's disk, and returns why keeping it failed, if it did.
+    /// Syncs the files, and returns what failed of keeping the exchange, if anything. Once a write
+    /// has failed, the exchange keeps nothing more.
     pub(super) fn finish(self) -> Option<String> {
         let parts = [self.request, self.response].into_iter();
         let files = parts.filter_map(|part| part.file.into_inner());
@@ -413,10 +388,9 @@ impl<C: Clock> Exchange<C> {
         }
     }
 
-    /// `body` with the fields of `apart` kept apart, each once in the record ([`Exchange`]): each
-    /// item of its conversation, if that is an array, and each field kept whole that it holds,
-    /// with the digest of each in its place; and what it keeps of the body. `None` if `body` is no
-    /// JSON object, or a part couldn't be kept.
+    /// `body` with its conversation's items and its whole fields replaced by their digests, once
+    /// each is kept in `model/items`. `None` if `body` is no JSON object or an item couldn't be
+    /// kept, and the body is kept as it is.
     fn kept_apart(&self, body: &[u8], apart: Apart) -> Option<(Vec<u8>, Body)> {
         let Ok(Value::Object(mut fields)) = serde_json::from_slice(body) else {
             return None;
@@ -443,20 +417,18 @@ impl<C: Clock> Exchange<C> {
         Some((rest, Body::of(body, items, whole)))
     }
 
-    /// Keeps `value` in `dir` as an item, once, named by the SHA-256 of its JSON, and returns
-    /// its digest, as a JSON string; `None` if it couldn't be kept.
     fn kept_item(&self, dir: &Path, value: &Value) -> Option<Value> {
         // The body went upstream as `serde_json` writes it, so each item is written alike, and the
         // body rebuilt from the items' text is the body that went.
         let text = value.to_string();
         let digest = sha256(text.as_bytes());
         let path = dir.join(digest.hex());
-        // Kept once: by an earlier request, or by another caller's at the same time. It is written
-        // under this exchange's own name, then linked to its digest's, which no later link
-        // replaces, so no other request sees its name before all of it is written, as git moves
-        // an object into place:
-        // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/object-file.c#L382-L457
         if !path.try_exists().ok()? {
+            // Kept once: by an earlier request, or by another caller's at the same time. It is
+            // written under this exchange's own name, then linked to its digest's, which no later
+            // link replaces, so no other request sees its name before all of it is written, as git
+            // moves an object into place:
+            // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/object-file.c#L382-L457
             let partial = dir.join(format!(".{}.partial", self.number));
             let mut file = File::create_new(&partial).ok()?;
             let linked =
@@ -473,8 +445,6 @@ impl<C: Clock> Exchange<C> {
     }
 }
 
-/// Model request `number`'s body, rebuilt from the record at `record`, as
-/// [`Record::model_request`](super::Record::model_request) says.
 pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, String> {
     let log = record.join("log.jsonl");
     let text = fs::read_to_string(&log).context(log.display())?;
@@ -504,8 +474,6 @@ pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, Str
     Ok(body)
 }
 
-/// The body of model request `number`, whose run log's `kept.request` is `kept`, in the record
-/// at `record`.
 fn rebuilt_body(record: &Path, number: u64, kept: &Map<String, Value>) -> Result<Vec<u8>, String> {
     let Some(parts) = kept_parts(record, number, kept)? else {
         let path = kept_file(record, number, "request")?;
@@ -534,41 +502,35 @@ fn rebuilt_body(record: &Path, number: u64, kept: &Map<String, Value>) -> Result
     Ok(Value::Object(body).to_string().into_bytes())
 }
 
-/// A model request's body as the record keeps it
-/// ([`Record::kept_request`](super::Record::kept_request)): each of its fields as it was sent, or
-/// named by its digest where the record kept it apart.
+/// A request body kept with its parts apart, as the record has it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeptRequest {
-    /// The field that holds the conversation, and each of its items, the earliest first, if the
-    /// record kept them apart.
+    /// The field that holds the conversation, and its items in order; `None` if the body was kept
+    /// without splitting it.
     pub conversation: Option<(String, Vec<KeptPart>)>,
-    /// The body's other fields.
+    /// The other fields, in the order they are kept.
     pub fields: Vec<(String, KeptPart)>,
 }
 
-/// A part of a kept request's body.
+/// A part of a kept request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeptPart {
-    /// Kept apart, once, in `model/items/` ([`Record::kept_item`](super::Record::kept_item)).
+    /// Held in `model/items` under this digest.
     Kept(Sha256Digest),
-    /// Held in the request's own file, as the client sent it.
+    /// Kept in the request file as it was sent.
     Sent(Value),
 }
 
-/// The name of the file in `model/` that keeps `part`, `request` or `response`, of model
-/// exchange `number`.
 fn file_name(number: u64, part: &str) -> String {
     format!("{number}.{part}")
 }
 
-/// The path of the file in the record at `record` that keeps `part`, `request` or `response`, of
-/// model exchange `number`, or the refusal of a symbolic link there, which is the record's damage.
 pub(super) fn kept_file(record: &Path, number: u64, part: &str) -> Result<PathBuf, String> {
     linked(record.join("model").join(file_name(number, part)))
 }
 
-/// `path`, or the refusal of a symbolic link, which may lead out of the record.
 fn linked(path: PathBuf) -> Result<PathBuf, String> {
+    // A link could lead a reader out of the record.
     if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err(format!(
             "`{}` is a symbolic link: expected a file of the record's own",
@@ -578,16 +540,13 @@ fn linked(path: PathBuf) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// The bytes of model request `number`'s response in the record at `record`, as
-/// [`Record::model_response`](super::Record::model_response) gives them.
 pub(super) fn kept_response(record: &Path, number: u64) -> Result<Vec<u8>, String> {
     let path = kept_file(record, number, "response")?;
     fs::read(&path).context(path.display())
 }
 
-/// The parts of the body of model request `number`, whose run log's `kept.request` is `kept`, in
-/// the record at `record`, as [`Record::kept_request`](super::Record::kept_request) says; `None`
-/// if the record kept none of them apart, so its file holds the body as it went.
+/// Request `number`'s kept parts, as the log's `kept.request`, `kept`, says them; `None` if it says
+/// the body was kept whole.
 pub(super) fn kept_parts(
     record: &Path,
     number: u64,
@@ -652,7 +611,6 @@ pub(super) fn kept_parts(
     Ok(Some(request))
 }
 
-/// The bytes of the item of the record at `record` that `digest` names, as kept.
 pub(super) fn kept_item(record: &Path, digest: &Sha256Digest) -> Result<Vec<u8>, String> {
     let path = record.join("model/items").join(digest.hex());
     fs::read(&path).context(path.display())
