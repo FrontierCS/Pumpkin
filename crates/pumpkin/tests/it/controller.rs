@@ -2717,7 +2717,7 @@ fn ls_by_offsets() {
         r#"{"state": "finished"}"#,
     );
     drop(drivers.remove(1));
-    // Uncounted: the stand-in counts a call's output once it ends, which `rsync`'s would wait on.
+    // Uncounted: what `wait` moves is no listing's.
     fs::remove_file(scratch.0.join("bin/count-out")).unwrap();
     let waited = on_client(&scratch, &client, &["wait", ids[2]])
         .output()
@@ -2898,5 +2898,361 @@ fn ls_refusals() {
             repo/.pumpkin/controller/alice.us-west-1/x/kept: "kept\n"
             outside-abs/kept: "kept\n"
             outside/log.jsonl: "kept, with no newline""#]],
+    );
+}
+
+/// The files below `dir`, each by its mode, size, modification time in whole seconds, SHA-256
+/// and path, escaped, sorted by path.
+fn record_files(dir: &Path) -> Vec<String> {
+    let files = walked(dir, &[]).into_iter().map(|path| {
+        let metadata = fs::symlink_metadata(dir.join(&path)).unwrap();
+        assert!(metadata.is_file(), "{}", path.display());
+        let bytes = fs::read(dir.join(&path)).unwrap();
+        format!(
+            "{:o} {} {} {} {}",
+            metadata.mode() & 0o7777,
+            metadata.len(),
+            metadata.mtime(),
+            sha256(&bytes),
+            path.display().to_string().escape_debug()
+        )
+    });
+    files.collect()
+}
+
+/// The inode of each file below `dir`, by its path.
+fn inodes(dir: &Path) -> Vec<(PathBuf, u64)> {
+    let inodes = walked(dir, &[]).into_iter().map(|path| {
+        let inode = fs::symlink_metadata(dir.join(&path)).unwrap().ino();
+        (path, inode)
+    });
+    inodes.collect()
+}
+
+/// `pumpkin` with `args`, by the client of `client`'s environment, which copies a run's record
+/// into `copy`: how it exited, the calls it made, and the files of `copy` that it wrote, by their
+/// inodes, which a copied file's rename changes.
+fn copied_record(
+    scratch: &Scratch,
+    client: &[(String, String); 2],
+    args: &[&str],
+    copy: &Path,
+) -> Vec<String> {
+    let before = if copy.exists() {
+        inodes(copy)
+    } else {
+        Vec::new()
+    };
+    let waited = on_client(scratch, client, args).output().unwrap();
+    let mut lines = vec![format!("{}: {}", args[0], waited.status)];
+    let said = String::from_utf8_lossy(&waited.stderr);
+    let said = said.lines().filter(|line| {
+        let ending = line.contains("copying run") || line.contains("its record is");
+        line.contains("connection") || line.contains("record") && !ending
+    });
+    lines.extend(said.map(|line| format!("  {line}")));
+    lines.push(format!("  {}", calls(scratch)));
+    let written = inodes(copy)
+        .into_iter()
+        .filter(|file| !before.contains(file));
+    let written: Vec<String> = written
+        .map(|(path, _)| path.display().to_string().escape_debug().to_string())
+        .collect();
+    lines.push(format!("  written: {}", written.join(", ")));
+    lines
+}
+
+// A record copied by `wait` with a file unreadable there, one changing, then whole; by `cancel`,
+// unchanged, changed, cut and then refused, then cut.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn record_copy() {
+    let scratch = Scratch::new("controller-record-copy");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let id = id_ago(0, "0d000001");
+    let _ = ended_job(&scratch, &id, "built\n");
+    let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
+    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
+    let at = |path: &str| format!("home/.pumpkin/runs/{id}/{path}");
+    scratch.write(&at("log.jsonl"), "{\"a\": 1}\n");
+    scratch.write(&at("model/a b"), "a name with a space\n");
+    scratch.write(&at("model/a\nb"), "a name with a newline\n");
+    scratch.write(&at("model/marked"), "set-id and sticky\n");
+    scratch.write(&at("jobs/0/out"), "out\n");
+    scratch.write(&at("jobs/0/secret"), "only its user's\n");
+    fs::create_dir(record.join("jobs/2")).unwrap();
+    // Modes of the record's own, whatever this machine's umask.
+    for path in walked(&record, &[]) {
+        fs::set_permissions(record.join(path), Permissions::from_mode(0o644)).unwrap();
+    }
+    fs::set_permissions(record.join("jobs/0/secret"), Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(record.join("model/marked"), Permissions::from_mode(0o7755)).unwrap();
+    // Left by copies of the run: one killed, one under way, and two of no copy's name.
+    let runs = scratch.0.join("repo/.pumpkin/runs");
+    for left in ["a1B2c3", "locked", "a1B2c3d", "a1-2c3"] {
+        scratch.write(&format!("repo/.pumpkin/runs/.{id}.{left}/sent/x"), "left\n");
+    }
+    let locked = File::open(runs.join(format!(".{id}.locked"))).unwrap();
+    locked.lock().unwrap();
+    let _ = calls(&scratch);
+    let mut lines = Vec::new();
+    for step in ["unread", "changing", "whole", "unchanged", "changed"] {
+        if step == "changing" {
+            let secret = Permissions::from_mode(0o600);
+            fs::set_permissions(record.join("jobs/0/secret"), secret).unwrap();
+            // The calls of `wait`: the job's directory, the job, the list, then the archive.
+            let secret = record.join("jobs/0/secret");
+            scratch.write(
+                "bin/before-4",
+                &format!("echo grown >> '{}'\n", secret.display()),
+            );
+        }
+        if step == "changed" {
+            // The same size, but an older time, as a file written anew in place.
+            scratch.write(&at("log.jsonl"), "{\"a\": 2}\n");
+            let log = File::options().write(true).open(record.join("log.jsonl"));
+            let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+            log.unwrap().set_modified(old).unwrap();
+            scratch.write(&at("model/added"), "new\n");
+            let added = Permissions::from_mode(0o644);
+            fs::set_permissions(record.join("model/added"), added).unwrap();
+            fs::remove_file(record.join("jobs/0/out")).unwrap();
+        }
+        lines.push(format!("{step}:"));
+        let command = if ["unchanged", "changed"].contains(&step) {
+            "cancel"
+        } else {
+            "wait"
+        };
+        lines.extend(copied_record(&scratch, &client, &[command, &id], &copy));
+        if step == "whole" {
+            let marked = fs::metadata(copy.join("model/marked")).unwrap().mode();
+            lines.push(format!("  model/marked: {:o}", marked & 0o7777));
+            let jobs = fs::read_dir(copy.join("jobs")).unwrap();
+            let mut jobs: Vec<String> = jobs
+                .map(|entry| entry.unwrap().file_name().display().to_string())
+                .collect();
+            jobs.sort();
+            lines.push(format!("  jobs: {}", jobs.join(", ")));
+            let marked = Permissions::from_mode(0o755);
+            fs::set_permissions(record.join("model/marked"), marked).unwrap();
+        }
+    }
+    let mut kept = record_files(&copy);
+    kept.retain(|file| !record_files(&record).contains(file));
+    let kept = kept.iter().map(|file| file.splitn(5, ' ').nth(4).unwrap());
+    lines.push(format!(
+        "only here: {}",
+        kept.collect::<Vec<_>>().join(", ")
+    ));
+    // Three files, the archive cut inside the second, then the next list refused; then cut
+    // inside the third, which the next archive brings.
+    let big = |seed: u8| -> Vec<u8> { (0..100_000u32).map(|i| seed ^ (i % 251) as u8).collect() };
+    fs::write(record.join("model/big-1"), big(1)).unwrap();
+    fs::write(record.join("model/big-2"), big(2)).unwrap();
+    fs::write(record.join("model/big-3"), big(3)).unwrap();
+    for big in ["big-1", "big-2", "big-3"] {
+        let path = record.join("model").join(big);
+        fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
+    }
+    let cut = scratch.0.join("bin/cut-out-0");
+    // The calls of `cancel`: the run's id, the cancel, the list, then the archive.
+    scratch.write(
+        "bin/before-4",
+        &format!("echo 150000 > '{}'\n", cut.display()),
+    );
+    let answer = scratch.0.join("bin/answer");
+    scratch.write(
+        "bin/before-5",
+        &format!("printf 'x\\0' > '{}'\n", answer.display()),
+    );
+    lines.push("cut, then refused:".to_owned());
+    lines.extend(copied_record(&scratch, &client, &["cancel", &id], &copy));
+    scratch.write(
+        "bin/before-4",
+        &format!("echo 150000 > '{}'\n", cut.display()),
+    );
+    scratch.write("bin/count-out", "");
+    lines.push("cut:".to_owned());
+    lines.extend(copied_record(&scratch, &client, &["cancel", &id], &copy));
+    let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
+    lines.push(format!(
+        "  counted: {}",
+        counted.lines().collect::<Vec<_>>().join(", ")
+    ));
+    let mut here = record_files(&copy);
+    here.retain(|file| !file.ends_with(" jobs/0/out"));
+    assert_eq!(here, record_files(&record));
+    lines.push("the copy (but `jobs/0/out`) is the record's:".to_owned());
+    lines.extend(here.iter().map(|file| {
+        let mut words = file.splitn(5, ' ');
+        let mode = words.next().unwrap();
+        format!("  {} {mode}", words.nth(3).unwrap())
+    }));
+    let runs = fs::read_dir(runs).unwrap();
+    let mut runs: Vec<String> = runs
+        .map(|entry| entry.unwrap().file_name().display().to_string())
+        .collect();
+    runs.sort();
+    lines.push(format!("runs: {}", runs.join(", ")));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            unread:
+            wait: exit status: 1
+              pumpkin: controller `alice` sent run <id>'s record without what its `tar` couldn't read (exit status: 2): tar: jobs/0/secret: Cannot open: Permission denied: the copy here holds what came whole, but not its record.json, so no command reads it yet: once the controller's user can read each file named (`chmod u+r` there, below `~/.pumpkin/runs/<id>`), run the command again
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
+            changing:
+            wait: exit status: 1
+              pumpkin: run <id>'s record changed on controller `alice` as it was copied: run the command again
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              written: 
+            whole:
+            wait: exit status: 3
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              written: jobs/0/secret, record.json
+              model/marked: 755
+              jobs: 0, 2
+            unchanged:
+            cancel: exit status: 0
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001
+              written: 
+            changed:
+            cancel: exit status: 0
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              written: log.jsonl, model/added
+            only here: jobs/0/out
+            cut, then refused:
+            cancel: exit status: 1
+              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, carrying on, now, attempt 2 of 7
+              pumpkin: controller `alice` listed `x` as a file or a directory of run <id>'s record, which names none below it, so nothing of it is copied: see what `~/.pumpkin/runs/<id>` holds there
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001
+              written: model/big-1
+            cut:
+            cancel: exit status: 0
+              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, carrying on, now, attempt 2 of 7
+              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              written: model/big-2, model/big-3
+              counted: 25, 0, 615, 615, 102400
+            the copy (but `jobs/0/out`) is the record's:
+              driver.pid 644
+              jobs/0/secret 600
+              log.jsonl 644
+              model/a\nb 644
+              model/a b 644
+              model/added 644
+              model/big-1 755
+              model/big-2 755
+              model/big-3 755
+              model/marked 755
+              outcome.json 644
+              record.json 644
+            runs: .<id>.a1-2c3, .<id>.a1B2c3d, .<id>.locked, <id>"#]],
+    );
+}
+
+// A record's list that names a path above it, or more files than a copy takes; and its archive
+// with a member above it, or with a symbolic link for a file it was asked for.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn record_copy_refusals() {
+    let scratch = Scratch::new("controller-record-copy-refusals");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let id = id_ago(0, "0d000002");
+    let _ = ended_job(&scratch, &id, "built\n");
+    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
+    let archive = scratch.0.join("archive");
+    scratch.write("archive/escape", "escaped\n");
+    scratch.write("outside", "kept\n");
+    symlink(scratch.0.join("outside"), archive.join("record.json")).unwrap();
+    let tar = |member: &str| {
+        let tar = stdx::process::command("tar", Environment::Only(&["PATH"]))
+            .args(["--create", "--absolute-names", "--file=-", "--directory"])
+            .arg(&archive)
+            .arg(member)
+            .output()
+            .unwrap();
+        assert!(tar.status.success(), "{tar:?}");
+        tar.stdout
+    };
+    let mut over = Vec::new();
+    for file_index in 0..=100_000 {
+        over.extend(format!("f 1 1000000000.0000000000 f{file_index}\0").into_bytes());
+    }
+    let answers = [
+        (
+            "a path above it",
+            3,
+            b"f 1 1000000000.0000000000 ../x\0".to_vec(),
+        ),
+        ("more files than it takes", 3, over),
+        ("a member above it", 4, tar("../archive/escape")),
+        ("a link for a file", 4, tar("record.json")),
+    ];
+    let mut lines = Vec::new();
+    for (what, call, answer) in answers {
+        let _ = fs::remove_dir_all(&copy);
+        let _ = calls(&scratch);
+        fs::write(scratch.0.join("answered"), answer).unwrap();
+        scratch.write(
+            &format!("bin/before-{call}"),
+            &format!(
+                "mv '{}' '{}'\n",
+                scratch.0.join("answered").display(),
+                scratch.0.join("bin/answer").display()
+            ),
+        );
+        let waited = on_client(&scratch, &client, &["wait", &id])
+            .output()
+            .unwrap();
+        lines.push(format!("{what}: {}", waited.status));
+        let said = String::from_utf8_lossy(&waited.stderr);
+        let said = said.lines().filter(|line| !line.contains("following run"));
+        let said = said.filter(|line| line.starts_with("pumpkin: ") && !line.contains("0:0"));
+        lines.extend(said.map(|line| format!("  {line}")));
+    }
+    let runs = fs::read_dir(scratch.0.join("repo/.pumpkin/runs")).unwrap();
+    let mut runs: Vec<String> = runs
+        .map(|entry| entry.unwrap().file_name().display().to_string())
+        .collect();
+    runs.sort();
+    lines.push(format!("runs: {}", runs.join(", ")));
+    let escaped = [
+        "repo/.pumpkin/escape",
+        "repo/.pumpkin/runs/escape",
+        "escape",
+    ];
+    for path in escaped {
+        lines.push(format!("{path}: {}", scratch.0.join(path).exists()));
+    }
+    let outside = fs::read_to_string(scratch.0.join("outside")).unwrap();
+    lines.push(format!("outside: {outside:?}"));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            a path above it: exit status: 1
+              pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
+              pumpkin: controller `alice` listed `f 1 1000000000.0000000000 ../x` as a file or a directory of run <id>'s record, which names none below it, so nothing of it is copied: see what `~/.pumpkin/runs/<id>` holds there
+            more files than it takes: exit status: 1
+              pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
+              pumpkin: run <id>'s record on controller `alice` holds over 100000 files and directories, more than a copy takes: in a shell on it (`aws ssm start-session`), pack the directories of `~/.pumpkin/runs/<id>` that hold the most into an archive each (`tar --create --remove-files`), then run the command again
+            a member above it: exit status: 1
+              pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
+              pumpkin: extracting run <id>'s record, as controller `alice` sent it, failed (exit status: 2), as said above
+            a link for a file: exit status: 1
+              pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
+              pumpkin: controller `alice` sent `record.json` of run <id>'s record, which it was not asked for as a file, so the copy keeps nothing of it: see what `~/.pumpkin/runs/<id>` holds there, and run the command again
+            runs: 
+            repo/.pumpkin/escape: false
+            repo/.pumpkin/runs/escape: false
+            escape: false
+            outside: "kept\n""#]],
     );
 }

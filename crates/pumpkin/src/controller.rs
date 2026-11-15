@@ -5,18 +5,19 @@
 //!
 //! Each command reaches the controller over the connections that the workspace's commands share
 //! to it, master `ssh`es to the controller's user through SSM's `AWS-StartSSHSession`, each `ssh`
-//! and `rsync` over one with a session free. With no master to share, it finds the controller by
-//! its tag, starts it if it is stopped, waits until SSM sees it, and opens one, with this
-//! machine's key, which it enrols through EC2 Instance Connect once the controller refuses it. A
-//! follow of a run, a send and a copy whose connection ends go on over another, a few times. What
-//! runs there is the controller's own side ([`crate::job`]), whose layout below the user's home
-//! its module doc gives.
+//! over one with a session free. With no master to share, it finds the controller by its tag,
+//! starts it if it is stopped, waits until SSM sees it, and opens one, with this machine's key,
+//! which it enrols through EC2 Instance Connect once the controller refuses it. A follow of a
+//! run, a send and a copy whose connection ends go on over another, a few times. What runs there
+//! is the controller's own side ([`crate::job`]), whose layout below the user's home its module
+//! doc gives.
 //!
 //! What each command does over the connections is a module's of its own: a run's or a build's
-//! send of its job ([`send`]), `ls`'s listing of the runs ([`listing`]), and the other commands
-//! ([`commands`]).
+//! send of its job ([`send`]), the copy of an ended run's record ([`copy`]), `ls`'s listing of the
+//! runs ([`listing`]), and the other commands ([`commands`]).
 
 mod commands;
+mod copy;
 mod listing;
 mod send;
 
@@ -56,15 +57,12 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 
 const START_POLL: Duration = Duration::from_secs(5);
 
-/// How long a copy by `rsync`, or a send of a task's files, may move no byte before it gives up.
-// There is no bound on a copy's or a send's whole time: SSM carries well under 1 MB a second,
-// so a record or a dataset of a GB or more takes as long as it takes. A dead connection ends by
-// itself, as `ServerAliveInterval` gives `ssh` 90 s, so this is a little beyond that, to ride out
-// an SSM session that pauses.
+/// How long a send of a task's files may move no byte before it gives up.
+// There is no bound on a send's whole time: SSM carries well under 1 MB a second, so a dataset
+// of a GB or more takes as long as it takes. A dead connection ends by itself, as
+// `ServerAliveInterval` gives `ssh` 90 s, so this is a little beyond that, to ride out an SSM
+// session that pauses.
 const STALL_TIMEOUT: Duration = Duration::from_mins(2);
-
-/// The deadline of a command that has no bound on its time, only on how long it may stall.
-const UNBOUNDED: Duration = Duration::MAX;
 
 /// How long a short command on the controller, such as the listing of its runs, may take.
 const SHORT_TIMEOUT: Duration = Duration::from_mins(10);
@@ -105,10 +103,6 @@ const AGAIN: [Duration; 6] = [
 
 /// The exit status of `ssh`'s own failure, by which it says that its connection ended.
 const SSH_FAILED: i32 = 255;
-
-/// The exit statuses by which `rsync` says that its connection ended: an error of its socket's
-/// input or output, or of its protocol's stream, and its `ssh`'s own failure, which it passes on.
-const RSYNC_ENDED: [i32; 3] = [10, 12, SSH_FAILED];
 
 const SESSION_POLL: Duration = Duration::from_millis(500);
 
@@ -231,7 +225,7 @@ fn kept() -> Result<PathBuf, String> {
 /// in the workspace's `controller/` ([`Workspace::controller`]), `<name>.<region>/`: up to
 /// [`MASTERS`] master `ssh`es, each by its socket there, named by its index, `0` and on, and its
 /// [`SESSIONS`] sessions, each an `flock` on a file beside it, `<index>-<session>` ([`Slot`]),
-/// which a command holds while its `ssh` or `rsync` goes over the master, and its log,
+/// which a command holds while its `ssh` goes over the master, and its log,
 /// `<index>.log`, which says why it ended, kept until the master opens again; the lock on opening
 /// one, `lock` ([`Lock`]), so that a batch of commands that start at once open them one at a time;
 /// the lock on sending the controller what its store lacks, `upload` ([`Shared::upload`]); and
@@ -444,7 +438,7 @@ impl Lock {
     }
 }
 
-/// An `ssh` or `rsync` to the controller, as [`Command`], with the session of the master it goes
+/// An `ssh` to the controller, as [`Command`], with the session of the master it goes
 /// over, which it holds until it is dropped.
 struct Session {
     command: Command,
@@ -678,7 +672,7 @@ fn finished(
 }
 
 impl Reached {
-    /// A session of a master that answers on the shared connections, for one `ssh` or `rsync`:
+    /// A session of a master that answers on the shared connections, for one `ssh`:
     /// one free on a master that is open; else, with the lock on opening one, one on the first
     /// master that is closed, which this opens; else, once every master's sessions are held, the
     /// first to be let go, which it says it waits for.
@@ -1006,30 +1000,6 @@ impl Reached {
         Session { command, slot }
     }
 
-    /// `rsync` over `ssh` to the controller, as [`ssh`](Self::ssh) is, which ends after
-    /// [`STALL_TIMEOUT`] with no byte moved, and keeps a file it was part way through, which a
-    /// later `rsync` of it carries on from; its operands name a path there as
-    /// [`remote`](Self::remote) does, and one here by its absolute path.
-    fn rsync(&self) -> Result<Session, String> {
-        let slot = self.slot()?;
-        let mut words = vec!["ssh".to_owned()];
-        words.extend(self.ssh_options(slot.master));
-        let shell: Vec<String> = words.iter().map(|word| next::quoted(word)).collect();
-        let mut rsync = self.shared.command("rsync");
-        rsync.arg("--rsh").arg(shell.join(" "));
-        rsync.arg(format!("--timeout={}", STALL_TIMEOUT.as_secs()));
-        rsync.arg("--partial");
-        Ok(Session {
-            command: rsync,
-            slot,
-        })
-    }
-
-    /// `path`, below the controller's user's home, as `rsync` names it there.
-    fn remote(&self, path: &str) -> String {
-        format!("{}:{path}", self.host())
-    }
-
     /// Runs `script` on the controller, with this machine's standard output and error, and
     /// `input` on its standard input, if any, else this machine's, until it ends, however long
     /// that takes.
@@ -1120,28 +1090,5 @@ impl Reached {
             .collect();
         let among = format!("on controller `{}`", self.name);
         runtime::named(&names, run, &among).map(str::to_owned)
-    }
-
-    /// Copies the record of run `id` from the controller into this machine's default runs
-    /// directory, saying so first, as a large record takes a while.
-    fn copy(&self, id: &str) -> Result<(), String> {
-        let runs = PathBuf::from(crate::default_runs()?);
-        fs::create_dir_all(&runs).context(runs.display())?;
-        say(format_args!(
-            "copying run {id}'s record from controller `{}` to {}",
-            self.name,
-            runs.join(id).display()
-        ));
-        let copying = || {
-            let mut rsync = self.rsync()?;
-            // But the sockets a run's `sockets/` may hold, which name nothing here.
-            rsync.args(["--archive", "--no-D"]);
-            rsync.arg(self.remote(&format!("{}/{id}/", crate::job::runs())));
-            rsync.arg(runs.join(id));
-            Ok(rsync)
-        };
-        let what = format!("copying run {id}'s record again, carrying on");
-        self.again(copying, None, "rsync", &RSYNC_ENDED, UNBOUNDED, &what)?;
-        Ok(())
     }
 }
