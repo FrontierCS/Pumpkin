@@ -52,6 +52,9 @@ pub(in crate::view) enum Asked {
         caller: String,
         by: stats::By,
     },
+    Ops {
+        caller: String,
+    },
     Diff {
         a: u64,
         b: u64,
@@ -174,6 +177,9 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
                 }
             },
         }),
+        ["trace", who, "ops"] => Ok(Asked::Ops {
+            caller: caller(who)?,
+        }),
         ["diff"] => Ok(Asked::Diff {
             a: request_of("a")?,
             b: request_of("b")?,
@@ -199,7 +205,7 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
             "404 Not Found",
             &format!(
                 "nothing is at `{}`: expected a run's `trace/<caller>/steps`, `…/entries`, \
-                 `…/entry`, `…/search` or `…/stats`, `exchange/<n>`, `item/<hex>`, or `diff`",
+                 `…/entry`, `…/search`, `…/stats` or `…/ops`, `exchange/<n>`, `item/<hex>`, or `diff`",
                 request.path
             ),
         )),
@@ -255,6 +261,7 @@ impl View {
             } => {
                 return exchange_bytes(&held.record, &held.exchanges, *request, *part);
             }
+            Asked::Ops { caller } => return Ok(Answer::Json(held.ops.json(caller))),
             Asked::Item { digest } => {
                 let bytes = held.record.kept_item(digest).map_err(Failed::NotFound)?;
                 return Ok(Answer::Bytes(Response::bytes(
@@ -325,7 +332,9 @@ impl Trace {
                 said["stats"] = self.step_stats(exchanges, self.at[&request]);
                 Ok(said)
             }
-            Asked::Item { .. } => unreachable!("answered above, without the pass"),
+            Asked::Item { .. } | Asked::Ops { .. } => {
+                unreachable!("answered above, without the pass")
+            }
         }
     }
 }

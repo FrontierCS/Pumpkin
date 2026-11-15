@@ -311,3 +311,18 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
   .lrow.step .pos { width: 7ch; }
   .lrow.step .t { width: 9.5ch; }
 }
+
+/* A trace's timeline: three lanes, the axis, and the strip of the whole trace, drawn on canvases
+   in these tokens; the labels at left. */
+.timeline { --tl-lane: calc(var(--row) * 5 / 8); --tl-label: 6ch; flex: none; display: grid; grid-template-columns: var(--tl-label) minmax(0, 1fr); column-gap: var(--s2); padding: var(--s1) var(--s2); user-select: none; }
+.tl-labels { position: relative; font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
+.tl-lane { height: var(--tl-lane); line-height: var(--tl-lane); }
+.tl-axis { height: var(--lh); }
+.tl-axis .tl-unit { height: var(--lh); padding: 0; border: none; background: none; font: inherit; color: var(--accent); text-decoration: underline dotted; }
+.tl-strip-label { height: var(--s4); line-height: var(--s4); }
+.tl-tracks { position: relative; min-width: 0; }
+.tl-lanes { display: block; width: 100%; cursor: crosshair; }
+.tl-strip { display: block; width: 100%; height: var(--s4); cursor: grab; border-top: 1px solid var(--line-soft); }
+.tl-tip { position: absolute; z-index: 2; pointer-events: none; padding: var(--s1) var(--s2); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-box); box-shadow: var(--pop); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--lh); color: var(--text-2); white-space: nowrap; }
+.tl-tip .head { color: var(--text); font-weight: 600; }
+.lrow.out { opacity: 0.4; }

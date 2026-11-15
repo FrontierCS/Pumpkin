@@ -155,6 +155,8 @@ struct Held {
     read: u64,
     /// The model exchanges its log names.
     exchanges: trace::Exchanges,
+    /// The ops its log names.
+    ops: trace::Ops,
     /// Which of the view's folds of a run it is ([`View::made`]).
     made: u64,
 }
@@ -176,6 +178,7 @@ impl Held {
             log_epoch,
             read: 0,
             exchanges: trace::Exchanges::default(),
+            ops: trace::Ops::default(),
             made,
         })
     }
@@ -216,6 +219,7 @@ impl Held {
             lines,
             recent,
             exchanges,
+            ops,
             ..
         } = self;
         let started_over = fold.take_each(|line| {
@@ -229,6 +233,7 @@ impl Held {
                     talk.take(&record);
                 }
                 exchanges.take(line.byte, &record);
+                ops.take(&record);
             }
         })?;
         if let Some(started_over) = started_over {
