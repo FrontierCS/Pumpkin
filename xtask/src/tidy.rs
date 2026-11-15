@@ -1,7 +1,7 @@
-//! The checks of the writing rule, of `ARCHITECTURE.md`'s links, of the figures and of the layout
-//! of `tests/` that a machine can make, which `cargo xtask ci` runs. `docs/dev/writing.md`,
-//! `docs/dev/style.md` and `docs/dev/testing.md` hold the rules, and each problem says what is
-//! wrong and what to do.
+//! The checks of the writing rule, of a source file's length, of `ARCHITECTURE.md`'s links, of the
+//! figures and of the layout of `tests/` that a machine can make, which `cargo xtask ci` runs.
+//! `docs/dev/writing.md`, `docs/dev/style.md` and `docs/dev/testing.md` hold the rules, and each
+//! problem says what is wrong and what to do.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -32,9 +32,21 @@ const TEST_COMMENT_CAP: usize = 2;
 // Rustfmt's `max_width` for code.
 const WIDTH: usize = 100;
 
+// A file past it holds several things, each better read and changed in a module of its own.
+const FILE_CAP: usize = 1_000;
+
+const SOURCES: [&str; 8] = ["rs", "star", "js", "css", "html", "py", "sh", "tf"];
+
+// The files over `FILE_CAP`, each with its ceiling, the most lines it may hold, which only goes
+// down: a ratchet, as TigerBeetle's tidy holds the functions that are already long and stops the
+// others growing past its cap, and fails on an exception that names no file:
+// https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L731-L753
+// https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L1496-L1508
+const CEILINGS: &str = ".config/tidy.toml";
+
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
-/// `ARCHITECTURE.md`, its Markdown documents, its figures and the files under its `tests/`
-/// directories pass the checks. The error holds a line for each problem.
+/// other source files, its `ARCHITECTURE.md`, its Markdown documents, its figures and the files
+/// under its `tests/` directories pass the checks. The error holds a line for each problem.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     let mut problems = Vec::new();
     let mut names = BTreeSet::new();
@@ -92,6 +104,7 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
     problems.extend(architecture(sh)?);
     let listed = listed(sh)?;
     problems.extend(test_data(&listed));
+    problems.extend(long_files(sh, &listed)?);
     names.extend(figures::packages(sh, &listed)?);
     problems.extend(figures::check(sh, &listed, &names)?);
     if problems.is_empty() {
@@ -137,6 +150,69 @@ fn test_data(paths: &[String]) -> Vec<String> {
         }
     }
     problems
+}
+
+/// The problems of `paths` that are source files ([`SOURCES`]) outside a `tests/` directory: one
+/// over [`FILE_CAP`] and not listed in [`CEILINGS`], or past its ceiling there, and each entry
+/// of the list that is stale, its file gone, within the cap or under its ceiling.
+fn long_files(sh: &Shell, paths: &[String]) -> Result<Vec<String>> {
+    let mut ceilings = BTreeMap::new();
+    if sh.path_exists(CEILINGS) {
+        let table: toml::Table = toml::from_str(&sh.read_file(CEILINGS)?)
+            .map_err(|error| format!("{CEILINGS} isn't TOML: {error}"))?;
+        let listed = table.get("long_files").and_then(toml::Value::as_table);
+        for (path, ceiling) in listed.into_iter().flatten() {
+            let ceiling = ceiling
+                .as_integer()
+                .and_then(|ceiling| usize::try_from(ceiling).ok());
+            let Some(ceiling) = ceiling else {
+                return Err(format!(
+                    "{CEILINGS}: `{path}`'s ceiling isn't a count of lines: give it the file's"
+                )
+                .into());
+            };
+            ceilings.insert(path.clone(), ceiling);
+        }
+    }
+    let split = "put what is new in a module of its own, or split the file into modules that \
+                 each hold one thing, in a pull request that only moves code";
+    let mut problems = Vec::new();
+    for path in paths {
+        let file = Path::new(path);
+        let extension = file.extension().and_then(|extension| extension.to_str());
+        let under_tests = file.parent().is_some_and(|parent| {
+            (parent.components()).any(|component| component.as_os_str() == "tests")
+        });
+        if under_tests || !extension.is_some_and(|extension| SOURCES.contains(&extension)) {
+            continue;
+        }
+        let lines = sh.read_file(path)?.lines().count();
+        let problem = match ceilings.remove(path.as_str()) {
+            None if lines > FILE_CAP => {
+                format!("{path}: the file is {lines} lines, over the cap of {FILE_CAP}: {split}")
+            }
+            Some(ceiling) if lines > ceiling => format!(
+                "{path}: the file is {lines} lines, over the cap of {FILE_CAP} and its ceiling of \
+                 {ceiling} in {CEILINGS}, which only goes down: {split}"
+            ),
+            Some(_) if lines <= FILE_CAP => format!(
+                "{path}: the file is {lines} lines, within the cap of {FILE_CAP}: take it off \
+                 {CEILINGS}"
+            ),
+            Some(ceiling) if lines < ceiling => format!(
+                "{path}: the file is {lines} lines, under its ceiling of {ceiling} in \
+                 {CEILINGS}: lower the ceiling to {lines}"
+            ),
+            None | Some(_) => continue,
+        };
+        problems.push(problem);
+    }
+    for path in ceilings.keys() {
+        problems.push(format!(
+            "{CEILINGS}: `{path}` isn't a source file of the repository: take it off the list"
+        ));
+    }
+    Ok(problems)
 }
 
 /// The problems of `ARCHITECTURE.md`'s links: one to code, or to a document that isn't there.

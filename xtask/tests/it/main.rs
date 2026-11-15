@@ -561,6 +561,41 @@ fn test_data() {
 }
 
 #[test]
+fn long_files() {
+    use Standing::Tracked;
+    let rust = |count| lines("fn f() {}", count);
+    let ceilings = "[long_files]\n\
+                    \"src/grown.rs\" = 1001\n\
+                    \"src/held.rs\" = 1001\n\
+                    \"src/shrunk.rs\" = 1002\n\
+                    \"src/split.rs\" = 1001\n\
+                    \"src/gone.rs\" = 1001\n";
+    check(
+        "long-files",
+        &[
+            (".config/tidy.toml", ceilings.to_owned(), Tracked),
+            ("src/at_cap.rs", rust(1000), Tracked),
+            ("src/long.rs", rust(1001), Tracked),
+            ("src/page/long.js", lines("f();", 1001), Tracked),
+            ("crates/a/tests/it/long.rs", rust(1001), Tracked),
+            ("docs/long.md", lines("A line.", 1001), Tracked),
+            ("src/grown.rs", rust(1002), Tracked),
+            ("src/held.rs", rust(1001), Tracked),
+            ("src/shrunk.rs", rust(1001), Tracked),
+            ("src/split.rs", rust(1000), Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            src/grown.rs: the file is 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/long.rs: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/page/long.js: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/shrunk.rs: the file is 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
+            src/split.rs: the file is 1000 lines, within the cap of 1000: take it off .config/tidy.toml
+            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list"#]],
+    );
+}
+
+#[test]
 fn diff() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let again = "cargo xtask mutants --in-diff HEAD";
