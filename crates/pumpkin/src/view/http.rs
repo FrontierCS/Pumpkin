@@ -82,12 +82,13 @@ impl Request {
     }
 }
 
-/// An answer: its status line's code and reason, its type (with its charset, if text), and its
-/// body.
+/// An answer: its status line's code and reason, its type (with its charset, if text), its body,
+/// and whether a browser may keep it ([`Response::immutable`]).
 pub(super) struct Response {
     status: &'static str,
     content_type: &'static str,
     body: Body,
+    immutable: bool,
 }
 
 /// An answer's body.
@@ -107,6 +108,7 @@ impl Response {
             status: "200 OK",
             content_type: "application/json; charset=utf-8",
             body: Body::Made(value.to_string().into_bytes()),
+            immutable: false,
         }
     }
 
@@ -121,19 +123,34 @@ impl Response {
             status: "200 OK",
             content_type,
             body: Body::Made(body),
+            immutable: false,
         }
     }
 
     /// A file of the page's, `body`, of the type `content_type`; `deflated` is its [`deflated`]
     /// form, if shorter.
-    pub(super) fn file(content_type: &'static str, body: &[u8], deflated: Option<Vec<u8>>) -> Self {
+    pub(super) fn file(
+        content_type: &'static str,
+        body: Vec<u8>,
+        deflated: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             status: "200 OK",
             content_type,
             body: Body::Held {
-                plain: body.to_vec(),
+                plain: body,
                 deflated,
             },
+            immutable: false,
+        }
+    }
+
+    /// This answer, as what its path always gives, so that a browser keeps it and uses it again
+    /// without asking.
+    pub(super) fn immutable(self) -> Self {
+        Self {
+            immutable: true,
+            ..self
         }
     }
 
@@ -145,6 +162,7 @@ impl Response {
             status,
             content_type: "application/json; charset=utf-8",
             body: Body::Made(body.into_bytes()),
+            immutable: false,
         }
     }
 }
@@ -349,6 +367,7 @@ pub(super) fn write(stream: TcpStream, response: Response, deflate: bool) -> io:
         status,
         content_type,
         body,
+        immutable,
     } = response;
     let (body, deflated) = match body {
         Body::Made(plain) => {
@@ -372,10 +391,18 @@ pub(super) fn write(stream: TcpStream, response: Response, deflate: bool) -> io:
     } else {
         String::new()
     };
-    // A live record is read again and again, so nothing is kept to be shown stale.
+    // A live record is read again and again, so nothing else is kept to be shown stale. What is
+    // immutable is kept a year and never asked for again (RFC 8246), as jupyter_server keeps a
+    // file whose path names its version:
+    // https://github.com/jupyter-server/jupyter_server/blob/0d1a13b2f5212a9f9da0122a9e7dbaf23f6cfcb7/jupyter_server/base/handlers.py#L998-L1012
+    let cache = if immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    };
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n\
-         Content-Length: {}\r\n{encoding}Vary: Accept-Encoding\r\nCache-Control: no-store\r\n\
+         Content-Length: {}\r\n{encoding}Vary: Accept-Encoding\r\nCache-Control: {cache}\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Content-Security-Policy: {CONTENT_SECURITY_POLICY}\r\n{challenge}Connection: close\r\n\r\n",
         body.len()

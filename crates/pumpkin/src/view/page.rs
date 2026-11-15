@@ -1,9 +1,15 @@
 //! The page that reads the view's data in a browser, its files compiled into `pumpkin`: an
-//! `index.html` at `/`, its modules of script, its style and its font, each at its own path. The
-//! page carries no data, so no request of it needs the token: the page takes the token from the
-//! address that `pumpkin view` printed, and sends it with each request of the data.
+//! `index.html` at `/`, and its modules of script, its style and its font, each at its own path
+//! below a directory named by their digest, so that a browser keeps each as long as it likes and
+//! a build with other files names other paths. The page carries no data, so no request of it
+//! needs the token: the page takes the token from the address that `pumpkin view` printed, and
+//! sends it with each request of the data.
+
+use std::fmt::Write as _;
 
 use miniz_oxide::deflate::CompressionLevel;
+use schema::ir::Sha256Digest;
+use sha2::{Digest as _, Sha256};
 
 use super::http::{self, Response};
 
@@ -108,31 +114,71 @@ const FILES: [(&str, &str, &[u8]); 19] = [
     ),
 ];
 
+/// The one script of [`FILES`] that is not a module: `index.html` runs it as a classic script,
+/// before it draws, so a module's preload would fetch it a second time, as a module.
+const CLASSIC_SCRIPT: &str = "/scheme.js";
+
 /// The page's files, each with its form deflated ([`http::deflated`]).
 pub(super) struct Page {
-    /// By the order of [`FILES`].
-    deflated: Vec<Option<Vec<u8>>>,
+    /// The directory that the files but `/` are served below: `/` and the SHA-256 of their paths
+    /// and bodies.
+    dir: String,
+    /// Each file of [`FILES`], by its order: its body as served, and its form deflated.
+    files: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 impl Page {
     /// The page, each file deflated once, so at the level that makes it shortest.
     pub(super) fn new() -> Self {
-        let deflated = FILES
-            .iter()
-            .map(|(_, _, body)| http::deflated(body, CompressionLevel::UberCompression));
-        Self {
-            deflated: deflated.collect(),
+        let mut digest = Sha256::new();
+        for (path, _, body) in FILES.iter().filter(|(path, ..)| *path != "/") {
+            digest.update(format!("{path}\0{}\0", body.len()));
+            digest.update(body);
         }
+        let digest: [u8; 32] = digest.finalize().into();
+        let dir = format!("/{}", Sha256Digest::from(digest).hex());
+        let files = FILES.iter().map(|(path, _, body)| {
+            let body = if *path == "/" {
+                entry(body, &dir)
+            } else {
+                body.to_vec()
+            };
+            let deflated = http::deflated(&body, CompressionLevel::UberCompression);
+            (body, deflated)
+        });
+        let files = files.collect();
+        Self { dir, files }
     }
 
     /// The page's file at `path`, if it is one.
     pub(super) fn file(&self, path: &str) -> Option<Response> {
-        let index = FILES.iter().position(|(at, ..)| *at == path)?;
-        let (_, content_type, body) = FILES[index];
-        Some(Response::file(
-            content_type,
-            body,
-            self.deflated[index].clone(),
-        ))
+        let at = match path {
+            "/" => "/",
+            _ => path.strip_prefix(&self.dir).filter(|at| *at != "/")?,
+        };
+        let index = FILES.iter().position(|(path, ..)| *path == at)?;
+        let (body, deflated) = &self.files[index];
+        let file = Response::file(FILES[index].1, body.clone(), deflated.clone());
+        Some(if at == "/" { file } else { file.immutable() })
     }
+}
+
+/// `index.html`, `body`, with each file of [`FILES`] that it names named below `dir`, and each
+/// module preloaded, so that the browser asks for every module at once instead of a level of
+/// imports at a time.
+fn entry(body: &[u8], dir: &str) -> Vec<u8> {
+    let mut entry = String::from_utf8_lossy(body).into_owned();
+    let mut preloads = String::new();
+    for (path, content_type, _) in FILES.iter().filter(|(path, ..)| *path != "/") {
+        entry = entry.replace(&format!("\"{path}\""), &format!("\"{dir}{path}\""));
+        if content_type.starts_with("text/javascript") && *path != CLASSIC_SCRIPT {
+            let _ = writeln!(
+                preloads,
+                "<link rel=\"modulepreload\" href=\"{dir}{path}\">"
+            );
+        }
+    }
+    entry
+        .replacen("</head>", &format!("{preloads}</head>"), 1)
+        .into_bytes()
 }

@@ -757,22 +757,17 @@ fn windows_a_log_by_its_bytes() {
     );
 }
 
-/// The paths of the scripts and modules that a file of the page loads, and of the files its style
-/// names.
-fn loaded(body: &str) -> Vec<String> {
-    let found = body
-        .match_indices(" from \"./")
-        .chain(body.match_indices("url(\"/"))
-        .chain(body.match_indices(" src=\"/"));
-    found
-        .map(|(at, _)| {
-            let rest = &body[at..];
-            let file = rest[rest.find('/').unwrap() + 1..]
-                .split('"')
-                .next()
-                .unwrap();
-            format!("/{file}")
-        })
+/// The paths of the files that the page's file at `path` names: those `index.html` names, the
+/// modules a module imports and the files a style names, each beside it.
+fn loaded(path: &str, body: &str) -> Vec<String> {
+    let dir = &path[..=path.rfind('/').unwrap()];
+    let named = |prefix: &'static str, base: &str| {
+        let found = body.match_indices(prefix).map(|(at, _)| at + prefix.len());
+        let base = base.to_owned();
+        found.map(move |at| format!("{base}{}", body[at..].split('"').next().unwrap()))
+    };
+    (named("href=\"/", "/").chain(named("src=\"/", "/")))
+        .chain(named(" from \"./", dir).chain(named("url(\"", dir)))
         .collect()
 }
 
@@ -788,7 +783,7 @@ fn serves_the_page() {
     // The page reads the token from its address, so its own files are served without it.
     let no_token = [("X-Pumpkin-Token", "")];
     let mut steps = Vec::new();
-    let mut paths = ["/", "/style.css", "/app.js"].map(str::to_owned).to_vec();
+    let mut paths = vec!["/".to_owned()];
     let mut at = 0;
     while let Some(path) = paths.get(at).cloned() {
         at += 1;
@@ -811,20 +806,35 @@ fn serves_the_page() {
         let policy = format!("policy: {}", header("Content-Security-Policy"));
         if path == "/" {
             steps.push(policy.clone());
+            // What the head loads, in its order: the scheme's classic script first, so that it
+            // runs before the first paint, and a preload of each module.
+            let page = String::from_utf8_lossy(&body);
+            let head = page
+                .lines()
+                .filter(|line| line.starts_with("<script") || line.starts_with("<link"));
+            steps.extend(head.map(|line| format!("head: {line}")));
         }
         assert_eq!(steps[1], policy, "{path}");
         let font = header("Content-Type") == "font/woff2";
         assert!(!font || body.starts_with(b"wOF2"), "{path}");
-        for file in loaded(&String::from_utf8_lossy(&body)) {
+        for file in loaded(&path, &String::from_utf8_lossy(&body)) {
             if !paths.contains(&file) {
                 paths.push(file);
             }
         }
     }
+    let dir = paths[1].rsplit_once('/').unwrap().0.to_owned();
+    // A page of another build, still open, asks for a file at its own path, which the files of
+    // this one are never served at.
+    let other = format!("/{}/app.js", "0".repeat(64));
+    let app = format!("{dir}/app.js");
     for (path, headers) in [
         ("/nothing.js", &[][..]),
+        ("/app.js", &[][..]),
+        (&other, &[][..]),
+        (&format!("{dir}/"), &[][..]),
         ("/", &[("Host", "pumpkin.example")][..]),
-        ("/app.js", &[("Host", "pumpkin.example:80")][..]),
+        (&app, &[("Host", "pumpkin.example:80")][..]),
     ] {
         let (status, body) = served.get_with(path, headers);
         steps.push(format!("{path} {headers:?}: {status} {body}"));
@@ -833,31 +843,52 @@ fn serves_the_page() {
         &scratch,
         steps.into_iter().map(Step::Ran),
         false,
-        &[],
+        &[(&dir, "/<digest>")],
         &expect![[r#"
             /: HTTP/1.1 200 OK text/html; charset=utf-8; no-store
             policy: default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
-            /style.css: HTTP/1.1 200 OK text/css; charset=utf-8; no-store
-            /app.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; no-store
-            /h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /key.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /log.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /stats.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
-            /diff.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            head: <script src="/<digest>/scheme.js"></script>
+            head: <link rel="stylesheet" href="/<digest>/style.css">
+            head: <script type="module" src="/<digest>/app.js"></script>
+            head: <link rel="modulepreload" href="/<digest>/app.js">
+            head: <link rel="modulepreload" href="/<digest>/diff.js">
+            head: <link rel="modulepreload" href="/<digest>/h.js">
+            head: <link rel="modulepreload" href="/<digest>/inspector.js">
+            head: <link rel="modulepreload" href="/<digest>/key.js">
+            head: <link rel="modulepreload" href="/<digest>/ledger.js">
+            head: <link rel="modulepreload" href="/<digest>/list.js">
+            head: <link rel="modulepreload" href="/<digest>/log.js">
+            head: <link rel="modulepreload" href="/<digest>/records.js">
+            head: <link rel="modulepreload" href="/<digest>/rows.js">
+            head: <link rel="modulepreload" href="/<digest>/run.js">
+            head: <link rel="modulepreload" href="/<digest>/stats.js">
+            head: <link rel="modulepreload" href="/<digest>/steps.js">
+            head: <link rel="modulepreload" href="/<digest>/timeline.js">
+            head: <link rel="modulepreload" href="/<digest>/trace.js">
+            /<digest>/style.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/app.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/diff.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/key.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/log.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/stats.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
             /nothing.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/nothing.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
+            /app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
+            /0000000000000000000000000000000000000000000000000000000000000000/app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/0000000000000000000000000000000000000000000000000000000000000000/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
+            /<digest>/ []: HTTP/1.1 404 Not Found {"error":"nothing is at `/<digest>/`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             / [("Host", "pumpkin.example")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}
-            /app.js [("Host", "pumpkin.example:80")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example:80`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}"#]],
+            /<digest>/app.js [("Host", "pumpkin.example:80")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example:80`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}"#]],
     );
 }
 
@@ -901,7 +932,10 @@ fn deflates_what_the_request_accepts() {
     let served = Served::start(&scratch);
     let mut steps = Vec::new();
     let log = format!("/api/runs/{id}/log?at=0");
-    for path in ["/", "/hanken-grotesk.woff2", &log] {
+    let end = served.get(&format!("/api/runs/{id}"))["end"].clone();
+    // So short that deflating lengthens it.
+    let nothing = format!("/api/runs/{id}/since?log={end}");
+    for path in ["/", &log, &nothing] {
         let (_, plain) = served.exchange_bytes("GET", path, &[]);
         for accepted in [
             "gzip, deflate, br, zstd",
@@ -939,14 +973,14 @@ fn deflates_what_the_request_accepts() {
             / "gzip": Content-Encoding none, Vary Accept-Encoding
             / "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             / "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /hanken-grotesk.woff2 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /hanken-grotesk.woff2 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /hanken-grotesk.woff2 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /hanken-grotesk.woff2 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate, br, zstd": Content-Encoding deflate, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding"#]],
+            /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8220 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8220 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8220 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8220 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 
