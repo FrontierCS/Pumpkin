@@ -14,9 +14,7 @@ impl Workflow {
     /// memory it offers at least, every CPU flag it needs, and exactly the GPUs and CPU model it
     /// needs, so a class with GPUs, or a stated CPU model, goes only to roles that need them.
     ///
-    /// # Errors
-    ///
-    /// Returns each role that fits no class, [at](super::ParseError::at) its needs, saying why.
+    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs, saying why.
     pub fn place<'o, P>(
         self,
         offered: &'o BTreeMap<Name, P>,

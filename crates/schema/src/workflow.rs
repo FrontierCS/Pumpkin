@@ -2,8 +2,8 @@
 //! [`Duration`], and the rules that span its parts checked.
 //!
 //! A [`Placed`] workflow has each of its roles on a provider, in the smallest class of sandbox
-//! offered that fits it. A [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`] by
-//! [`Workflow::place`], so code that acts on one need not check again what they established.
+//! offered that fits it. A [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`]
+//! by [`Workflow::place`], so code that acts on one need not check again what they established.
 //! Each kind of part has its own id type, so that, for example, the role a [`JudgeGrant`]
 //! judges with is known to be a [`Judge`]. Ids are only valid for the workflow that issued them.
 
@@ -25,7 +25,7 @@ mod place;
 
 pub use errors::{ParseError, ParseErrors};
 
-/// A parsed workflow.
+/// A workflow that parsing checked: only parsing makes one, so code past it needn't check again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workflow {
     ir: crate::ir::Workflow,
@@ -41,7 +41,6 @@ pub struct Workflow {
 }
 
 impl Workflow {
-    /// The IR that this workflow was parsed from.
     pub fn ir(&self) -> &crate::ir::Workflow {
         &self.ir
     }
@@ -63,7 +62,6 @@ impl Workflow {
         &self.runners[&id.0]
     }
 
-    /// The sandbox of any role.
     pub fn sandbox(&self, role: RoleId) -> &Sandbox {
         &self.roles[role.0]
     }
@@ -74,9 +72,6 @@ impl Workflow {
     }
 
     /// What `f` makes of each role, by its id, and its sandbox, in [`roles`](Self::roles)' order.
-    ///
-    /// # Errors
-    ///
     /// Fails with `f`'s first error, calling `f` on no role after it.
     pub fn by_role<T, E>(
         &self,
@@ -142,7 +137,6 @@ impl Placed {
         &self.workflow
     }
 
-    /// Where `role` is placed.
     pub fn placement(&self, role: RoleId) -> &Placement {
         self.placements.get(role)
     }
@@ -154,11 +148,7 @@ impl Placed {
     }
 
     /// What `f` makes of each provider that a role is placed on, by its name, in the order of
-    /// their names.
-    ///
-    /// # Errors
-    ///
-    /// Fails with `f`'s first error, calling `f` on no provider after it.
+    /// their names. Fails with `f`'s first error, calling `f` on no provider after it.
     pub fn by_provider<T, E>(
         &self,
         mut f: impl FnMut(&Name) -> Result<T, E>,
@@ -177,7 +167,6 @@ pub struct Placement {
     pub provider: Name,
     /// The class, by the name the provider declares it by (`provider::Ready::classes`).
     pub class: Name,
-    /// What the provider declares of the class.
     pub declared: Class,
 }
 
@@ -264,7 +253,6 @@ impl<T> ByProvider<T> {
         self.0.iter()
     }
 
-    /// What `f` makes of each provider's value, for the same providers.
     pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> ByProvider<U> {
         let mapped = self.0.into_iter().map(|(name, value)| (name, f(value)));
         ByProvider(mapped.collect())
@@ -275,7 +263,6 @@ impl<T> ByProvider<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoleId(usize);
 
-/// A judge role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JudgeId(RoleId);
 
@@ -285,7 +272,6 @@ impl JudgeId {
     }
 }
 
-/// A runner role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunnerId(RoleId);
 
@@ -307,7 +293,6 @@ impl<T> ByRole<T> {
     }
 }
 
-/// A slot of a judge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlotId {
     judge: JudgeId,
@@ -315,7 +300,6 @@ pub struct SlotId {
 }
 
 impl SlotId {
-    /// The judge that has the slot.
     pub fn judge(self) -> JudgeId {
         self.judge
     }
@@ -365,7 +349,6 @@ pub struct Agent {
     pub finalize_grace: Duration,
 }
 
-/// A judge role.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Judge {
     /// See [`ir::JudgeRuntime::command`](crate::ir::JudgeRuntime::command).
@@ -439,12 +422,10 @@ pub struct Runner {
     pub env: Env,
 }
 
-/// A lease grant of a role's, the agent's or a judge's; see
-/// [`ir::LeaseGrant`](crate::ir::LeaseGrant).
+/// A lease grant; see [`ir::LeaseGrant`](crate::ir::LeaseGrant).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseGrant {
     pub name: Name,
-    /// The role that holds it: the agent, or a judge.
     pub holder: RoleId,
     /// The runner, which no other lease grant names, and whose image, if the agent holds the
     /// grant, is no judge's ([`ir::LeaseGrant::role`](crate::ir::LeaseGrant::role)).

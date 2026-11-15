@@ -1,7 +1,6 @@
 //! Writing a tree that arrives over a session into a directory.
 //!
-//! Both ends use it: `sandboxd` for what the gateway puts, the gateway for what it collects,
-//! which may come from a buggy sandbox. Parsing has already confined every path to the
+//! A tree may come from a buggy sandbox. Parsing has already confined every path to the
 //! directory, so the writer checks how the parts fit: each entry's parent exists, file sizes
 //! match their data, and the tree stays within its [`Limits`]. Since no entry creates a missing
 //! parent, each creates at most one directory or file.
@@ -73,7 +72,7 @@ impl Writer {
     /// # Errors
     ///
     /// Fails if the previous file is incomplete, if a limit is passed, if the parent is
-    /// missing, if a file already exists, or if creating the entry, or giving it its mode, fails.
+    /// missing, or if a file already exists.
     pub fn entry(&mut self, entry: &Entry) -> io::Result<()> {
         self.check_file_complete()?;
         self.entries += 1;
@@ -124,8 +123,7 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// Fails if no file is due bytes, if there are none, if they run past the file's size, or
-    /// if writing fails.
+    /// Fails if no file is due bytes, if there are none, or if they run past the file's size.
     pub fn data(&mut self, bytes: &[u8]) -> io::Result<()> {
         if bytes.is_empty() {
             return Err(invalid(
@@ -151,11 +149,7 @@ impl Writer {
         Ok(())
     }
 
-    /// Ends the tree.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the last file is incomplete.
+    /// Ends the tree; fails if the last file is incomplete.
     pub fn finish(self) -> io::Result<()> {
         self.check_file_complete()
     }

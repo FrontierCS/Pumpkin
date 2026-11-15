@@ -1,8 +1,5 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
 //! workflow, [`WORKFLOW`].
-//! Also placing the workflow's roles on providers, in classes of sandbox, the JSON of ops'
-//! replies, which `sandboxctl` prints, the sandbox protocol's hellos and endpoints, and the
-//! in-sandbox contract.
 //!
 //! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of
 //! all of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
@@ -245,7 +242,6 @@ impl Case for HelloJson {
     }
 }
 
-/// Two grants' digits, and whether the grants are equal.
 struct Grants(&'static str, &'static str);
 
 impl Case for Grants {
@@ -268,7 +264,6 @@ impl Case for Frame {
     }
 }
 
-/// `value`, one of the IR's checked values.
 fn valid<T: TryFrom<String, Error = String>>(value: &str) -> T {
     T::try_from(value.to_owned()).unwrap()
 }

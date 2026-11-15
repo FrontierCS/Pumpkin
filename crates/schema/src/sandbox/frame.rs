@@ -18,11 +18,7 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// The largest body in a frame. Files longer than this move in several frames.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// Writes one frame.
-///
-/// # Errors
-///
-/// Fails if the message or the body is too long, or if writing fails.
+/// Writes one frame, refusing a message or a body over its maximum.
 pub fn write(writer: &mut impl Write, message: &impl Serialize, body: &[u8]) -> io::Result<()> {
     let message = serde_json::to_vec(message).map_err(io::Error::other)?;
     let message_len = encode_len(message.len(), MAX_MESSAGE_BYTES, "message")?;
@@ -36,12 +32,8 @@ pub fn write(writer: &mut impl Write, message: &impl Serialize, body: &[u8]) -> 
     writer.flush()
 }
 
-/// Reads one frame, or `None` if the connection ended cleanly between frames.
-///
-/// # Errors
-///
-/// Fails if reading fails, if the connection ends inside a frame, if a length is over its cap,
-/// or if the message isn't JSON, or is no `T`.
+/// Reads one frame, or `None` if the connection ended cleanly between frames. It refuses a length
+/// over its cap, and a message that isn't JSON or is no `T`.
 pub fn read<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<(T, Vec<u8>)>> {
     let within = |len: u32, max: usize, what: &str| {
         capped(len, max).ok_or_else(|| {
@@ -62,12 +54,10 @@ pub fn read<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<(T
 }
 
 /// Reads a [`Hello`], the frame that opens a session, or `None` if the connection ended cleanly
-/// before it. It refuses a frame longer than [`MAX_HELLO_BYTES`] from its lengths alone.
+/// before it.
 ///
-/// # Errors
-///
-/// Fails if reading fails, if the connection ends inside the frame, if the message is longer than
-/// a hello's or there is a body, or if the message isn't JSON, or is no hello.
+/// It refuses a frame longer than [`MAX_HELLO_BYTES`] from its lengths alone, one with a body, and
+/// a message that isn't JSON or is no hello.
 pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<Hello>> {
     read_bodiless(reader, MAX_HELLO_BYTES, ["the hello", "a hello"])
 }
@@ -77,10 +67,6 @@ pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<Hello>> {
 ///
 /// It reads a message of at most [`MAX_MESSAGE_BYTES`] and no body, and refuses a longer frame
 /// from its lengths alone.
-///
-/// # Errors
-///
-/// Fails as [`read_hello`] does, for an answer's message and body.
 pub fn read_hello_reply(reader: &mut impl Read) -> io::Result<Option<HelloReply>> {
     read_bodiless(
         reader,
@@ -137,7 +123,6 @@ fn read_len(reader: &mut impl Read) -> io::Result<Option<u32>> {
     Ok(Some(u32::from_be_bytes(bytes)))
 }
 
-/// `len`, if it is at most `max`.
 fn capped(len: u32, max: usize) -> Option<usize> {
     // A length that doesn't fit a usize is over the cap, a usize.
     usize::try_from(len).ok().filter(|&len| len <= max)

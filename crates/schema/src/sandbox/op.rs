@@ -19,10 +19,10 @@
 //! A sandbox's callers take turns ([`super`]): a payload is read from its file in its turn, so
 //! leave the file be until the call returns; a call whose `sandboxctl` has gone by then is dropped.
 //!
-//! A reply is an object whose `kind` names it: `ops`, `judge`, `submit`, `status`, `lease`,
-//! `lease_status`, or `refused`, as the owner may answer any op ([`OpReply::Refused`]). Its fields are its type's, under the same names; a limit or
-//! a quota that doesn't exist is `null`. A status has `returned` and `scored` once its job's judge
-//! has given a result, scored or not, and `failure` only if the job gave no result.
+//! A reply is an object whose `kind` is `ops`, `judge`, `submit`, `status`, `lease`, `lease_status`
+//! or `refused`, which may answer any op ([`OpReply::Refused`]). Its fields are its type's, under
+//! the same names; a limit or a quota that doesn't exist is `null`. A status has `returned` and
+//! `scored` once its job has given a result, scored or not, and `failure` only if it gave none.
 
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -161,7 +161,7 @@ pub enum OpReply {
 #[serde(deny_unknown_fields)]
 pub struct OpsReply {
     /// The time left to work, in whole seconds rounded down: from when the op reached its owner,
-    /// or later, until the deadline, or, for a judge's call, until its command's timeout.
+    /// or later, until its caller's work ends.
     pub remaining_seconds: u64,
     /// The caller's CPU and memory limits: its role's.
     pub resources: Resources,
@@ -245,7 +245,6 @@ pub struct SubmitReply {
     pub remaining_seconds: u64,
 }
 
-/// What became of a submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmitState {
@@ -365,7 +364,6 @@ pub enum Last {
     Transfer(TransferStatus),
 }
 
-/// Where a lease is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseState {
@@ -413,7 +411,6 @@ pub struct TransferStatus {
     pub end: Option<TransferEnd>,
 }
 
-/// How a transfer ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferEnd {
@@ -425,7 +422,6 @@ pub enum TransferEnd {
     Failed(String),
 }
 
-/// How a command that a lease ran ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandEnd {

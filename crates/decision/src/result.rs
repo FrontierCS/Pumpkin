@@ -1,5 +1,3 @@
-//! A judge call's result, parsed from its `result.json`.
-
 use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
@@ -52,7 +50,6 @@ impl JudgeResult {
         Ok(Self { score, returned })
     }
 
-    /// The score, if the result has one.
     pub fn score(&self) -> Option<&Number> {
         self.score.as_ref()
     }
@@ -63,7 +60,6 @@ impl JudgeResult {
         &self.returned
     }
 
-    /// The state of the job that gave this result, as a status reply gives it.
     pub(super) fn job_state(&self) -> JobState {
         let Self { score, returned } = self;
         JobState::Completed {

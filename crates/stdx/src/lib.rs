@@ -19,9 +19,6 @@ pub mod slots;
 /// assert_eq!(error, "the port: invalid digit found in string");
 /// ```
 pub trait Context<T> {
-    /// # Errors
-    ///
-    /// Fails with `<context>: <error>` if `self` holds an error.
     fn context(self, context: impl Display) -> Result<T, String>;
 }
 
@@ -122,7 +119,6 @@ pub struct Utc {
 }
 
 impl Utc {
-    /// The time `seconds` after the Unix epoch.
     pub fn from_unix(seconds: u64) -> Self {
         let (days, time) = (seconds / 86_400, seconds % 86_400);
         // Days to a civil date, after Howard Hinnant's `civil_from_days`, for days from 1970 on.
@@ -148,7 +144,6 @@ impl Utc {
         }
     }
 
-    /// The seconds after the Unix epoch at this time, which is not before it.
     pub fn to_unix(&self) -> u64 {
         let Self {
             year,

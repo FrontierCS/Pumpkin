@@ -1,9 +1,4 @@
 //! The values that a run and its providers exchange through [`Provider`](crate::Provider).
-//!
-//! A provider declares what holds while a run is connected to it ([`Ready`]), among it the
-//! [`Class`]es of sandbox it creates, creates the sandboxes the run asks for ([`Create`]), and
-//! says what it made of them. Every sandbox of a run carries the run's [`RunTag`], by which a
-//! provider lists the run's sandboxes, whatever made them.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -19,7 +14,6 @@ use serde_json::Value;
 pub struct Ready {
     /// The provider's report of its environment, for the run's record, in a form of its own.
     pub report: Value,
-    /// The classes of sandbox it creates, by name.
     pub classes: BTreeMap<Name, Class>,
 }
 
@@ -63,7 +57,6 @@ impl TryFrom<String> for RunTag {
 /// provider's [`Meeting`](crate::Meeting) says, under the [sandbox's rules](schema::sandbox).
 #[derive(Debug)]
 pub struct Create {
-    /// The run the sandbox belongs to, which tags it.
     pub run: RunTag,
     /// The sandbox's name, which no other sandbox of its run has, though another run's may: a
     /// key a provider may know it by on its platform, beside the id it gives it.
@@ -83,7 +76,7 @@ pub struct Create {
     /// not, it is [passive](schema::sandbox).
     pub ops: bool,
     /// Whether the sandbox's `sandboxd` serves the model endpoint, at
-    /// [`MODEL_PORT`](schema::sandbox::MODEL_PORT), as a role with a model route needs.
+    /// [`MODEL_PORT`](schema::sandbox::MODEL_PORT).
     pub model: bool,
     /// The run's hard end, by this host's clock, which bounds how long the sandbox runs should
     /// the run's driver die ([`Creator::create`](crate::Creator::create)).
@@ -99,11 +92,7 @@ pub struct Create {
 pub struct UnixTime(Duration);
 
 impl UnixTime {
-    /// `time`, a time by the machine's clock.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `time` is before the Unix epoch, which is the clock's error.
+    /// `time`, a time by the machine's clock; fails if it is before the Unix epoch.
     pub fn of(time: SystemTime) -> Result<Self, String> {
         let since = time.duration_since(UNIX_EPOCH);
         let since = since.map_err(|_| "the clock reads before 1970-01-01: set the system clock");
@@ -177,7 +166,6 @@ impl From<String> for SandboxdRef {
     }
 }
 
-/// The sandbox a create made.
 #[derive(Debug)]
 pub struct Created {
     pub id: SandboxId,
@@ -202,7 +190,6 @@ impl From<String> for SandboxId {
     }
 }
 
-/// A sandbox that its run's list finds.
 #[derive(Debug)]
 pub struct Listed {
     pub id: SandboxId,

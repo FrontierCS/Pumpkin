@@ -1,10 +1,7 @@
 //! What the EC2 provider and `ec2-boot`, the boot of each of its sandboxes' instances, share.
 //!
 //! The provider writes a [`Start`] into an instance's user data, which `ec2-boot start` reads on
-//! its standard input; the image of `sandboxd` that the instance pulls holds both programs
-//! ([`SANDBOXD_IN_IMAGE`], [`BOOT_IN_IMAGE`]); the user data makes the grant's directory
-//! ([`GRANT_DIR`]); and each line that the boot writes to the serial console, where the provider
-//! reads it, begins with [`CONSOLE_PREFIX`].
+//! its standard input.
 
 use std::net::SocketAddrV4;
 

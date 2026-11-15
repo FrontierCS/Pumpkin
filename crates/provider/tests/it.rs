@@ -1,10 +1,6 @@
-//! The values that a run and its providers exchange: the run tags that providers find a run's
-//! sandboxes by.
-
 use expect_test::{Expect, expect};
 use provider::RunTag;
 
-/// Checks what each of `tags` parses as, or why it is refused, against `expect`.
 fn check(tags: &[&str], expect: &Expect) {
     let outcomes: Vec<String> = (tags.iter())
         .map(|&tag| match RunTag::try_from(tag.to_owned()) {
