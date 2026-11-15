@@ -942,6 +942,11 @@ impl Reached {
             // So that a connection whose other end is gone, as when this machine slept, ends
             // within minutes, rather than when TCP gives up.
             "ServerAliveInterval=30",
+            // An SSM session carries under 1 MB a second, far less than zlib compresses in one,
+            // so what compression saves in bytes it saves in time. A master compresses its whole
+            // connection, so each command that joins it sends compressed, as ssh_config(5) says:
+            // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/ssh_config.5#L685-L693
+            "Compression=yes",
         ];
         for option in options {
             words.extend(["-o".to_owned(), option.to_owned()]);
