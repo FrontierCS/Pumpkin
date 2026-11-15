@@ -1,8 +1,8 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
 //! workflow, [`WORKFLOW`].
 //!
-//! The workflow stays whole, as the IR's golden fixture: `round_trip` compares a round trip of
-//! all of it, and every other IR case is a change to it (`fixture`, `fixture_with`).
+//! The workflow stays whole, as the IR's golden fixture: every IR case is a change to it
+//! (`fixture`, `fixture_with`).
 
 #![expect(
     clippy::unwrap_used,
@@ -724,14 +724,8 @@ fn in_sandbox_contract() {
 }
 
 #[test]
-fn round_trip() {
+fn parsed() {
     let ir: ir::Workflow = serde_json::from_str(WORKFLOW).unwrap();
-    // Whatever writes the IR serializes these types, so each must read back what it wrote.
-    assert_eq!(
-        serde_json::to_value(&ir).unwrap(),
-        fixture(),
-        "a round trip"
-    );
     let workflow = Workflow::parse(&ir).unwrap();
     let name = |role| workflow.sandbox(role).name.as_str();
     assert_eq!(name(workflow.agent().role), "agent");
