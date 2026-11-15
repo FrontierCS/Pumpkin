@@ -32,7 +32,7 @@ pub(super) const HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
 /// What a page that an answer is may load and run: the view's own scripts, style and font alone,
 /// never an inline script, a style attribute or another site's file, and no frame may hold it, so
 /// that text of a record a page shows can never run as code.
-const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
+pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
      font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
      frame-ancestors 'none'";
 
