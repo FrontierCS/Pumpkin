@@ -138,9 +138,9 @@ fn how(ending: &Ending) -> String {
 /// The run of `held`, as JSON, as of its last look: `{"id", "task", "live", "state", "scored",
 /// "verdict", "again", "other_build", "times", "lanes", "talk", "model", "summary", "unread",
 /// "end", "log_epoch"}`, where `again` is `{"command": c}`, the command that runs it again from
-/// here, or `{"error": e}`, why none can be made; its runs directory is `named`, as commands name
-/// it, if not by default.
-pub(super) fn run_json(held: &Held, named: Option<&str>) -> Value {
+/// here, or `{"error": e}`, why none can be made, and left out unless `again`; its runs directory
+/// is `named`, as commands name it, if not by default.
+pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     let record = &held.record;
     let id = record.id();
     let readout = &held.readout;
@@ -189,17 +189,13 @@ pub(super) fn run_json(held: &Held, named: Option<&str>) -> Value {
     });
     let unread =
         progress::unread(unread).map(|said| json!({ "count": unread.len(), "said": said }));
-    json!({
+    let mut run = json!({
         "id": id,
         "task": held.task,
         "live": held.ending.is_none(),
         "state": state,
         "scored": scored(held.ending.as_ref()),
         "verdict": verdict,
-        "again": match controller::here(record, None) {
-            Ok(args) => json!({ "command": next::run_again(&args) }),
-            Err(error) => json!({ "error": error }),
-        },
         "other_build": record.other_build(),
         "times": times,
         "lanes": progress.as_ref().map(|progress| lanes(record.dir(), progress, held.talk.as_ref())),
@@ -209,7 +205,14 @@ pub(super) fn run_json(held: &Held, named: Option<&str>) -> Value {
         "unread": unread,
         "end": held.fold.taken(),
         "log_epoch": held.log_epoch,
-    })
+    });
+    if again {
+        run["again"] = match controller::here(record, None) {
+            Ok(args) => json!({ "command": next::run_again(&args) }),
+            Err(error) => json!({ "error": error }),
+        };
+    }
+    run
 }
 
 /// `model`, a run's or a judge call's model requests, as JSON: how many, how many stated a

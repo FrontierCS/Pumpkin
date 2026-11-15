@@ -41,7 +41,7 @@ import { RowList } from "./rows.js";
  * @property {string} state
  * @property {boolean} scored
  * @property {string} verdict
- * @property {{ command: string, error?: undefined } | { error: string, command?: undefined }} again
+ * @property {{ command: string, error?: undefined } | { error: string, command?: undefined } | undefined} again
  * @property {string | null} other_build
  * @property {Times | null} times
  * @property {Lane[] | null} lanes
@@ -546,9 +546,12 @@ function drawFacts(facts, data) {
   );
 }
 
-// The command that runs the run again from here, with a copy button, or why there is none.
+// The command that runs the run again from here, with a copy button, or why there is none; nothing
+// if the reply has no `again`.
 /** @param {HTMLElement} node @param {Run} data */
 function drawAgain(node, data) {
+  node.hidden = data.again === undefined;
+  if (data.again === undefined) return;
   const command = data.again.command;
   if (command === undefined) return fill(node, h("span", { class: "name" }, "Again"), h("span", { class: "why", title: data.again.error ?? "" }, "-"));
   fill(

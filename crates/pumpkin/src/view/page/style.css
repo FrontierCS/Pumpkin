@@ -120,6 +120,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .again code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .again .why { color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .again button { flex: none; }
+.again[hidden] { display: none; }
 .cancel:empty, .unread:empty, p.empty:empty { display: none; }
 .cancel .sure { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .cancel .sure p { flex: 1 1 100%; }

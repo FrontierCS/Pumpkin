@@ -25,6 +25,7 @@
 //! form of what it answers with is a module's of its own ([`json`](mod@json)).
 
 mod cancel;
+mod frame;
 mod http;
 mod json;
 mod page;
@@ -86,36 +87,51 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
         "serving the runs in {runs} to this machine alone, until stopped, at\n    \
          http://127.0.0.1:{port}/?t={token}"
     ));
-    let mut view = View {
-        runs: PathBuf::from(&runs),
+    let mut local = Local {
+        view: View::new(PathBuf::from(&runs), named),
         runs_given: runs,
-        named,
         token,
         port,
         cancels: cancel::Cancels::default(),
-        ended: BTreeMap::new(),
-        held: BTreeMap::new(),
-        log_epochs: BTreeMap::new(),
-        reads: 0,
-        made: 0,
-        trace: Vec::new(),
         page: page::Page::new(),
     };
-    match serve(&listener, &mut view)? {}
+    match serve(&listener, &mut local)? {}
 }
 
-/// What the view holds between requests.
-struct View {
-    runs: PathBuf,
+/// Answers, on the standard output, each request on the standard input for the runs' data in the
+/// default runs directory, in the frames of [`frame`], until the input ends or [`frame::IDLE`]
+/// passes with none.
+pub(crate) fn over_pipe() -> Result<ExitCode, String> {
+    let view = View::new(PathBuf::from(crate::default_runs()?), None);
+    // The command that runs a run again from here would name the controller's paths.
+    let mut view = View {
+        again: false,
+        ..view
+    };
+    frame::answer(&mut view)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What `pumpkin view` holds beside the runs' data ([`View`]).
+struct Local {
+    view: View,
     /// The runs directory as it was given, or found by default, which a cancel names.
     runs_given: String,
-    /// The runs directory as commands name it, if not by default.
-    named: Option<String>,
     /// What each request of the view's data carries ([`token`]).
     token: String,
     /// The port that the view is served at, which its page's `Origin` names.
     port: u16,
     cancels: cancel::Cancels,
+    page: page::Page,
+}
+
+/// What the view holds of the runs' data between requests.
+struct View {
+    runs: PathBuf,
+    /// The runs directory as commands name it, if not by default.
+    named: Option<String>,
+    /// Whether a run's reply holds the command that runs it again ([`run_json`]).
+    again: bool,
     /// The list's row of each run that has ended, or is lost, by its id.
     ended: BTreeMap<String, Row>,
     /// Each run held as a fold of its log, by its id.
@@ -130,7 +146,6 @@ struct View {
     /// The traces of runs' callers, the last read last, as [`trace::TRACE_PASSES`] bounds them
     /// ([`trace::Trace`]).
     trace: Vec<trace::Trace>,
-    page: page::Page,
 }
 
 /// The list's row of a run that has ended, or is lost, kept as the module's doc says.
@@ -273,10 +288,10 @@ struct Silent {
     accepted: Instant,
 }
 
-/// Answers the connections to `listener` from `view`, one at a time, first accepted first. A
+/// Answers the connections to `listener` from `local`, one at a time, first accepted first. A
 /// connection that has sent nothing holds back no other, and is closed once silent for
 /// [`http::IDLE`].
-fn serve(listener: &TcpListener, view: &mut View) -> Result<Infallible, String> {
+fn serve(listener: &TcpListener, local: &mut Local) -> Result<Infallible, String> {
     // In the order they were accepted.
     let mut silent: Vec<Silent> = Vec::new();
     loop {
@@ -286,7 +301,7 @@ fn serve(listener: &TcpListener, view: &mut View) -> Result<Infallible, String> 
         let mut still = Vec::with_capacity(silent.len());
         for (connection, sent) in silent.into_iter().zip(sent) {
             if sent {
-                answer_sent(connection.stream, view);
+                answer_sent(connection.stream, local);
             } else if connection.accepted.elapsed() < http::IDLE {
                 still.push(connection);
             }
@@ -332,26 +347,26 @@ fn wait(listener: &TcpListener, silent: &[Silent]) -> Result<(bool, Vec<bool>), 
 }
 
 /// Answers `stream`, which has sent something or ended, and says why if that fails.
-fn answer_sent(stream: TcpStream, view: &mut View) {
+fn answer_sent(stream: TcpStream, local: &mut Local) {
     // One that ends, or fails, before its first byte asked nothing: a browser closes its spare
     // connections so.
     if !stream.peek(&mut [0]).is_ok_and(|bytes| bytes > 0) {
         return;
     }
-    if let Err(error) = answer(stream, view) {
+    if let Err(error) = answer(stream, local) {
         say(format_args!("a connection to the view failed: {error}"));
     }
 }
 
 /// Reads the request on `stream`, which has sent its first byte, and answers it.
-fn answer(stream: TcpStream, view: &mut View) -> std::io::Result<()> {
+fn answer(stream: TcpStream, local: &mut Local) -> std::io::Result<()> {
     // A request sent in part holds back every other connection until `STALL` after its first
     // byte; a browser sends each request whole.
     let read = http::read(&stream, Instant::now() + http::STALL)?;
     // Making the answer has no deadline: it is made of this machine's records, which no client
     // can slow, and one cut off while it was made would waste its cost.
     let (response, deflate) = match read {
-        Ok(request) => (route(&request, view), request.deflate),
+        Ok(request) => (route(&request, local), request.deflate),
         Err(refused) => (refused, false),
     };
     http::write(stream, response, deflate)
@@ -400,14 +415,15 @@ impl From<String> for Failed {
     }
 }
 
-/// The answer to `request`, of `view`.
-fn route(request: &Request, view: &mut View) -> Response {
+/// The answer to `request`, of `local`: a page's file, or, for a request that carries the token
+/// and passes [`allowed`], a cancel or the runs' data.
+fn route(request: &Request, local: &mut Local) -> Response {
     if request.method == Method::Get
-        && let Some(file) = view.page.file(&request.path)
+        && let Some(file) = local.page.file(&request.path)
     {
         return file;
     }
-    if request.token.as_deref() != Some(view.token.as_str()) {
+    if request.token.as_deref() != Some(local.token.as_str()) {
         let carries = if request.token.is_some() {
             "a wrong"
         } else {
@@ -426,16 +442,43 @@ fn route(request: &Request, view: &mut View) -> Response {
         Ok(asked) => asked,
         Err(refused) => return refused,
     };
-    if let Err(refused) = allowed(&asked, request, view.port, view.named.as_deref()) {
+    if let Err(refused) = allowed(&asked, request, local.port, local.view.named.as_deref()) {
         return refused;
     }
+    match asked {
+        Asked::Cancel { id } => local.cancel(&id),
+        Asked::Cancelling { id } => local.cancels.said(&id),
+        asked => answered(asked, &mut local.view),
+    }
+}
+
+/// The answer to `request`, a `GET` of the runs' data, of `view`, with none of the checks of
+/// [`route()`].
+fn api(request: &Request, view: &mut View) -> Response {
+    match asked(request) {
+        Ok(asked) => answered(asked, view),
+        Err(refused) => refused,
+    }
+}
+
+/// The answer to `asked`, of the runs' data, of `view`.
+fn answered(asked: Asked, view: &mut View) -> Response {
     let answered = match asked {
         Asked::Runs { before } => view.runs_json(before.as_deref()),
         Asked::Run { id } => view.run_json(&id),
         Asked::Since { id, log, log_epoch } => view.since_json(&id, log, log_epoch),
         Asked::Log { id, at, log_epoch } => view.log_json(&id, at, log_epoch),
-        Asked::Cancel { id } => return view.cancel(&id),
-        Asked::Cancelling { id } => return view.cancels.said(&id),
+        Asked::Cancel { id } | Asked::Cancelling { id } => {
+            return Response::refused(
+                "404 Not Found",
+                &format!(
+                    "the view on a controller answers no cancel: cancel run {} from the page \
+                     that `pumpkin view` serves, or run: {}",
+                    id.as_str(),
+                    next::of_run("cancel", None, id.as_str())
+                ),
+            );
+        }
         Asked::Trace { id, asked } => match view.trace(&id, asked) {
             Ok(trace::Answer::Json(json)) => Ok(json),
             Ok(trace::Answer::Bytes(bytes)) => return bytes,
@@ -553,6 +596,22 @@ fn allowed(
 }
 
 impl View {
+    /// The view of the runs in `runs`, which commands name as `named`, if not by default, holding
+    /// nothing yet.
+    fn new(runs: PathBuf, named: Option<String>) -> Self {
+        Self {
+            runs,
+            named,
+            again: true,
+            ended: BTreeMap::new(),
+            held: BTreeMap::new(),
+            log_epochs: BTreeMap::new(),
+            reads: 0,
+            made: 0,
+            trace: Vec::new(),
+        }
+    }
+
     /// A page of the runs, newest first, before run `before` if given, as JSON:
     /// `{"runs": [...], "next": <id or null>}`, where `next` is the `before` of the next page, if
     /// there is one.
@@ -692,9 +751,9 @@ impl View {
 
     /// Run `id`, as JSON, as the module's doc says.
     fn run_json(&mut self, id: &RunTag) -> Result<Value, Failed> {
-        let named = self.named.clone();
+        let (named, again) = (self.named.clone(), self.again);
         let held = self.held(id)?;
-        Ok(run_json(held, named.as_deref()))
+        Ok(run_json(held, named.as_deref(), again))
     }
 
     /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave
@@ -707,7 +766,7 @@ impl View {
         log: u64,
         log_epoch: Option<u64>,
     ) -> Result<Value, Failed> {
-        let named = self.named.clone();
+        let (named, again) = (self.named.clone(), self.again);
         let held = self.held(id)?;
         let end = held.fold.taken();
         let live = held.ending.is_none();
@@ -719,7 +778,7 @@ impl View {
         Ok(json!({
             "end": end,
             "live": live,
-            "run": run_json(held, named.as_deref()),
+            "run": run_json(held, named.as_deref(), again),
             "records": records,
             "next": past,
         }))
@@ -739,15 +798,6 @@ impl View {
         }))
     }
 
-    /// Starts `pumpkin cancel` of run `id` ([`cancel::Cancels::start`]); not found if the runs
-    /// directory holds no record of it.
-    fn cancel(&mut self, id: &RunTag) -> Response {
-        if let Err(error) = Record::open(&self.runs.join(id.as_str())) {
-            return Response::refused("404 Not Found", &error);
-        }
-        self.cancels.start(id, &self.runs_given)
-    }
-
     /// Drops the folds of the runs that have ended, or are lost, but the [`HELD_ENDED_RUNS`] read
     /// last.
     fn drop_ended(&mut self) {
@@ -760,6 +810,17 @@ impl View {
         for (_, id) in &ended[..dropped] {
             self.held.remove(id);
         }
+    }
+}
+
+impl Local {
+    /// Starts `pumpkin cancel` of run `id` ([`cancel::Cancels::start`]); not found if the runs
+    /// directory holds no record of it.
+    fn cancel(&mut self, id: &RunTag) -> Response {
+        if let Err(error) = Record::open(&self.view.runs.join(id.as_str())) {
+            return Response::refused("404 Not Found", &error);
+        }
+        self.cancels.start(id, &self.runs_given)
     }
 }
 

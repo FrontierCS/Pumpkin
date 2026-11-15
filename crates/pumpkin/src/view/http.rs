@@ -11,7 +11,7 @@ use miniz_oxide::deflate::{CompressionLevel, compress_to_vec_zlib};
 
 /// The most bytes of a request's line and headers that are read: a browser's `GET`, with the
 /// cookies it keeps for `localhost`, takes a few KiB.
-const HEAD_MAX_BYTES: u64 = 64 * 1024;
+pub(super) const HEAD_MAX_BYTES: u64 = 64 * 1024;
 
 /// The most bytes of a `POST`'s body that are read, and dropped: a cancel's has none.
 const BODY_MAX_BYTES: u64 = 1024;
@@ -61,6 +61,21 @@ pub(super) enum Method {
 }
 
 impl Request {
+    /// A `GET` of `target`, a path and its query as a request's line gives them, that carries
+    /// neither an `Origin` nor the token, and accepts a deflated body if `deflate`; or the refusal
+    /// of a query that is no text as a form encodes it.
+    pub(super) fn get(target: &str, deflate: bool) -> Result<Self, Response> {
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        Ok(Self {
+            method: Method::Get,
+            path: path.to_owned(),
+            query: pairs(query)?,
+            origin: None,
+            token: None,
+            deflate,
+        })
+    }
+
     /// The value of the query's `name`, if it has one.
     pub(super) fn query(&self, name: &str) -> Option<&str> {
         let mut values = self.query.iter().filter(|(named, _)| named == name);
@@ -167,6 +182,46 @@ impl Response {
     }
 }
 
+/// What an answer sends, its body deflated as the module's doc says if the request accepts it.
+pub(super) struct Sent {
+    pub(super) status: &'static str,
+    pub(super) content_type: &'static str,
+    pub(super) body: Vec<u8>,
+    pub(super) deflated: bool,
+    /// Whether a browser may keep it ([`Response::immutable`]).
+    pub(super) immutable: bool,
+}
+
+impl Response {
+    /// What this answer sends to a request that accepts `deflate` if `deflate`.
+    pub(super) fn sent(self, deflate: bool) -> Sent {
+        let Self {
+            status,
+            content_type,
+            body,
+            immutable,
+        } = self;
+        let (plain, deflated) = match body {
+            Body::Made(plain) => {
+                let deflated = deflate.then(|| deflated(&plain, CompressionLevel::BestSpeed));
+                (plain, deflated.flatten())
+            }
+            Body::Held { plain, deflated } => (plain, deflated.filter(|_| deflate)),
+        };
+        let (body, deflated) = match deflated {
+            Some(deflated) => (deflated, true),
+            None => (plain, false),
+        };
+        Sent {
+            status,
+            content_type,
+            body,
+            deflated,
+            immutable,
+        }
+    }
+}
+
 /// `body` deflated at `level`, in zlib's format, which HTTP's `deflate` names (RFC 9110, section
 /// 8.4.1.2), if that is shorter.
 pub(super) fn deflated(body: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
@@ -244,18 +299,15 @@ pub(super) fn read(stream: &TcpStream, due: Instant) -> io::Result<Result<Reques
     if let Err(refused) = on_loopback(host.as_deref()) {
         return Ok(Err(refused));
     }
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let pairs = match pairs(query) {
-        Ok(pairs) => pairs,
+    let request = match Request::get(target, deflate) {
+        Ok(request) => request,
         Err(refused) => return Ok(Err(refused)),
     };
     Ok(Ok(Request {
         method,
-        path: path.to_owned(),
-        query: pairs,
         origin,
         token,
-        deflate,
+        ..request
     }))
 }
 
@@ -363,22 +415,17 @@ fn on_loopback(host: Option<&str>) -> Result<(), Response> {
 ///
 /// Fails if the connection fails, or has yet to take it all [`STALL`] after it is ready to write.
 pub(super) fn write(stream: TcpStream, response: Response, deflate: bool) -> io::Result<()> {
-    let Response {
+    let Sent {
         status,
         content_type,
         body,
+        deflated,
         immutable,
-    } = response;
-    let (body, deflated) = match body {
-        Body::Made(plain) => {
-            let deflated = deflate.then(|| deflated(&plain, CompressionLevel::BestSpeed));
-            (plain, deflated.flatten())
-        }
-        Body::Held { plain, deflated } => (plain, deflated.filter(|_| deflate)),
-    };
-    let (body, encoding) = match deflated {
-        Some(deflated) => (deflated, "Content-Encoding: deflate\r\n"),
-        None => (body, ""),
+    } = response.sent(deflate);
+    let encoding = if deflated {
+        "Content-Encoding: deflate\r\n"
+    } else {
+        ""
     };
     // The deadline starts here: deflating is part of making the answer.
     let mut stream = Due {
