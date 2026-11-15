@@ -1,3 +1,12 @@
+//! What a run's log says of the run so far: a [`Progress`], and the parts of the log that this
+//! build couldn't read ([`Unread`]).
+//!
+//! Each line of the log moves a `Reading` on, and a [`Readout`] completes it with what the log
+//! leaves out: each role's place, startup time and prices, from `ir.json` and `provider.json`
+//! (`Roles`), and what the record's directories hold when the readout is made, such as a sandbox's
+//! `sandbox.json` and a judge's output. Every `Duration` is a time since the run started, by the
+//! run's clock.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,72 +25,69 @@ use super::logged::{self, Collected, Line};
 use crate::sandbox::SandboxName;
 use crate::{TokenPrices, record};
 
-/// Where a role's sandboxes are: a provider of the run's, and a class it offers, as
-/// `provider.json` names them.
+/// Where a sandbox runs: a class of a provider, each by the name that `provider.json` gives it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Place {
     pub provider: String,
     pub class: String,
 }
 
-/// What a run's log, as far as this build can read it ([`Readout`]), says of the run so far,
-/// with the bounds of its workflow and of its roles' classes.
-///
-/// Each time is since the run started, as the log gives times.
+/// A run as its log tells it, up to the last line read. A time is `None` until the log says that it
+/// happened.
 #[derive(Clone, Debug)]
 pub struct Progress {
-    /// When the run started, by the driving machine's clock.
+    /// When the run started, by the machine's clock.
     pub started: UnixTime,
     /// When the core abandons the run if it is still going.
     pub hard_end: Duration,
-    /// The work phase's deadline, counted from the agent's start.
+    /// The work phase's deadline, counted from the agent's start, as the IR gives it; `None` if the
+    /// IR has no agent.
     pub deadline: Option<Duration>,
-    /// When the log wrote its last record.
+    /// When the latest line read was written.
     pub last: Duration,
     pub agent: AgentSpan,
-    /// Each judge call, in the order the core started them.
+    /// Each judge call, in the order the log started them.
     pub calls: Vec<CallSpan>,
-    /// Each lease, in the order the core opened them.
+    /// Each lease, in the order the log started them.
     pub leases: Vec<LeaseSpan>,
-    /// The model requests of every role's route.
+    /// The model requests of every role.
     pub model: ModelUse,
-    /// When the work phase ended, as the core tore the agent down, if it has.
+    /// When the work phase ended: when the agent's teardown began.
     pub work_end: Option<Duration>,
-    /// When the run ended, by the core's finish or abandon, if it has.
+    /// When the core finished or abandoned the run.
     pub end: Option<Duration>,
-    /// The price of each class of the run's providers that declared one, in dollars an hour, by
-    /// its place, as `provider.json` records it.
+    /// The price in US dollars an hour of each class of the run's providers that declared one, as
+    /// `provider.json` records it.
     pub prices: BTreeMap<Place, f64>,
     /// The prices of the tokens of each model of the run's routes that has them, by the route's
     /// name for it, as `provider.json` records them.
     pub token_prices: BTreeMap<String, TokenPrices>,
 }
 
-/// What [`Record::progress`](crate::Record::progress), or a [`LogFold`], reads of a run's log.
-///
-/// The run's progress, once the log records its start with its hard end, and each part of the
-/// log that this build can't read, in the log's order, which the progress leaves out.
-///
-/// [`LogFold`]: super::LogFold
+/// What a run's log tells of it, and what of the log couldn't be read.
 #[derive(Debug)]
 pub struct Readout {
+    /// `None` if the log holds no `run_started` that gives a hard end, as none does of a log not
+    /// yet begun, or of a build that predates it.
     pub progress: Option<Progress>,
+    /// The parts of the log that were left out, in the order they were met.
     pub unread: Vec<Unread>,
 }
 
-/// A part of a run log's line that this build can't read: it isn't JSON, or it is of a kind
-/// this build knows but lacks a field of that kind's, or holds one in another form.
+/// A part of the log that this build couldn't read, and why: it is left out of the readout and
+/// listed, so that no content of a log fails a read.
 #[derive(Clone, Debug)]
 pub struct Unread {
-    /// Its line's number in the log, counting from 1.
+    /// Its line's number in the log, from 1.
     pub line: u64,
+    /// Which part of the line.
     pub part: Part,
-    /// Why it doesn't read.
+    /// What is wrong with it, and what a reader expects.
     pub reason: String,
 }
 
-/// Which part of a line doesn't read: the line, so none of it reads; its event; or its action
-/// at an index, from 0, among those it holds.
+/// The part of a line that couldn't be read: the whole line, which is no JSON object of a line's
+/// shape, its event, or one of its actions, by its index from 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Line,
@@ -89,8 +95,8 @@ pub enum Part {
     Action(usize),
 }
 
-/// Where it is, and why it doesn't read: `line 4: <reason>`, `line 4, its event: <reason>` or,
-/// for the action at index 1, `line 4, its action 2: <reason>`.
+/// Where it is, and why it doesn't read: `line 4: <reason>`, `line 4, its event: <reason>` or, for
+/// the action at index 1, `line 4, its action 2: <reason>`.
 impl fmt::Display for Unread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { line, part, reason } = self;
@@ -102,104 +108,115 @@ impl fmt::Display for Unread {
     }
 }
 
-/// A sandbox of the run, whatever started it, from the core's start of it, at `asked`.
+/// A sandbox of the run, which one of the agent, a judge call or a lease holds. Its times are those
+/// the log gave it, and `None` while it hasn't.
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
+    /// Where its role is placed; `None` if `provider.json` doesn't place it.
     pub place: Option<Place>,
     /// How long its class may take to start it.
     pub startup: Option<Duration>,
-    /// The GPUs its role needs, if it needs any.
+    /// The GPUs its role asks for.
     pub needs: Option<Gpu>,
-    /// The GPUs its `sandboxd` saw as it started, each by its model as `nvidia-smi` names it, as
-    /// the log's `sandbox_gpus` says, if it does.
+    /// The GPUs its `sandboxd` saw, once the log says so.
     pub gpus: Option<Vec<String>>,
+    /// When the core started it: 0 for the agent's.
     pub asked: Duration,
     /// When its command started, or its runner was ready.
     pub started: Option<Duration>,
     /// When the run was done with it: once it had collected what the agent's work phase left, or
-    /// the agent failed; once a judge call or a lease ended; else once it was deleted, as one
-    /// is when the run stops short of the core's end.
+    /// the agent failed; once a judge call or a lease ended; else once it was deleted, as one is
+    /// when the run stops short of the core's end.
     pub gone: Option<Duration>,
-    /// Whether the run deleted it, as its `sandbox.json` in the record says, if it is there.
+    /// Whether its `sandbox.json` records the provider's delete as done; `None` if it has no
+    /// `sandbox.json`, so was never created.
     pub deleted: Option<bool>,
 }
 
-/// The agent's sandbox, from the core's start of it, at time 0.
+/// The agent: its sandbox, and its command's end.
 #[derive(Clone, Debug, Default)]
 pub struct AgentSpan {
     pub sandbox: Sandbox,
     /// Whether its role has a model route.
     pub routed: bool,
-    /// When it exited or failed, and how.
+    /// When, and how, its command ended.
     pub end: Option<(Duration, AgentEnd)>,
 }
 
-/// How the agent ended: its command's exit, with its status, or its failure.
+/// How the agent's command ended.
 #[derive(Clone, Debug)]
 pub enum AgentEnd {
+    /// It exited, or a signal killed it.
     Exited(ExitStatus),
+    /// The run couldn't start it or keep its sandbox, for this reason.
     Failed(String),
 }
 
-/// A judge call, job `job`.
+/// A judge call: the final judge's, which scores the selected submission, or a call that the agent
+/// made.
 #[derive(Clone, Debug)]
 pub struct CallSpan {
+    /// Its number in the run.
     pub job: u64,
-    /// The grant of the agent's that it was made under, or `None` for the workflow's score.
+    /// The agent's grant it answers, by name; `None` for the final judge.
     pub grant: Option<String>,
-    /// The judge role it called, if the record names it.
+    /// The role of its judge.
     pub role: Option<String>,
     pub sandbox: Sandbox,
-    /// How long its command may run.
+    /// How long the core gave it.
     pub timeout: Duration,
-    /// Whether the core stopped it, or its command was killed at its timeout.
+    /// Whether the core ordered it stopped.
     pub stopped: bool,
+    /// Whether it ran past its timeout.
     pub timed_out: bool,
     /// How the call ended, collected or failed, at its sandbox's `gone`.
     pub end: Option<CallEnd>,
-    /// Its command's standard error in the record, if it holds any bytes.
+    /// Its judge's standard error in the record, if the judge wrote any when the readout was made.
     pub stderr: Option<PathBuf>,
-    /// Its evidence directory in the record, if it collected one.
+    /// The directory in the record that holds its judge's evidence, if there is one.
     pub evidence: Option<PathBuf>,
-    /// Its own model requests, which the run's ([`Progress::model`]) count too.
+    /// Its own model requests, which the run's (`Progress::model`) count too.
     pub model: ModelUse,
 }
 
-/// A lease, `lease`, opened under the grant `grant`.
+/// A lease: a runner that the agent or a judge call holds, to run commands and move trees on.
 #[derive(Clone, Debug)]
 pub struct LeaseSpan {
+    /// Its number in the run.
     pub lease: u64,
+    /// The grant that gave it, by name.
     pub grant: String,
-    /// The job whose judge call holds it, or `None` for the agent.
+    /// The judge call that holds it, by `job`; `None` if the agent does.
     pub holder: Option<u64>,
-    /// Its runner's sandbox.
     pub sandbox: Sandbox,
-    /// How long its runner may be ready, as its grant says, or its holder asked at its open.
+    /// How long it may last: its grant's `instance_seconds`, or less if its open asked for less.
     pub ready_for: Option<Duration>,
-    /// When the core closed it, and why.
+    /// When the core ended it, and why.
     pub closed: Option<(Duration, Closed)>,
-    /// How many commands and transfers it ran, and the last.
+    /// How many commands and transfers it ran.
     pub commands: u64,
+    /// The latest of them.
     pub last: Option<Work>,
+    /// Why its runner failed, if it did.
     pub failed: Option<String>,
-    /// How long it was busy, until the command or transfer that runs, if one does, began.
     busy: Duration,
-    /// When the command or transfer that runs began, until it ended.
     working: Option<Duration>,
 }
 
-/// Why the core closed a lease: its holder asked it to, the agent's work ended, the judge call
-/// that held it ended, or the lease's time, or its grant's, ran out.
+/// Who closed a lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Closed {
+    /// Its holder asked.
     Asked,
+    /// The work phase ended, which tears down the agent that held it.
     WorkEnded,
+    /// The judge call that held it ended.
     CallEnded,
+    /// The lease's time, or its grant's, ran out.
     Expired,
 }
 
-/// What a lease ran, and how it ended, once it has: a command, its `argv`, or a transfer of a
-/// tree, from a path to a path.
+/// What a lease last ran, and how that ended, once it has.
 #[derive(Clone, Debug)]
 pub enum Work {
     Command {
@@ -254,9 +271,9 @@ impl LeaseSpan {
         self.until(now).saturating_sub(ready)
     }
 
-    /// How much of the time it was charged for until `now` ([`LeaseSpan::charged`]) a command or
-    /// transfer of its ran: from when the core accepted it until it ended, or the core closed
-    /// the lease, or its sandbox was gone, whichever came first.
+    /// How much of the time it was charged for until `now` a command or transfer of its ran: from
+    /// when the core accepted it until it ended, or the core closed the lease, or its sandbox was
+    /// gone, whichever came first.
     pub fn busy(&self, now: Duration) -> Duration {
         let working = (self.working).map_or(Duration::ZERO, |since| {
             self.until(now).saturating_sub(since)
@@ -264,14 +281,11 @@ impl LeaseSpan {
         self.busy + working
     }
 
-    /// When its runner's charge ends, as of `now`: when the core closed the lease, or else its
-    /// sandbox was gone, or else `now`.
     fn until(&self, now: Duration) -> Duration {
         let closed = self.closed.map(|(at, _)| at);
         closed.or(self.sandbox.gone).unwrap_or(now)
     }
 
-    /// Notes that its last command, if it ran one, ended at `at`, as `end` says.
     fn command_ended(&mut self, at: Duration, end: CommandEnd) {
         if let Some(Work::Command { end: last, .. }) = &mut self.last {
             *last = Some(end);
@@ -279,7 +293,6 @@ impl LeaseSpan {
         }
     }
 
-    /// Notes that its last transfer, if it ran one, ended at `at`, as `end` says.
     fn transfer_ended(&mut self, at: Duration, end: TransferEnd) {
         if let Some(Work::Transfer { end: last, .. }) = &mut self.last {
             *last = Some(end);
@@ -287,7 +300,6 @@ impl LeaseSpan {
         }
     }
 
-    /// Ends its busy time at `at`, if it is busy, or at its charge's end, if that came first.
     fn rest(&mut self, at: Duration) {
         if let Some(since) = self.working.take() {
             self.busy += self.until(at).saturating_sub(since);
@@ -295,67 +307,68 @@ impl LeaseSpan {
     }
 }
 
-/// How a judge call ended: with a result, which has a score, the JSON number, or not, when it
-/// is what the judge returned, as JSON; with a result that was invalid; or with a failure.
+/// How a judge call ended.
 #[derive(Clone, Debug)]
 pub enum CallEnd {
+    /// The judge returned a score, as JSON.
     Scored(String),
+    /// The judge returned a result without one, which is this, as JSON.
     Unscored(String),
+    /// The judge's output was no result its spec reads, for this reason.
     Invalid(String),
+    /// The run couldn't start the call or keep its sandbox, for this reason.
     Failed(String),
 }
 
-/// The run's model requests, of every role with a route, as its routes answered them.
+/// The model requests of a role, or of the whole run: each has been answered, or is in flight.
 #[derive(Clone, Debug, Default)]
 pub struct ModelUse {
+    /// How many were answered.
     pub requests: u64,
-    /// How many were answered each way: the upstream's status for a response forwarded whole,
-    /// `<status> cut` for one cut short, and `refused` or `barred` for the route's refusal.
+    /// How many answers ended each way: with the upstream's status, such as `200`, or `null` if it
+    /// gave none; with `<status> cut`; or with `barred` or `refused`.
     pub answers: BTreeMap<String, u64>,
-    /// How many of them stated that they failed ([`route::Failure`]), by the code each gave, or
-    /// `None` for one that gave none.
+    /// How many responses stated a failure, by the code they gave, or `None` if they gave none.
     pub failed: BTreeMap<Option<String>, u64>,
-    /// How many were not forwarded whole with a 2xx status: cut short, refused or barred by the
-    /// route, or forwarded with another status.
+    /// How many answers were not a whole response with a 2xx status.
     pub not_2xx: u64,
-    /// When the good one that ended last was answered, a good one being forwarded whole, with a
-    /// 2xx status, and its stream stating no failure.
+    /// When the good answer that ended last was answered: a whole response with a 2xx status, whose
+    /// stream stated no failure.
     pub last_good: Option<Duration>,
-    /// Each that went upstream and has no answer yet, by its number, with when it went.
+    /// The requests begun and not yet answered, by number, with when each began.
     pub in_flight: BTreeMap<u64, Duration>,
-    /// How long each good one whose start the log records took, from going upstream to its
-    /// answer's end, in the order they were answered.
+    /// How long each good answer whose start the log records took, from going upstream to its end,
+    /// in the order they were answered.
     pub took: Vec<Duration>,
-    /// How long each of those whose stream's output began took to begin it.
+    /// How long each good answer took to its first token of output, if it had one.
     pub first_tokens: Vec<Duration>,
-    /// The tokens of those whose responses reported their usage, summed.
+    /// What the responses reported.
     pub tokens: Tokens,
-    /// Those tokens, of the answers whose lines name their model, by the route's name for it.
+    /// What the answers that name their model reported, by the route's name for it.
     pub by_model: BTreeMap<String, Tokens>,
-    /// The names of the request headers that the route left behind, of any of them: the first
-    /// [`route::MAX_DROPPED_HEADERS`] by name.
+    /// The names of request headers that the route left behind, at most
+    /// `route::MAX_DROPPED_HEADERS`.
     pub dropped_headers: BTreeSet<String>,
-    /// Whether the route left behind more names than `dropped_headers` holds.
+    /// Whether more names were left behind than `dropped_headers` holds.
     pub more_dropped_headers: bool,
 }
 
-/// Tokens summed over the responses that reported them: `reported` is how many did, and each
-/// `Option` count is `None` if none of those gave it.
+/// Tokens summed over the responses that reported them.
+///
+/// `reported` is how many did, and each `Option` count is `None` if none of those gave it.
+/// `cached` and `cache_write` count input tokens read from and written to the provider's cache,
+/// which `input` includes.
 #[derive(Clone, Debug, Default)]
 pub struct Tokens {
+    /// How many responses reported their usage.
     pub reported: u64,
     pub input: u64,
     pub output: u64,
     pub cached: Option<u64>,
-    /// The input tokens written to the provider's cache.
     pub cache_write: Option<u64>,
     pub reasoning: Option<u64>,
 }
 
-/// What `reading`, of the log of the record in `dir`, with `roles` and `unread`, says of the
-/// run ([`LogFold::readout`]).
-///
-/// [`LogFold::readout`]: super::LogFold::readout
 pub(super) fn readout(
     dir: &Path,
     roles: Option<&Roles>,
@@ -400,8 +413,8 @@ pub(super) fn readout(
         prices: roles.prices.clone(),
         token_prices: roles.token_prices.clone(),
     };
-    // Each sandbox's `sandbox.json` is rewritten as the run deletes it, and a judge call's
-    // standard error and evidence are collected as it ends, so they are read now.
+    // Each sandbox's `sandbox.json` is rewritten as the run deletes it, and a judge call's standard
+    // error and evidence are collected as it ends, so they are read now.
     for lease in &mut progress.leases {
         lease.sandbox.deleted = deleted(&dir.join(format!("leases/{}", lease.lease)))?;
     }
@@ -428,7 +441,8 @@ pub(super) fn json_file(path: &Path) -> Result<Value, String> {
     }
 }
 
-/// Each role's place, by its name, as `provided`, a record's `provider.json`, names it.
+/// Each role's place, by the role's name, from the `roles` of `provider.json`'s content `provided`;
+/// a role without a complete place is left out.
 pub(crate) fn places(provided: &Value) -> BTreeMap<String, Place> {
     let roles_placed = provided["roles"].as_object().into_iter().flatten();
     let places = roles_placed.filter_map(|(role, placed)| {
@@ -441,33 +455,22 @@ pub(crate) fn places(provided: &Value) -> BTreeMap<String, Place> {
     places.collect()
 }
 
-/// Whether the sandbox whose record is in `dir` was deleted, as its `sandbox.json` says, if it
-/// is there.
 fn deleted(dir: &Path) -> Result<Option<bool>, String> {
     let sandbox = json_file(&dir.join("sandbox.json"))?;
     Ok((!sandbox.is_null()).then(|| sandbox["delete"]["state"] == "deleted"))
 }
 
-/// What the record's `ir.json` and `provider.json` say of where the run's roles are, what GPUs
-/// they need, and their bounds.
+/// What the IR and `provider.json` say of a run's roles: what the log's lines refer to by name.
 #[derive(Default)]
 pub(super) struct Roles {
-    /// The agent's role's name.
     agent_role: String,
-    /// Whether the agent's role has a model route.
     routed: bool,
-    /// Each judge or lease grant, by the name of the role that holds it and its own name.
     grants: BTreeMap<(String, String), Grant>,
-    /// The score's judge role's name.
     score_role: Option<String>,
-    /// Each role's place, by its name.
     places: BTreeMap<String, Place>,
-    /// The GPUs of each role that needs any, by its name.
     gpus: BTreeMap<String, Gpu>,
     deadline: Option<Duration>,
-    /// Each class's startup, by its place.
     startups: BTreeMap<Place, Duration>,
-    /// Each class's price, in dollars an hour, by its place, if its provider declared one.
     prices: BTreeMap<Place, f64>,
     token_prices: BTreeMap<String, TokenPrices>,
 }
@@ -540,8 +543,6 @@ impl Roles {
         }
     }
 
-    /// A sandbox of `role`, which the core started at `asked`, in its role's place, with its
-    /// class's startup and the GPUs its role needs.
     fn sandbox(&self, role: Option<&str>, asked: Duration) -> Sandbox {
         let place = role.and_then(|role| self.places.get(role)).cloned();
         Sandbox {
@@ -554,18 +555,14 @@ impl Roles {
     }
 }
 
-/// A judge or lease grant: the role it names, and how long a lease's runner may be ready.
 #[derive(Clone, Default)]
 struct Grant {
     role: Option<String>,
     ready_for: Option<Duration>,
 }
 
-/// A log as far as it has been read: what its lines say, each as [`Progress`]'s field of its
-/// name holds it.
 #[derive(Clone, Default)]
 pub(super) struct Reading {
-    /// When the run started, and its hard end, once its start is read.
     started: Option<(UnixTime, Duration)>,
     last: Duration,
     agent: AgentSpan,
@@ -577,7 +574,6 @@ pub(super) struct Reading {
 }
 
 impl Reading {
-    /// Takes in `line`, a line of the log of a run whose roles are `roles`.
     pub(super) fn take(&mut self, line: &Line, roles: &Roles) {
         self.last = self.last.max(line.at_ns);
         let at = line.when();
@@ -633,7 +629,6 @@ impl Reading {
         }
     }
 
-    /// Takes in `event`, observed at `at`.
     #[expect(clippy::too_many_lines, reason = "one arm per kind of event")]
     fn event(&mut self, at: Duration, event: &logged::Event) {
         match event {
@@ -767,7 +762,6 @@ impl CallSpan {
 }
 
 impl Reading {
-    /// The sandbox that `name` names within the run, if the core started it.
     fn named(&mut self, name: SandboxName) -> Option<&mut Sandbox> {
         match name {
             SandboxName::Agent => Some(&mut self.agent.sandbox),
@@ -776,21 +770,16 @@ impl Reading {
         }
     }
 
-    /// Judge call `job`, if the core started it.
     fn call(&mut self, job: u64) -> Option<&mut CallSpan> {
         self.calls.iter_mut().find(|call| call.job == job)
     }
 
-    /// Lease `lease`, if the core opened it.
     fn lease(&mut self, lease: u64) -> Option<&mut LeaseSpan> {
         self.leases.iter_mut().find(|span| span.lease == lease)
     }
 }
 
 impl Reading {
-    /// Takes in `action`, which the core decided on at `at`, in a run whose roles are `roles`;
-    /// a lease it closes is `closed`, but one that the judge call of job `ended`, which ended,
-    /// holds.
     fn action(
         &mut self,
         at: Duration,
@@ -857,8 +846,6 @@ impl Reading {
         }
     }
 
-    /// Takes in the open of lease `lease`, under `grant`, held by `holder`, which the core
-    /// decided on at `at`, in a run whose roles are `roles`.
     fn open_lease(
         &mut self,
         at: Duration,
@@ -893,7 +880,6 @@ impl Reading {
         });
     }
 
-    /// Notes that lease `lease` ran `work`, which is its last, from `at`, if the core opened it.
     fn lease_ran(&mut self, at: Duration, lease: u64, work: Work) {
         if let Some(lease) = self.lease(lease) {
             lease.commands += 1;
@@ -903,14 +889,9 @@ impl Reading {
     }
 }
 
-/// A model request's answer, as its `model_answered` says: its number, the model it went to, if
-/// the line names it, when its stream's output began, if it did, its upstream's status, if a
-/// response came, how the route answered it, the code of the failure it stated, if it stated one,
-/// and the tokens it reported, if it did.
 struct Answered<'e> {
     request: u64,
     model: Option<&'e str>,
-    /// The names of its request's headers that the route left behind.
     dropped_headers: &'e [String],
     first_token: Option<Duration>,
     upstream_status: Option<u16>,
@@ -920,7 +901,6 @@ struct Answered<'e> {
 }
 
 impl ModelUse {
-    /// Takes in `answered`, a model request answered at `at`.
     fn take(&mut self, at: Duration, answered: &Answered<'_>) {
         let Answered {
             request,

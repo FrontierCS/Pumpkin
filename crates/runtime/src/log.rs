@@ -1,28 +1,27 @@
-//! The run log, `log.jsonl`, and the JSON forms of events, actions and outcomes.
+//! The run log, `log.jsonl` in a run's record, and its readers. `ARCHITECTURE.md` says what the log
+//! holds and what it leaves to the record's other files.
 //!
-//! `log.jsonl` holds one JSON record per line, each timed and synced as [`Log`] writes it.
-//! [`Progress`] reads it back, timing each record by its `o`, or else its `t`. A record is one of:
+//! The log is one JSON object a line, appended as the run goes and never changed; a line counts
+//! once its newline is there. A line has `seq`, its number from 0, and `at_ns`, when it was
+//! written, which never decreases; and then either `note`, a sentence for the operator, or `event`,
+//! an object whose `kind` names it, with `observed_ns`, when it happened, and `actions`, what the
+//! runtime did about it, in order. A thread that observed an event hands it over to be written, so
+//! its `observed_ns` may be before an earlier line's `at_ns`. Events that the runtime tells and the
+//! core never decided, such as a sandbox's deletion, have no `observed_ns`. The first line is
+//! `run_started`, observed at 0.
 //!
-//! - an event of the core's: `{"seq": n, "at_ns": "t", "observed_ns": "o", "event": e,
-//!   "actions": [a, ...]}`, with the actions the core decided on it, which it took at `o`, when
-//!   the runtime observed it: what the agent's session handed over as it reached the host, a
-//!   judge call's events as its thread saw them, so `o` may be before an earlier record's `t`.
-//!   The first, `seq` 0, is the run's start, `{"kind": "run_started", "unix_ns": "u",
-//!   "hard_end_ns": "h"}`, observed at 0, `u` nanoseconds after the Unix epoch by the driving
-//!   machine's clock, whose hard end is `h` after it;
-//! - one that no core decides on: an `op_refused` ([`Log::refused`]) or an [`Entry`], `{"seq": n,
-//!   "at_ns": "t", "event": e, "actions": []}`, with `"observed_ns": "o"` as above if the thread
-//!   that observed it timed it; or a note, `{"seq": n, "at_ns": "t", "note": s}`.
+//! Every `..._ns` is a string of decimal digits: nanoseconds since the run started, but the
+//! `unix_ns` of `run_started`, since the Unix epoch by the driving machine's clock; `u64::MAX`
+//! stands for anything longer. Grants appear by name, jobs, ops and leases by number, payloads by
+//! size and digest, and a `caller` or `holder` as `agent` or `job-<n>`.
 //!
-//! `seq` counts records from 0. Each event and action is an object whose `kind` is its name in
-//! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
-//! by their names in the workflow, jobs, ops and leases by their numbers, payloads by size and
-//! digest, and times and durations in nanoseconds as decimal strings, where `u64::MAX` stands for
-//! anything longer; a status's job, a number the agent gave, is a decimal string too. A `caller`
-//! or `holder` is its sandbox's name in the run, `agent`, or `job-<n>` for job `n`'s call.
-//! `start_judge` names the agent's grant of the call, `null` for the score, `start_lease` the
-//! lease's; the op's request gives a command's argv and a transfer's paths, never what moved.
-//! A reply, to the line's op, is the [`OpReply`] sent, a `status` or `lease_status` by kind alone.
+//! A line that leads to an act, an event with actions or an `op_refused`, is synced with all before
+//! it ahead of the act; any other lasts with the next sync. The run's end syncs the log before
+//! `outcome.json`, so a crash cuts a lost run's log only after its last synced line.
+//!
+//! A reader takes a line only once it ends in a newline, skips an event or action `kind` it doesn't
+//! know, lists a part it can't read as unread rather than failing, and takes as optional what an
+//! older log lacks: `observed_ns`, `hard_end_ns`, `first_token_ns`, `model` and `kept`.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -61,15 +60,6 @@ pub use progress::{
 pub use usage::{Cost, PlaceUse, Priced, Used};
 pub(super) use usage::{usage_of, used};
 
-/// The run log, open for appending: each record's `at_ns` is when the log wrote it, by the run's
-/// clock, so no record's `at_ns` is before the one's before it; synced on the run's host, `H`.
-///
-/// A record that leads to an act, an event with actions or an `op_refused`, is synced with all
-/// before it ahead of the act; any other is only written, to last with the next sync. An act that
-/// no record leads to is recorded after it: a model exchange, a session's end that the gateway
-/// makes, and what the run's end does after a failure of its own. The run's end syncs the log
-/// before `outcome.json`, and a failed sync fails the run: so a crash cuts a lost run's log only
-/// after its last synced record, and a finished run's only if a sync failed.
 pub(super) struct Log<'h, H: Host> {
     path: PathBuf,
     file: File,
@@ -79,9 +69,6 @@ pub(super) struct Log<'h, H: Host> {
 }
 
 impl<'h, H: Host> Log<'h, H> {
-    /// Creates the log, `log.jsonl`, in the record's directory `dir`, where it must not exist,
-    /// and syncs `dir` on `host`, so that the log lasts as each record synced into it does; each
-    /// record is timed by `clock`, the run's.
     pub(super) fn create(host: &'h H, clock: H::Clock, dir: &Path) -> Result<Self, String> {
         let path = dir.join("log.jsonl");
         let file = OpenOptions::new()
@@ -89,6 +76,7 @@ impl<'h, H: Host> Log<'h, H> {
             .create_new(true)
             .open(&path)
             .context(path.display())?;
+        // So that the log lasts as each record synced into it does.
         record::sync_dir(host, dir)?;
         Ok(Self {
             path,
@@ -99,8 +87,6 @@ impl<'h, H: Host> Log<'h, H> {
         })
     }
 
-    /// Appends the record of the run's start, observed at 0, `unix` after the Unix epoch, whose
-    /// hard end is `hard_end` after it, with the core's first `actions`.
     pub(super) fn start(
         &mut self,
         workflow: &Workflow,
@@ -116,8 +102,6 @@ impl<'h, H: Host> Log<'h, H> {
         self.decided(workflow, Duration::ZERO, event, actions)
     }
 
-    /// Appends the record of `event`, observed at `observed`, the time the core took it at, and
-    /// the `actions` it called for.
     pub(super) fn event(
         &mut self,
         workflow: &Workflow,
@@ -128,11 +112,6 @@ impl<'h, H: Host> Log<'h, H> {
         self.decided(workflow, observed, event_json(event), actions)
     }
 
-    /// Appends the record of `refused`, an op of the agent's whose payload the gateway refused:
-    /// `{"kind": "op_refused", "request": r, "message": m}`, where the request's payload is
-    /// `{"size": s, "over": n}`, its size and the limit it was over, in bytes, without a digest,
-    /// as the gateway kept none of its bytes, and the message is the refusal the agent is sent,
-    /// unless a note after it says it wasn't.
     pub(super) fn refused(&mut self, refused: &RefusedOp) -> Result<(), String> {
         let mut request = json!(refused.call());
         let (size, over) = (refused.size(), refused.payload_limit().bytes());
@@ -147,15 +126,14 @@ impl<'h, H: Host> Log<'h, H> {
         self.sync()
     }
 
-    /// Appends how `caller`'s route answered its request `request`, observed at its end: `{"kind":
-    /// "model_answered", "caller": c, "request": n, "upstream_status": u, "answer": a, "kept": k}`;
-    /// `"upstream"` and `"api"` as [`ModelAnswer`] says, `"model"` as [`Answer`] does;
-    /// `"request_id"` if the upstream named one; `"usage"` if reported ([`Usage`]); `"failed":
-    /// {"code": c}` if it stated a failure, without `"code"` if it gave none ([`route::Failure`]);
-    /// and if a response came, `"first_byte_ns"` and `"first_token_ns"` as [`ModelAnswer`] says,
-    /// where it has them. `u` is the upstream's status, or `null` if no response came, `a` the
-    /// [`Answer`]'s kind, with a refusal's or a bar's status and message, but never a body, and `k`
-    /// where the record keeps the exchange ([`Exchange::kept`](super::Exchange::kept)).
+    /// Writes the `model_answered` event of a request: its `caller`, `request` number, the
+    /// `upstream` and `api` of the entry that took it, if one did, `upstream_status`, null if no
+    /// response came, and `model`, `request_id`, `usage` and `failed` (with the `code` of its
+    /// failure, if it gave one), each if there is one. `answer` is named by its `kind`: `forwarded`
+    /// or `cut` short, for an upstream's response; `barred`, refused before an upstream; `refused`,
+    /// in place of the upstream's response; the last two with `status` and `message`, never a body.
+    /// `first_byte_ns` is when a response began to arrive, and `first_token_ns` when its output
+    /// did; `kept` says what the exchange left in the record's `model/`.
     #[expect(
         clippy::too_many_lines,
         reason = "one place for each field of the record"
@@ -284,8 +262,6 @@ impl<'h, H: Host> Log<'h, H> {
         }
     }
 
-    /// Appends the record of `event`, an event of the core's observed at `observed`, and the
-    /// `actions` the core decided on, synced if it has any.
     fn decided(
         &mut self,
         workflow: &Workflow,
@@ -297,12 +273,12 @@ impl<'h, H: Host> Log<'h, H> {
             .iter()
             .map(|action| action_json(workflow, action))
             .collect();
+        // A line whose actions the runtime carries out next lasts before it does.
         let leads = !actions.is_empty();
         self.observed(observed, event, &actions)?;
         if leads { self.sync() } else { Ok(()) }
     }
 
-    /// Appends the record of `event`, observed at `observed`, with `actions`.
     fn observed(
         &mut self,
         observed: Duration,
@@ -314,19 +290,16 @@ impl<'h, H: Host> Log<'h, H> {
         self.append(record)
     }
 
-    /// Appends the record of `event`, which no core decides on, and so leads to no action.
     fn told(&mut self, event: Value) -> Result<(), String> {
         let mut record = json!({ "actions": [] });
         record["event"] = event;
         self.append(record)
     }
 
-    /// Appends a note: `{"note": s}`.
     pub(super) fn note(&mut self, note: &str) -> Result<(), String> {
         self.append(json!({ "note": note }))
     }
 
-    /// Appends `record`, numbered and timed as it is written.
     fn append(&mut self, mut record: Value) -> Result<(), String> {
         record["seq"] = self.seq.into();
         record["at_ns"] = nanos(self.clock.now()).into();
@@ -346,46 +319,39 @@ impl<'h, H: Host> Log<'h, H> {
     }
 }
 
-/// A record of the run log that no core decides on, which the thread that observed it hands the
-/// loop, and the loop writes as it takes it, at that time ([`Log`]).
 pub(super) enum Entry {
-    /// A note ([`Log::note`]).
     Note(String),
-    /// A model request of the caller's, by its number, going upstream at a time:
-    /// `{"kind": "model_request_started", "caller": c, "request": n}`, observed then. A request
-    /// that the route refuses itself never goes upstream, and has none.
+    /// A model request going upstream, at a time, as `model_request_started`; a request that the
+    /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
-    /// How a route answered a model request of the caller's, by its number
-    /// ([`Log::model_answered`]).
     ModelAnswered((Caller, u64), Box<ModelAnswer>),
-    /// The GPUs that a sandbox's `sandboxd` saw as it started, as its session says them:
-    /// `{"kind": "sandbox_gpus", "sandbox": n, "gpus": [m, ...]}`, where `n` is its name within the
-    /// run, and each `m` a GPU's model, as `nvidia-smi` names it. A sandbox whose `sandboxd` saw
-    /// none, or couldn't tell, has none.
+    /// The GPUs that a sandbox's `sandboxd` saw as it started, as `sandbox_gpus`: the sandbox's
+    /// name in the run, and each GPU's model as `nvidia-smi` names it. A sandbox whose `sandboxd`
+    /// saw none, or couldn't tell, has none.
     Gpus(Name, Vec<GpuModel>),
-    /// A sandbox's delete, which ended it: `{"kind": "sandbox_deleted", "sandbox": n, "provider":
-    /// p, "id": i}`, where `n` is its name within the run, `agent`, `job-<n>` or `lease-<n>`, or
-    /// `null` for one that no start of the run recorded, which the run's end found left. Every
-    /// sandbox's end is one, on every path, a stop short of the core's end included, after which
-    /// the log keeps the notes and deletes of the run's children, but no event of theirs.
+    /// A sandbox's delete, which ended it, as `sandbox_deleted`: its name in the run, `agent`,
+    /// `job-<n>` or `lease-<n>`, or null for one that no start of the run recorded, which the run's
+    /// end found left; and its provider and id. Every sandbox's end is one, on every path, a stop
+    /// short of the core's end included, after which the log keeps the notes and deletes of the
+    /// run's children, but no event of theirs.
     Deleted(Deleted),
 }
 
-/// How a route answered a model request, as its thread observed it: through the upstream and
-/// API of the entry that took it, if one did, where the record keeps it, and when the answer's
-/// first bytes came, its stream's output began ([`route::Keep::first_output`]), and it ended,
-/// each by the run's clock.
 pub(super) struct ModelAnswer {
-    /// The upstream's name and the API of the entry that took the request, if one did, even if
-    /// the route barred the request itself, and never sent it upstream.
+    /// The name and API of the upstream entry that took the request, if one did, even if the route
+    /// barred the request itself and never sent it upstream.
     pub(super) taken: Option<(Name, Api)>,
     pub(super) answer: Answer,
     pub(super) kept: Value,
+    /// When the response's first bytes came and, if its stream's output began, when that did;
+    /// `None` if no byte came.
     pub(super) first: Option<(Duration, Option<Duration>)>,
+    /// When the answer ended.
     pub(super) ended: Duration,
 }
 
-/// `usage` in the run log's JSON form: its counts, without those the provider didn't give.
+/// A response's usage: `input_tokens` and `output_tokens`, and `cached_tokens`,
+/// `cache_write_tokens` and `reasoning_tokens` if it reported them.
 fn usage_json(usage: &Usage) -> Value {
     let Usage {
         input_tokens,
@@ -407,7 +373,8 @@ fn usage_json(usage: &Usage) -> Value {
     json
 }
 
-/// `duration` in nanoseconds, as the log gives times and durations.
+/// `duration` as the log gives times and durations: its whole nanoseconds, as decimal digits, at
+/// most `u64::MAX`.
 pub(super) fn nanos(duration: Duration) -> String {
     // A decimal string, since a reader that reads JSON numbers as doubles rounds integers past
     // 2^53, and a time since the Unix epoch in nanoseconds is past 2^53.
@@ -416,7 +383,6 @@ pub(super) fn nanos(duration: Duration) -> String {
         .to_string()
 }
 
-/// The JSON form of an event.
 fn event_json(event: &Event) -> Value {
     match event {
         Event::AgentStarted => json!({ "kind": "agent_started" }),
@@ -541,7 +507,6 @@ fn request_json(request: &Request) -> Value {
     }
 }
 
-/// The JSON form of an action.
 #[expect(clippy::too_many_lines, reason = "one arm per action")]
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
@@ -629,8 +594,11 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
     }
 }
 
-/// The JSON form of an outcome: `{"score": s, "work_end": w, "verdict": v}`, where the score
-/// is `null` if there is none.
+/// How a run finished, for `outcome.json`: `score`, null if it has none; `work_end`, which is
+/// `deadline`, `finalized`, `agent_exited` with its `status`, or `agent_failed` with its `reason`;
+/// and `verdict`, which is `no_submission`, `judged` or `no_result`, the last two with the
+/// `submission` (`payload`, `finalized`) and the `result` (`score`, `returned`) or `failure`
+/// (`timeout`, `error` or `invalid_result`) that judging gave. Each of them is named by its `kind`.
 pub(super) fn outcome_json(outcome: &Outcome) -> Value {
     let Outcome { work_end, verdict } = outcome;
     let work_end = match work_end {

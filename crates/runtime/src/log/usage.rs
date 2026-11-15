@@ -1,3 +1,10 @@
+//! What a run used: its sandboxes' time, its model requests and tokens, and what they cost in US
+//! dollars where a price is known, totalled from a [`Progress`]; and the `usage` object of
+//! `outcome.json`, which keeps the totals once the run has ended.
+//!
+//! A cost counts only what has a price, and says what hasn't ([`Cost`]), so a total never passes
+//! for more than it covers.
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -9,7 +16,6 @@ use super::{logged, nanos};
 use crate::TokenPrices;
 
 impl Progress {
-    /// Each sandbox of the run: the agent's, each judge call's, and each lease's.
     fn each_sandbox(&self) -> impl Iterator<Item = &Sandbox> {
         let calls = self.calls.iter().map(|call| &call.sandbox);
         let leases = self.leases.iter().map(|lease| &lease.sandbox);
@@ -18,14 +24,8 @@ impl Progress {
             .chain(leases)
     }
 
-    /// Each place the run's sandboxes were in, with how many, how long they lasted in all, each
-    /// from the core's start of it until the run was done with it, or the run's end, or else the
-    /// log's last record, how long its leases' runners were charged for ([`LeaseSpan::charged`]),
-    /// and busy ([`LeaseSpan::busy`]),
-    /// and how many the record says were created, and deleted.
-    ///
-    /// [`LeaseSpan::charged`]: super::LeaseSpan::charged
-    /// [`LeaseSpan::busy`]: super::LeaseSpan::busy
+    /// The run's sandboxes by place, as far as the log says: until the run's end, or the last line
+    /// read if it hasn't ended.
     pub fn sandboxes(&self) -> BTreeMap<Place, PlaceUse> {
         let now = self.end.unwrap_or(self.last);
         let mut sandboxes: BTreeMap<Place, PlaceUse> = BTreeMap::new();
@@ -57,9 +57,6 @@ impl Progress {
         sandboxes
     }
 
-    /// What the run's sandboxes cost, in dollars, at their classes' prices, `None` if none
-    /// lasted in a class with one, and whether some lasted in a class without one, which the sum
-    /// leaves out.
     fn usd(&self) -> (Option<f64>, bool) {
         let sandboxes = self.sandboxes();
         let mut usd = None;
@@ -72,8 +69,7 @@ impl Progress {
         )
     }
 
-    /// What the run cost so far, at the prices that its record keeps; `None` if nothing of it
-    /// has a price: no model whose tokens have a cost, no sandbox in a class with a price.
+    /// What the run cost, as far as it is priced; `None` if nothing is.
     pub fn cost(&self) -> Option<Cost> {
         let (tokens, unpriced_models) = self.model.usd(&self.token_prices);
         let (sandboxes, unpriced_classes) = self.usd();
@@ -92,9 +88,9 @@ impl Progress {
 }
 
 impl ModelUse {
-    /// What the tokens of these requests cost, in dollars, at `prices`, each model's by the
-    /// route's name for it, `None` if no model's tokens have a cost at them
-    /// ([`TokenPrices::usd`]), and the models whose tokens have none, which the sum leaves out.
+    /// What the tokens that responses reported cost at `prices`, by model, in US dollars, with the
+    /// models that have no price, or whose tokens `prices` can't cost ([`TokenPrices::usd`]). The
+    /// cost is `None` if no model is priced.
     pub fn usd(&self, prices: &BTreeMap<String, TokenPrices>) -> (Option<f64>, Vec<String>) {
         let mut usd = None;
         let mut unpriced = Vec::new();
@@ -108,18 +104,18 @@ impl ModelUse {
     }
 }
 
-/// What a run cost, in dollars, at the prices that its record keeps.
-///
-/// Each sum leaves out what has no price: the models whose tokens have no cost at them, and the
-/// sandboxes that lasted in a class without a price, if some did.
+/// A run's cost in US dollars, and what the total leaves out.
 #[derive(Debug)]
 pub struct Cost {
+    /// What the total covers.
     pub priced: Priced,
+    /// The models whose tokens went unpriced.
     pub unpriced_models: Vec<String>,
+    /// Whether a sandbox's class has no price, so its time went unpriced.
     pub unpriced_classes: bool,
 }
 
-/// The parts of a run's cost that have a price, in dollars: its tokens, its sandboxes, or both.
+/// Which of a run's costs have a price, and what each comes to in US dollars.
 #[derive(Debug)]
 pub enum Priced {
     Both { tokens: f64, sandboxes: f64 },
@@ -128,7 +124,7 @@ pub enum Priced {
 }
 
 impl Cost {
-    /// The whole of what has a price.
+    /// The total of what is priced.
     pub fn usd(&self) -> f64 {
         match self.priced {
             Priced::Both { tokens, sandboxes } => tokens + sandboxes,
@@ -136,46 +132,45 @@ impl Cost {
         }
     }
 
-    /// Whether the run cost more than [`Cost::usd`], by what has no price.
+    /// Whether the total leaves something out: it is then a lower bound.
     pub fn unpriced(&self) -> bool {
         !self.unpriced_models.is_empty() || self.unpriced_classes
     }
 }
 
-/// The sandboxes a run had in a place.
-///
-/// How many, how long they lasted in all, how many the record says were created, and deleted,
-/// and the price of the place's class, in dollars an hour, if its provider declared one.
+/// The sandboxes of one place.
 #[derive(Debug)]
 pub struct PlaceUse {
+    /// How many of the run.
     pub count: u64,
+    /// The time from each one's being asked for to its end, or to now, summed.
     pub lasted: Duration,
-    /// How long the runners of the leases among them were charged for, if there are any, and how
-    /// much of that their commands and transfers ran ([`LeaseSpan::busy`]).
-    ///
-    /// [`LeaseSpan::busy`]: super::LeaseSpan::busy
+    /// For the leases among them, how long their runners were ready, and how much of that a
+    /// command or a transfer ran, each summed (`LeaseSpan::charged` and `LeaseSpan::busy`);
+    /// `None` if none is a lease's.
     pub charged: Option<(Duration, Duration)>,
+    /// How many have a `sandbox.json`, so were created.
     pub created: u64,
+    /// How many of those that `sandbox.json` records as deleted.
     pub deleted: u64,
+    /// The class's price an hour, if it has one.
     pub usd_per_hour: Option<f64>,
 }
 
 impl PlaceUse {
-    /// What they cost, in dollars, at the price, if there is one.
+    /// What `lasted` costs at the price; `None` if the class has none.
     pub fn usd(&self) -> Option<f64> {
         Some(self.usd_per_hour? * self.lasted.as_secs_f64() / 3600.0)
     }
 }
 
-/// What a run used, as its `outcome.json` records it: `{"ran_ns": r, "model_requests": m, "tokens":
-/// t, "calls": [c, ...], "sandboxes": [s, ...], "usd": d, "unpriced_models": [u, ...]}`: when its
-/// log last wrote, the model requests its routes answered and the tokens they reported,
-/// `{"responses": n, "input": i, "output": o}` with `"cached"`, `"cache_write"` and `"reasoning"`
-/// where given; each judge call's share, if it made model requests, `{"job": j, "grant": g,
-/// "model_requests": m, "tokens": t}`; each place's sandboxes, `{"provider": p, "class": c,
-/// "count": n, "lasted_ns": l}`, with `"charged_ns"` and `"busy_ns"` for leases'
-/// ([`PlaceUse::charged`]), `"undeleted"`, and `"usd_per_hour"` and `"usd"` for a priced class;
-/// and the run's cost ([`Progress::cost`]) and its unpriced models, if something has a price.
+/// The `usage` of `outcome.json`, which [`used`] reads back: `ran_ns`, when the log last wrote;
+/// `model_requests`; `tokens`, with `responses`, `input`, `output` and, if some response reported
+/// them, `cached`, `cache_write` and `reasoning`; `sandboxes`, one object a place, with `provider`,
+/// `class`, `count`, `lasted_ns`, `charged_ns` and `busy_ns` if a lease ran there, `undeleted` if
+/// some weren't deleted, and `usd_per_hour` and `usd` if its class is priced; `calls`, if a judge
+/// call made model requests, each with its `job`, `grant`, `model_requests` and `tokens`; and `usd`
+/// with `unpriced_models`, unless nothing is priced.
 pub(crate) fn usage_of(progress: &Progress) -> Value {
     let sandboxes = progress.sandboxes().into_iter().map(|(place, used)| {
         let mut sandboxes = json!({
@@ -226,21 +221,20 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
     usage
 }
 
-/// What an ended run used, as its `outcome.json` records it.
+/// What a finished run used, as the `usage` of its `outcome.json` says.
 #[derive(Debug)]
 pub struct Used {
     /// When its log last wrote, since the run started.
     pub ran: Duration,
     pub model_requests: u64,
     pub tokens: Tokens,
-    /// What it cost, its tokens and its sandboxes, in dollars, if something of it had a price
-    /// ([`Progress::cost`]), and whether it cost more, by what has no price, which the sum leaves
-    /// out.
+    /// What it cost, its tokens and its sandboxes, in dollars; `None` if nothing is priced.
     pub usd: Option<f64>,
+    /// Whether `usd` leaves out a model or a class that has no price.
     pub unpriced: bool,
 }
 
-/// What `usage`, an `outcome.json`'s `usage` as [`usage_of`] writes it, says.
+/// The [`Used`] that a `usage` says, or why it isn't one.
 pub(crate) fn used(usage: &Value) -> Result<Used, String> {
     #[derive(Deserialize)]
     struct Usage {
@@ -299,7 +293,6 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
     })
 }
 
-/// The JSON form of `tokens`, as [`usage_of`] gives it.
 fn tokens_json(tokens: &Tokens) -> Value {
     let Tokens {
         reported,

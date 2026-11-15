@@ -1,3 +1,10 @@
+//! Readers of the run log that work on a file the run is still appending to, so a last line without
+//! its newline is a line not yet written, and is left until it is whole.
+//!
+//! A [`LogFold`] follows one log: each take reads the lines the log gained since the last, so a
+//! poll costs what the log gained, and the fold's [`Readout`] covers every line taken. The other
+//! readers read the log of a record's directory whole, once.
+
 use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read as _, Seek, SeekFrom};
@@ -10,13 +17,6 @@ use stdx::Context;
 use super::logged::{self, Line};
 use super::progress::{Reading, Readout, Roles, Unread, json_file, readout};
 
-/// Takes each line of the run log of the record in `dir` whose frame reads, as a [`Line`] of
-/// the parts of it that read, in turn, by `take`, and returns the parts that don't; `None` if
-/// there is no log. A last line without its newline is left out ([`take_lines`]).
-///
-/// # Errors
-///
-/// Fails if the log can't be read.
 fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>, String> {
     let path = dir.join("log.jsonl");
     let Some(log) = open(&path)? else {
@@ -37,7 +37,6 @@ fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>
     Ok(Some(unread))
 }
 
-/// The run log at `path`, open to read; `None` if there is none.
 fn open(path: &Path) -> Result<Option<File>, String> {
     match File::open(path) {
         Ok(log) => Ok(Some(log)),
@@ -46,20 +45,12 @@ fn open(path: &Path) -> Result<Option<File>, String> {
     }
 }
 
-/// How far a read of a run log went: up to the end of the last whole line it took.
 #[derive(Clone, Copy, Default)]
 struct Cursor {
-    /// The bytes before that end.
     size: u64,
-    /// The lines before it, so the number of the last.
     lines: u64,
 }
 
-/// Takes each whole line of `log`, the run log at `path`, past `cursor`, in turn, by `take`, with
-/// the byte it starts at and its bytes, and, if its frame reads, as a [`Line`] of the parts of it
-/// that read; adds the parts that don't to `unread`, and moves `cursor` past each line before it
-/// takes it, so that a failed read leaves it past the lines taken before. A last line without its
-/// newline, one being written or that a crash cut short, is left to a later read.
 fn take_lines(
     log: File,
     path: &Path,
@@ -74,6 +65,8 @@ fn take_lines(
     loop {
         line.clear();
         log.read_until(b'\n', &mut line).context(path.display())?;
+        // A last line without its newline is one being written, or that a crash cut short: it is
+        // left to a later read.
         let Some(whole) = line.strip_suffix(b"\n") else {
             return Ok(());
         };
@@ -85,12 +78,8 @@ fn take_lines(
     }
 }
 
-/// The final judge's job: the one that the run log of the record in `dir` names in its
-/// `start_judge` without a grant.
-///
-/// # Errors
-///
-/// Fails if the log can't be read, or doesn't name such a job.
+/// The number of the judge call that scores the run, from the log in `dir`. Fails if the log is
+/// missing, or holds no start of such a call, naming the parts it couldn't read.
 pub(crate) fn final_judge(dir: &Path) -> Result<u64, String> {
     let mut job = None;
     let unread = records(dir, |line| {
@@ -122,8 +111,9 @@ pub(crate) fn final_judge(dir: &Path) -> Result<u64, String> {
     }
 }
 
-/// The lines of the run log of the record in `dir`, as
-/// [`Record::log_lines`](crate::Record::log_lines) gives them.
+/// The lines of the log in `dir` within `bytes`, each without its newline and with the byte it
+/// starts at. The range must begin and end at lines' ends, as `TakenLine::byte` and the length of
+/// what a fold took give them; a last line without a newline is returned as it is.
 pub(crate) fn lines(dir: &Path, bytes: Range<u64>) -> Result<Vec<(u64, Vec<u8>)>, String> {
     let path = dir.join("log.jsonl");
     let size = usize::try_from(bytes.end.saturating_sub(bytes.start)).map_err(|_| {
@@ -146,12 +136,8 @@ pub(crate) fn lines(dir: &Path, bytes: Range<u64>) -> Result<Vec<(u64, Vec<u8>)>
     Ok(lines.collect())
 }
 
-/// Reads what the record in `dir` says of its run so far ([`Readout`]).
-///
-/// # Errors
-///
-/// Fails if a file of the record can't be read, or, once the log exists, its `ir.json` or
-/// `provider.json` isn't JSON.
+/// What the whole log in `dir` says now. Fails if a file of the record can't be read, or, once the
+/// log exists, its `ir.json` or `provider.json` isn't JSON.
 pub(crate) fn progress(dir: &Path) -> Result<Readout, String> {
     let mut fold = LogFold::new(dir);
     let None = fold.take()? else {
@@ -170,40 +156,39 @@ pub(crate) fn progress(dir: &Path) -> Result<Readout, String> {
 
 /// A run's log, as far as it was read, kept to be read on as the run appends to it.
 ///
-/// Each [`take`](Self::take) reads only what the log gained, and a [`readout`](Self::readout)
-/// says what all it took says, as a read of those bytes whole would.
+/// Each [`take`](Self::take) reads only what the log gained, and a [`readout`](Self::readout) says
+/// what all it took says, as a read of those bytes whole would.
 ///
-/// Modelled on sapling's indexedlog `FoldState`, which resumes a fold over an append-only log
-/// from the offset it reached, and starts over when `self.offset > log.disk_buf.len() as u64 ||
+/// Modelled on sapling's indexedlog `FoldState`, which resumes a fold over an append-only log from
+/// the offset it reached, and starts over when `self.offset > log.disk_buf.len() as u64 ||
 /// self.epoch != log.meta.epoch`, a log's epoch here being its file's device and inode:
 /// <https://github.com/meta/sapling/blob/8a502b24d6777264898ad36acad97209e9ab1978/eden/scm/lib/indexedlog/src/log/fold.rs#L158-L216>.
 pub struct LogFold {
     dir: PathBuf,
-    /// What `ir.json` and `provider.json` say, read as the log is first found: a run writes
-    /// each of them whole, once, before it creates its log.
     roles: Option<Roles>,
     reading: Reading,
     unread: Vec<Unread>,
-    /// The device and inode of the log file taken, once it is found.
     file: Option<(u64, u64)>,
     taken: Cursor,
 }
 
-/// A whole line of a run's log that a [`LogFold`] took: the byte it starts at, and its bytes,
-/// without the newline that ends it.
+/// A whole line of the log, as a fold took it.
 #[derive(Clone, Copy, Debug)]
 pub struct TakenLine<'l> {
+    /// The byte of the log where the line starts.
     pub byte: u64,
+    /// The line, without its newline, though it may not be JSON or not a line's shape.
     pub bytes: &'l [u8],
 }
 
-/// Why a [`LogFold`] started over: its log is no longer the one it took some of.
+/// That a fold found the log no longer the one it had read, and read the log it found from its
+/// start.
 ///
-/// It found no log at the log's path, a log shorter than it had taken, or another file, by its
-/// device and inode, none of which a run's log, that only grows, ever is.
+/// It found no log at the log's path, a log shorter than it had taken, or another file, by
+/// its device and inode, none of which a run's log, which only grows, ever is. Its `Display` says
+/// which, for the person following the run.
 #[derive(Debug)]
 pub struct StartedOver {
-    /// The bytes it had taken.
     taken: u64,
     found: Found,
 }
@@ -211,13 +196,10 @@ pub struct StartedOver {
 #[derive(Debug)]
 enum Found {
     Gone,
-    /// A log of this many bytes.
     Shorter(u64),
     Other,
 }
 
-/// `its log is 120 bytes, shorter than the 4096 bytes read of it before: reading it again from
-/// its start`.
 impl fmt::Display for StartedOver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { taken, found } = self;
@@ -242,7 +224,6 @@ impl fmt::Display for StartedOver {
 }
 
 impl LogFold {
-    /// The log of the record in `dir`, none of it taken.
     pub(crate) fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_owned(),
@@ -254,26 +235,20 @@ impl LogFold {
         }
     }
 
-    /// Takes each whole line that the log gained since the last take; a last line without its
-    /// newline waits for a later one. A failed take keeps the lines it took, and the next goes
-    /// on after them. Once some of the log is taken, if it is gone, shorter, or another file,
-    /// the fold starts over, takes the log from its start, and says so.
+    /// Reads the lines that the log gained since the last take, and adds what they say to the
+    /// readout. A log that isn't there yet is no error, and adds nothing. A failed take keeps the
+    /// lines it took, and the next goes on after them.
     ///
-    /// # Errors
-    ///
-    /// Fails if a file of the record can't be read, or, once the log exists, its `ir.json` or
-    /// `provider.json` isn't JSON.
+    /// If the log is gone, shorter than what was read, or another file, the fold forgets everything
+    /// it held and reads the log from its start, and says so. Fails if a file of the record can't
+    /// be read, or, once the log exists, its `ir.json` or `provider.json` isn't JSON.
     pub fn take(&mut self) -> Result<Option<StartedOver>, String> {
         self.take_each(|_| {})
     }
 
-    /// Takes what the log gained as [`take`](Self::take) does, and hands `each` every whole line
-    /// it takes, in the log's order, whether it reads or not; after a [`StartedOver`], those of
-    /// the log from its start.
-    ///
-    /// # Errors
-    ///
-    /// As [`take`](Self::take).
+    /// [`take`](LogFold::take), calling `each` with every line it takes, whether or not the line
+    /// could be read. After a start over, the lines are the new log's from its first, and what the
+    /// caller derived of the earlier ones is its to discard.
     pub fn take_each(
         &mut self,
         mut each: impl FnMut(TakenLine<'_>),
@@ -305,6 +280,8 @@ impl LogFold {
             return Ok(started_over);
         };
         self.file = Some(file);
+        // Each of `ir.json` and `provider.json` is written whole, once, before the run creates its
+        // log, so they are read as the log is first found.
         let roles = if let Some(roles) = self.roles.take() {
             roles
         } else {
@@ -329,17 +306,14 @@ impl LogFold {
         Ok(started_over)
     }
 
-    /// The byte past the last whole line taken, which the next take reads on from: 0 before any.
+    /// How many bytes of the log the fold has taken: the byte where the next line it takes starts.
     pub fn taken(&self) -> u64 {
         self.taken.size
     }
 
-    /// What the lines taken say of the run ([`Readout`]), with what the record says now of
-    /// each sandbox that they name. More can be taken after.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a sandbox's `sandbox.json` in the record can't be read, or isn't JSON.
+    /// What the lines taken say, as reading the whole log would, with what the record says now of
+    /// each sandbox that they name. Fails if a sandbox's `sandbox.json` can't be read, or isn't
+    /// JSON.
     pub fn readout(&self) -> Result<Readout, String> {
         readout(
             &self.dir,

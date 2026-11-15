@@ -1,15 +1,13 @@
-//! The run log's records as its readers read them, in the forms that the run log writes.
+//! The run log's lines as its readers read them, in the forms that the run log writes; the `log`
+//! module says what a line holds.
 //!
-//! Each line is a [`Line`], its event an [`Event`] and its actions [`Action`]s, each with the
-//! fields of its kind that a reader of the log reads, and no other, so a field that no reader
-//! reads can't keep a line from reading.
-//!
-//! A line's frame, its event and each of its actions read on their own, each whole or not at
-//! all. A kind of event or action that this build doesn't know reads as `Unknown`, and changes
-//! nothing that a reader works out. A part of a known kind that lacks a field its kind has, or
-//! holds one in another form, doesn't read: its readers leave it out and say so
-//! ([`Unread`]), and never read it with defaults. A field that a writer may leave out is an
-//! `Option`.
+//! Each type has the fields of its kind that a reader of the log reads, and no other, so a field
+//! that no reader reads can't keep a line from reading. A line's frame, its event and each of its
+//! actions read on their own, each whole or not at all. A kind of event or action that this build
+//! doesn't know reads as `Unknown`, and changes nothing that a reader works out. A field that a
+//! writer may leave out is an `Option` or has a default; a part of a known kind that lacks any
+//! other field of its kind, or holds one in another form, doesn't read: its readers leave it out
+//! and say so ([`Unread`]), and never read it with defaults.
 
 use std::time::Duration;
 
@@ -23,22 +21,15 @@ use serde_json::{Number, Value};
 use super::{Part, Unread};
 use crate::sandbox::SandboxName;
 
-/// A line of the run log, with those of its parts that read.
 #[derive(Debug)]
 pub(super) struct Line {
-    /// When the log wrote it.
     pub(super) at_ns: Duration,
-    /// When the runtime observed what it records, if the record says: when the core took its
-    /// event, if the core decided on it.
     pub(super) observed_ns: Option<Duration>,
-    /// Its event, but for a note, or for an event that doesn't read.
     pub(super) event: Option<Event>,
-    /// The actions the core decided on its event, but those that don't read.
     pub(super) actions: Vec<Action>,
     pub(super) note: Option<String>,
 }
 
-/// A line's frame, with its event and each of its actions left as JSON, to read on their own.
 #[derive(Deserialize)]
 struct Frame {
     #[serde(deserialize_with = "nanos")]
@@ -52,8 +43,9 @@ struct Frame {
 }
 
 impl Line {
-    /// Reads line `number` of the log, `bytes`, and adds each part of it that doesn't read to
-    /// `unread`; `None` if its frame doesn't read.
+    /// Reads the line `number`, counted from 1, that is `bytes`. `None` if it is no JSON object
+    /// with an `at_ns`; otherwise the line, without the event or any action that couldn't be read,
+    /// each of which is added to `unread`.
     pub(super) fn read(bytes: &[u8], number: u64, unread: &mut Vec<Unread>) -> Option<Self> {
         let frame: Frame = match serde_json::from_slice(bytes) {
             Ok(frame) => frame,
@@ -93,22 +85,18 @@ impl Line {
         })
     }
 
-    /// When it happened, as the log's readers time it: when the runtime observed it, if the record
-    /// says, and else when the log wrote it.
+    /// When its event happened: its `observed_ns`, or else when it was written.
     pub(super) fn when(&self) -> Duration {
         self.observed_ns.unwrap_or(self.at_ns)
     }
 }
 
-/// An event of the run log, by its `kind`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Event {
     RunStarted {
-        /// The run's start, by the driving machine's clock.
         #[serde(deserialize_with = "unix_nanos")]
         unix_ns: UnixTime,
-        /// The run's hard end, since its start; a start without it reads as no start.
         #[serde(default, deserialize_with = "optional_nanos")]
         hard_end_ns: Option<Duration>,
     },
@@ -160,14 +148,10 @@ pub(super) enum Event {
         reason: String,
     },
     Tick,
-    /// A model request of `caller`'s, numbered `request` in the run, going upstream.
     ModelRequestStarted {
         caller: Caller,
         request: u64,
     },
-    /// How a route answered a model request of `caller`'s, if the line names it, numbered
-    /// `request` in the run, to `model`, as the route names it, if the line names one, and when
-    /// its stream's output began, if the line says.
     ModelAnswered {
         caller: Option<Caller>,
         request: u64,
@@ -183,10 +167,8 @@ pub(super) enum Event {
     },
     SandboxGpus {
         sandbox: SandboxName,
-        /// Each GPU's model, as `nvidia-smi` names it.
         gpus: Vec<String>,
     },
-    /// A sandbox's delete; `sandbox` is `None` for one that no start of the run recorded.
     SandboxDeleted {
         sandbox: Option<SandboxName>,
     },
@@ -195,7 +177,6 @@ pub(super) enum Event {
 }
 
 impl Event {
-    /// The request of an op's arrival.
     pub(super) fn request(&self) -> Option<&Request> {
         match self {
             Self::OpArrived { request } => Some(request),
@@ -223,7 +204,6 @@ impl Event {
         }
     }
 
-    /// The job of a judge call's event: its start, exit, timeout, collection or failure.
     pub(super) fn judge_job(&self) -> Option<u64> {
         match self {
             Self::JudgeStarted { job }
@@ -252,9 +232,6 @@ impl Event {
     }
 }
 
-/// An op's request, by its `kind`, as far as a lease's readers read it: a lease's open, with
-/// the life its holder asked for, if it did, the command or the transfer it asks to run, and its
-/// close.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Request {
@@ -274,13 +251,10 @@ pub(super) enum Request {
         to: String,
     },
     LeaseClose,
-    /// Any other op.
     #[serde(other)]
     Other,
 }
 
-/// What a judge call's collection found: a result, with its score, the JSON number, if it has
-/// one, and what the judge returned; or why what it found is no result.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Collected {
@@ -288,26 +262,21 @@ pub(super) enum Collected {
     Invalid(String),
 }
 
-/// A judge's result: its score, the JSON number, if it has one, and what the judge returned.
 #[derive(Debug, Deserialize)]
 pub(super) struct JudgeResult {
     pub(super) score: Option<Number>,
     pub(super) returned: Value,
 }
 
-/// How a route answered a model request.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Answer {
-    /// Its upstream's response, forwarded whole.
     Forwarded,
-    /// Its upstream's response, cut short.
     Cut,
     Barred,
     Refused,
 }
 
-/// Where the record keeps an exchange, of which a reader reads what its request left behind.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct Kept {
     #[serde(default)]
@@ -316,19 +285,16 @@ pub(super) struct Kept {
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct KeptRequest {
-    /// The names of the request's headers that the route left behind; none in a log written
-    /// before the route named them.
+    // None in a log written before the route named them.
     #[serde(default)]
     pub(super) dropped_headers: Vec<String>,
 }
 
-/// An answer's statement that it failed, with the code it gave, if any.
 #[derive(Debug, Deserialize)]
 pub(super) struct Failed {
     pub(super) code: Option<String>,
 }
 
-/// The tokens a response reported, but those it didn't give.
 #[derive(Debug, Deserialize)]
 #[expect(clippy::struct_field_names, reason = "the run log's names for them")]
 pub(super) struct Usage {
@@ -339,13 +305,11 @@ pub(super) struct Usage {
     pub(super) reasoning_tokens: Option<u64>,
 }
 
-/// An action of the run log, by its `kind`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Action {
     StartAgent,
     Reply,
-    /// A judge call's start: under the agent's `grant`, or `None` for the score.
     StartJudge {
         job: u64,
         grant: Option<String>,
@@ -355,17 +319,14 @@ pub(super) enum Action {
     StopJudge {
         job: u64,
     },
-    /// A lease's open, held by `holder`, or by the agent if the line names none.
     StartLease {
         lease: u64,
         holder: Option<Caller>,
         grant: String,
     },
-    /// A command's start, of the line's op's request.
     RunCommand {
         lease: u64,
     },
-    /// A transfer's start, of the line's op's request.
     Transfer {
         lease: u64,
     },
@@ -380,8 +341,6 @@ pub(super) enum Action {
 }
 
 impl Action {
-    /// The job of the score's judge call, if this starts it: a judge call's start without a
-    /// grant.
     pub(super) fn score_job(&self) -> Option<u64> {
         match self {
             Self::StartJudge {
@@ -403,8 +362,9 @@ impl Action {
     }
 }
 
-/// Which way a lease's transfer moves a tree: `put` into the runner, `replace` for a put that
-/// replaces its destination, or `get` out of it.
+/// What a transfer does, as the log's `transfer` action names it: `put` copies the holder's tree to
+/// the runner, where nothing is, `replace` does so over what is, and `get` copies the runner's tree
+/// to the holder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -413,8 +373,7 @@ pub enum Direction {
     Get,
 }
 
-/// An op's caller, or a lease's holder: the agent, or job `n`'s judge call, `agent` or
-/// `job-<n>` in the log.
+/// Who a model request or a lease belongs to, written and read as `agent` or `job-<n>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Caller {
     Agent,
@@ -457,8 +416,6 @@ impl<'de> Deserialize<'de> for Caller {
     }
 }
 
-/// `value`, part `part` of line `line`, as a `T`; `None` if it doesn't read, which is added to
-/// `unread`.
 fn read_part<T: DeserializeOwned>(
     value: Value,
     (line, part): (u64, Part),
@@ -474,7 +431,7 @@ fn read_part<T: DeserializeOwned>(
     }
 }
 
-/// A time or duration in nanoseconds, as a decimal string.
+/// Reads a time written as the log writes every `..._ns`: a string of decimal digits.
 pub(super) fn nanos<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let text = String::deserialize(deserializer)?;
     let nanos = text.parse().map_err(|_| {
@@ -483,7 +440,6 @@ pub(super) fn nanos<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Durati
     Ok(Duration::from_nanos(nanos))
 }
 
-/// A time or duration in nanoseconds, as [`nanos`] reads one, or `null`.
 fn optional_nanos<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Duration>, D::Error> {
@@ -493,7 +449,6 @@ fn optional_nanos<'de, D: Deserializer<'de>>(
     Ok(nanos.map(|Nanos(nanos)| nanos))
 }
 
-/// A time by the machine's clock, in nanoseconds since the Unix epoch, as [`nanos`] reads one.
 fn unix_nanos<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UnixTime, D::Error> {
     nanos(deserializer).map(UnixTime::after_epoch)
 }

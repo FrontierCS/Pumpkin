@@ -1,28 +1,27 @@
-//! A run's record on disk: its directory and name, the payloads stored by digest, and the
-//! files written whole.
+//! A run's record: the directory, named by the run's id, in the runs directory, and the files in
+//! it, which [`Record`] reads back. `ARCHITECTURE.md` says when each is written and who may write
+//! it.
 //!
-//! Each run has a directory of its own, `<runs>/<id>/`, which [`create`] makes and names:
-//!
-//! - `driver.pid`: the pid of the process that drives the run, locked by it until the run's last
-//!   write: see [`Lock`] for the rule that makes the record's state readable;
-//! - `driver.log`: the driver process's standard output and error since the run's start;
-//! - `record.json`, written first: the version of the record's form ([`RECORD_VERSION`]), the
-//!   build that made it ([`BUILD`]) and the arguments of its `pumpkin run` ([`Record::args`]);
-//! - `ir.json`: the workflow's IR;
-//! - `provider.json`: where the roles are placed, and each one's model route ([`provided`]);
-//! - `log.jsonl`: the run log, which the `log` module lays out;
-//! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256;
-//! - `agent/`, `jobs/<n>/` and `leases/<n>/`, for the sandbox of the agent, of job `n`'s judge
-//!   call and of lease `n`'s runner, once created: its `sandbox.json` ([`write_sandbox`]), and its
-//!   `out` and `log` as far as collected, but a result over
-//!   [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
-//! - `model/`: each model exchange, each conversation item and each field kept whole, such as a
-//!   list of tools, once (`Exchange`);
-//! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
-//! - `reaps.jsonl`: each sandbox that a reap deleted ([`REAPS`]);
-//! - `outcome.json`: how the run ended, and what it used (`log::usage_of`): `{"state":
-//!   "finished"}` and the outcome's fields (`log::outcome_json`), `{"state": "failed", "reason":
-//!   r}`, as [`Record::reap`] records a lost run too, or `{"state": "interrupted", "signal": s}`.
+//! - `record.json`, written first: `record_version`, which a reader refuses if it isn't its own;
+//!   `args`, the words that started the run; `pumpkin`, the build that made it, `{"version",
+//!   "commit"}`, with the commit `{"hash", "date"}` or null, which an older record lacks.
+//! - `driver.pid`, locked while the driver lives and holding its process ID; `driver.log`, the
+//!   driver's standard output and error since the run started.
+//! - `ir.json`, the workflow's IR; `provider.json`, written before the log: `providers`, each with
+//!   its `report` and `classes` (`startup_seconds`, and `usd_per_hour` if priced); `roles`, each
+//!   with its `provider` and `class`; and `routes`, each role's entries (`api`, `upstream` and
+//!   `models`, each with its `upstream_name` and `usd_per_mtok` if priced), which an older record
+//!   lacks.
+//! - `log.jsonl`, the run log (`log`); `payloads/<digest>`, the payload of each op the core
+//!   accepted, by the SHA-256 of its bytes; `model/`, each model exchange (`model`).
+//! - `agent/`, `jobs/<n>/` and `leases/<n>/`, a sandbox each, with its `sandbox.json`: `provider`,
+//!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once a delete was tried;
+//!   and its `out/` and `log/` as far as collected, but a result over `RESULT_MAX_BYTES`.
+//! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
+//!   `failed`, with a `reason`, or `interrupted`, with a `signal`; and `usage`, if the run began
+//!   its log, which an older record lacks.
+//! - `reaps.jsonl`, a line for each sandbox a reap deleted; `sockets/`, where private sandboxes
+//!   meet the gateway, which a reap removes.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -48,32 +47,23 @@ use super::model::{KeptPart, KeptRequest};
 use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
 
-/// Why [`Record::reap`] records a lost run as failed.
 const LOST: &str = "its driver ended without an outcome";
 
-/// The version of the record's form, named as the IR's version is
-/// ([`IrVersion`](schema::ir::IrVersion)), which a reader checks before it reads the rest. Until
-/// Pumpkin's first release, the form changes under this version; after it, each change to the
-/// form, a new file included, takes a new version, so that a build refuses a record whose form it
-/// doesn't know instead of misreading it. A record's `record.json` is
-/// `{"record_version": v, "pumpkin": p, "args": a}`: this version, the build that made it
-/// ([`BUILD`]), `{"version": v, "commit": c}`, with `c` `{"hash": h, "date": d}` or `null`
-/// ([`Record::other_build`]), and the `pumpkin run`'s arguments, an array of words
-/// ([`Record::args`]).
+// A build refuses a record of another version instead of misreading it. Until Pumpkin's first
+// release the form changes under this version, so an older record may lack what a newer one has.
 const RECORD_VERSION: &str = "pumpkin.record/v0";
 
-/// This build of Pumpkin, which `pumpkin --version` prints, and each record names. Its version
-/// is the workspace's, which each of Pumpkin's crates takes.
+/// This build of Pumpkin, which `pumpkin --version` prints, and each record names.
 pub const BUILD: Build = Build {
     version: env!("CARGO_PKG_VERSION"),
     commit: commit(env!("PUMPKIN_COMMIT_HASH"), env!("PUMPKIN_COMMIT_DATE")),
 };
 
-/// A build of Pumpkin: its version, and the commit it was built from.
+/// A build of Pumpkin: its version, and the commit it was built from if it was made in a git
+/// checkout of Pumpkin's repository.
 ///
-/// A build has a commit if it was made in a git checkout of Pumpkin's repository. It is shown
-/// as its version alone, `0.0.0`, or with the commit's first 9 hexadecimal digits and its date,
-/// `0.0.0 (0f3a2b1c9 2026-11-08)`.
+/// It is shown as its version alone, `0.0.0`, or with the commit's first 9 hexadecimal digits and
+/// its date, `0.0.0 (0f3a2b1c9 2026-11-08)`.
 #[derive(Clone, Copy, Debug)]
 pub struct Build {
     version: &'static str,
@@ -82,13 +72,10 @@ pub struct Build {
 
 #[derive(Clone, Copy, Debug)]
 struct Commit {
-    /// Its hash, in hexadecimal digits.
     hash: &'static str,
-    /// The day it was committed, as `YYYY-MM-DD`.
     date: &'static str,
 }
 
-/// The commit whose `hash` and `date` the build script found, or none if it gives both empty.
 const fn commit(hash: &'static str, date: &'static str) -> Option<Commit> {
     // A constant that fails this fails to compile.
     assert!(
@@ -104,13 +91,12 @@ const fn commit(hash: &'static str, date: &'static str) -> Option<Commit> {
 }
 
 impl Build {
-    /// The hash of the commit it was built from, in hexadecimal digits, if it has one.
+    /// The hash of the commit it was built from, if there was one.
     #[must_use]
     pub fn commit_hash(self) -> Option<&'static str> {
         self.commit.map(|commit| commit.hash)
     }
 
-    /// Its JSON form in `record.json`.
     fn json(self) -> Value {
         let Self { version, commit } = self;
         let commit = commit.map(|Commit { hash, date }| json!({ "hash": hash, "date": date }));
@@ -126,8 +112,6 @@ impl fmt::Display for Build {
     }
 }
 
-/// Writes the build of `version`, made from the commit of hash and date `commit`, if it has one,
-/// as a [`Build`] is shown.
 fn write_build(
     f: &mut impl fmt::Write,
     version: &str,
@@ -139,8 +123,6 @@ fn write_build(
     }
 }
 
-/// The build that `build`, as [`Build::json`] writes one, names, shown as a [`Build`] is; `None`
-/// if it names none.
 fn shown(build: &Value) -> Option<String> {
     let version = build["version"].as_str()?;
     let commit = match &build["commit"] {
@@ -155,19 +137,19 @@ fn shown(build: &Value) -> Option<String> {
 /// The lock on a record's `driver.pid`, an exclusive `flock` held until it is dropped, by the
 /// process that drives the run.
 ///
-/// Only the holder writes the record, and drops the lock after its last write, `outcome.json`:
-/// so a record with one has ended, one whose lock is held is live, and one whose lock is free
-/// without one is lost, which only [`Record::reap`] writes then. The lock goes with the process,
-/// however it ends, and `docker` children don't inherit it, as [`File`]s are close-on-exec.
+/// Only the holder writes the record, and drops the lock after its last write, `outcome.json`: so a
+/// record with one has ended, one whose lock is held is live, and one whose lock is free without
+/// one is lost, which only [`Record::reap`] writes then. The lock goes with the process, however it
+/// ends, and `docker` children don't inherit it, as `File`s are close-on-exec.
 #[derive(Debug)]
 pub(super) struct Lock {
     _file: File,
 }
 
-/// A new run's id, which names its record and tags its sandboxes: `now` as a UTC time, and 8
-/// random hexadecimal digits, as `20261028-131811-1a2b3c4d`, which sorts by the time of the call.
+/// A new run id: the UTC time `now` as `YYYYMMDD-HHMMSS`, then `-` and eight random lowercase
+/// hexadecimal digits, so that ids sort by when they were made.
 ///
-/// Fails if `now` is before the Unix epoch.
+/// Fails if `now` is before the Unix epoch or the system's randomness can't be read.
 pub fn new_id(now: SystemTime) -> Result<RunTag, String> {
     let seconds = UnixTime::of(now)?.since_epoch().as_secs();
     let mut random = [0; 4];
@@ -185,8 +167,8 @@ pub fn new_id(now: SystemTime) -> Result<RunTag, String> {
     }
 }
 
-/// When `pumpkin run` minted the run id `id` ([`new_id`]), since the Unix epoch, to the second,
-/// as its digits say; `None` if it is no id of that form.
+/// When `id` was made, since the Unix epoch, to the second, as [`new_id`] wrote it into the id;
+/// `None` if `id` isn't of its form.
 pub fn minted(id: &str) -> Option<Duration> {
     let digits = |range: std::ops::Range<usize>| -> Option<u64> {
         let digits = id.get(range)?;
@@ -209,10 +191,9 @@ pub fn minted(id: &str) -> Option<Duration> {
     Some(Duration::from_secs(utc.to_unix()))
 }
 
-/// The one of `names`, the ids of the runs `among` says where, such as `in <dir>`, that `run`, an
-/// id, a prefix of one, or of its 8 random digits, names: the one that no other id shares it with.
-///
-/// Fails if `run` is empty, or names no id of `names` or several, which the error lists.
+/// The one of `names`, the ids of runs, that `run` names: a prefix of an id or of its random
+/// digits. Fails, saying so in terms of `among`, where the names are, if none matches or several
+/// do.
 pub fn named<'n>(names: &'n [String], run: &str, among: &str) -> Result<&'n str, String> {
     if run.is_empty() {
         return Err("the run is empty: name an id, a prefix of one, or a record's path".into());
@@ -241,13 +222,12 @@ pub fn named<'n>(names: &'n [String], run: &str, among: &str) -> Result<&'n str,
 }
 
 /// Makes the record directory of run `id` in `runs`, creating `runs` if need be, with its
-/// `record.json` and its locked `driver.pid`, syncing on `host` each directory that gains an
-/// entry; returns its path, in the canonical path of `runs`.
+/// `record.json` and its locked `driver.pid`, syncing on `host` each directory that gains an entry;
+/// returns its path, in the canonical path of `runs`.
 ///
 /// It is made as `.<id>.partial`, renamed to `<id>` once locked, so that no reader of `runs` sees
-/// it before its lock. What it makes is at most [`DIR_MODE`], so only its owner may write it, as
-/// `gateway::Sockets::create` needs. Fails, before it makes anything, if another user could
-/// rename an entry on the path to `runs` ([`checked`]).
+/// it before its lock. Fails, before it makes anything, if another user could rename an entry on
+/// the path to `runs`.
 pub(super) fn create(
     host: &impl Host,
     runs: &Path,
@@ -277,8 +257,6 @@ pub(super) fn create(
     }
 }
 
-/// Writes the files of a new record, of a run started with `args`, into `partial`, which is
-/// empty, locks its `driver.pid`, and renames `partial` to `dir`, in `runs`, syncing on `host`.
 fn fill(
     host: &impl Host,
     partial: &Path,
@@ -301,14 +279,15 @@ fn fill(
         .and_then(|()| host.sync(&pid, Durable::All))
         .context(pid_path.display())?;
     sync_dir(host, partial)?;
-    // A record directory is never empty, so the rename fails rather than replace one that an id
-    // collision names.
+    // Last, so that a record that exists is whole and its `driver.pid` locked. A record directory
+    // is never empty, so the rename fails rather than replace one that an id collision names.
     fs::rename(partial, dir).context(dir.display())?;
     sync_dir(host, runs)?;
     Ok(Lock { _file: pid })
 }
 
-/// A run's record on disk, found to be read: [`wait`](Self::wait) follows it to its end.
+/// A run's record on disk, which only [`Record::reap`] writes. Its methods read the files as they
+/// are, which change while the run lives.
 #[derive(Debug)]
 pub struct Record {
     id: String,
@@ -317,65 +296,58 @@ pub struct Record {
     other_build: Option<String>,
 }
 
-/// How a run ended, as its `outcome.json` says, each with a sentence that follows the run's id
-/// and says how in words, but a score, which the reader words as it shows any score.
+/// How a run ended, as its `outcome.json` says, each with a sentence that follows the run's id and
+/// says how in words, but a score, which the reader words as it shows any score.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// The run finished with a score, the JSON number `score`, after its work phase ended as
-    /// `after` says: `after the work phase ended <how>`.
+    /// It finished with a score, a JSON number, after its work phase ended as `after` says: `after
+    /// the work phase ended <how>`.
     Scored { score: String, after: String },
-    /// The run finished without a score, as the agent submitted nothing or the verdict has
-    /// none: `finished without a score: <why>`.
+    /// It finished without a score, as the agent submitted nothing or the verdict has none:
+    /// `finished without a score: <why>`.
     Unscored(String),
-    /// The run finished without a score as its final judge returned no result: `finished
-    /// without a score: <why>`. `judge_stderr` is where the record holds that judge's standard
-    /// error, which may not have been collected, or why the run log doesn't say.
+    /// It finished without a score as its final judge returned no result: `finished without a
+    /// score: <why>`. `judge_stderr` is where the record holds that judge's standard error, which
+    /// may not have been collected, or why the run log doesn't say.
     NoResult {
         why: String,
         judge_stderr: Result<PathBuf, String>,
     },
-    /// The run stopped without an outcome, as [`Stopped`](crate::Stopped) says in words:
-    /// `failed: <reason>`.
+    /// It stopped without an outcome, as `Stopped` says in words: `failed: <reason>`.
     Failed(String),
-    /// A signal stopped the run, as [`Stopped`](crate::Stopped) says in words: `was interrupted
-    /// by <signal>`.
+    /// A signal stopped it, as `Stopped` says in words: `was interrupted by <signal>`.
     Interrupted(String),
-    /// The run is lost: its driver ended without an `outcome.json`.
+    /// Its driver ended without an outcome.
     Lost,
 }
 
-/// The file of a record in which each [`Record::reap`] appends a line for each sandbox it
-/// deleted, which a later reap then leaves be.
+/// The file of a record in which each [`Record::reap`] appends a line for each sandbox it deleted,
+/// which a later reap then leaves be.
 ///
-/// A line is `{"at_ns": t, "provider": p, "id": i, "reaped": "removed"}`: at `t` nanoseconds
-/// since the Unix epoch, a decimal string, as the run log gives times, the reap deleted sandbox
-/// `i` of provider `p`, as `p` listed it or the record held it undeleted ([`write_sandbox`]).
+/// A line is `{"at_ns": t, "provider": p, "id": i, "reaped": "removed"}`: at `t` nanoseconds since
+/// the Unix epoch, a decimal string, as the run log gives times, the reap deleted sandbox `i` of
+/// provider `p`, as `p` listed it or the record held it undeleted.
 const REAPS: &str = "reaps.jsonl";
 
-/// What [`Record::reap`] removed of a run that had ended, or was lost.
+/// What [`Record::reap`] deleted.
 #[derive(Debug)]
 pub struct Reaped {
     /// The sandboxes that each provider it was given still listed, by the provider's name, now
     /// deleted.
     pub sandboxes: Vec<(Name, Vec<SandboxId>)>,
-    /// The sandboxes that the record held undeleted on a provider it was given, by the
-    /// provider's name, which that provider no longer listed, as they had ended, now deleted
-    /// with what each left there.
+    /// The sandboxes that the record held undeleted on a provider it was given, by the provider's
+    /// name, which that provider no longer listed, as they had ended, now deleted with what each
+    /// left there.
     pub ended: Vec<(Name, SandboxId)>,
-    /// Its socket directory, if one was left, now removed.
+    /// The directory of sockets removed, if there was one.
     pub sockets: Option<PathBuf>,
-    /// Whether it was lost, and is now recorded as failed, as its driver ended without an
-    /// outcome.
+    /// Whether the run had no outcome: the reap recorded it as failed.
     pub lost: bool,
 }
 
 impl Record {
-    /// The record in the directory `dir`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `dir` is no directory, has no `record.json`, or has one that is not a record of
-    /// this version of Pumpkin.
+    /// Opens the record in `dir`, whose name is the run's id. Fails if `dir` holds no
+    /// `record.json`, or one that isn't this build's `record_version`.
     pub fn open(dir: &Path) -> Result<Self, String> {
         let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
             return Err(format!(
@@ -442,17 +414,15 @@ impl Record {
         })
     }
 
-    /// The record that `run`, a record's directory name, a prefix of it or of its 8 random
-    /// digits that no other record's name shares, names in `runs`. Fails if `run` is empty, or
-    /// names no record or several, which the error lists.
+    /// Opens the record in `runs` that `run` names, as [`named`] reads it.
     pub fn find(runs: &Path, run: &str) -> Result<Self, String> {
         let names = names(runs)?;
         let id = named(&names, run, &format!("in {}", runs.display()))?;
         Self::open(&runs.join(id))
     }
 
-    /// Every record in `runs`, by its id, oldest first, each opened as [`open`](Self::open)
-    /// does, or why it can't be; a directory there that holds no `record.json` is no record.
+    /// Opens each record in `runs`, in the order of their ids; a directory that holds no
+    /// `record.json` is skipped, and one that doesn't open is an error in its place.
     pub fn all(runs: &Path) -> Result<Vec<Result<Self, String>>, String> {
         let mut records = Vec::new();
         for name in names(runs)? {
@@ -467,12 +437,9 @@ impl Record {
         Ok(records)
     }
 
-    /// The name of each directory in `runs` that may hold a record, sorted, so by id, oldest
-    /// first, as [`all`](Self::all) opens them, without opening any.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `runs` can't be listed.
+    /// The names of the directories in `runs` that may hold a record, in order, which is by id,
+    /// oldest first, but for those that start with `.`, each a record in the making, which isn't
+    /// there yet.
     pub fn names(runs: &Path) -> Result<Vec<String>, String> {
         names(runs)
     }
@@ -493,8 +460,7 @@ impl Record {
         &self.args
     }
 
-    /// The name of the run's workflow, from its `ir.json`; `None` if the record has none yet, as
-    /// one just begun.
+    /// The name of the workflow, or `None` if `ir.json` isn't written.
     pub fn task(&self) -> Result<Option<String>, String> {
         let Some(ir) = self.ir()? else {
             return Ok(None);
@@ -508,12 +474,7 @@ impl Record {
         }
     }
 
-    /// The run's workflow, as its `ir.json` keeps it ([`ir_json`]); `None` if the record has none
-    /// yet, as one just begun.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `ir.json` can't be read, or isn't JSON.
+    /// The workflow's IR, or `None` if `ir.json` isn't written.
     pub fn ir(&self) -> Result<Option<Value>, String> {
         let path = self.dir.join("ir.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -524,12 +485,7 @@ impl Record {
             .context(path.display())
     }
 
-    /// Where each of the run's roles is placed, by the role's name, as its `provider.json`
-    /// records it; `None` if the record has none yet, as one just begun.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `provider.json` can't be read, or isn't JSON.
+    /// Where each role is placed, by the role's name, or `None` if `provider.json` isn't written.
     pub fn places(&self) -> Result<Option<BTreeMap<String, Place>>, String> {
         let path = self.dir.join("provider.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -539,53 +495,33 @@ impl Record {
         Ok(Some(log::places(&provided)))
     }
 
-    /// Each whole line of the run's log from byte `bytes.start`, where one starts, to byte
-    /// `bytes.end`, where one ends, as a [`LogFold`] took them, in the log's order: the byte it
-    /// starts at, and its bytes, without the newline that ends it.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the log can't be read, or ends before `bytes.end`.
+    /// The lines of the run log within `bytes`, each without its newline and with the byte it
+    /// starts at; the range begins and ends at lines' ends, as
+    /// [`TakenLine::byte`](crate::TakenLine::byte) gives them. Fails if the log can't be read, or
+    /// ends before `bytes.end`.
     pub fn log_lines(&self, bytes: Range<u64>) -> Result<Vec<(u64, Vec<u8>)>, String> {
         log::lines(&self.dir, bytes)
     }
 
-    /// What the run's log says of it so far, as far as this build can read it ([`Readout`]).
-    ///
-    /// # Errors
-    ///
-    /// Fails if a file of the record can't be read, or, once the log exists, its `ir.json` or
-    /// `provider.json` isn't JSON.
+    /// What the whole run log says now.
     pub fn progress(&self) -> Result<Readout, String> {
         log::progress(&self.dir)
     }
 
-    /// The run's log, none of it read yet, to read as the run appends to it ([`LogFold`]).
+    /// A fold of the run log, which has taken nothing yet.
     pub fn fold(&self) -> LogFold {
         LogFold::new(&self.dir)
     }
 
-    /// Model request `number`'s body as it went upstream, or as its client sent it, rebuilt from
-    /// where the record keeps it, as its log's `model_answered` names it (`model::Exchange`).
-    ///
-    /// # Errors
-    ///
-    /// Fails if the log names no request `number` that the record kept, if a file it names can't
-    /// be read or isn't the form the record keeps, or if the log names the SHA-256 of the body
-    /// sent and the rebuilt body has another.
+    /// Model request `number`'s body, rebuilt from the items that the record keeps, as it went
+    /// upstream or, if the route refused it, as its client sent it. Fails if the log names no such
+    /// request, an item is missing, or the rebuilt body's SHA-256 isn't the one that the log holds.
     pub fn model_request(&self, number: u64) -> Result<Vec<u8>, String> {
         super::model::rebuilt_request(&self.dir, number)
     }
 
-    /// The body of model request `number`, whose log's `model_answered`'s `kept.request` is
-    /// `kept`, as the record keeps it: the items of its conversation and the fields it keeps
-    /// whole each by its digest, read without the items themselves; each field as it was sent if
-    /// the record kept none apart.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `kept` is no object, or if the request's file can't be read or isn't a JSON
-    /// object of the form that `kept` names.
+    /// Model request `number`'s body as the record keeps it: apart, as `kept`, the `kept.request`
+    /// of the log's `model_answered` line for it, says, or else whole.
     pub fn kept_request(&self, number: u64, kept: &Value) -> Result<KeptRequest, String> {
         let Value::Object(kept) = kept else {
             return Err(format!(
@@ -610,21 +546,12 @@ impl Record {
     }
 
     /// The bytes of model request `number`'s response as the record keeps it; while it is in
-    /// flight, as far as it has come.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the file can't be read, or is a symbolic link.
+    /// flight, as far as it has come. Fails if the file can't be read, or is a symbolic link.
     pub fn model_response(&self, number: u64) -> Result<Vec<u8>, String> {
         super::model::kept_response(&self.dir, number)
     }
 
-    /// The bytes of the conversation's item, or the field kept whole, that `digest` names, as
-    /// the record keeps it in `model/items/`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the record keeps no such item, or it can't be read.
+    /// The JSON text of the kept item whose SHA-256 is `digest`.
     pub fn kept_item(&self, digest: &Sha256Digest) -> Result<Vec<u8>, String> {
         super::model::kept_item(&self.dir, digest)
     }
@@ -635,9 +562,9 @@ impl Record {
         self.other_build.as_deref()
     }
 
-    /// Waits until the run has ended, or been lost, and returns how: at once if its
-    /// `outcome.json` is there. Calls `following` first if the run is live, which is to say that
-    /// the wait is a long one.
+    /// Waits until the run has ended, or been lost, and returns how: at once if its `outcome.json`
+    /// is there. Calls `following` first if the run is live, which is to say that the wait is a
+    /// long one.
     pub fn wait(&self, following: impl FnOnce()) -> Result<Ending, String> {
         if let Some(ending) = self.ending()? {
             return Ok(ending);
@@ -664,8 +591,7 @@ impl Record {
         }
     }
 
-    /// The process ID that the run's driver wrote to `driver.pid`, while it holds the record's
-    /// lock; `None` once the run has ended or been lost.
+    /// The process ID of the run's driver, or `None` if it has let go of its lock.
     pub fn driver(&self) -> Result<Option<u32>, String> {
         let (pid, path) = self.pid_file()?;
         match pid.try_lock_shared() {
@@ -687,13 +613,8 @@ impl Record {
 
     /// Waits for the run's driver, if one runs, to end, then deletes each sandbox of the run that
     /// `providers`, by name, list or the record holds undeleted, removes its `sockets/` and records
-    /// a lost run as failed. Two reaps of a record take turns. A provider left out deletes nothing.
-    ///
-    /// # Errors
-    ///
-    /// Fails, writing nothing, if the record has no `driver.pid`, its id is no run tag, or its
-    /// locks can't be taken; then if `outcome.json` can't be written, the run's sandboxes can't
-    /// be listed or deleted, or its socket directory can't be removed.
+    /// a lost run as failed; each deletion is appended to `reaps.jsonl`. Two reaps of a record take
+    /// turns. A provider left out deletes nothing, so a sandbox on it stays.
     pub fn reap(&self, providers: &[(&Name, &dyn Sweep)]) -> Result<Reaped, String> {
         let (pid, pid_path) = self.pid_file()?;
         let run = RunTag::try_from(self.id.clone()).map_err(|error| {
@@ -703,8 +624,8 @@ impl Record {
                 self.dir.display()
             )
         })?;
-        // A driver never takes the lock again once it has let go, so the run stays ended.
         pid.lock_shared().context(pid_path.display())?;
+        // A driver never takes the lock again once it has let go, so the run stays ended.
         drop(pid);
         // Reaps take turns by the directory's lock, which no driver takes, so that `driver.pid`'s
         // lock stays the driver's alone, which `driver` reads as a live run.
@@ -754,9 +675,9 @@ impl Record {
         })
     }
 
-    /// Whether the run's own end finished it, with every sandbox that the record holds deleted,
-    /// so that a reap would find of it only what a create that gave up made after the end's
-    /// sweep, which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
+    /// Whether the run's own end finished it, with every sandbox that the record holds deleted, so
+    /// that a reap would find of it only what a create that gave up made after the end's sweep,
+    /// which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
     pub fn ended_clean(&self) -> Result<bool, String> {
         let finished = match self.ended()? {
             Some(Ending::Scored { .. } | Ending::Unscored(_) | Ending::NoResult { .. }) => true,
@@ -765,12 +686,8 @@ impl Record {
         Ok(finished && self.undeleted()?.is_empty())
     }
 
-    /// The `sandbox.json` of each sandbox that the record holds, the agent's, each job's and each
-    /// lease's, by its directory below the record, such as `jobs/3`, in the order of their paths.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a directory or a `sandbox.json` of the record can't be read, or one isn't JSON.
+    /// The `sandbox.json` of each sandbox that has one, with its directory below the record, in
+    /// order.
     pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
         let mut dirs = vec![PathBuf::from("agent")];
         for of in ["jobs", "leases"] {
@@ -798,9 +715,6 @@ impl Record {
         Ok(sandboxes)
     }
 
-    /// Each sandbox that the record holds without a delete that succeeded, the agent's, each
-    /// job's and each lease's, by its provider's name, but those that an earlier reap removed
-    /// ([`REAPS`]).
     fn undeleted(&self) -> Result<Vec<(Name, SandboxId)>, String> {
         let reaps = self.dir.join(REAPS);
         let reaped = read_optional(&reaps)?.unwrap_or_default();
@@ -833,7 +747,6 @@ impl Record {
         Ok(undeleted)
     }
 
-    /// Appends to the record's [`REAPS`] a line for each of `listed` and of `ended`, at once.
     fn note_reaped(
         &self,
         listed: &[(Name, Vec<SandboxId>)],
@@ -856,9 +769,9 @@ impl Record {
         replace(&System, &self.dir, REAPS, &text)
     }
 
-    /// What each provider that the run's roles are placed on reported of its environment, by
-    /// its name: the `report` that `provider.json` holds of it, in the provider's own form; none
-    /// if the run didn't get as far as writing `provider.json`.
+    /// What each provider that the run's roles are placed on reported of its environment, by its
+    /// name: the `report` that `provider.json` holds of it, in the provider's own form; empty if
+    /// the run didn't get as far as writing `provider.json`.
     pub fn provider_reports(&self) -> Result<BTreeMap<Name, Value>, String> {
         let path = self.dir.join("provider.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -885,14 +798,9 @@ impl Record {
         reports.collect()
     }
 
-    /// Each role's model route as `provider.json` records it, by the role's name, each entry in
-    /// the route's order; a role that the table leaves out has no route. `None` if the record's
-    /// build kept no routes, which says nothing of which roles have one.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `provider.json` can't be read, as before a run writes it, or its `routes` isn't
-    /// the form a record keeps.
+    /// Each role's model route as `provider.json` records it, by the role's name, each entry in the
+    /// route's order; a role that the table leaves out has no route. `None` if the record's build
+    /// kept no routes, which says nothing of which roles have one.
     pub fn routes(&self) -> Result<Option<BTreeMap<String, Vec<RouteEntry>>>, String> {
         #[derive(serde::Deserialize)]
         struct Provided {
@@ -934,12 +842,8 @@ impl Record {
         }))
     }
 
-    /// What the run used, as its `outcome.json` records it ([`Used`]); `None` while it has none,
-    /// or if it has one without what the run used, as a reap writes of a lost run.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `outcome.json` can't be read, or its `usage` isn't the form a run writes.
+    /// What the run used, as its `outcome.json` records it; `None` while it has none, or if it has
+    /// one without what the run used, as a reap writes of a lost run.
     pub fn used(&self) -> Result<Option<Used>, String> {
         let path = self.dir.join("outcome.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -952,14 +856,12 @@ impl Record {
         }
     }
 
-    /// The record's `driver.pid`, opened, and its path.
     fn pid_file(&self) -> Result<(File, PathBuf), String> {
         let path = self.dir.join("driver.pid");
         let pid = File::open(&path).context(path.display())?;
         Ok((pid, path))
     }
 
-    /// How the run ended, if it has an `outcome.json`.
     fn ended(&self) -> Result<Option<Ending>, String> {
         let path = self.dir.join("outcome.json");
         let Some(bytes) = read_optional(&path)? else {
@@ -993,18 +895,19 @@ impl Record {
     }
 }
 
-/// An entry of a role's model route, as `provider.json` records it.
-///
-/// Its API, the deployment's name of the upstream that serves it, and the name the upstream takes
-/// for each model it allows, by the model's name.
+/// A route entry as `provider.json` has it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteEntry {
+    /// The API that the entry serves.
     pub api: Api,
+    /// The deployment's name of the upstream that serves it.
     pub upstream: String,
+    /// The name that the upstream takes for each model the entry allows, by the name the route
+    /// allows.
     pub models: BTreeMap<String, String>,
 }
 
-/// The bytes of the file at `path`, or `None` if there is no such file.
+/// The bytes of `path`, or `None` if there is no such file.
 pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -1013,8 +916,6 @@ pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// The names of the directories in `runs`, sorted, but for those that start with `.`, each a
-/// record in the making, which isn't there yet.
 fn names(runs: &Path) -> Result<Vec<String>, String> {
     let entries = fs::read_dir(runs).map_err(|error| {
         format!(
@@ -1037,8 +938,6 @@ fn names(runs: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// How `outcome`, a finished run's `outcome.json`, says the run ended: with its score, or why it
-/// has none, from its verdict, and how its work phase ended; its record is in `dir`.
 fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
     let work_end = &outcome["work_end"];
     let status = &work_end["status"];
@@ -1094,21 +993,16 @@ pub(super) fn sockets(dir: &Path) -> PathBuf {
     dir.join("sockets")
 }
 
-/// Where the record in `dir` holds the final judge's standard error,
-/// `jobs/<n>/log/command.stderr`, for the job `n` that its run log names
-/// ([`log::final_judge`]), or why the run log doesn't say.
 fn final_judge_stderr(dir: &Path) -> Result<PathBuf, String> {
     let job = dir.join(format!("jobs/{}", log::final_judge(dir)?));
     Ok(job.join(command_stderr().as_str()))
 }
 
-/// The most that the mode of a directory that [`create`] makes may be: a umask can only take bits
-/// from it.
+// The most that the mode of a directory that `create` makes may be: a umask can only take bits from
+// it, so no other user may write the record's directory, as `gateway::Sockets::create` needs of the
+// directory where it makes the sockets.
 const DIR_MODE: u32 = 0o755;
 
-/// Makes `dir` and those of its ancestors that are missing, as [`fs::create_dir_all`] does,
-/// each at most [`DIR_MODE`], and syncs the parent of each directory it makes on `host`, so that
-/// each lasts.
 fn create_dirs(host: &impl Host, dir: &Path) -> Result<(), String> {
     let missing: Vec<&Path> = (dir.ancestors())
         .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
@@ -1117,8 +1011,7 @@ fn create_dirs(host: &impl Host, dir: &Path) -> Result<(), String> {
         .create(dir)
         .context(dir.display())?;
     for made in missing.into_iter().rev() {
-        // The parent of a relative path's first component is the empty path: the current
-        // directory.
+        // The parent of a relative path's first component is the empty path: the current directory.
         let parent = made
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty());
@@ -1127,11 +1020,10 @@ fn create_dirs(host: &impl Host, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The canonical path of `runs`, once it is checked that it and each of its ancestors are owned
-/// by root or by this process's effective user ([`effective_uid`]), and that only their owner,
-/// or the user's private group ([`private_group`]), may write them, unless they are sticky, as
-/// `/tmp` is: else another user could rename the record, or a directory above it, and put one of
-/// their own in its place. Fails at the first one, from `/` down, that isn't so.
+/// `runs` made canonical, if no directory on its path, from the root down, can be written by a user
+/// other than this process's, or root, or by a group of more than that user, unless it is sticky,
+/// as `/tmp` is: else another user could rename the record, or a directory above it, and put one of
+/// their own in its place. Fails naming the first that can, and how to close it.
 fn checked(runs: &Path) -> Result<PathBuf, String> {
     let user = effective_uid()?;
     let canonical = fs::canonicalize(runs).context(runs.display())?;
@@ -1176,7 +1068,6 @@ fn checked(runs: &Path) -> Result<PathBuf, String> {
 
 const STATUS: &str = "/proc/self/status";
 
-/// The effective uid of this process, the second of the four on [`STATUS`]'s `Uid:` line.
 fn effective_uid() -> Result<u32, String> {
     let status = fs::read_to_string(STATUS).context(STATUS)?;
     (status.lines())
@@ -1194,10 +1085,9 @@ const PASSWD: &str = "/etc/passwd";
 
 const GROUP: &str = "/etc/group";
 
-/// The gid of the private group of `user`, if it has one: its primary group in [`PASSWD`], when
-/// [`GROUP`] lists it with no member but `user`, and no other user in [`PASSWD`] has it as their
-/// primary group. A user or a group these files don't list, as one that only a network database
-/// holds, has none, and a member that only such a database adds goes unseen.
+/// The primary group of `user`, if no one else is in it, so that it is as private as the user. A
+/// user or a group that `/etc/passwd` and `/etc/group` don't list, as one that only a network
+/// database holds, has none, and a member that only such a database adds goes unseen.
 fn private_group(user: u32) -> Result<Option<u32>, String> {
     let passwd = fs::read_to_string(PASSWD).context(PASSWD)?;
     let group = fs::read_to_string(GROUP).context(GROUP)?;
@@ -1218,8 +1108,6 @@ fn private_group(user: u32) -> Result<Option<u32>, String> {
     Ok((alone && !others).then_some(gid))
 }
 
-/// The entries of `file`, a file in the form of [`PASSWD`] or [`GROUP`], as their name, their
-/// id, and the fields after it, skipping the lines that hold none.
 fn entries(file: &str) -> impl Iterator<Item = (&str, u32, std::str::Split<'_, char>)> {
     file.lines().filter_map(|line| {
         let mut fields = line.split(':');
@@ -1229,7 +1117,6 @@ fn entries(file: &str) -> impl Iterator<Item = (&str, u32, std::str::Split<'_, c
     })
 }
 
-/// `seconds` since the Unix epoch as `YYYYMMDD-hhmmss`, in UTC.
 fn utc_stamp(seconds: u64) -> String {
     let Utc {
         year,
@@ -1242,15 +1129,8 @@ fn utc_stamp(seconds: u64) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
-/// What `provider.json` holds of `placed`, whose roles are placed on `providers` and served by
-/// `routes`, at `prices`: `{"providers": {p: {"report": r, "classes": {c: {"startup_seconds": s,
-/// "usd_per_hour": h}}}}, "roles": {n: {"provider": p, "class": c}}, "routes": {n: [{"api": a,
-/// "upstream": u, "models": {m: {"upstream_name": v, "usd_per_mtok": t}}}]}}`, where `r` is
-/// `p`'s report and each class `c` takes `s` to start and costs `h`, if `p` states a price, as
-/// `p` declared ([`Ready`](provider::Ready)); role `n` is placed on `p`, in class `c`; and each
-/// entry of `n`'s model route, in its order, takes API `a` to the upstream that the deployment
-/// names `u`, which takes model `m` as `v`, whose tokens cost `t`, if `prices` give it one. A role
-/// without a model route is not in `routes`.
+/// The content of `provider.json`: what each provider declared (`report`, `classes`), each role's
+/// place, and each role's route, with the prices that the machine's configuration gave.
 pub(super) fn provided(
     placed: &Placed,
     providers: &ByProvider<&dyn Provider>,
@@ -1319,24 +1199,16 @@ pub(super) fn provided(
     })
 }
 
-/// What a run of `workflow` keeps in its record's `ir.json`, as [`Run::prepare`] writes it.
-///
-/// It is the workflow's IR in a record's JSON form (`json_text`), and the IR's one encoding as
-/// text, so an IR printed elsewhere is byte for byte what a run of it records.
-///
-/// [`Run::prepare`]: crate::Run::prepare
+/// The workflow's IR as a run's `ir.json` holds it: the IR's one encoding as text, so an IR printed
+/// elsewhere is byte for byte what a run of it records.
 pub fn ir_json(workflow: &Workflow) -> String {
     json_text(&json!(workflow.ir()))
 }
 
-/// `value` as each JSON file of a record holds it: pretty-printed, with each object's keys in
-/// order, then a line feed.
 fn json_text(value: &Value) -> String {
     format!("{value:#}\n")
 }
 
-/// Writes `value` as the file `name` in `dir`, a directory of the record, in a record's JSON
-/// form ([`json_text`]), by [`replace`] on `host`.
 pub(super) fn write_json(
     host: &impl Host,
     dir: &Path,
@@ -1350,11 +1222,8 @@ pub(super) fn write_ir(host: &impl Host, dir: &Path, workflow: &Workflow) -> Res
     replace(host, dir, "ir.json", ir_json(workflow).as_bytes())
 }
 
-/// Writes `sandbox.json` in `dir`, a sandbox's directory in the record, made if need be, by
-/// [`replace`] on `host`: `{"provider": p, "id": i}`, sandbox `i` that provider `p` created;
-/// with `"gpus": [m, ...]` once its session says the GPUs its `sandboxd` saw
-/// ([`Session::gpus`](gateway::Session::gpus)); and, once `deleted` is the outcome of its latest
-/// delete, `"delete": {"state": "deleted"}`, or `{"state": "failed"}`.
+/// Writes `dir`'s `sandbox.json`, `dir` made if need be: the sandbox's provider and id, its GPUs if
+/// known, and how its latest delete went, if one was tried.
 pub(super) fn write_sandbox(
     host: &impl Host,
     dir: &Path,
@@ -1377,9 +1246,8 @@ pub(super) fn write_sandbox(
     write_json(host, dir, "sandbox.json", &sandbox)
 }
 
-/// Writes `bytes` as the file `name` in `dir`, whole or not at all, even if the machine stops:
-/// to a temporary file in `dir`, synced on `host`, then renamed over `name`, and `dir` synced.
-/// The temporary file is removed if it can't be written or renamed.
+/// Makes `dir/name` hold `bytes`, as it is or as it was, whenever the machine fails: written and
+/// synced aside, then renamed over it, then the directory synced.
 fn replace(host: &impl Host, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
     let temporary = dir.join(format!(".{name}.partial"));
     let path = dir.join(name);
@@ -1403,7 +1271,6 @@ fn replace(host: &impl Host, dir: &Path, name: &str, bytes: &[u8]) -> Result<(),
     sync_dir(host, dir)
 }
 
-/// The reference to an op's payload: its size and SHA-256.
 pub(super) fn reference(bytes: &[u8]) -> PayloadRef {
     let sha256: [u8; 32] = Sha256::digest(bytes).into();
     PayloadRef {
@@ -1412,16 +1279,13 @@ pub(super) fn reference(bytes: &[u8]) -> PayloadRef {
     }
 }
 
-/// The payloads of the ops a run accepted, each stored once in `payloads/`, under its SHA-256
-/// in hexadecimal, and synced on the run's host, `H`.
+/// The record's `payloads/`, where each accepted payload is kept under the digest of its bytes.
 pub(super) struct Payloads<'h, H> {
     dir: PathBuf,
     host: &'h H,
 }
 
 impl<'h, H: Host> Payloads<'h, H> {
-    /// Makes `payloads/` in the record's directory `record`, and syncs `record` on `host`, so
-    /// that it lasts.
     pub(super) fn create(host: &'h H, record: &Path) -> Result<Self, String> {
         let dir = record.join("payloads");
         fs::create_dir(&dir).context(dir.display())?;
@@ -1429,7 +1293,7 @@ impl<'h, H: Host> Payloads<'h, H> {
         Ok(Self { dir, host })
     }
 
-    /// Stores `bytes`, whose reference is `payload`, by [`replace`], unless they are stored
+    /// Keeps `bytes`, whose reference is `payload`, unless a payload of that digest is kept
     /// already: a file has a digest's name only once it holds all of its bytes.
     pub(super) fn store(&self, bytes: &[u8], payload: &PayloadRef) -> Result<(), String> {
         let path = self.path(&payload.digest);
@@ -1442,7 +1306,6 @@ impl<'h, H: Host> Payloads<'h, H> {
         }
     }
 
-    /// The payload whose reference is `payload`, as [`Payloads::store`] stored it.
     pub(super) fn stored(&self, payload: &PayloadRef) -> Stored {
         Stored {
             path: self.path(&payload.digest),
@@ -1455,14 +1318,13 @@ impl<'h, H: Host> Payloads<'h, H> {
     }
 }
 
-/// A payload in `payloads/`, which [`Stored::read`] reads back.
 pub(super) struct Stored {
     path: PathBuf,
     reference: PayloadRef,
 }
 
 impl Stored {
-    /// The payload's bytes, checked against its size and SHA-256.
+    /// The payload's bytes. Fails if the file's size or digest isn't the reference's.
     pub(super) fn read(&self) -> Result<Vec<u8>, String> {
         let bytes = fs::read(&self.path).context(self.path.display())?;
         let read = reference(&bytes);
@@ -1480,8 +1342,8 @@ impl Stored {
     }
 }
 
-/// What `dir`, where a sandbox's [`out_dir()`] and [`log_dir()`] were collected, holds of each,
-/// for the run log: `out, 0 files of 0 bytes; log, 2 files of 481 bytes`.
+/// What `dir`, where a sandbox's `out` and `log` were collected, holds of each, for the run log:
+/// `out, 0 files of 0 bytes; log, 2 files of 481 bytes`.
 pub(super) fn collected(dir: &Path) -> String {
     let parts = [out_dir(), log_dir()].map(|part| match tree_size(&dir.join(part.as_str())) {
         Ok(TreeSize { files, bytes }) => {
@@ -1496,7 +1358,6 @@ pub(super) fn collected(dir: &Path) -> String {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TreeSize {
-    /// The entries that aren't directories.
     files: u64,
     bytes: u64,
 }
