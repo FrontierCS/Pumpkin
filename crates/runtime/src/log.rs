@@ -58,7 +58,7 @@ pub use progress::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress,
     Readout, Sandbox, Tokens, Unread, Work,
 };
-pub use usage::{PlaceUse, Used};
+pub use usage::{Cost, PlaceUse, Priced, Used};
 pub(super) use usage::{usage_of, used};
 
 /// The run log, open for appending: each record's `at_ns` is when the log wrote it, by the run's

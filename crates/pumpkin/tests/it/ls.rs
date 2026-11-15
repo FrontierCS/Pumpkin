@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Scratch, StandIn, Step, asked, check, cut, judged, judged_log, lease_places, lease_task,
-    logged, masked, poll, ran, write_record, write_run,
+    Prices, Scratch, StandIn, Step, asked, check, cut, judged, judged_log, lease_places,
+    lease_task, logged, masked, poll, ran, write_record, write_run,
 };
 
 #[test]
@@ -240,7 +240,7 @@ fn lists_phases() {
     // deadline with nothing submitted, unpriced.
     let whole = "20261110-100000-0000000a";
     let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
-    let priced = lease_places(true);
+    let priced = lease_places(Prices::Both);
     write_run(
         &scratch,
         whole,
@@ -267,7 +267,7 @@ fn lists_phases() {
             json!([{ "kind": "finish" }]),
         ),
     ];
-    let unpriced = lease_places(false);
+    let unpriced = lease_places(Prices::Nothing);
     write_run(
         &scratch,
         late,
@@ -276,6 +276,16 @@ fn lists_phases() {
         Some(unscored),
         &unpriced,
     );
+    // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing.
+    for (id, prices) in [
+        ("20261110-120000-0000000c", Prices::Tokens),
+        ("20261110-120000-0000000d", Prices::Sandboxes),
+        ("20261110-120000-0000000e", Prices::Nothing),
+    ] {
+        let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+        let places = lease_places(prices);
+        write_run(&scratch, id, asked(id, 30), &log, Some(outcome), &places);
+    }
     // Live, cut at the second named, its last record written 2 seconds ago: as it starts its
     // agent, as the agent has made model requests, as it has called a judge, and as the final
     // judge runs; and an agent's that was written long ago, past its deadline.
@@ -354,26 +364,29 @@ fn lists_phases() {
             $ pumpkin ls --runs runs 20261110
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  49.36      $0.44+  example/lease
+              20261110-100000-0000000a finished     18m20s  49.36      $1.10+  example/lease
               20261110-110000-0000000b finished     30m06s  -               -  example/lease
-              2 runs: 2 finished (1 without a score); $0.44 so far, and more in classes without a price
+              20261110-120000-0000000c finished     18m20s  49.36      $0.66+  example/lease
+              20261110-120000-0000000d finished     18m20s  49.36      $0.44+  example/lease
+              20261110-120000-0000000e finished     18m20s  49.36           -  example/lease
+              5 runs: 5 finished (1 without a score); $2.20 so far, and more without a price
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  49.36      $0.44+  example/lease
+              20261110-100000-0000000a finished     18m20s  49.36      $1.10+  example/lease
               20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: the agent on aws/judge
-              20261111-090000-0000000b agent           <t>  of 30m      $0.00  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>
-              20261111-090000-0000000c agent           <t>  of 30m     $0.02+  example/lease: 3 model requests, the last answered <t> ago
+              20261111-090000-0000000b agent           <t>  of 30m      $0.66  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>
+              20261111-090000-0000000c agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
                                        job 0           <t>  of 10m06s          train judge on modal/a100_80 with unknown GPUs
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261111-090000-0000000d final judge     <t>  of 15m04s  $0.38+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
-              20261111-090000-0000000e agent           <t>  of 30m      $0.00  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
+              20261111-090000-0000000d final judge     <t>  of 15m04s  $1.04+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
+              20261111-090000-0000000e agent           <t>  of 30m      $0.66  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
               20261111-090000-0000000f publishing      <t>                  -  example/lease
               20261111-090000-0000000g agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
               20261111-090000-0000000h agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet
               20261111-090000-0000000i agent           <t>  of 30m      $0.00  example/lease: 2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
               20261111-090000-0000000j agent           <t>  of 30m      $0.00  example/lease: 2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
-              11 runs: 10 running, 1 finished; $0.85 so far, and more in classes without a price; every live run ends by <t> UTC"#]],
+              11 runs: 10 running, 1 finished; $4.15 so far, and more without a price; every live run ends by <t> UTC"#]],
     );
 }
 
@@ -408,34 +421,34 @@ fn lists_leases() {
         false,
         &[],
         &expect![[r#"
-        $ pumpkin ls --runs runs
-        exit status: Some(0)
-        printed:
-          20261114-090000-00000001 agent           <t>  of 30m     $0.02+  example/lease: 3 model requests, the last answered <t> ago
-                                   job 0           <t>  of 10m06s          train judge on modal/a100_80 with unknown GPUs
-                                   lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
-          20261114-090000-00000002 agent           <t>  of 30m     $0.02+  example/lease: 3 model requests, the last answered <t> ago
-                                   job 0           <t>  of 10m06s          train judge on modal/a100_80 with unknown GPUs
-                                   lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-          20261114-090000-00000003 agent           <t>  of 30m     $0.05+  example/lease: 3 model requests, the last answered <t> ago
-                                   lease 0         <t>                     box of job 0 on aws/box, closed as its call ended; its sandbox isn't gone yet; `sh -c set -e\nprint 7` exited 0
-          20261114-090000-00000004 agent           <t>  of 30m     $0.05+  example/lease: 3 model requests, the last answered <t> ago
-                                   lease 1         <t>  of 30m             gpu on modal/a100_80, starting
-                                   lease 2         <t>  of 2m              cpu on aws/judge, starting
-          20261114-090000-00000005 agent           <t>  of 30m     $0.06+  example/lease: 3 model requests, the last answered <t> ago
-                                   lease 1         <t>  of 1m              gpu on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
-                                   lease 2         <t>  of 2m              cpu on aws/judge, starting
-          20261114-090000-00000006 agent           <t>  of 30m     $0.07+  example/lease: 3 model requests, the last answered <t> ago
-                                   lease 1         <t>                     gpu on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
-                                   lease 2         <t>  of 2m              cpu on aws/judge, starting
-          20261114-090000-00000007 agent           <t>  of 30m     $0.08+  example/lease: 3 model requests, the last answered <t> ago
-                                   lease 2         <t>  of 30m             cpu on aws/judge, ready, 2s busy; `sleep 60` running
-          20261114-090000-00000008 agent           <t>  of 30m     $0.28+  example/lease: 3 model requests, the last answered <t> ago
-                                   lease 2         <t>  of 30m             cpu on aws/judge, ready, 30s busy; `sleep 60` timed out
-                                   lease 3         <t>                     gpu on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
-          20261114-090000-00000009 ending          <t>  of 1h43m   $0.37+  example/lease: the end of lease 2
-                                   lease 2         <t>                     cpu on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
-          9 runs: 9 running; $1.01 so far, and more in classes without a price; every live run ends by <t> UTC"#]],
+            $ pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              20261114-090000-00000001 agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
+                                       job 0           <t>  of 10m06s          train judge on modal/a100_80 with unknown GPUs
+                                       lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
+              20261114-090000-00000002 agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
+                                       job 0           <t>  of 10m06s          train judge on modal/a100_80 with unknown GPUs
+                                       lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
+              20261114-090000-00000003 agent           <t>  of 30m     $0.71+  example/lease: 3 model requests, the last answered <t> ago
+                                       lease 0         <t>                     box of job 0 on aws/box, closed as its call ended; its sandbox isn't gone yet; `sh -c set -e\nprint 7` exited 0
+              20261114-090000-00000004 agent           <t>  of 30m     $0.71+  example/lease: 3 model requests, the last answered <t> ago
+                                       lease 1         <t>  of 30m             gpu on modal/a100_80, starting
+                                       lease 2         <t>  of 2m              cpu on aws/judge, starting
+              20261114-090000-00000005 agent           <t>  of 30m     $0.72+  example/lease: 3 model requests, the last answered <t> ago
+                                       lease 1         <t>  of 1m              gpu on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
+                                       lease 2         <t>  of 2m              cpu on aws/judge, starting
+              20261114-090000-00000006 agent           <t>  of 30m     $0.73+  example/lease: 3 model requests, the last answered <t> ago
+                                       lease 1         <t>                     gpu on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
+                                       lease 2         <t>  of 2m              cpu on aws/judge, starting
+              20261114-090000-00000007 agent           <t>  of 30m     $0.74+  example/lease: 3 model requests, the last answered <t> ago
+                                       lease 2         <t>  of 30m             cpu on aws/judge, ready, 2s busy; `sleep 60` running
+              20261114-090000-00000008 agent           <t>  of 30m     $0.94+  example/lease: 3 model requests, the last answered <t> ago
+                                       lease 2         <t>  of 30m             cpu on aws/judge, ready, 30s busy; `sleep 60` timed out
+                                       lease 3         <t>                     gpu on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
+              20261114-090000-00000009 ending          <t>  of 1h43m   $1.03+  example/lease: the end of lease 2
+                                       lease 2         <t>                     cpu on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
+              9 runs: 9 running; $6.95 so far, and more without a price; every live run ends by <t> UTC"#]],
     );
 }
 
@@ -475,7 +488,7 @@ fn says_unread_lines() {
         asked(id, 90),
         &log,
         Some(unscored),
-        &lease_places(false),
+        &lease_places(Prices::Nothing),
     );
     let mut written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
     written.push_str("{\"seq\":\n");
@@ -487,7 +500,7 @@ fn says_unread_lines() {
         asked(unstarted, 90),
         &log,
         Some(json!({ "state": "failed", "reason": "the agent's sandbox didn't start" })),
-        &lease_places(false),
+        &lease_places(Prices::Nothing),
     );
     let written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
     let written = written.replacen("\"unix_ns\"", "\"unix\"", 1);
@@ -546,7 +559,7 @@ fn live(scratch: &Scratch, id: &str, log: &[Value], ago: Duration) -> File {
         since.checked_sub(last + ago).unwrap(),
         log,
         None,
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();

@@ -242,6 +242,7 @@ fn model_json(model: &ModelUse) -> Value {
         took,
         first_tokens,
         tokens,
+        by_model: _,
         dropped_headers,
         more_dropped_headers,
     } = model;

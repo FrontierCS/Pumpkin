@@ -22,9 +22,9 @@ use test_support::BUSYBOX;
 
 use super::view::Served;
 use super::{
-    BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, Scratch, StandIn, asked, cpu_list, cut, docker_table,
-    ended, install, invocation, judged, judged_log, lease_places, poll, report, workflow,
-    write_run,
+    BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, Prices, Scratch, StandIn, asked, cpu_list, cut,
+    docker_table, ended, install, invocation, judged, judged_log, lease_places, poll, report,
+    workflow, write_run,
 };
 
 /// The controller's settings, as the module renders its SSM parameter: the engine, the provider
@@ -3372,7 +3372,7 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
     let commit = runtime::BUILD.commit_hash().unwrap();
     install(scratch, &format!("home/.pumpkin/{commit}/bin"));
     let (ended, live) = ("20261110-090000-0000000a", "20261110-110000-0000000c");
-    let places = lease_places(true);
+    let places = lease_places(Prices::Both);
     let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
     let dir = write_run(
         scratch,
@@ -3454,14 +3454,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308312, end: 308312
+            next: 308432, end: 308432
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "agent"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 308312"#]],
+            state: "finished", end: 308432"#]],
     );
 }
 
@@ -3491,7 +3491,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: it ended before it replied in full; `ssh` ended with exit status: 255; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308312, end: 308312"#]],
+            next: 308432, end: 308432"#]],
     );
 }
 

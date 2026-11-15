@@ -9,7 +9,7 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::export::{EXPORTED, exported, reports, write_exported};
-use super::{Scratch, Step, asked, check, judged, judged_log, lease_places, write_run};
+use super::{Prices, Scratch, Step, asked, check, judged, judged_log, lease_places, write_run};
 
 /// The stand-in `aws`, which answers `--version`, ends every other command at once, as if it ran,
 /// and notes each in `calls` beside it, its arguments a line each, ended by an empty line.
@@ -59,7 +59,7 @@ fn uploads_what_changed() {
     let scratch = Scratch::new("publish-uploads-what-changed");
     scratch.write_executable("bin/aws", AWS.as_bytes());
     let outcome = Some(judged(49.36, json!({ "raw_score": 49.36 })));
-    let mut places = lease_places(true);
+    let mut places = lease_places(Prices::Both);
     for (provider, report) in reports().as_object().unwrap() {
         places["providers"][provider]["report"] = report.clone();
     }

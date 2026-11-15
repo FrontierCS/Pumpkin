@@ -13,8 +13,8 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Scratch, Step, asked, check, cut, judged, judged_log, lease_places, logged, poll, write_record,
-    write_run,
+    Prices, Scratch, Step, asked, check, cut, judged, judged_log, lease_places, logged, poll,
+    write_record, write_run,
 };
 
 /// A `pumpkin view` of `scratch`'s `runs`, killed as it is dropped.
@@ -178,7 +178,7 @@ const SERVED_LIVE: &str = "20261110-110000-0000000c";
 /// that is lost, one that is live, whose driver's lock it returns, held, one with no log, two
 /// that used no tokens that anyone counted, and a directory that holds no record.
 fn write_served(scratch: &Scratch) -> File {
-    let priced = lease_places(true);
+    let priced = lease_places(Prices::Both);
     let ended = SERVED_ENDED;
     let mut outcome = judged(49.36, json!({ "raw_score": 49.36 }));
     outcome["usage"] = json!({
@@ -337,17 +337,17 @@ fn serves_runs() {
             next: null
             runs:
               {"bound":"-","id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","scored":false,"state":"lost","time":"-","tokens":null,"usd":"-"}
-              {"bound":"of 30m","id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","scored":false,"state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.06+"}
-              {"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.06+"}
+              {"bound":"of 30m","id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","scored":false,"state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
+              {"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"}
               {"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"}
               {"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}
 
             GET /api/runs?before=<live>
-            {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.06+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}]}
+            {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
-            end: 8312
+            end: 8432
             id: "<ended>"
             lanes:
               {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
@@ -359,26 +359,26 @@ fn serves_runs() {
               {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"grant":"train","kind":"judge","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
               {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"grant":"train","kind":"judge","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {\"exit_status\":1,\"stderr_tail\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
-              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":null,"output":null},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
+              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":500,"output":50},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
             live: false
             log_epoch: 0
-            model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3000,"output":300},"took":{"count":3,"median":5.0}}
+            model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3500,"output":350},"took":{"count":3,"median":5.0}}
             other_build: null
             scored: true
             state: "finished"
             summary: "<as `wait` says it>"
-            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"judge call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"glm-5.3":"glm-5.3-flash"},"upstream":"zai"}],"score":false},{"kind":null,"name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"scorer","place":"modal/a100_80","routed":false,"routes":[],"score":true},{"kind":null,"name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":null,"name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
+            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"judge call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"glm-5.3":"glm-5.3-flash"},"upstream":"zai"}],"score":false},{"kind":null,"name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"scorer","place":"modal/a100_80","routed":true,"routes":[],"score":true},{"kind":null,"name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":null,"name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
             verdict: "Run <ended> finished with a score of 49.36, after the work phase ended when the agent exited with status 0"
 
             GET /api/runs/<ended>/since?log=<end>
-            {"end":8312,"live":false}
+            {"end":8432,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 8312, live false, next 8312, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7361
-            next 8312, end 8312, bytes [Number(7361), Number(7504), Number(7635), Number(7724), Number(7842), Number(8148)], the last's event "judge_collected"
+            end 8432, live false, next 8432, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7415
+            next 8432, end 8432, bytes [Number(7415), Number(7558), Number(7689), Number(7778), Number(7896), Number(8268)], the last's event "judge_collected"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -396,7 +396,7 @@ fn serves_runs() {
             {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8312: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8432: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -552,7 +552,7 @@ fn follows_a_live_run() {
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &[],
         None,
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
@@ -825,13 +825,15 @@ fn starts_over_a_shortened_log() {
     let scratch = Scratch::new("starts-over");
     let id = "20261110-180000-00000013";
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let mut places = lease_places(Prices::Both);
+    places.as_object_mut().unwrap().remove("routes");
     let dir = write_run(
         &scratch,
         id,
         since.checked_sub(Duration::from_secs(200)).unwrap(),
         &judged_log(),
         None,
-        &lease_places(true),
+        &places,
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
@@ -880,16 +882,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 8312, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3138&log_epoch=0
+            GET /api/runs/<id>: end 8432, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3192&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3138: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3138&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3192: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3192&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3138: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4498, log_epoch 1
-            GET /api/runs/<id>/since?log=3138&log_epoch=1
-            end 4498, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3192: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4552, log_epoch 1
+            GET /api/runs/<id>/since?log=3192&log_epoch=1
+            end 4552, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -910,7 +912,7 @@ fn windows_a_log_by_its_bytes() {
         asked(id, 30),
         &log,
         outcome,
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
     let (mut steps, mut at, mut records) = (Vec::new(), 0, 0);
@@ -937,7 +939,7 @@ fn windows_a_log_by_its_bytes() {
         &expect![[r#"
             from byte 0: 10001 records, next 709044
             from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10055 records, next 2486037"#]],
+            from byte 1757701: 10055 records, next 2486157"#]],
     );
 }
 
@@ -1113,7 +1115,7 @@ fn deflates_what_the_request_accepts() {
     let scratch = Scratch::new("deflates");
     let id = "20261110-200000-00000015";
     let outcome = Some(judged(49.36, json!({})));
-    let places = lease_places(true);
+    let places = lease_places(Prices::Both);
     write_run(&scratch, id, asked(id, 30), &judged_log(), outcome, &places);
     let served = Served::start(&scratch);
     let mut steps = Vec::new();
@@ -1163,10 +1165,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8312 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8312 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8312 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8312 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=8432 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8432 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8432 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8432 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 
@@ -1514,7 +1516,7 @@ fn traces_a_caller() {
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
         Some(json!({ "state": "failed" })),
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
     let run = format!("/api/runs/{id}");
@@ -1597,7 +1599,14 @@ fn traces_a_caller() {
     for other in 0..9 {
         let other = format!("20261110-170100-{other:08x}");
         let outcome = Some(json!({ "state": "failed" }));
-        write_run(&scratch, &other, since, &[], outcome, &lease_places(true));
+        write_run(
+            &scratch,
+            &other,
+            since,
+            &[],
+            outcome,
+            &lease_places(Prices::Both),
+        );
         served.get(&format!("/api/runs/{other}"));
     }
     let log_path = dir.join("log.jsonl");
@@ -1890,7 +1899,7 @@ fn traces_a_messages_exchange() {
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
         Some(json!({ "state": "failed" })),
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
     let run = format!("/api/runs/{id}");
@@ -2013,7 +2022,7 @@ fn follows_a_trace() {
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
         None,
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
@@ -2228,7 +2237,7 @@ fn diffs_two_requests() {
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
         Some(json!({ "state": "failed" })),
-        &lease_places(true),
+        &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
     let run = format!("/api/runs/{id}");
@@ -2383,7 +2392,7 @@ fn places_steps_whatever_their_answers_order() {
     }
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let started_at = since.checked_sub(Duration::from_secs(60)).unwrap();
-    let places = lease_places(true);
+    let places = lease_places(Prices::Both);
     write_run(
         &scratch,
         done,
@@ -2512,7 +2521,8 @@ fn holds_each_live_trace_and_the_last_three_ended() {
                 answered(n + 1, caller, n, 200, kept, Some("responses"))
             })
             .collect();
-        write_run(&scratch, id, since, &log, outcome, &lease_places(true));
+        let places = lease_places(Prices::Both);
+        write_run(&scratch, id, since, &log, outcome, &places);
     }
     let driver = File::open(scratch.0.join("runs").join(live).join("driver.pid")).unwrap();
     driver.lock().unwrap();
@@ -2688,7 +2698,7 @@ fn times_a_callers_ops() {
         ),
     ];
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    write_run(&scratch, id, since, &log, None, &lease_places(true));
+    write_run(&scratch, id, since, &log, None, &lease_places(Prices::Both));
     let served = Served::start(&scratch);
     let said = ["agent", "job-1"].map(|caller| {
         let reply = served.get(&format!("/api/runs/{id}/trace/{caller}/ops"));
