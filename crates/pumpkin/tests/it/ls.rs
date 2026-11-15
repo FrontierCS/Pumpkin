@@ -284,7 +284,7 @@ fn lists_phases() {
         ("20261111-090000-0000000a", 0, ago),
         ("20261111-090000-0000000b", 30, ago),
         ("20261111-090000-0000000c", 62, ago),
-        ("20261111-090000-0000000d", 1010, ago),
+        ("20261111-090000-0000000d", 1012, ago),
         ("20261111-090000-0000000e", 30, Duration::from_hours(1)),
     ]
     .into_iter()
@@ -362,12 +362,12 @@ fn lists_phases() {
             printed:
               20261110-100000-0000000a finished     18m20s  49.36      $0.44+  example/lease
               20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: the agent on aws/judge
-              20261111-090000-0000000b agent           <t>  of 30m      $0.00  example/lease: 3 model requests, the last answered <t> ago
+              20261111-090000-0000000b agent           <t>  of 30m      $0.00  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>
               20261111-090000-0000000c agent           <t>  of 30m     $0.02+  example/lease: 3 model requests, the last answered <t> ago
                                        job 0           <t>  of 10m06s          train judge on modal/a100_80 with unknown GPUs
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261111-090000-0000000d final judge     <t>  of 15m04s  $0.38+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB
-              20261111-090000-0000000e agent           <t>  of 30m      $0.00  example/lease: 3 model requests, the last answered <t> ago; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
+              20261111-090000-0000000d final judge     <t>  of 15m04s  $0.38+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
+              20261111-090000-0000000e agent           <t>  of 30m      $0.00  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
               20261111-090000-0000000f publishing      <t>                  -  example/lease
               20261111-090000-0000000g agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
               20261111-090000-0000000h agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet

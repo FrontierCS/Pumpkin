@@ -463,11 +463,9 @@ fn kept_exchanges(name: &str, record: &Path, mut received: Vec<Vec<u8>>) -> Vec<
     numbers.sort_unstable();
     numbers.dedup();
     let opened = Record::open(record).unwrap();
-    let upstream = (read_log(record).into_iter()).filter_map(|logged| {
-        let note = logged["note"].as_str()?;
-        let number = note.strip_prefix("model request ")?;
-        number.strip_suffix(" goes upstream")?.parse().ok()
-    });
+    let upstream = (read_log(record).into_iter())
+        .filter(|logged| logged["event"]["kind"] == "model_request_started")
+        .map(|logged| logged["event"]["request"].as_u64().unwrap());
     let mut rebuilt: Vec<Vec<u8>> = upstream
         .map(|number| opened.model_request(number).unwrap())
         .collect();
@@ -751,12 +749,11 @@ fn left(name: &str, providers: &[(&str, &Sim)], tag: &RunTag) -> Vec<String> {
 /// A stand-in for a model provider, on the loopback, which answers a request whose input is
 /// `stream` with a whole stream that echoes the request's line, its `authorization` and its
 /// body, one whose input is a number with that number as its whole body, one whose input is
-/// `stall` with a stream's head and first part, then nothing, until
-/// its client hangs up, one whose input is `expired` with a 401, as a provider refuses an
-/// expired key, one whose input is `forbidden` with a 403, and one whose input is `down` with a
-/// 502 that names its id for the request. Each stream's head names in
-/// `openai-model` the model that the request's body named, as a provider does that answers with
-/// the model asked for.
+/// `stall` with a stream's head and first part, then nothing, until its client hangs up, one
+/// whose input is `expired` with a 401, as a provider refuses an expired key, one whose input is
+/// `forbidden` with a 403, one whose input is `down` with a 502 that names its id for the
+/// request, and one whose input is `silent` with none. Each stream's head names in `openai-model`
+/// the model that the request's body named, as a provider does that answers with it.
 struct StandIn {
     address: String,
     stops: Sender<()>,
@@ -838,6 +835,7 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     let input: Value = serde_json::from_slice(&body).unwrap();
     let said = input["input"][1]["content"].as_str();
     let refused = match said {
+        Some("silent") => return (received, None),
         Some("expired") => Some(("401 Unauthorized", "")),
         Some("forbidden") => Some(("403 Forbidden", "")),
         Some("down") => Some(("502 Bad Gateway", "x-request-id: req-502\r\n")),
@@ -874,7 +872,8 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
         let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}"#;
         write_chunk(
             &mut connection,
-            "data: {\"type\":\"response.created\",\"response\":{\"usage\":null}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"usage\":null}}\n\n\
+             data: {\"type\":\"response.output_text.delta\",\"delta\":\"6\"}\n\n",
         );
         write_chunk(
             &mut connection,
@@ -956,8 +955,14 @@ fn logged(
                 *op = json!(op.as_u64().unwrap() - polls);
             }
         }
-        for time in ["at_ns", "observed_ns"] {
-            if let Some(ns) = logged.get_mut(time)
+        let times = [
+            "/at_ns",
+            "/observed_ns",
+            "/event/first_byte_ns",
+            "/event/first_token_ns",
+        ];
+        for time in times {
+            if let Some(ns) = logged.pointer_mut(time)
                 && nanos(ns) != Some(0)
                 && !scripted
             {
@@ -999,17 +1004,34 @@ fn logged(
 }
 
 /// The time of the last of `log`'s records, a run log's, once it checks that they are numbered
-/// from 0 with no gap, none timed before the one before it, and no event observed after its
-/// record was written.
+/// from 0 with no gap, none timed before the one before it, no event observed after its record
+/// was written, and each model request's start, its answer's first byte, its first token and its
+/// end in that order, where the log has them, its start before its answer in the log.
 fn in_order(log: &[Value]) -> Option<Duration> {
     let time = |ns: &Value| Duration::from_nanos(nanos(ns).unwrap());
-    let mut last = None;
+    let (mut last, mut started) = (None, BTreeMap::new());
     for (seq, logged) in log.iter().enumerate() {
         assert_eq!(logged["seq"], json!(seq), "{logged}");
         let at = Some(time(&logged["at_ns"]));
         assert!(last <= at, "{logged} comes before the record before it");
         let observed = logged.get("observed_ns").map(time);
         assert!(observed <= at, "{logged} was observed after it was written");
+        let event = &logged["event"];
+        match event["kind"].as_str() {
+            Some("model_request_started") => {
+                started.insert(event["request"].as_u64(), observed);
+            }
+            Some("model_answered") => {
+                let start = started.remove(&event["request"].as_u64()).flatten();
+                let marks = ["first_byte_ns", "first_token_ns"];
+                let marks = marks.map(|field| event.get(field).map(time));
+                let each = iter::once(start).chain(marks).chain([observed]).flatten();
+                assert!(each.is_sorted(), "{logged}: its times are out of order");
+                let timed = start.is_some() || marks == [None, None];
+                assert!(timed, "{logged}: it has times, but no start");
+            }
+            _ => {}
+        }
         last = at;
     }
     last
@@ -2572,6 +2594,7 @@ fn model_requests() {
         "finalize submit 6",
         "model m-large usage",
         "model m-large limited",
+        "model m-large silent",
         "model m-large expired",
     ];
     let shown = executed(
@@ -2585,41 +2608,45 @@ fn model_requests() {
     expect![[r#"
         finished, with score Some(Number(6))
         payloads hold: ["xxxxxx"]
-        outcome.json's usage: {"model_requests":5,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}
+        outcome.json's usage: {"model_requests":6,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":294,"bytes":272,"items":{"count":3,"field":"input"},"path":"model/0.request"},"response":{"bytes":372,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":294,"bytes":272,"items":{"count":3,"field":"input"},"path":"model/0.request"},"response":{"bytes":372,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"api":"responses","caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":5}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
-        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":273,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"seq":8}
-        {"at_ns":"<ns>","note":"model request 3 goes upstream","seq":9}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","failed":{"code":"rate_limit_exceeded"},"kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/3.request"},"response":{"bytes":281,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":200},"seq":10}
-        {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":11}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":7,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream_status":401},"seq":12}
-        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1686 bytes","seq":14}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":15}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":16}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":17}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":18}
-        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":19}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":2},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","first_token_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":330,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":3},"observed_ns":"<ns>","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","failed":{"code":"rate_limit_exceeded"},"first_byte_ns":"<ns>","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/3.request"},"response":{"bytes":281,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":4},"observed_ns":"<ns>","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider gave no answer: try again","status":502},"api":"responses","caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":115,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":5},"observed_ns":"<ns>","seq":13}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/5.request"},"response":{"bytes":7,"path":"model/5.response"}},"kind":"model_answered","request":5,"upstream":"stand-in","upstream_status":401},"observed_ns":"<ns>","seq":14}
+        {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1921 bytes","seq":16}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":17}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":18}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":19}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":20}
+        {"actions":[{"kind":"finish","outcome":{"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":21}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
         model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-        model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 2: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
         model request 3: 200 [("content-type", "text/event-stream"), ("openai-model", "m-large")] event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
-        model request 4: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
+        model request 4: 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}
+        model request 5: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
         model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a","sha256:55d2a41f5ef0f1adb28a4e2d4420c19e5c857ee46121cc479a8f7bc2fdac819b"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
         model exchange 1 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6bc0b5dcffbd963414c779a049374557aba7edf0b7655c06cfd15b83b4901d9d"],"model":"vendor/m-large","store":false}; response data: {"type":"response.created","response":{"usage":null}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6bc0b5dcffbd963414c779a049374557aba7edf0b7655c06cfd15b83b4901d9d"],"model":"vendor/m-large","store":false}; response data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
         model exchange 3 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:7b6c4b476ddef378a1d5d3f8d8aede1f77d78e9f85b27ee071a96779b90da7df"],"model":"vendor/m-large","store":false}; response event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
-        model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; response refused
-        model items kept: 6
+        model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ab7db161254d2c7471c643168516a57af7f7841c5b6613b468ba76fd09cd4ba6"],"model":"vendor/m-large","store":false}; response {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}
+        model exchange 5 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; response refused
+        model items kept: 7
         the model endpoint at each create: [true, false]"#]]
     .assert_eq(&shown);
 }
@@ -2649,13 +2676,13 @@ fn model_upstream_refusals() {
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"caller":"agent","kept":{"request":{"body_bytes":177,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":403},"seq":4}
-        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
-        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":401},"seq":8}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"agent","kept":{"request":{"body_bytes":167,"bytes":167,"path":"model/3.request"},"response":{"bytes":191,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":177,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":403},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":2},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream":"stand-in","upstream_status":401},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"agent","kept":{"request":{"body_bytes":167,"bytes":167,"path":"model/3.request"},"response":{"bytes":191,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":9}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 1083 bytes","seq":12}
@@ -2705,18 +2732,18 @@ fn model_provider_down() {
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":7,"path":"model/1.response"}},"kind":"model_answered","request":1,"request_id":"req-502","upstream_status":502},"seq":6}
-        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"request_id":"req-502","upstream_status":502},"seq":8}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/3.request"},"response":{"bytes":153,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream_status":null},"seq":9}
-        {"at_ns":"<ns>","note":"model request 4 goes upstream","seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":7,"path":"model/1.response"}},"kind":"model_answered","request":1,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"<ns>","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":2},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":7,"path":"model/2.response"}},"kind":"model_answered","request":2,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"api":"responses","caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/3.request"},"response":{"bytes":153,"path":"model/3.response"}},"kind":"model_answered","request":3,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":4},"observed_ns":"<ns>","seq":10}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 867 bytes","seq":12}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":25,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream_status":200},"seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/4.request"},"response":{"bytes":25,"path":"model/4.response"}},"kind":"model_answered","request":4,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":14}
         {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","seq":15}
         its last record came before the agent's teardown was to end
         the agent's standard output:
@@ -2753,9 +2780,9 @@ fn model_barred_is_no_failure() {
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":4}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":null},"seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"api":"responses","caller":"agent","kept":{"request":{"body_bytes":166,"bytes":166,"path":"model/1.request"},"response":{"bytes":153,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":5}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":6}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 567 bytes","seq":7}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":8}
@@ -2787,10 +2814,10 @@ fn model_provider_recovers() {
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":4}
-        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":252,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":6}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish","outcome":{"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 444 bytes","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
@@ -2829,13 +2856,13 @@ fn model_provider_down_at_the_deadline() {
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream_status":502},"seq":5}
-        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":172,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":6}
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 217 bytes","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":25,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":25,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":10}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":11}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
@@ -2871,11 +2898,11 @@ fn model_stream_cut() {
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":4}
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":10}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
@@ -2912,12 +2939,12 @@ fn model_grace_cut() {
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":6}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":9}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
@@ -2969,15 +2996,15 @@ fn judge_model() {
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"at_ns":"<ns>","note":"`final_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"agent","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":174,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":252,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":5}
         {"actions":[{"kind":"reply","op":0,"reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 353 bytes","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
-        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":11}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":12}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
         {"actions":[{"kind":"finish","outcome":{"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":15}
@@ -3024,14 +3051,14 @@ fn judge_and_agent_model() {
         {"at_ns":"<ns>","note":"`agent`'s model route: `responses` to the upstream `stand-in`, which takes `m-large` as `vendor/m-large`","seq":1}
         {"at_ns":"<ns>","note":"`train_judge`'s model route: `responses` to the upstream `stand-in`, which takes `m-small` as `vendor/m-small`","seq":2}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":3}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":4}
         {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":5}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
-        {"at_ns":"<ns>","note":"model request 1 goes upstream","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"caller":"job-0","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream_status":200},"seq":8}
-        {"at_ns":"<ns>","note":"model request 2 goes upstream","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":169,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/1.request"},"response":{"bytes":1,"path":"model/1.response"}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":2},"observed_ns":"<ns>","seq":9}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"job-0","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":25,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream_status":200},"seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/2.request"},"response":{"bytes":25,"path":"model/2.response"}},"kind":"model_answered","request":2,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":11}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"score":5}},"observed_ns":"<ns>","seq":13}
         {"actions":[{"kind":"reply","op":1,"reply":{"job":0,"kind":"status","remaining":{"calls":99,"seconds":null},"returned":{"raw_score":5},"scored":true,"state":"completed"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"job":"0","kind":"status"}},"observed_ns":"<ns>","seq":14}
@@ -3039,7 +3066,7 @@ fn judge_and_agent_model() {
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":16}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 126 bytes","seq":17}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":18}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"caller":"agent","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":200},"seq":19}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":25,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":19}
         {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
         {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":22}
@@ -3089,8 +3116,8 @@ fn judge_key_refused() {
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":2}
         {"actions":[{"kind":"reply","op":0,"reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":3}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":4}
-        {"at_ns":"<ns>","note":"model request 0 goes upstream","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"caller":"job-0","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream_status":401},"seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":175,"bytes":198,"items":{"count":2,"field":"input"},"path":"model/0.request"},"response":{"bytes":7,"path":"model/0.response"}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":401},"observed_ns":"<ns>","seq":6}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}

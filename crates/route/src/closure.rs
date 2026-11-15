@@ -87,6 +87,8 @@ struct Rules {
     conversation: &'static str,
     /// Where a response's usage gives its tokens.
     usage: usage::Fields,
+    /// Which events of a response's stream are the model's output.
+    output: usage::Output,
     /// Refuses a body that keeps state on the provider's side, or refers to state kept there.
     stored: fn(&Map<String, Value>) -> Result<(), Refusal>,
     /// Refuses a body that picks a feature of the provider's beyond its models and tools.
@@ -103,6 +105,7 @@ const RESPONSES: Rules = Rules {
     headers: &RESPONSES_HEADERS,
     conversation: "input",
     usage: usage::RESPONSES_FIELDS,
+    output: usage::responses_output,
     stored: stateless,
     feature: picks_no_feature,
     tool: client_tool,
@@ -113,6 +116,7 @@ const CHAT: Rules = Rules {
     headers: &CHAT_HEADERS,
     conversation: "messages",
     usage: usage::CHAT_FIELDS,
+    output: usage::chat_output,
     stored: stores_nothing,
     feature: searches_nothing,
     tool: function_tool,
@@ -260,6 +264,10 @@ impl Closed {
 
     pub(crate) fn usage(&self) -> usage::Fields {
         self.rules.usage
+    }
+
+    pub(crate) fn output(&self) -> usage::Output {
+        self.rules.output
     }
 
     /// `answered`, the model that a response says answered the request, as the request named

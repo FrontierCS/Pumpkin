@@ -6,23 +6,25 @@ use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Answer, Keep, Route, Serving, Upstream};
-use schema::ir::{ApiRoute, Name, Sha256Digest};
+use schema::ir::{Api, ApiRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use stdx::{Context as _, Deadline, unpoisoned};
 
-use crate::Stopped;
+use crate::{Clock, Stopped};
 
 /// A sandbox's model route, as the run serves it: for each entry, the route that closes its
-/// requests and the upstream that they reach, with the name that the deployment gives it.
+/// requests and the upstream that they reach, with the name that the deployment gives it and the
+/// entry's API.
 pub(super) struct Served {
     entries: Vec<(Route, Upstream)>,
-    names: Vec<Name>,
+    names: Vec<(Name, Api)>,
     /// How the model provider is failing the sandbox: the failure, if the last request answered
     /// while the route was open got one, and no 2xx came after it.
     failing: Mutex<Option<Failing>>,
@@ -118,7 +120,7 @@ impl Served {
             let route = Route::new(serving.api, serving.models.clone());
             (route, Upstream::new(&serving.url, &serving.key))
         });
-        let names = servings.iter().map(|serving| serving.name.clone());
+        let names = (servings.iter()).map(|serving| (serving.name.clone(), serving.api));
         (!servings.is_empty()).then(|| Self {
             entries: entries.collect(),
             names: names.collect(),
@@ -127,23 +129,24 @@ impl Served {
     }
 
     /// Answers `incoming`, the sandbox's model request numbered `number`, as [`route::serve`] does,
-    /// keeping it in `exchange`. It gives `note` a note on a request that it forwards, before it
-    /// does, and tells `answered` how it answered the request, before the answer's end is written.
+    /// keeping it in `exchange`, calling `forwarding` just before it sends it upstream, and
+    /// telling `answered` how it answered it, and the upstream and API of the entry that took it,
+    /// if one did, before the answer's end is written.
     pub(super) fn serve(
         &self,
-        (number, exchange): (u64, &Exchange),
+        (number, exchange): (u64, &Exchange<impl Clock>),
         incoming: IncomingModelRequest,
         allowed: bool,
         by: Deadline,
-        note: impl FnOnce(String),
-        answered: impl FnOnce(Answer),
+        forwarding: impl FnOnce(),
+        answered: impl FnOnce(Option<&(Name, Api)>, Answer),
     ) {
-        let forwarding = || note(format!("model request {number} goes upstream"));
         let answered = |entry: Option<usize>, answer| {
-            if let Some(entry) = entry {
-                self.bear(number, &self.names[entry], &answer);
+            let taken = entry.map(|entry| &self.names[entry]);
+            if let Some((name, _)) = taken {
+                self.bear(number, name, &answer);
             }
-            answered(answer);
+            answered(taken, answer);
         };
         let entries = &self.entries;
         route::serve(
@@ -175,7 +178,7 @@ impl Served {
             .entries
             .iter()
             .position(|(_, upstream)| upstream.key_was_refused());
-        refused.map(|entry| &self.names[entry])
+        refused.map(|entry| &self.names[entry].0)
     }
 
     /// Checks that the sandbox's last request answered while the route was open got no failure
@@ -270,8 +273,13 @@ fn failure(answer: &Answer) -> Option<String> {
 /// answer's body as `<n>.response`, each made as its first bytes come. A request whose body holds
 /// a conversation the route read keeps each of its items once, in `items/<hex>`, the item's JSON
 /// named by its SHA-256, and its body with that list of items as their digests, in order;
-/// [`Record::model_request`](super::Record::model_request) rebuilds it.
-pub(super) struct Exchange {
+/// [`Record::model_request`](super::Record::model_request) rebuilds it. It notes, by the run's
+/// clock `C`, when its answer's first bytes came, and when its stream's output began.
+pub(super) struct Exchange<C> {
+    clock: C,
+    /// When its answer's first bytes came, once they have, and its stream's output began, once
+    /// it has.
+    first: Cell<Option<(Duration, Option<Duration>)>>,
     dir: PathBuf,
     number: u64,
     request: Part,
@@ -298,14 +306,17 @@ struct Part {
     bytes: Cell<u64>,
 }
 
-impl Exchange {
-    pub(super) fn new(record: &Path, number: u64) -> Self {
+impl<C: Clock> Exchange<C> {
+    /// Exchange `number`, to keep in the record at `record`, timed by `clock`.
+    pub(super) fn new(record: &Path, number: u64, clock: C) -> Self {
         let part = |name| Part {
             name,
             file: RefCell::new(None),
             bytes: Cell::new(0),
         };
         Self {
+            clock,
+            first: Cell::new(None),
             dir: record.join("model"),
             number,
             request: part("request"),
@@ -337,6 +348,11 @@ impl Exchange {
             }
         }
         kept
+    }
+
+    /// When its answer's first bytes came, if they have, and its stream's output began, if it has.
+    pub(super) fn timed(&self) -> Option<(Duration, Option<Duration>)> {
+        self.first.get()
     }
 
     /// Syncs what it kept to the record's disk, and returns why keeping it failed, if it did.
@@ -451,7 +467,7 @@ pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, Str
     Ok(Value::Object(fields).to_string().into_bytes())
 }
 
-impl Keep for Exchange {
+impl<C: Clock> Keep for Exchange<C> {
     fn request(&self, body: &[u8], conversation: Option<&'static str>) {
         let split = conversation.and_then(|field| Some((field, self.without_items(body, field)?)));
         let (kept, items) = match &split {
@@ -464,6 +480,19 @@ impl Keep for Exchange {
     }
 
     fn response(&self, bytes: &[u8]) {
+        if !bytes.is_empty() && self.first.get().is_none() {
+            self.first.set(Some((self.clock.now(), None)));
+        }
         self.add(&self.response, bytes);
+    }
+
+    fn first_output(&self) {
+        let Some((first_byte, None)) = self.first.get() else {
+            unreachable!(
+                "the route told the stream's output began before any of its bytes, or twice, \
+                 though it tells it once at most, after the bytes that hold it (`Keep`)"
+            )
+        };
+        self.first.set(Some((first_byte, Some(self.clock.now()))));
     }
 }

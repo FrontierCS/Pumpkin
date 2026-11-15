@@ -391,6 +391,9 @@ fn reads_model_answers() {
             last_good: Some(
                 1s,
             ),
+            in_flight: {},
+            took: [],
+            first_tokens: [],
             tokens: Tokens {
                 reported: 0,
                 input: 0,

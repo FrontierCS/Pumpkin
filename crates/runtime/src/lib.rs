@@ -28,7 +28,7 @@ use gateway::{
 };
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
-use schema::ir::Image;
+use schema::ir::{Api, Image, Name};
 use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
 use schema::workflow::{ByProvider, ByRole, JudgeCall, LeaseGrantId, Placed, RoleId, Workflow};
 use serde_json::json;
@@ -54,7 +54,7 @@ pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Direction, LeaseSpan, ModelUse, Part, Place,
     PlaceUse, Progress, Readout, Sandbox, Tokens, Unread, Work,
 };
-use log::{Entry, Log};
+use log::{Entry, Log, ModelAnswer};
 use model::{Exchange, Served};
 pub use record::{BUILD, Build, Ending, Reaped, Record, ir_json, minted, named, new_id};
 use record::{Lock, Payloads};
@@ -756,7 +756,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         let by = deadline(&self.clock, by);
         let reports = self.inbox.sender();
-        let exchange = Exchange::new(self.dir, number);
+        let clock = self.clock.clone();
+        let exchange = Exchange::new(self.dir, number, clock.clone());
         // A request stays in flight until its thread writes its response's end, the thread's
         // last step, so the session's bound on the requests in flight,
         // `MAX_MODEL_REQUESTS_IN_FLIGHT`, bounds these threads too, but for those writing that
@@ -766,16 +767,31 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             .spawn_scoped(scope, move || {
                 // The loop's inbox outlives every request's thread, which the run's end waits
                 // for. Both reports come before the answer's end, and so before what the caller
-                // does next.
-                let noted = |note| {
-                    let _ = reports.send(Input::Logged(Entry::Note(note)));
+                // does next. Each time is read here, as it happens, since the loop writes the
+                // record later, by however long it is busy.
+                let forwarding = || {
+                    let started = Entry::ModelRequestStarted((caller, number), clock.now());
+                    let _ = reports.send(Input::Logged(started));
                 };
-                let answered = |answer| {
-                    let kept = exchange.kept();
-                    let answered = Entry::ModelAnswered((caller, number), answer, kept);
+                let answered = |taken: Option<&(Name, Api)>, answer| {
+                    let answered = ModelAnswer {
+                        taken: taken.cloned(),
+                        answer,
+                        kept: exchange.kept(),
+                        first: exchange.timed(),
+                        ended: clock.now(),
+                    };
+                    let answered = Entry::ModelAnswered((caller, number), answered);
                     let _ = reports.send(Input::Logged(answered));
                 };
-                served.serve((number, &exchange), incoming, allowed, by, noted, answered);
+                served.serve(
+                    (number, &exchange),
+                    incoming,
+                    allowed,
+                    by,
+                    forwarding,
+                    answered,
+                );
                 if let Some(failed) = exchange.finish() {
                     let note = format!("model request {number} wasn't kept whole: {failed}");
                     let _ = reports.send(Input::Logged(Entry::Note(note)));

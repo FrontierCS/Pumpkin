@@ -11,8 +11,8 @@
 //!   "hard_end_ns": "h"}`, observed at 0, `u` nanoseconds after the Unix epoch by the driving
 //!   machine's clock, whose hard end is `h` after it;
 //! - one that no core decides on: an `op_refused` ([`Log::refused`]) or an [`Entry`], `{"seq": n,
-//!   "at_ns": "t", "event": e, "actions": []}`, or a note, `{"seq": n, "at_ns": "t", "note": s}`,
-//!   such as why the run failed.
+//!   "at_ns": "t", "event": e, "actions": []}`, with `"observed_ns": "o"` as above if the thread
+//!   that observed it timed it; or a note, `{"seq": n, "at_ns": "t", "note": s}`.
 //!
 //! `seq` counts records from 0. Each event and action is an object whose `kind` is its name in
 //! snake case, such as `{"kind": "judge_exited", "job": 1, "status": {"code": 0}}`. Grants appear
@@ -38,7 +38,7 @@ use decision::{
 use gateway::RefusedOp;
 use provider::UnixTime;
 use route::{Answer, Usage};
-use schema::ir::{Gpu, GpuModel, Name};
+use schema::ir::{Api, Gpu, GpuModel, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use schema::workflow::{JudgeCall, Workflow};
@@ -140,21 +140,32 @@ impl<'h, H: Host> Log<'h, H> {
         self.sync()
     }
 
-    /// Appends the record of `answer`, how `caller`'s route answered its model request numbered
-    /// `request`: `{"kind": "model_answered", "caller": c, "request": n, "upstream_status": u,
-    /// "answer": a, "kept": k}`, with `"request_id": i` if the upstream named its id for the
-    /// request, `"usage"` if its response reported one ([`Usage`]), and `"failed": {"code": c}`
-    /// if its response stated that it failed, without `"code"` if it gave none
-    /// ([`route::Failure`]), where `u` is the upstream's status, or `null` if no response came,
-    /// `a` the [`Answer`]'s kind, with a refusal's or a bar's status and message, but never a
-    /// body, and `k` where the record keeps the exchange
-    /// ([`Exchange::kept`](super::Exchange::kept)).
+    /// Appends how `caller`'s route answered its request `request`, observed at its end:
+    /// `{"kind": "model_answered", "caller": c, "request": n, "upstream_status": u, "answer": a,
+    /// "kept": k}`; `"upstream"` and `"api"` as [`ModelAnswer`] says; `"request_id"` if the
+    /// upstream named one; `"usage"` if reported ([`Usage`]); `"failed": {"code": c}` if it
+    /// stated a failure, without `"code"` if it gave none ([`route::Failure`]); and if a response
+    /// came, `"first_byte_ns"` and `"first_token_ns"` as [`ModelAnswer`] says, where it has them.
+    /// `u` is the upstream's status, or `null` if no response came, `a` the [`Answer`]'s kind, with
+    /// a refusal's or a bar's status and message, but never a body, and `k` where the record keeps
+    /// the exchange ([`Exchange::kept`](super::Exchange::kept)).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one place for each field of the record"
+    )]
     fn model_answered(
         &mut self,
         (caller, request): (Caller, u64),
-        answer: &Answer,
-        kept: Value,
+        answered: ModelAnswer,
     ) -> Result<(), String> {
+        let ModelAnswer {
+            taken,
+            answer,
+            kept,
+            first,
+            ended,
+        } = answered;
+        let answer = &answer;
         let (upstream_status, request_id, (usage, failed), answer) = match answer {
             Answer::Forwarded {
                 status,
@@ -199,6 +210,19 @@ impl<'h, H: Host> Log<'h, H> {
             "upstream_status": upstream_status,
             "answer": answer,
         });
+        if let Some((upstream, api)) = taken {
+            event["upstream"] = json!(upstream);
+            event["api"] = json!(api);
+        }
+        // Where no response came, the bytes kept are the route's refusal's.
+        if upstream_status.is_some()
+            && let Some((first_byte, first_token)) = first
+        {
+            event["first_byte_ns"] = json!(nanos(first_byte));
+            if let Some(first_token) = first_token {
+                event["first_token_ns"] = json!(nanos(first_token));
+            }
+        }
         if let Some(request_id) = request_id {
             event["request_id"] = json!(request_id);
         }
@@ -212,15 +236,21 @@ impl<'h, H: Host> Log<'h, H> {
             };
         }
         event["kept"] = kept;
-        self.told(event)
+        self.observed(ended, event, &[])
     }
 
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
-            Entry::ModelAnswered(request, answer, kept) => {
-                self.model_answered(request, &answer, kept)
+            Entry::ModelRequestStarted((caller, request), started) => {
+                let event = json!({
+                    "kind": "model_request_started",
+                    "caller": logged::Caller::from(caller),
+                    "request": request,
+                });
+                self.observed(started, event, &[])
             }
+            Entry::ModelAnswered(request, answered) => self.model_answered(request, answered),
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
@@ -254,10 +284,20 @@ impl<'h, H: Host> Log<'h, H> {
             .map(|action| action_json(workflow, action))
             .collect();
         let leads = !actions.is_empty();
+        self.observed(observed, event, &actions)?;
+        if leads { self.sync() } else { Ok(()) }
+    }
+
+    /// Appends the record of `event`, observed at `observed`, with `actions`.
+    fn observed(
+        &mut self,
+        observed: Duration,
+        event: Value,
+        actions: &[Value],
+    ) -> Result<(), String> {
         let mut record = json!({ "observed_ns": nanos(observed), "actions": actions });
         record["event"] = event;
-        self.append(record)?;
-        if leads { self.sync() } else { Ok(()) }
+        self.append(record)
     }
 
     /// Appends the record of `event`, which no core decides on, and so leads to no action.
@@ -297,9 +337,13 @@ impl<'h, H: Host> Log<'h, H> {
 pub(super) enum Entry {
     /// A note ([`Log::note`]).
     Note(String),
-    /// How a route answered a model request of the caller's, by its number, and where the record
-    /// keeps it ([`Log::model_answered`]).
-    ModelAnswered((Caller, u64), Answer, Value),
+    /// A model request of the caller's, by its number, going upstream at a time:
+    /// `{"kind": "model_request_started", "caller": c, "request": n}`, observed then. A request
+    /// that the route refuses itself never goes upstream, and has none.
+    ModelRequestStarted((Caller, u64), Duration),
+    /// How a route answered a model request of the caller's, by its number
+    /// ([`Log::model_answered`]).
+    ModelAnswered((Caller, u64), ModelAnswer),
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as its session says them:
     /// `{"kind": "sandbox_gpus", "sandbox": n, "gpus": [m, ...]}`, where `n` is its name within the
     /// run, and each `m` a GPU's model, as `nvidia-smi` names it. A sandbox whose `sandboxd` saw
@@ -311,6 +355,20 @@ pub(super) enum Entry {
     /// sandbox's end is one, on every path, a stop short of the core's end included, after which
     /// the log keeps the notes and deletes of the run's children, but no event of theirs.
     Deleted(Deleted),
+}
+
+/// How a route answered a model request, as its thread observed it: through the upstream and
+/// API of the entry that took it, if one did, where the record keeps it, and when the answer's
+/// first bytes came, its stream's output began ([`route::Keep::first_output`]), and it ended,
+/// each by the run's clock.
+pub(super) struct ModelAnswer {
+    /// The upstream's name and the API of the entry that took the request, if one did, even if
+    /// the route barred the request itself, and never sent it upstream.
+    pub(super) taken: Option<(Name, Api)>,
+    pub(super) answer: Answer,
+    pub(super) kept: Value,
+    pub(super) first: Option<(Duration, Option<Duration>)>,
+    pub(super) ended: Duration,
 }
 
 /// `usage` in the run log's JSON form: its counts, without those the provider didn't give.
@@ -870,9 +928,16 @@ pub struct ModelUse {
     /// How many were not forwarded whole with a 2xx status: cut short, refused or barred by the
     /// route, or forwarded with another status.
     pub not_2xx: u64,
-    /// When the last good one was answered: forwarded whole, with a 2xx status, and its stream
-    /// stating no failure.
+    /// When the good one that ended last was answered, a good one being forwarded whole, with a
+    /// 2xx status, and its stream stating no failure.
     pub last_good: Option<Duration>,
+    /// Each that went upstream and has no answer yet, by its number, with when it went.
+    pub in_flight: BTreeMap<u64, Duration>,
+    /// How long each good one whose start the log records took, from going upstream to its
+    /// answer's end, in the order they were answered.
+    pub took: Vec<Duration>,
+    /// How long each of those whose stream's output began took to begin it.
+    pub first_tokens: Vec<Duration>,
     /// The tokens of those whose responses reported their usage, summed.
     pub tokens: Tokens,
 }
@@ -1276,14 +1341,26 @@ impl Reading {
                     lease.failed = Some(reason.clone());
                 }
             }
+            logged::Event::ModelRequestStarted { caller, request } => {
+                self.model.in_flight.insert(*request, at);
+                if let logged::Caller::Job(job) = caller
+                    && let Some(call) = self.call(*job)
+                {
+                    call.model.in_flight.insert(*request, at);
+                }
+            }
             logged::Event::ModelAnswered {
                 caller,
+                request,
+                first_token_ns,
                 upstream_status,
                 answer,
                 failed,
                 usage,
             } => {
                 let answered = Answered {
+                    request: *request,
+                    first_token: *first_token_ns,
                     upstream_status: *upstream_status,
                     answer,
                     failed: failed.as_ref(),
@@ -1633,10 +1710,12 @@ impl Reading {
     }
 }
 
-/// A model request's answer, as its `model_answered` says: its upstream's status, if a response
-/// came, how the route answered it, the code of the failure it stated, if it stated one, and the
-/// tokens it reported, if it did.
+/// A model request's answer, as its `model_answered` says: its number, when its stream's output
+/// began, if it did, its upstream's status, if a response came, how the route answered it, the
+/// code of the failure it stated, if it stated one, and the tokens it reported, if it did.
 struct Answered<'e> {
+    request: u64,
+    first_token: Option<Duration>,
     upstream_status: Option<u16>,
     answer: &'e logged::Answer,
     failed: Option<&'e logged::Failed>,
@@ -1647,12 +1726,15 @@ impl ModelUse {
     /// Takes in `answered`, a model request answered at `at`.
     fn take(&mut self, at: Duration, answered: &Answered<'_>) {
         let Answered {
+            request,
+            first_token,
             upstream_status,
             answer,
             failed,
             usage,
         } = answered;
         self.requests += 1;
+        let started = self.in_flight.remove(request);
         if let Some(logged::Failed { code }) = failed {
             *self.failed.entry(code.clone()).or_default() += 1;
         }
@@ -1661,7 +1743,14 @@ impl ModelUse {
         if !whole_2xx {
             self.not_2xx += 1;
         } else if failed.is_none() {
-            self.last_good = Some(at);
+            // Threads write their answers as they end, which needn't be in the order they ended.
+            self.last_good = self.last_good.max(Some(at));
+            if let Some(started) = started {
+                self.took.push(at.saturating_sub(started));
+                if let Some(first_token) = first_token {
+                    self.first_tokens.push(first_token.saturating_sub(started));
+                }
+            }
         }
         // As the log gives the status: `null` for none.
         let status = upstream_status.map_or_else(|| "null".to_owned(), |status| status.to_string());
