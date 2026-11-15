@@ -1,10 +1,10 @@
 //! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
 //! sandbox's own, at a TCP address on the loopback, or where `sandboxd` listens on the loopback,
-//! behind the stand-in TLS edge ([`Meeting`]). `sandboxd` runs here as an ordinary process, not as
-//! a sandbox's first process, and a temporary directory stands in for the sandbox. So `sandboxd`
-//! serves no ops, which it serves only at the sandbox's own `/pumpkin`, nor the model endpoint, at
-//! a port of the sandbox's own loopback. A fake gateway sends what the gateway's end never would,
-//! or holds up what only a slow link would, having read the hello.
+//! behind the stand-in TLS edge. `sandboxd` runs here as an ordinary process, not as a
+//! sandbox's first process, and a temporary directory stands in for the sandbox. So `sandboxd`
+//! serves no ops, which it serves only at the sandbox's own `/pumpkin`, nor the model endpoint,
+//! at a port of the sandbox's own loopback. A fake gateway sends what the gateway's end never
+//! would, or holds up what only a slow link would, having read the hello.
 
 #![expect(
     clippy::unwrap_used,
@@ -40,29 +40,20 @@ use serde_json::{Value, json};
 use stdx::process::Environment;
 use test_support::hung;
 
-/// What `sandboxd` and the tests' other programs get of the tests' environment: `PATH` alone,
-/// to find the programs they run.
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
-/// A registration grant that no gateway of the tests issues.
+// A registration grant that no gateway of the tests issues.
 const GRANT: &str = "00112233445566778899aabbccddeeff";
 
-/// Where a test's `sandboxd` meets the gateway.
 #[derive(Clone, Copy)]
 enum Meeting {
-    /// At a socket of the sandbox's own, with [`GRANT`] in `sandboxd`'s environment all the same,
-    /// which a command shows it doesn't get.
+    // `sandboxd` gets `GRANT` in its environment all the same, which a command shows it doesn't
+    // get.
     Socket,
-    /// At a grant listener's address on the loopback, with the address and the grant that the
-    /// listener issued ([`TcpDial`]).
     Tcp,
-    /// Where `sandboxd` listens, at an address of the loopback's, with the grant that a dialer
-    /// issued ([`Listening`]), behind the stand-in TLS edge, at whose endpoint the gateway dials
-    /// it.
     Listen,
 }
 
-/// What issued a sandbox's meeting, which lasts as long as the sandbox.
 #[expect(
     dead_code,
     reason = "the issuers are held for their drop, which ends the meeting"
@@ -73,7 +64,6 @@ enum Gateway {
     Listen(SocketAddr),
 }
 
-/// A temporary directory standing in for a sandbox, with `sandboxd` serving its session.
 struct Sandbox {
     root: PathBuf,
     gateway: Gateway,
@@ -84,18 +74,15 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// Starts `sandboxd`, meeting the gateway as `meeting` says, with the shell script
-    /// `nvidia_smi`, if given, as the `nvidia-smi` on its `PATH`, and puts the directories `in`,
-    /// `out`, `home` and `log` there.
     fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
-        // Kept if the test fails.
         let root = tempfile::Builder::new()
+            // Kept if the test fails.
             .prefix("sandboxd-")
             .tempdir()
             .unwrap()
             .keep();
-        // Without symbolic links, as the kernel names the working directories that
-        // `processes` finds the sandbox's processes by.
+        // Without symbolic links, as the kernel names the working directories that `processes`
+        // finds the sandbox's processes by.
         let root = fs::canonicalize(root).unwrap();
         let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
         if let Some(script) = nvidia_smi {
@@ -166,7 +153,6 @@ impl Sandbox {
         self.root.join(name)
     }
 
-    /// How `process` exited, if its exit is what arrives next, within `wait`.
     fn exit(&self, process: Process, wait: Duration) -> Option<ExitStatus> {
         match self.arrivals.recv_timeout(wait) {
             Ok(Arrival::Exited {
@@ -182,7 +168,6 @@ impl Sandbox {
         absolute(&self.root.join(relative))
     }
 
-    /// How to run `script` in the sandbox's `home`, with its output in the sandbox's `log`.
     fn sh(&self, script: &str, env: &[&str]) -> Launch {
         let n = self.commands.get() + 1;
         self.commands.set(n);
@@ -214,8 +199,6 @@ impl Sandbox {
         Ok(lines)
     }
 
-    /// Each file below `dir` with its contents, or its size if they aren't text, and each empty
-    /// directory.
     fn list(&self, base: &Path, dir: &Path, lines: &mut Vec<String>) {
         let mut paths: Vec<_> = fs::read_dir(dir)
             .unwrap()
@@ -239,21 +222,18 @@ impl Sandbox {
         }
     }
 
-    /// `text` with the sandbox's root written `$ROOT`.
     fn show(&self, text: &dyn std::fmt::Display) -> String {
         text.to_string()
             .replace(self.root.to_str().unwrap(), "$ROOT")
     }
 }
 
-/// This process's umask, as Linux shows it.
 fn umask() -> u32 {
     let status = fs::read_to_string("/proc/self/status").unwrap();
     let line = status.lines().find_map(|line| line.strip_prefix("Umask:"));
     u32::from_str_radix(line.unwrap().trim(), 8).unwrap()
 }
 
-/// A `PATH` on which the `nvidia-smi` that runs is the shell script `script`, in `bin` in `root`.
 fn stand_in(root: &Path, script: &str) -> String {
     let bin = root.join("bin");
     fs::create_dir(&bin).unwrap();
@@ -270,7 +250,6 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
-/// An address on the loopback, at a port the kernel picked, where nothing listens.
 fn unlistened() -> SocketAddr {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
@@ -283,14 +262,11 @@ fn unlistened() -> SocketAddr {
     address
 }
 
-/// The IDs of the processes whose working directory is in the sandbox at `root`, as the
-/// commands started there and whatever they start have, polled every 10 ms until `done` holds
-/// of them or `timeout` passes. A process that has exited has no working directory, so a
-/// zombie isn't one of them.
 fn processes(root: &Path, timeout: Duration, done: impl Fn(&[u32]) -> bool) -> Vec<u32> {
     let deadline = Instant::now() + timeout;
     loop {
-        // A process may exit between being listed and being looked at.
+        // A process may exit between being listed and being looked at, and a zombie has no working
+        // directory.
         let found: Vec<u32> = fs::read_dir("/proc")
             .unwrap()
             .filter_map(|entry| {
@@ -307,8 +283,6 @@ fn processes(root: &Path, timeout: Duration, done: impl Fn(&[u32]) -> bool) -> V
     }
 }
 
-/// How `sandboxd` exited after its session ended. It has 10 s to, or it is killed and the test
-/// fails.
 fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -322,9 +296,6 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
     panic!("sandboxd ran on 10 s after its session ended: it should exit with the session");
 }
 
-/// Runs `scenario` against a new sandbox, whose `sandboxd` meets the gateway as `meeting` says,
-/// ends the session, and checks what the scenario reported, then what [`Sandbox::end`] says,
-/// against `expect`.
 fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
     let mut sandbox = Sandbox::start(meeting, None);
     let mut lines = scenario(&mut sandbox);
@@ -333,9 +304,6 @@ fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, e
 }
 
 impl Sandbox {
-    /// Ends the session by dropping it, and says what arrived after it, how `sandboxd` exited, and
-    /// how many processes were left running in the sandbox, which get 2 s to exit, and are then
-    /// killed.
     fn end(self) -> Vec<String> {
         let mut lines = Vec::new();
         let Self {
@@ -494,10 +462,10 @@ fn judging(sandbox: &mut Sandbox) -> Vec<String> {
     lines
 }
 
-// A tree keeps each entry's permission bits, the host's within its umask, but a directory's owner
-// always has all three and no set-ID or sticky bit: so the receiver can always remove what it got.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+// A tree keeps each entry's mode within the host's umask, but a directory's owner always has
+// all three bits and no set-ID or sticky bit: the receiver can always remove what it got.
 fn modes_and_stdin() {
     check(
         Meeting::Socket,
@@ -596,7 +564,6 @@ fn modes_and_stdin() {
     );
 }
 
-/// `len` bytes that repeat out of step with the frames.
 // So that a frame lost, repeated or out of order shows.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|n| u8::try_from(n % 251).unwrap()).collect()
@@ -607,9 +574,9 @@ fn freezing() {
     check(
         Meeting::Socket,
         |sandbox| {
+            // The shell and both sleeps, so that freezing finds each of them to kill.
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
             let group = sandbox.session.start(launch, hung()).unwrap();
-            // The shell and both sleeps, so that freezing finds each of them to kill.
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
             sandbox.session.freeze(hung()).unwrap();
@@ -676,9 +643,9 @@ fn full_sandbox() {
             let launch = sandbox.sh("exec sleep 60", &[]);
             let sleep = sandbox.session.start(launch, hung()).unwrap();
             fs::write(sandbox.root.join("out/kept"), "kept").unwrap();
-            let pid = sandbox.sandboxd.id().to_string();
             // `sandboxd`'s own limit on its user's processes stands in for the sandbox's: either
             // fails a new process or thread alike.
+            let pid = sandbox.sandboxd.id().to_string();
             let limited = stdx::process::command("prlimit", PATH_ONLY)
                 .args(["--pid", &pid, "--nproc=1"])
                 .status()
@@ -733,9 +700,8 @@ fn refusals() {
             assert!(made.unwrap().success());
             let started = sandbox.session.start(fifo, hung()).map(|_| ());
             lines.push(format!("stdout a FIFO: {}", show_error(sandbox, started)));
-            // Started by name with its own PATH, a missing program is waited for by the
-            // standard library itself, which must not race the reaper while another command
-            // runs.
+            // Started by name with its own PATH, a missing program is waited for by the standard
+            // library itself, which must not race the reaper while another command runs.
             let sleep = sandbox.sh("exec sleep 60", &[]);
             let _running = sandbox.session.start(sleep, hung()).unwrap();
             let mut failures: Vec<String> = (0..1000)
@@ -872,8 +838,6 @@ fn model_answers() {
     );
 }
 
-/// A `sandboxd` whose gateway, a fake at `socket`, sends it `message` once it connects: how it
-/// exited, and why.
 fn answered(socket: &Path, message: &ToSandbox) -> String {
     let (mut connection, sandboxd) = accepting_gateway(socket);
     frame::write(&mut connection, message, &[]).unwrap();
@@ -885,6 +849,7 @@ fn hello_answers() {
     check(
         Meeting::Socket,
         |sandbox| {
+            // A later version's refusal may carry fields that this one doesn't know.
             let message = format!("a stand-in for sandbox protocol {}", PROTOCOL_VERSION + 1);
             let refusal = json!({ "type": "refused", "message": message, "later": true });
             let (mut gateway, sandboxd, hello) = fake_gateway(&sandbox.socket("refused.sock"));
@@ -987,9 +952,6 @@ fn listening() {
     );
 }
 
-/// What a `sandboxd` that listens apart from the test's gateway does with peers that answer its
-/// hello, each in turn, as [`greeted`] says, the last with its grant; then how it exited once that
-/// peer closed, which ends the session, and what it said.
 fn listening_apart() -> Vec<String> {
     let apart = unlistened();
     let apart_text = apart.to_string();
@@ -1019,10 +981,6 @@ fn listening_apart() -> Vec<String> {
     lines
 }
 
-/// How a peer that dials the `sandboxd` that listens at `address`, once it listens, and answers
-/// its hello with `answer`, fares, its address added to `peers`: then it sends a request, which
-/// only a served peer hears answered, and a peer turned away meets closed, reset or not, as the
-/// order of its write and sandboxd's close decides.
 fn greeted(address: SocketAddr, answer: &HelloReply, peers: &mut Vec<String>) -> String {
     let mut peer = dialed(address);
     peers.push(peer.local_addr().unwrap().to_string());
@@ -1044,8 +1002,6 @@ fn greeted(address: SocketAddr, answer: &HelloReply, peers: &mut Vec<String>) ->
     format!("{answer:?}: its hello {hello:?}, then {then}")
 }
 
-/// What a `sandboxd` that listens, its deadline seconds away, does with a peer that trickles its
-/// answer: how the peer ended, then how `sandboxd` exited, and what it said.
 fn trickled() -> String {
     let address = unlistened();
     let address_text = address.to_string();
@@ -1058,15 +1014,11 @@ fn trickled() -> String {
     format!("a peer that trickles its answer: {trickled}; then: {said}")
 }
 
-/// `offset` seconds from now, in whole seconds since the Unix epoch, as `--by` takes it.
 fn unix_seconds(offset: i64) -> String {
     let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();
     now.checked_add_signed(offset).unwrap().to_string()
 }
 
-/// How a peer that dials the `sandboxd` that listens at `address`, takes its hello, and then
-/// trickles its answer, a byte a second, of a frame that would take minutes, ends: its address,
-/// and whether it was turned away within a bound far below that.
 fn trickling(address: SocketAddr) -> (String, String) {
     let mut peer = dialed(address);
     let local = peer.local_addr().unwrap().to_string();
@@ -1096,8 +1048,6 @@ fn trickling(address: SocketAddr) -> (String, String) {
     (local, "sent it all, never turned away".to_owned())
 }
 
-/// A connection to `address`, once something listens there, whose reads and writes wait as long
-/// as a request does ([`hung`]).
 fn dialed(address: SocketAddr) -> TcpStream {
     // A `sandboxd` that never listens fails the test rather than hang it.
     let by = hung();
@@ -1168,8 +1118,8 @@ fn refused_before_the_session() {
                     format!("{case}: {}", ended.replace(&closed, "$CLOSED"))
                 })
                 .collect();
-            // Each refused as it is parsed, before sandboxd becomes anyone.
-            // The tests run as a user that isn't root.
+            // Each refused as it is parsed, before sandboxd becomes anyone. The tests run as a user
+            // that isn't root.
             for user in ["0:1000", "1000", "a:b", "1234:1235"] {
                 let args = [&closed, "--user", user].map(OsStr::new);
                 let ended = ended(sandboxd(&args, Some(OsStr::new(GRANT))));
@@ -1236,8 +1186,6 @@ fn reading_while_collecting() {
     );
 }
 
-/// The frames of a collect of the sandbox's `out` on stream 1, then of a put of `bytes` as
-/// `in/put` on stream 2.
 fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8])> {
     let collect = ToSandbox::Collect {
         stream: 1,
@@ -1264,8 +1212,6 @@ fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8]
     frames
 }
 
-/// What `gateway` hears in answer to a collect of `tree` on stream 1 and a put on stream 2, in
-/// that order, whichever ends first.
 fn hear_both(gateway: &mut UnixStream, tree: &[u8]) -> Vec<String> {
     let (mut entries, mut collected) = (Vec::new(), Vec::new());
     let (mut collect, mut put) = (None, None);
@@ -1290,16 +1236,12 @@ fn hear_both(gateway: &mut UnixStream, tree: &[u8]) -> Vec<String> {
     [collect, put].into_iter().flatten().collect()
 }
 
-/// [`fake_gateway`], which accepts the hello.
 fn accepting_gateway(socket: &Path) -> (UnixStream, Child) {
     let (mut connection, sandboxd, _) = fake_gateway(socket);
     frame::write(&mut connection, &HelloReply::Accepted { grant: None }, &[]).unwrap();
     (connection, sandboxd)
 }
 
-/// A `sandboxd` whose gateway is a fake at `socket`, the fake's end of its session once it
-/// connects, which waits on each read and write as long as a request does ([`hung`]), and the
-/// hello it read there.
 fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     let gateway = UnixListener::bind(socket).unwrap();
     gateway.set_nonblocking(true).unwrap();
@@ -1326,8 +1268,6 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     (connection, sandboxd, hello)
 }
 
-/// A `sandboxd` run with `args`, with `grant` in its environment's `SANDBOXD_GRANT`, if any, and
-/// its standard error piped.
 fn sandboxd(args: &[&OsStr], grant: Option<&OsStr>) -> Child {
     let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
     sandboxd.args(args).stderr(Stdio::piped());
@@ -1337,8 +1277,6 @@ fn sandboxd(args: &[&OsStr], grant: Option<&OsStr>) -> Child {
     sandboxd.spawn().unwrap()
 }
 
-/// How `sandboxd`, whose standard error is piped, exited after its session ended, and why, if it
-/// said.
 fn ended(mut sandboxd: Child) -> String {
     let status = exited(&mut sandboxd);
     let mut stderr = String::new();
@@ -1353,8 +1291,8 @@ fn ended(mut sandboxd: Child) -> String {
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn as_root_with_user() {
-    // Kept if the test fails.
     let root = tempfile::Builder::new()
+        // Kept if the test fails.
         .prefix("sandboxd-")
         .tempdir()
         .unwrap()
@@ -1396,9 +1334,6 @@ fn as_root_with_user() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Starts a container, `container`, of [`test_support::BUSYBOX`], as root, whose first process,
-/// the engine's init, runs the static `sandboxd`, as Modal's own does, with `--user` and `user`,
-/// meeting the gateway at the socket in `dir`.
 fn start_as_root(dir: &Path, container: &str, user: &str) {
     let mount =
         |host: &Path, at: &str| format!("--mount=type=bind,source={},target={at}", host.display());
@@ -1415,8 +1350,6 @@ fn start_as_root(dir: &Path, container: &str, user: &str) {
     assert!(started, "the container was to start");
 }
 
-/// What a command in `session`'s sandbox finds of its user, and of `/pumpkin`, as it runs: how it
-/// exited, then each line it printed, collected into `collected`.
 fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
     let dirs = ["home", "log"].map(relative);
     let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
@@ -1441,9 +1374,6 @@ fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path
     lines
 }
 
-/// What a command in `session`'s sandbox, the container `container`, leaves behind as it exits,
-/// a process orphaned and one in a session of its own, outside its command's process group: how
-/// the command exited, then the container's processes before the sandbox is frozen and after.
 fn left_behind(
     session: &mut Session,
     arrivals: &Receiver<Arrival>,
@@ -1452,6 +1382,8 @@ fn left_behind(
     let exited = sh_as_user(
         session,
         arrivals,
+        // One sleep is orphaned and the other is in a session of its own, outside its command's
+        // process group: freezing kills both.
         "(sleep 600 &); setsid sleep 600 & exit 3",
     );
     // The script exits without waiting for its sleeps, which may not run yet: until then, each
@@ -1468,8 +1400,6 @@ fn left_behind(
     ]
 }
 
-/// Runs `script` in `session`'s sandbox, its output in `/pumpkin/log/out`, and returns how it
-/// exited, which it has 30 s to.
 fn sh_as_user(session: &mut Session, arrivals: &Receiver<Arrival>, script: &str) -> ExitStatus {
     let out = absolute(Path::new("/pumpkin/log/out"));
     let launch = Launch {
@@ -1490,8 +1420,6 @@ fn sh_as_user(session: &mut Session, arrivals: &Receiver<Arrival>, script: &str)
     }
 }
 
-/// The commands of `container`'s processes, from the host, by process ID, listed every 10 ms
-/// until `done` holds of the list or 30 s pass.
 fn contained(container: &str, done: impl Fn(&str) -> bool) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

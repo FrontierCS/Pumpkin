@@ -1,6 +1,9 @@
-//! Serving a session, once the gateway accepts its hello. A collect and a freeze, which may last,
-//! are served on threads of their own where one can start, so that the session reads on
-//! meanwhile; any other request is served before the next frame is read.
+//! The session with the gateway: how `sandboxd` meets it, and how it serves the session once the
+//! gateway accepts its hello.
+//!
+//! A collect and a freeze, which may last, are served on threads of their own where one can
+//! start, so that the session reads on meanwhile; any other request is served before the next
+//! frame is read.
 
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -35,21 +38,18 @@ pub(crate) enum Gateway {
     Listen(SocketAddr, RegistrationGrant, Deadline),
 }
 
-/// How long a `sandboxd` that listens waits between its looks for a peer.
-// A twentieth of a second, which the gateway's dial, taking a round trip or more, hardly notices.
+// The listener doesn't block, so that the deadline is checked between polls. A twentieth of a
+// second is a delay that the gateway's dial, taking a round trip or more, hardly notices.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
-/// Why a `sandboxd` that listens ends once its deadline has passed.
 const UNCLAIMED: &str = "no gateway claimed the sandbox by its start's deadline, and the slack \
                          after it: expected the gateway to dial while the start lasts, past which \
                          nothing does, so the sandbox ends";
 
-/// How many of the peers it turns away a `sandboxd` that listens tells of on standard error, each
-/// in a line, before it tells of no more: any host behind the gateway's address may reach its
-/// endpoint, as often as it likes.
-// Enough to show why the gateway's own dials failed, which come first unless another peer races
-// them, and as many as the kernel's rate limit lets a burst of its messages print
-// (`printk_ratelimit_burst`).
+// Any host behind the gateway's address may reach a listening `sandboxd`, as often as it
+// likes. Ten is enough to show why the gateway's own dials failed, which come first unless
+// another peer races them, and as many as the kernel's rate limit lets a burst of its
+// messages print (`printk_ratelimit_burst`).
 const TOLD_PEERS_COUNT: usize = 10;
 
 impl fmt::Display for Gateway {
@@ -65,16 +65,14 @@ type Reader = Box<dyn Read>;
 
 type Writer = Box<dyn Write + Send>;
 
-/// How long `sandboxd` gives `nvidia-smi` to name the sandbox's GPUs as it starts.
 // A first query wakes the GPUs' driver, which takes seconds where nothing keeps it awake; past
 // that, the start goes on without a fact that it can do without.
 const GPUS_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Connects to `gateway`, opens the session with a hello that names the sandbox's GPUs, as
-/// `nvidia-smi` names them, if it does within [`GPUS_TIMEOUT`], and serves the session until the
-/// gateway ends it. With `serve_ops`, it also serves ops, and with `serve_model`, the model
-/// endpoint, both from before the first request. Fails, with the gateway's reason, if the gateway
-/// refuses the session, having started nothing.
+/// Meets the gateway and serves its session until the gateway ends it, with a hello that names
+/// the sandbox's GPUs. With `serve_ops` it also serves ops, and with `serve_model` the model
+/// endpoint, both from before the first request. It fails, with the gateway's reason, if the
+/// gateway refuses the session, having started nothing.
 pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Result<(), String> {
     let (reader, writer) = meet(gateway, gpus())?;
     let sender = Sender(Arc::new(Mutex::new(writer)));
@@ -96,19 +94,19 @@ pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Re
         puts: Puts::default(),
     };
     let served = session.serve(&mut BufReader::new(reader));
-    session.commands.kill_all();
     // The op in flight, the callers waiting their turns and the model requests in flight end as
     // `sandboxd` exits, which closes their connections.
+    session.commands.kill_all();
     served.context("the session with the gateway failed")
 }
 
-/// The sandbox's GPUs, each by its model, as `nvidia-smi` names them within [`GPUS_TIMEOUT`],
-/// which it runs as it would a command, without [`SANDBOXD_GRANT`]; none where it isn't on
-/// `PATH`, fails, or names none.
+/// The sandbox's GPUs, each by its model, as `nvidia-smi` names them within `GPUS_TIMEOUT`;
+/// none where it isn't on `PATH`, fails, or names none.
 fn gpus() -> Option<Vec<GpuModel>> {
     let mut nvidia_smi = stdx::process::command("nvidia-smi", Environment::Inherited);
     nvidia_smi
         .args(["--query-gpu=name", "--format=csv,noheader"])
+        // It runs as a command would, which has no grant.
         .env_remove(SANDBOXD_GRANT);
     let output = stdx::process::output(&mut nvidia_smi, Deadline::after(GPUS_TIMEOUT));
     let output = output.ok()?.filter(|output| output.status.success())?;
@@ -121,7 +119,7 @@ fn gpus() -> Option<Vec<GpuModel>> {
 }
 
 /// The hello that presents `grant` and names `gpus`, unless their names would make it longer
-/// than [`MAX_HELLO_BYTES`], which the gateway would refuse.
+/// than `MAX_HELLO_BYTES`, which the gateway would refuse.
 fn hello(grant: Option<RegistrationGrant>, gpus: Option<Vec<GpuModel>>) -> Hello {
     let named = Hello { grant, gpus };
     let fits = serde_json::to_vec(&named).is_ok_and(|json| json.len() <= MAX_HELLO_BYTES);
@@ -135,8 +133,8 @@ fn hello(grant: Option<RegistrationGrant>, gpus: Option<Vec<GpuModel>>) -> Hello
 }
 
 /// Listens at `address` until a peer's answer to `hello` presents `grant`, and returns that
-/// peer's connection's two ends, the session open; or fails once `by` has passed. Each other peer
-/// is told nothing more, and its connection closed, with why on standard error.
+/// peer's connection's two ends, the session open; or fails once `by` has passed. Each other
+/// peer is told nothing more, and its connection closed, with why on standard error.
 fn listen(
     address: &SocketAddr,
     grant: &RegistrationGrant,
@@ -187,8 +185,8 @@ fn listen(
     }
 }
 
-/// Opens the session on `stream` with `hello`, as [`open`] does, all within [`HELLO_TIMEOUT`]
-/// and by `by`, with a peer whose answer presents `grant`; then lifts that bound.
+/// Opens the session on `stream` with `hello`, as `open` does, all within `HELLO_TIMEOUT` and
+/// by `by`, with a peer whose answer presents `grant`; then lifts that bound.
 fn greet(
     stream: &TcpStream,
     grant: &RegistrationGrant,
@@ -216,17 +214,16 @@ struct Until<'a> {
 }
 
 impl Until<'_> {
-    /// The time left until `by`, as the socket's timeout bounds each call on its own; failing
-    /// once it has passed, which a socket's `None` would take for no timeout at all.
+    // The time left until `by`, as the socket's timeout bounds each call on its own; failing once
+    // it has passed, which a socket's `None` would take for no timeout at all.
     fn left(&self) -> io::Result<Duration> {
         self.by.remaining().ok_or(io::ErrorKind::TimedOut.into())
     }
 }
 
-/// `error`, from a socket whose timeout was set, as timed out if that timeout passed, which fails
-/// a call as it would fail a non-blocking one.
 fn timed_out(error: io::Error) -> io::Error {
     match error.kind() {
+        // A call that passes its socket's timeout fails as a non-blocking one would.
         io::ErrorKind::WouldBlock => io::ErrorKind::TimedOut.into(),
         _ => error,
     }
@@ -250,8 +247,6 @@ impl Write for Until<'_> {
     }
 }
 
-/// Meets `gateway`, once it connects, or connecting to it, once, and returns the connection's two
-/// ends, the session open with a hello that names `gpus`.
 fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Writer), String> {
     let connecting = format_args!("connecting to the gateway at {gateway} failed");
     let opening = format_args!("opening the session with the gateway at {gateway} failed");
@@ -324,7 +319,6 @@ fn open(
     }
 }
 
-/// The two ends of `stream`, a connection to the gateway, the writing one cloned with `clone`.
 fn halves<S: Read + Write + Send + 'static>(
     stream: S,
     clone: impl FnOnce(&S) -> io::Result<S>,
@@ -333,8 +327,8 @@ fn halves<S: Read + Write + Send + 'static>(
     Ok((Box::new(stream), Box::new(writer)))
 }
 
-/// Sends frames to the gateway, from any of the session's threads.
 #[derive(Clone)]
+/// Sends frames to the gateway, from any of the session's threads, each whole.
 pub(crate) struct Sender(Arc<Mutex<Writer>>);
 
 impl Sender {
@@ -368,8 +362,8 @@ impl Session {
         Ok(())
     }
 
-    /// Acts on one request. A failed request is reported to the gateway; an error here means
-    /// the session itself failed.
+    /// Acts on one request. A failed request is reported to the gateway; an error here means the
+    /// session itself failed.
     fn handle(&mut self, message: ToSandbox, body: &[u8]) -> io::Result<()> {
         match message {
             ToSandbox::Put { stream, dir, root } => {
@@ -410,11 +404,11 @@ impl Session {
         serve: impl FnOnce(&Sender) -> io::Result<()> + Clone + Send + 'static,
     ) -> io::Result<()> {
         let (sender, aside) = (self.sender.clone(), serve.clone());
-        // The gateway writes some frames from threads of its own, beside its requests, each by
-        // its deadline, and a frame this session doesn't read waits in the connection's buffers,
-        // then in the gateway's write: so the session reads on while a tree goes out at the
-        // link's pace, or while freezing waits for the killed processes to go, rather than make
-        // the gateway's other writers wait that long, past their deadlines.
+        // The gateway writes some frames from threads of its own, beside its requests, each by its
+        // deadline, and a frame this session doesn't read waits in the connection's buffers, then
+        // in the gateway's write: so the session reads on while a tree goes out at the link's pace,
+        // or while freezing waits for the killed processes to go, rather than make the gateway's
+        // other writers wait that long, past their deadlines.
         let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
             // A write that fails has failed the connection, which the session's reads then see.
             let _ = aside(&sender);
