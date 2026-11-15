@@ -11,12 +11,18 @@
 // entries when they come. While the run is live, the steps are polled from where the last read
 // ended: a step that comes again replaces its row, and its entries are read again, the old ones
 // shown until the new come.
+//
+// In the static mode, each step's entries are a file of their own, of every kind, which the
+// page reads a window's steps of at once and filters by kind itself; the steps are read whole at
+// each poll, and the rows that differ taken; and the search reads the trace's text a chunk at a
+// time (`search.js`).
 
-import { POLL_MS, Refused, byId, fill, follow, get, h, keepSetting, plural, route, sentence, setKeys, setQuery, setting, show, tone, typing } from "./h.js";
+import { POLL_MS, Refused, STATIC, byId, fill, follow, get, h, keepSetting, plural, route, sentence, setKeys, setQuery, setting, show, tone, typing } from "./h.js";
 import { forgetExchanges, inspect } from "./inspector.js";
 import { drawRow, keyOf, layout, matches, stepFolded, threadFolded } from "./ledger.js";
 import { logView } from "./log.js";
 import { RowList } from "./rows.js";
+import { Chunks } from "./search.js";
 import { statsView } from "./stats.js";
 import { IN_FLIGHT, Steps } from "./steps.js";
 import { Timeline } from "./timeline.js";
@@ -29,7 +35,7 @@ import { Timeline } from "./timeline.js";
  * @typedef {import("./ledger.js").Marks} Marks
  * @typedef {import("./inspector.js").Selected} Selected
  * @typedef {import("./timeline.js").OpColumns} OpColumns
- * @typedef {{ at: string, request: number, index: number, kind: string, byte: number, context: [string, string, string] }} Hit
+ * @typedef {{ at: string, request: number, index: number, kind: string, byte: number, context?: [string, string, string] }} Hit the server's hits have `context`
  * @typedef {{ controller: AbortController, requests: Set<number> }} Reading
  */
 
@@ -95,6 +101,8 @@ export async function traceView(id) {
     reading: [],
     /** @type {Set<number>} the steps whose entries are to be read again, shown as read until then */
     stale: new Set(),
+    /** @type {Set<number>} the steps whose entries' file wasn't there, read again at the next poll */
+    missing: new Set(),
     /** @type {Array<{ kind: string, requests: number[] }>} the windows read, the last read last */
     windows: [],
     /** @type {Row[]} */
@@ -292,6 +300,29 @@ export async function traceView(id) {
     }
   };
 
+  // Reads into `got` the entries of each of its requests, from the export's files of them, all at
+  // once, as a window is of `WINDOW_STEPS` at most. A request whose file isn't there gets none,
+  // and is read again at the next poll.
+  const readFiles = (/** @type {Map<number, Entry[]>} */ got, /** @type {AbortSignal} */ signal) =>
+    Promise.all(
+      [...got].map(async ([request, entries]) => {
+        try {
+          /** @type {{ request: number, entry: number } | null} */
+          let next = { request, entry: 0 };
+          while (next) {
+            /** @type {{ entries: Entry[], next: { request: number, entry: number } | null }} */
+            const window = await get(api + "/entries?from=" + request + "&to=" + request + "&entry=" + next.entry, signal);
+            entries.push(...window.entries);
+            next = window.next;
+          }
+        } catch (error) {
+          if (!(error instanceof Refused && error.status === 404)) throw error;
+          entries.length = 0;
+          state.missing.add(request);
+        }
+      }),
+    );
+
   // Reads the window of the steps of `s`'s thread around it whose entries aren't read.
   const readWindow = async (/** @type {number} */ s) => {
     const steps = /** @type {Steps} */ (state.steps);
@@ -303,7 +334,8 @@ export async function traceView(id) {
     const rows = block.filter((row) => unread(row) && !isReading(c.request[row]));
     if (!rows.length) return;
     const requests = new Set(rows.map((row) => c.request[row]));
-    const kind = shape.kind;
+    // Each file of an export holds a step's entries of every kind.
+    const kind = STATIC ? "" : shape.kind;
     const reading = { controller: new AbortController(), requests };
     state.reading.push(reading);
     const from = c.request[rows[0]];
@@ -312,15 +344,18 @@ export async function traceView(id) {
     /** @type {Map<number, Entry[]>} */
     const got = new Map([...requests].map((request) => [request, []]));
     try {
-      /** @type {{ request: number, entry: number } | null} */
-      let resume = null;
-      do {
-        const more = resume ? "&from=" + resume.request + "&entry=" + resume.entry : "&from=" + from;
-        /** @type {{ entries: Entry[], next: { request: number, entry: number } | null }} */
-        const window = await get(api + "/entries?to=" + to + more + one, reading.controller.signal);
-        for (const e of window.entries) got.get(e.request)?.push(e);
-        resume = window.next;
-      } while (resume);
+      if (STATIC) await readFiles(got, reading.controller.signal);
+      else {
+        /** @type {{ request: number, entry: number } | null} */
+        let resume = null;
+        do {
+          const more = resume ? "&from=" + resume.request + "&entry=" + resume.entry : "&from=" + from;
+          /** @type {{ entries: Entry[], next: { request: number, entry: number } | null }} */
+          const window = await get(api + "/entries?to=" + to + more + one, reading.controller.signal);
+          for (const e of window.entries) got.get(e.request)?.push(e);
+          resume = window.next;
+        } while (resume);
+      }
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) status.textContent = "Reading entries failed: " + (error instanceof Error ? error.message : String(error));
       return;
@@ -530,15 +565,47 @@ export async function traceView(id) {
     if (state.searched) runSearch(state.searched);
   });
 
-  // ---- search: in the server, over every entry's text
+  // ---- search: in the server, over every entry's text, or in the page over the export's chunks
 
   /** @type {number | undefined} */
   let typed;
+  const chunks = new Chunks(id, caller);
+  // The search of the static mode under way: a newer one, or a cleared one, stops it.
+  let searching = {};
+  // Marks `hits`, of `count` matches in all.
+  const takeHits = (/** @type {Hit[]} */ hits, /** @type {number} */ count) => {
+    /** @type {Map<number, number>} */
+    const steps = new Map();
+    for (const hit of hits) steps.set(hit.request, (steps.get(hit.request) || 0) + 1);
+    Object.assign(state, { hits, hitCount: count, marks: { at: new Set(hits.map((hit) => hit.at)), steps } });
+  };
+  const searchFiles = async (/** @type {string} */ needle) => {
+    const mine = (searching = {});
+    const wanted = () => searching === mine && list.node.isConnected;
+    state.hitAt = -1;
+    try {
+      const filter = { kind: shape.kind, thread: shape.thread };
+      const done = await chunks.search(needle, filter, state.steps?.length ?? 0, wanted, (hits, count, left) => {
+        takeHits(hits, count);
+        drawFound();
+        if (left) found.textContent = (state.hitCount ? found.textContent + " · " : "") + plural(left, "part") + " of the text left to read";
+        list.paint(true);
+        timeline.draw();
+      });
+      if (done) drawInspector();
+    } catch (error) {
+      if (!wanted()) return;
+      Object.assign(state, { hits: [], hitCount: 0, hitAt: -1, marks: null });
+      found.textContent = "Search failed: " + (error instanceof Error ? error.message : String(error));
+      list.paint(true);
+    }
+  };
   const runSearch = async (/** @type {string} */ text) => {
     if (!list.node.isConnected) return;
     const needle = text.trim() ? text : "";
     setQuery({ q: needle || null });
     state.searched = needle;
+    searching = {};
     if (!needle) {
       Object.assign(state, { hits: [], hitCount: 0, hitAt: -1, marks: null });
       found.textContent = "";
@@ -547,6 +614,7 @@ export async function traceView(id) {
       return;
     }
     found.textContent = "Searching…";
+    if (STATIC) return searchFiles(needle);
     const one = (shape.kind ? "&kind=" + shape.kind : "") + (shape.thread !== null ? "&thread=" + shape.thread : "");
     /** @type {{ count: number, hits: Hit[] }} */
     let reply;
@@ -560,10 +628,8 @@ export async function traceView(id) {
       return;
     }
     if (state.searched !== needle) return;
-    /** @type {Map<number, number>} */
-    const steps = new Map();
-    for (const hit of reply.hits) steps.set(hit.request, (steps.get(hit.request) || 0) + 1);
-    Object.assign(state, { hits: reply.hits, hitCount: reply.count, hitAt: -1, marks: { at: new Set(reply.hits.map((hit) => hit.at)), steps } });
+    takeHits(reply.hits, reply.count);
+    state.hitAt = -1;
     drawFound();
     list.paint(true);
     timeline.draw();
@@ -654,6 +720,17 @@ export async function traceView(id) {
     state.run = await get(base);
     drawRun();
   };
+  // A poll of the static mode, which no file answers `steps?since=` in: the run, the whole steps
+  // and the ops read again, the steps cut to the rows that differ, as a `since` reply sends them.
+  /** @returns {Promise<[StepsReply, { ops: OpColumns }]>} */
+  const pollFiles = async () => {
+    const [run, whole, ops] = await Promise.all([get(base), /** @type {Promise<StepsReply>} */ (get(api + "/steps")), get(api + "/ops")]);
+    // As the server refuses a `since` of another log.
+    if (whole.log_epoch !== state.epoch) throw new Refused(409, "The log started over");
+    state.run = run;
+    drawRun();
+    return [/** @type {Steps} */ (state.steps).since(whole), ops];
+  };
   const read = async (/** @type {() => boolean} */ current) => {
     if (!state.steps) {
       const [run, reply, ops] = await Promise.all([state.run ? Promise.resolve(state.run) : get(base), /** @type {Promise<StepsReply>} */ (get(api + "/steps")), get(api + "/ops")]);
@@ -676,13 +753,15 @@ export async function traceView(id) {
       return reply.live ? POLL_MS : null;
     }
     /** @type {[StepsReply, { ops: OpColumns }]} */
-    const [reply, ops] = await Promise.all([get(api + "/steps?since=" + state.end + "&log_epoch=" + state.epoch), get(api + "/ops")]);
+    const [reply, ops] = STATIC ? await pollFiles() : await Promise.all([get(api + "/steps?since=" + state.end + "&log_epoch=" + state.epoch), get(api + "/ops")]);
     if (!current()) return null;
     state.end = reply.end;
     state.ops = ops.ops;
     const steps = state.steps;
-    // The entries of the steps in flight are read again at each poll: their answers grow.
-    const flying = steps.cols.request.filter((_, s) => steps.inFlight(s));
+    // The entries of the steps in flight are read again at each poll: their answers grow. So are
+    // those whose file wasn't there.
+    const flying = [...steps.cols.request.filter((_, s) => steps.inFlight(s)), ...state.missing];
+    state.missing.clear();
     // Their entries stay shown until read again.
     const forget = (/** @type {number[]} */ requests) => {
       for (const request of requests) if ([...state.read.values()].some((read) => read.has(request))) state.stale.add(request);
@@ -696,6 +775,7 @@ export async function traceView(id) {
     }
     // A row that comes again has its entries read again.
     forget([...steps.merge(reply), ...flying]);
+    chunks.forgetLast();
     timeline.take();
     drawThreads();
     redraw();

@@ -1,7 +1,7 @@
 // What a record of a run's log says, as the run's log and a trace's show it: the lanes it
 // concerns, its kind and words, polls in a row folded, and its row in a list.
 
-import { bytes, clock, count, h, plural, utc } from "./h.js";
+import { STATIC, bytes, clock, count, h, plural, utc } from "./h.js";
 
 /**
  * @typedef {object} LogRecord a record of the run's log, its strings cut, a note's or an event's
@@ -16,6 +16,25 @@ import { bytes, clock, count, h, plural, utc } from "./h.js";
  * @typedef {{ fold: LogRecord[] }} Fold
  * @typedef {LogRecord | Fold} Item
  */
+
+// Where the log is read, `cursor` the byte read to and `at` the byte that the window holding it
+// starts at: in the static mode, the export's file of that window, which holds its records from
+// its start and grows while the run is live.
+/** @typedef {{ cursor: number, at: number }} Reading */
+
+// The byte to read the log's next window at.
+/** @param {Reading} read */
+export const windowAt = (read) => (STATIC ? read.at : read.cursor);
+
+// Moves `read` past `window`, read at `at`, and gives its records past those read before.
+/** @param {Window} window @param {Reading} read @param {number} at */
+export function pastWindow(window, read, at) {
+  const records = window.records.filter((record) => record.byte >= read.cursor);
+  read.cursor = window.next;
+  // An export has a file at a window's `next` only below the log's end.
+  read.at = window.next < window.end ? window.next : at;
+  return records;
+}
 
 // The lanes that a log record concerns, by their names: `agent`, `job <n>`, `lease <n>`.
 /** @param {LogRecord} record */

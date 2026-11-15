@@ -76,6 +76,9 @@ input:hover, select:hover { border-color: var(--edge); }
 .crumbs .id { color: var(--text); }
 .follow { margin-left: auto; display: flex; align-items: center; gap: var(--s2); color: var(--dim); white-space: nowrap; }
 .follow .mark { margin: 0; }
+.published { margin-left: auto; display: flex; align-items: center; gap: var(--s2); color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.published .mark { margin: 0; }
+.published + .follow { margin-left: 0; }
 .bar .scheme, .bar .colour-key-button { flex: none; height: var(--control); }
 .notice { flex: none; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line); }
 

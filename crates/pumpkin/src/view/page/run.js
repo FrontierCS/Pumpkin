@@ -5,11 +5,14 @@
 // reply was read to, then, while the run is live, polled from where the last read ended
 // (`/since?log=<byte>`): a reply of only `end` and `live` changes nothing; one with records
 // replaces the run and appends them. A refusal of the byte, or a log shorter than it, means the
-// log started over, and the run is read again from its start.
+// log started over, and the run is read again from its start. In the static mode, where no
+// file answers `/since`, the run is read again at each poll, and the log's last window is read
+// again from the byte it starts at, its records past the last read taken.
 
 import {
   POLL_MS,
   Refused,
+  STATIC,
   bytes,
   byId,
   clock,
@@ -30,7 +33,7 @@ import {
   typing,
   utc,
 } from "./h.js";
-import { drawKinds, folded, holds, lanesOf, recordRow, saidOf } from "./records.js";
+import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, saidOf, windowAt } from "./records.js";
 import { RowList } from "./rows.js";
 
 /**
@@ -117,10 +120,11 @@ function laneRole(lane, data) {
 /** @param {string} id */
 export async function runView(id) {
   const base = "/api/runs/" + encodeURIComponent(id);
-  // `cursor` is the byte the log is read to; `open` holds the first record's byte of each fold
-  // opened; `shown` the records the address's filters keep; `selected` the `sel` last drawn.
-  /** @type {{ data: Run | null, records: LogRecord[], cursor: number, caught: boolean, drawnAt: number, open: Set<number>, kinds: string, shown: LogRecord[], selected: string | null | undefined, inspected: boolean }} */
-  const state = { data: null, records: [], cursor: 0, caught: false, drawnAt: 0, open: new Set(), kinds: "", shown: [], selected: undefined, inspected: false };
+  // `cursor` and `at` are where the log is read (`Reading`); `open` holds the first record's byte
+  // of each fold opened; `shown` the records the address's filters keep; `selected` the `sel`
+  // last drawn.
+  /** @type {{ data: Run | null, records: LogRecord[], cursor: number, at: number, caught: boolean, drawnAt: number, open: Set<number>, kinds: string, shown: LogRecord[], selected: string | null | undefined, inspected: boolean }} */
+  const state = { data: null, records: [], cursor: 0, at: 0, caught: false, drawnAt: 0, open: new Set(), kinds: "", shown: [], selected: undefined, inspected: false };
   const { query } = route();
   const counted = h("span", { class: "counted" });
   const all = h("span", {});
@@ -259,7 +263,8 @@ export async function runView(id) {
     const data = /** @type {Run} */ (state.data);
     fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.verdict));
     drawFacts(facts, data);
-    drawAgain(again, data);
+    if (STATIC) fill(again);
+    else drawAgain(again, data);
     drawTraces(traces, data);
     drawCancel();
     fill(unread, data.unread ? h("p", { class: "warn" }, h("span", { class: "mark warn" }), plural(data.unread.count, "line") + " of the log can't be read: " + data.unread.said) : null);
@@ -354,7 +359,7 @@ export async function runView(id) {
     const said = cancel.said ? h("pre", {}, cancel.said) : null;
     const to = (/** @type {typeof cancel.phase} */ phase) => () => ((cancel.phase = phase), drawCancel());
     const ask = h("button", { class: "danger", title: "Stop this run: asks you to confirm first", onclick: to("confirm") }, "Cancel run…");
-    if (cancel.phase === "idle") return fill(cancelBox, live ? ask : null);
+    if (cancel.phase === "idle") return fill(cancelBox, live && !STATIC ? ask : null);
     if (cancel.phase === "confirm") {
       return fill(
         cancelBox,
@@ -382,7 +387,7 @@ export async function runView(id) {
   };
   // Forgets what was read, to read the log again from its start.
   const again0 = () => {
-    Object.assign(state, { data: null, records: [], cursor: 0, caught: false, drawnAt: 0 });
+    Object.assign(state, { data: null, records: [], cursor: 0, at: 0, caught: false, drawnAt: 0 });
     state.open.clear();
   };
   // The first time the log is read to the run's end: a live run goes to its end, and what the
@@ -417,11 +422,12 @@ export async function runView(id) {
     }
     const data = state.data;
     if (state.cursor < data.end) {
+      const at = windowAt(state);
       /** @type {Window} */
-      const window = await get(base + "/log?at=" + state.cursor + "&log_epoch=" + data.log_epoch);
+      const window = await get(base + "/log?at=" + at + "&log_epoch=" + data.log_epoch);
       if (!current()) return null;
       if (window.end < state.cursor) return again0(), 0;
-      take(window.records, window.next);
+      state.records.push(...pastWindow(window, state, at));
       if (state.cursor >= data.end) caughtUp();
       else if (state.records.length - state.drawnAt >= DRAW_EVERY_RECORDS) {
         state.drawnAt = state.records.length;
@@ -431,6 +437,16 @@ export async function runView(id) {
     }
     if (!state.caught) caughtUp();
     if (!data.live) return null;
+    if (STATIC) {
+      /** @type {Run} */
+      const run = await get(base);
+      if (!current()) return null;
+      if (run.log_epoch !== data.log_epoch) return again0(), 0;
+      state.data = run;
+      drawRun();
+      if (state.cursor < run.end) return 0;
+      return run.live ? POLL_MS : (redraw(), null);
+    }
     /** @type {Since} */
     const since = await get(base + "/since?log=" + state.cursor + "&log_epoch=" + data.log_epoch);
     if (!current()) return null;

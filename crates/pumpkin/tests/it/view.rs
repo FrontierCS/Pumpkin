@@ -1045,6 +1045,7 @@ fn serves_the_page() {
             head: <link rel="modulepreload" href="/<digest>/records.js">
             head: <link rel="modulepreload" href="/<digest>/rows.js">
             head: <link rel="modulepreload" href="/<digest>/run.js">
+            head: <link rel="modulepreload" href="/<digest>/search.js">
             head: <link rel="modulepreload" href="/<digest>/stats.js">
             head: <link rel="modulepreload" href="/<digest>/steps.js">
             head: <link rel="modulepreload" href="/<digest>/timeline.js">
@@ -1061,6 +1062,7 @@ fn serves_the_page() {
             /<digest>/records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/search.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/stats.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable

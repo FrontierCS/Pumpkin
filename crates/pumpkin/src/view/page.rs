@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use super::http::{self, Response};
 
 /// The page's files, by the path each is served at, with its type.
-const FILES: [(&str, &str, &[u8]); 19] = [
+const FILES: [(&str, &str, &[u8]); 20] = [
     (
         "/",
         "text/html; charset=utf-8",
@@ -79,6 +79,11 @@ const FILES: [(&str, &str, &[u8]); 19] = [
         "/scheme.js",
         "text/javascript; charset=utf-8",
         include_bytes!("page/scheme.js"),
+    ),
+    (
+        "/search.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("page/search.js"),
     ),
     (
         "/stats.js",
@@ -183,11 +188,32 @@ impl Page {
                 index.contains(html),
                 "the page's index.html opens with {html}"
             );
-            let index = index.replacen(html, marked, 1).into_bytes();
-            ("index.html".to_owned(), index, false)
+            assert!(
+                index.contains(CHARSET),
+                "the page's index.html names its {CHARSET}"
+            );
+            let index = index.replacen(html, marked, 1);
+            let index = index.replacen(CHARSET, &format!("{CHARSET}\n{}", policy_meta()), 1);
+            ("index.html".to_owned(), index.into_bytes(), false)
         });
         files.collect()
     }
+}
+
+/// The line of `index.html` that the policy's `<meta>` follows, as early as the page allows.
+const CHARSET: &str = "<meta charset=\"utf-8\">";
+
+/// The view's content security policy ([`http::CONTENT_SECURITY_POLICY`]) as a `<meta>`, but for
+/// `frame-ancestors`, which a `<meta>` can't say.
+fn policy_meta() -> String {
+    let policy = http::CONTENT_SECURITY_POLICY.split("; ");
+    let policy: Vec<&str> = policy
+        .filter(|directive| !directive.starts_with("frame-ancestors"))
+        .collect();
+    format!(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\">",
+        policy.join("; ")
+    )
 }
 
 /// `index.html`, `body`, with each file of [`FILES`] that it names named below `dir`, and each
