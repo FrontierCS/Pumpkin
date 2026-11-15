@@ -347,7 +347,7 @@ fn serves_runs() {
             {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.06+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.11+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
-            end: 8220
+            end: 8287
             id: "<ended>"
             lanes:
               {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
@@ -374,11 +374,11 @@ fn serves_runs() {
             verdict: "Run <ended> finished with a score of 49.36, after the work phase ended when the agent exited with status 0"
 
             GET /api/runs/<ended>/since?log=<end>
-            {"end":8220,"live":false}
+            {"end":8287,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 8220, live false, next 8220, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7085
-            next 8220, end 8220, bytes [Number(7085), Number(7228), Number(7359), Number(7448), Number(7566), Number(7872)], the last's event "judge_collected"
+            end 8287, live false, next 8287, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7336
+            next 8287, end 8287, bytes [Number(7336), Number(7479), Number(7610), Number(7699), Number(7817), Number(8123)], the last's event "judge_collected"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -396,7 +396,7 @@ fn serves_runs() {
             {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8220: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8287: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -880,16 +880,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 8220, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3003&log_epoch=0
+            GET /api/runs/<id>: end 8287, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3113&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3003: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3003&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3113: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3113&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3003: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4269, log_epoch 1
-            GET /api/runs/<id>/since?log=3003&log_epoch=1
-            end 4269, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3113: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4473, log_epoch 1
+            GET /api/runs/<id>/since?log=3113&log_epoch=1
+            end 4473, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -937,7 +937,7 @@ fn windows_a_log_by_its_bytes() {
         &expect![[r#"
             from byte 0: 10001 records, next 709044
             from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10055 records, next 2485945"#]],
+            from byte 1757701: 10055 records, next 2486012"#]],
     );
 }
 
@@ -1161,10 +1161,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8220 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8220 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8220 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8220 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=8287 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8287 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8287 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8287 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 

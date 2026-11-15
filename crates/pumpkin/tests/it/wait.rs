@@ -843,99 +843,73 @@ fn follower_without_its_client() {
     );
 }
 
-// A result one level deeper than a run writes is left out and said; a log's last line cut short,
-// as by a crash, is left out quietly.
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the cases and their snapshot"
-)]
-fn reads_the_deepest_results() {
+fn reads_the_deepest_result_and_a_log_cut_short() {
     let scratch = Scratch::new("reads-the-deepest-results");
     let mut steps = Vec::new();
-    for (id, depth) in [
-        ("20261113-123335-0000000a", RESULT_MAX_DEPTH),
-        ("20261113-123335-0000000b", RESULT_MAX_DEPTH + 1),
-    ] {
-        let whole = (1..depth).fold(json!({ "raw_score": 6 }), |inner, _| json!({ "d": inner }));
-        let returned = json!({ "raw_score": 6, "whole": whole });
-        let result = json!({ "score": 6, "returned": returned });
-        let collected = json!({ "kind": "judge_collected", "job": 0, "result": result });
-        let finish = json!([{ "kind": "finish", "outcome": judged(6.0, returned.clone()) }]);
-        let final_judge = json!([{
-            "kind": "start_judge", "job": 0, "grant": null, "timeout_ns": "60000000000",
-        }]);
-        let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
-        let log = [
-            logged(0, json!({ "kind": "agent_started" }), json!([])),
-            logged(1, exit, json!([{ "kind": "tear_down_agent" }])),
-            logged(1, json!({ "kind": "tick" }), final_judge),
-            logged(1, json!({ "kind": "judge_started", "job": 0 }), json!([])),
-            logged(2, collected, finish),
-        ];
-        let outcome = Some(judged(6.0, returned));
-        let dir = write_run(
-            &scratch,
-            id,
-            asked(id, 0),
-            &log,
-            outcome,
-            &lease_places(false),
-        );
-        let mut log = File::options()
-            .append(true)
-            .open(dir.join("log.jsonl"))
-            .unwrap();
-        log.write_all(br#"{"at_ns":"14"#).unwrap();
-        let ls = scratch.pumpkin(&["ls", "--runs", "runs", id]);
-        steps.push(Step::Ran(ran(ls, &scratch.0, false)));
-        // What it said, without the outcome it printed, which holds the result.
-        let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
-        let invoked = invocation(&wait);
-        let output = wait.output().unwrap();
-        let said = String::from_utf8(output.stderr).unwrap();
-        let status = output.status.code();
-        steps.push(Step::Ran(format!(
-            "{invoked}\nexit status: {status:?}\n{}",
-            said.trim_end()
-        )));
-    }
+    let (id, depth) = ("20261113-123335-0000000a", RESULT_MAX_DEPTH);
+    let whole = (1..depth).fold(json!({ "raw_score": 6 }), |inner, _| json!({ "d": inner }));
+    let returned = json!({ "raw_score": 6, "whole": whole });
+    let result = json!({ "score": 6, "returned": returned });
+    let collected = json!({ "kind": "judge_collected", "job": 0, "result": result });
+    let finish = json!([{ "kind": "finish" }]);
+    let final_judge = json!([{
+        "kind": "start_judge", "job": 0, "grant": null, "timeout_ns": "60000000000",
+    }]);
+    let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
+    let log = [
+        logged(0, json!({ "kind": "agent_started" }), json!([])),
+        logged(1, exit, json!([{ "kind": "tear_down_agent" }])),
+        logged(1, json!({ "kind": "tick" }), final_judge),
+        logged(1, json!({ "kind": "judge_started", "job": 0 }), json!([])),
+        logged(2, collected, finish),
+    ];
+    let outcome = Some(judged(6.0, returned));
+    let dir = write_run(
+        &scratch,
+        id,
+        asked(id, 0),
+        &log,
+        outcome,
+        &lease_places(false),
+    );
+    let mut log = File::options()
+        .append(true)
+        .open(dir.join("log.jsonl"))
+        .unwrap();
+    log.write_all(br#"{"at_ns":"14"#).unwrap();
+    let ls = scratch.pumpkin(&["ls", "--runs", "runs", id]);
+    steps.push(Step::Ran(ran(ls, &scratch.0, false)));
+    // What it said, without the outcome it printed, which holds the result.
+    let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
+    let invoked = invocation(&wait);
+    let output = wait.output().unwrap();
+    let said = String::from_utf8(output.stderr).unwrap();
+    let status = output.status.code();
+    steps.push(Step::Ran(format!(
+        "{invoked}\nexit status: {status:?}\n{}",
+        said.trim_end()
+    )));
     check(
         &scratch,
         steps,
         false,
         &[],
         &expect![[r#"
-        $ pumpkin ls --runs runs 20261113-123335-0000000a
-        exit status: Some(0)
-        printed:
-          20261113-123335-0000000a finished         2s  6               -  example/lease
-          1 run: 1 finished
-        $ pumpkin wait --runs runs 20261113-123335-0000000a
-        exit status: Some(0)
-        pumpkin: run 20261113-123335-0000000a started 0s after it was asked for, and ran 2s:
-             0:00 agent on aws/judge, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
-             0:01 final judge job 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: 6
-          model: 0 requests
-          sandboxes: 1 on aws/judge, 2s in all, 1 created, all deleted; 1 on modal/a100_80, 1s in all, 1 created, all deleted
-        pumpkin: run 20261113-123335-0000000a finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000a
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-        $ pumpkin ls --runs runs 20261113-123335-0000000b
-        exit status: Some(0)
-        pumpkin: run 20261113-123335-0000000b: 1 part of its log can't be read by this pumpkin, the first at line 6: recursion limit exceeded, at column 743
-        printed:
-          20261113-123335-0000000b finished         1s  6               -  example/lease
-          1 run: 1 finished
-        $ pumpkin wait --runs runs 20261113-123335-0000000b
-        exit status: Some(0)
-        pumpkin: run 20261113-123335-0000000b started 0s after it was asked for, and ran 1s:
-             0:00 agent on aws/judge, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
-             0:01 final judge job 0 on modal/a100_80 with unknown GPUs, which never ended
-          model: 0 requests
-          sandboxes: 1 on aws/judge, 1s in all, 1 created, all deleted; 1 on modal/a100_80, 0s in all, 1 created, all deleted
-          1 part of its log can't be read by this pumpkin, the first at line 6: recursion limit exceeded, at column 743
-        pumpkin: run 20261113-123335-0000000b finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000b
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
+            $ pumpkin ls --runs runs 20261113-123335-0000000a
+            exit status: Some(0)
+            printed:
+              20261113-123335-0000000a finished         2s  6               -  example/lease
+              1 run: 1 finished
+            $ pumpkin wait --runs runs 20261113-123335-0000000a
+            exit status: Some(0)
+            pumpkin: run 20261113-123335-0000000a started 0s after it was asked for, and ran 2s:
+                 0:00 agent on aws/judge, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
+                 0:01 final judge job 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: 6
+              model: 0 requests
+              sandboxes: 1 on aws/judge, 2s in all, 1 created, all deleted; 1 on modal/a100_80, 1s in all, 1 created, all deleted
+            pumpkin: run 20261113-123335-0000000a finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000a
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }
 

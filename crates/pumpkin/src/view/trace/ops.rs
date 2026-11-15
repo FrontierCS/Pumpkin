@@ -117,7 +117,7 @@ impl Ops {
         };
         let actions = actions.as_array().map_or(&[][..], Vec::as_slice);
         let reply = (actions.iter())
-            .find(|action| action["kind"] == "reply" && action["op"] == op)
+            .find(|action| action["kind"] == "reply")
             .map_or(&Value::Null, |action| &action["reply"]);
         let name = match request["lease"].as_u64() {
             Some(lease) => Some(format!("lease {lease}")),

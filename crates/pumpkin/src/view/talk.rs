@@ -117,8 +117,9 @@ impl Talk {
     /// Takes in `record`, the log's next record.
     pub(super) fn take(&mut self, record: &Value) {
         let at = super::when(record).unwrap_or_default();
+        let request = &record["event"]["request"];
         for action in record["actions"].as_array().into_iter().flatten() {
-            self.action(at, action);
+            self.action(at, action, request);
         }
         self.event(at, &record["event"]);
     }
@@ -154,7 +155,7 @@ struct Reading {
 }
 
 impl Talk {
-    fn action(&mut self, at: f64, action: &Value) {
+    fn action(&mut self, at: f64, action: &Value, request: &Value) {
         let lease = action["lease"].as_u64();
         match (action["kind"].as_str().unwrap_or_default(), lease) {
             ("start_judge", _) => {
@@ -189,7 +190,7 @@ impl Talk {
                 self.reading.holders.insert(lease, holder);
             }
             ("run_command", Some(lease)) => {
-                let argv = action["argv"].as_array().into_iter().flatten();
+                let argv = request["argv"].as_array().into_iter().flatten();
                 let argv: Vec<&str> = argv.filter_map(Value::as_str).collect();
                 if let Some((holder, runner)) = self.ends(lease) {
                     self.edge(&holder, &runner, "command").add(None, None);
@@ -201,7 +202,11 @@ impl Talk {
                 if let Some(transfer) = action["transfer"].as_u64() {
                     (self.reading.directions).insert((lease, transfer), direction.to_owned());
                 }
-                let (from, to) = (action["from"].as_str(), action["to"].as_str());
+                // A put's request names its tree, a get's the path it takes from.
+                let from = request["tree"]
+                    .as_str()
+                    .or_else(|| request["from"].as_str());
+                let (from, to) = (from, request["to"].as_str());
                 let label = format!("{} → {}", from.unwrap_or("?"), to.unwrap_or("?"));
                 self.started(lease, direction, label, at);
             }

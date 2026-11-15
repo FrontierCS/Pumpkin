@@ -453,6 +453,7 @@ fn rebuilds_requests_kept_before_whole_fields() {
 
 // Each command is busy until its lease's charge ends, so that busy is never more than charged.
 #[test]
+#[expect(clippy::too_many_lines, reason = "one line for each record of its log")]
 fn reads_unended_commands() {
     let dir = TempDir::new().unwrap();
     let record = dir.path().join("20261114-120000-00000001");
@@ -484,7 +485,9 @@ fn reads_unended_commands() {
             "kind": "start_lease", "grant": grant, "holder": "agent", "lease": lease,
         })
     };
-    let run = |lease: u64| serde_json::json!({ "kind": "run_command", "lease": lease, "command": 0, "argv": [] });
+    let lease_run = |lease: u64| serde_json::json!({ "kind": "op_arrived", "request": { "kind": "lease_run", "lease": lease, "argv": [] } });
+    let run =
+        |lease: u64| serde_json::json!({ "kind": "run_command", "lease": lease, "command": 0 });
     let close = serde_json::json!({ "kind": "close_lease", "lease": 1 });
     let records = [
         (0, run_started, vec![]),
@@ -495,7 +498,8 @@ fn reads_unended_commands() {
         ),
         (2, event("lease_ready", 0), vec![]),
         (2, event("lease_ready", 1), vec![]),
-        (3, tick.clone(), vec![run(0), run(1)]),
+        (3, lease_run(0), vec![run(0)]),
+        (3, lease_run(1), vec![run(1)]),
         (5, tick, vec![close]),
         (6, deleted("lease-1"), vec![]),
         (7, event("lease_ended", 1), vec![]),
@@ -599,13 +603,14 @@ fn reads_core_times() {
 {"seq":3,"at_ns":"5000000000","observed_ns":"2000000000","event":{"kind":"judge_started","job":0},"actions":[]}
 {"seq":4,"at_ns":"8000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":0},"actions":[]}
 {"seq":5,"at_ns":"9000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":1},"actions":[]}
-{"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"tick"},"actions":[{"kind":"run_command","lease":0,"command":0,"argv":[]},{"kind":"run_command","lease":1,"command":0,"argv":[]}]}
-{"seq":7,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0,"end":{"exited":{"code":0}}},"actions":[]}
-{"seq":8,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
-{"seq":9,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
-{"seq":10,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"judge_exited","job":0},"actions":[]}
-{"seq":11,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"judge_collected","job":0,"result":{"score":1,"returned":{}}},"actions":[]}
-{"seq":12,"at_ns":"25000000000","event":{"kind":"sandbox_deleted","sandbox":"lease-1"},"actions":[]}
+{"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","request":{"kind":"lease_run","lease":0,"argv":[]}},"actions":[{"kind":"run_command","lease":0,"command":0}]}
+{"seq":7,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","request":{"kind":"lease_run","lease":1,"argv":[]}},"actions":[{"kind":"run_command","lease":1,"command":0}]}
+{"seq":8,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0,"end":{"exited":{"code":0}}},"actions":[]}
+{"seq":9,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
+{"seq":10,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
+{"seq":11,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"judge_exited","job":0},"actions":[]}
+{"seq":12,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"judge_collected","job":0,"result":{"score":1,"returned":{}}},"actions":[]}
+{"seq":13,"at_ns":"25000000000","event":{"kind":"sandbox_deleted","sandbox":"lease-1"},"actions":[]}
 "#;
     fs::write(record.join("log.jsonl"), log).unwrap();
     let progress = Record::open(&record)
