@@ -5,65 +5,13 @@
 use std::fmt::Write as _;
 
 use expect_test::expect;
-use lang::Args;
 use schema::ir;
 use serde_json::Value;
 
-use super::{check, evaluated, layer, route, show};
+use super::{agent, args, check, entry, evaluated, layer, route, show};
 
-/// A task's entry that gives `codex()` each of its arguments from an `--arg` of its name, and
-/// builds its agent on the image of `//images/Dockerfile`, which the judge runs on too.
-const ENTRY: &str = r#"
-load("@pumpkin//harness/codex/codex.star", "codex")
-
-MODEL = arg("model", str)
-EFFORT = arg("effort", str)
-TOOLS = arg("tools", str)
-WORKSPACE = arg("workspace", str)
-PROMPT = arg("prompt", str)
-DEADLINE = arg("deadline_seconds", int)
-GRACE = arg("finalize_grace_seconds", int)
-
-BASE = image("Dockerfile", context = "//images")
-
-agent = codex(
-    BASE,
-    model = MODEL,
-    effort = EFFORT,
-    tools = TOOLS,
-    workspace = WORKSPACE,
-    prompt = PROMPT,
-    deadline_seconds = DEADLINE,
-    finalize_grace_seconds = GRACE,
-)
-
-workflow(
-    name = "codex",
-    roles = [
-        {
-            "name": "agent",
-            "image": agent["image"],
-            "user": {"uid": 1000, "gid": 1000},
-            "needs": {"cpu_millis": 1000, "memory_bytes": GiB},
-            "runtime": agent["runtime"],
-            "egress": agent["egress"],
-            "grants": [{"submit": {"name": "final"}}],
-        },
-        {
-            "name": "judge",
-            "image": BASE,
-            "user": {"uid": 65532, "gid": 65532},
-            "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
-            "runtime": {"judge": {
-                "command": {"argv": ["true"], "cwd": "/pumpkin/home"},
-                "slots": [{"name": "payload", "max_bytes": KiB}],
-                "result": {"score": "/score", "returns": ["/score"]},
-            }},
-        },
-    ],
-    score = {"role": "judge", "slot": "payload", "timeout_seconds": 60},
-)
-"#;
+/// The argument `codex()` takes besides `SHARED`, with the Starlark of its value.
+const OWN: [(&str, &str); 1] = [("tools", r#"arg("tools", str)"#)];
 
 /// The prompt of the task repository's `lib/fcs.star`.
 const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
@@ -79,11 +27,11 @@ action, then exit.
 Web search is disabled; use only local task files and tools.
 ";
 
-/// Model, effort, tools, workspace, prompt, deadline and grace, from `examples/codex`, `pumpkin`'s
+/// Model, effort, workspace, prompt, deadline, grace and tools, from `examples/codex`, `pumpkin`'s
 /// tests and the task repository, on each model of the catalog; then other workspaces and
 /// prompts, each effort, a model that needs escaping, and the root as the workspace.
 #[expect(clippy::too_many_lines, reason = "it is the cases")]
-fn cases() -> Vec<[String; 7]> {
+fn cases() -> Vec<[&'static str; 7]> {
     let greeting = "Write a greeting to the file `greeting`, then submit it with `sandboxctl \
                     submit final greeting --finalize`.\n";
     let fixture = "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n";
@@ -91,86 +39,86 @@ fn cases() -> Vec<[String; 7]> {
         [
             "model-small",
             "high",
-            "native",
             "/workspace",
             greeting,
             "1800",
             "60",
+            "native",
         ],
         [
             "model-small",
             "high",
-            "native",
             "/workspace",
             fixture,
             "18000",
             "0",
+            "native",
         ],
-        ["model-small", "high", "native", "/workspace", "", "60", "0"],
+        ["model-small", "high", "/workspace", "", "60", "0", "native"],
         [
             "model-large",
             "low",
-            "native",
             "/home/agent",
             "Solve it.",
             "60",
             "0",
+            "native",
         ],
         [
             "gpt-6.1-terra",
             "xhigh",
-            "functions",
             "/workspace",
             FCS_PROMPT,
             "18000",
             "60",
+            "functions",
         ],
         [
             "glm-5.3",
             "xhigh",
-            "functions",
             "/workspace",
             FCS_PROMPT,
             "3600",
             "60",
+            "functions",
         ],
         [
             "gpt-6.1-terra",
             "xhigh",
-            "native",
             "/workspace",
             FCS_PROMPT,
             "3600",
             "60",
+            "native",
         ],
         [
             "glm-5.3",
             "high",
-            "native",
             "/workspace",
             "Go.\n",
             "3600",
             "60",
+            "native",
         ],
         [
             "model-small",
             "xhigh",
-            "native",
             "/workspace",
             FCS_PROMPT,
             "3600",
             "60",
+            "native",
         ],
         [
             r#"vendor/"quoted"\model"#,
             "xhigh",
-            "native",
             "/srv/work",
             "Go.\n",
             "60",
             "0",
+            "native",
         ],
-        ["glm-5.3", "high", "functions", "/", "Go.\n", "60", "0"],
+        ["glm-5.3", "high", "/", "Go.\n", "60", "0", "functions"],
     ];
     for effort in [
         "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -178,33 +126,14 @@ fn cases() -> Vec<[String; 7]> {
         cases.push([
             "gpt-6.1-terra",
             effort,
-            "functions",
             "/workspace",
             "Go.\n",
             "60",
             "0",
+            "functions",
         ]);
     }
-    (cases.into_iter())
-        .map(|case| case.map(str::to_owned))
-        .collect()
-}
-
-/// The arguments of `case`, by their names, as `ENTRY` takes them.
-fn args(case: &[String; 7]) -> Args {
-    let names = [
-        "model",
-        "effort",
-        "tools",
-        "workspace",
-        "prompt",
-        "deadline_seconds",
-        "finalize_grace_seconds",
-    ];
-    let given: Vec<String> = (names.iter().zip(case))
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect();
-    Args::parse(given.iter().map(String::as_str)).unwrap()
+    cases
 }
 
 #[test]
@@ -212,15 +141,10 @@ fn args(case: &[String; 7]) -> Args {
 fn roles() {
     let mut shown = String::new();
     for (index, case) in cases().into_iter().enumerate() {
-        let (workflow, images) = evaluated(ENTRY, &args(&case)).unwrap();
-        let [model, effort, tools, workspace, prompt, deadline, grace] = &case;
-        let agent = &workflow.ir().roles[0];
-        let ir::Runtime::Agent(runtime) = &agent.runtime else {
-            panic!("the first role is the agent");
-        };
-        assert_eq!(runtime.stdin.as_deref(), Some(prompt.as_str()));
-        assert_eq!(runtime.deadline_seconds.to_string(), *deadline);
-        assert_eq!(runtime.finalize_grace_seconds.to_string(), *grace);
+        let (workflow, images) = evaluated(&entry("codex", &OWN), &args(&OWN, &case)).unwrap();
+        let [model, effort, workspace, prompt, _, _, tools] = case;
+        let (agent, runtime) = agent(&workflow, &case);
+        assert_eq!(runtime.stdin.as_deref(), Some(prompt));
         let _ = writeln!(shown, "{model} {effort} {tools} {workspace}:");
         shown.push_str(&show(runtime, excerpt));
         shown.push_str(&route(agent));
@@ -608,57 +532,54 @@ fn refusals() {
         [
             "model-small",
             "extreme",
-            "native",
             "/workspace",
             "",
             "60",
             "0",
+            "native",
         ],
-        ["model-small", "high", "both", "/workspace", "", "60", "0"],
+        ["model-small", "high", "/workspace", "", "60", "0", "both"],
         [
             "gpt-6.1-sol",
             "high",
-            "functions",
             "/workspace",
             "",
             "60",
             "0",
+            "functions",
         ],
         [
             "model-small",
             "high",
-            "native",
             "/pumpkin/home",
             "",
             "60",
             "0",
+            "native",
         ],
     ];
-    let mut refused: Vec<String> = (cases.into_iter())
-        .map(|case| {
-            let case = case.map(str::to_owned);
-            evaluated(ENTRY, &args(&case)).unwrap_err()
-        })
+    let mut refused: Vec<String> = (cases.iter())
+        .map(|case| evaluated(&entry("codex", &OWN), &args(&OWN, case)).unwrap_err())
         .collect();
     // A prompt that a task's `arg("prompt", str, default = None)` gives when no one passes one.
-    let silent = ENTRY.replace("prompt = PROMPT,", "prompt = None,");
-    let case = ["model-small", "high", "native", "/workspace", "", "60", "0"].map(str::to_owned);
-    refused.push(evaluated(&silent, &args(&case)).unwrap_err());
+    let silent = entry("codex", &OWN).replace("prompt = PROMPT,", "prompt = None,");
+    let case = ["model-small", "high", "/workspace", "", "60", "0", "native"];
+    refused.push(evaluated(&silent, &args(&OWN, &case)).unwrap_err());
     check(
         &refused.join("\n"),
         &expect![[r#"
             @pumpkin//harness/codex/codex.star:171:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
                 171 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:14:9
+                in `codex()`, called at task.star:13:9
             @pumpkin//harness/codex/codex.star:188:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
                 188 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:14:9
+                in `codex()`, called at task.star:13:9
             @pumpkin//harness/codex/codex.star:185:13: fail: Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
                 185 |             fail(message.format(model, slugs))
                     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:14:9
+                in `codex()`, called at task.star:13:9
             @pumpkin//harness/codex/codex.star:195:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 195 |     home = below + "/.codex"
                     |            ^^^^^^^^^^^^^^^^^
@@ -666,7 +587,7 @@ fn refusals() {
             @pumpkin//harness/codex/codex.star:173:9: fail: `None` is not a prompt: give a string, which may be empty
                 173 |         fail("`None` is not a prompt: give a string, which may be empty")
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:14:9"#]],
+                in `codex()`, called at task.star:13:9"#]],
     );
 }
 

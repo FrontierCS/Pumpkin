@@ -4,89 +4,11 @@
 use std::fmt::Write as _;
 
 use expect_test::expect;
-use lang::Args;
-use schema::ir;
 
-use super::{check, evaluated, layer, route, show};
+use super::{FCS_PROMPT, agent, args, check, entry, evaluated, layer, route, show};
 
-/// A task's entry that gives `claude_code()` each of its arguments from an `--arg` of its name,
-/// and builds its agent on the image of `//images/Dockerfile`, which the judge runs on too.
-const ENTRY: &str = r#"
-load("@pumpkin//harness/claude_code/claude_code.star", "claude_code")
-
-MODEL = arg("model", str)
-EFFORT = arg("effort", str)
-WORKSPACE = arg("workspace", str)
-PROMPT = arg("prompt", str)
-DEADLINE = arg("deadline_seconds", int)
-GRACE = arg("finalize_grace_seconds", int)
-MAX_OUTPUT_TOKENS = arg("max_output_tokens", int)
-
-BASE = image("Dockerfile", context = "//images")
-
-agent = claude_code(
-    BASE,
-    model = MODEL,
-    effort = EFFORT,
-    workspace = WORKSPACE,
-    prompt = PROMPT,
-    deadline_seconds = DEADLINE,
-    finalize_grace_seconds = GRACE,
-    max_output_tokens = MAX_OUTPUT_TOKENS,
-)
-
-workflow(
-    name = "claude-code",
-    roles = [
-        {
-            "name": "agent",
-            "image": agent["image"],
-            "user": {"uid": 1000, "gid": 1000},
-            "needs": {"cpu_millis": 1000, "memory_bytes": GiB},
-            "runtime": agent["runtime"],
-            "egress": agent["egress"],
-            "grants": [{"submit": {"name": "final"}}],
-        },
-        {
-            "name": "judge",
-            "image": BASE,
-            "user": {"uid": 65532, "gid": 65532},
-            "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
-            "runtime": {"judge": {
-                "command": {"argv": ["true"], "cwd": "/pumpkin/home"},
-                "slots": [{"name": "payload", "max_bytes": KiB}],
-                "result": {"score": "/score", "returns": ["/score"]},
-            }},
-        },
-    ],
-    score = {"role": "judge", "slot": "payload", "timeout_seconds": 60},
-)
-"#;
-
-/// The names of `ENTRY`'s arguments, in the order a case gives them.
-const NAMES: [&str; 7] = [
-    "model",
-    "effort",
-    "workspace",
-    "prompt",
-    "deadline_seconds",
-    "finalize_grace_seconds",
-    "max_output_tokens",
-];
-
-/// The arguments of `case`, by their names, as `ENTRY` takes them.
-fn args(case: &[&str; 7]) -> Args {
-    let given: Vec<String> = (NAMES.iter().zip(case))
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect();
-    Args::parse(given.iter().map(String::as_str)).unwrap()
-}
-
-/// A prompt of the task repository's form, shortened.
-const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
-
-When the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.
-";
+/// The arguments `claude_code()` takes besides `SHARED`, each with the Starlark of its value.
+const OWN: [(&str, &str); 1] = [("max_output_tokens", r#"arg("max_output_tokens", int)"#)];
 
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
@@ -134,15 +56,10 @@ fn roles() {
     }
     let mut shown = String::new();
     for (index, case) in cases.iter().enumerate() {
-        let (workflow, images) = evaluated(ENTRY, &args(case)).unwrap();
-        let [model, effort, workspace, prompt, deadline, grace, max] = case;
-        let agent = &workflow.ir().roles[0];
-        let ir::Runtime::Agent(runtime) = &agent.runtime else {
-            panic!("the first role is the agent");
-        };
+        let (workflow, images) = evaluated(&entry("claude_code", &OWN), &args(&OWN, case)).unwrap();
+        let [model, effort, workspace, prompt, _, _, max] = case;
+        let (agent, runtime) = agent(&workflow, case);
         assert_eq!(runtime.stdin.as_deref(), Some(*prompt));
-        assert_eq!(runtime.deadline_seconds.to_string(), *deadline);
-        assert_eq!(runtime.finalize_grace_seconds.to_string(), *grace);
         assert!(
             runtime.files.is_empty(),
             "Claude Code reads no file of ours"
@@ -244,7 +161,7 @@ fn refusals() {
         ("high", "/workspace", "Go.", "0"),
     ] {
         let case = [given[0], effort, workspace, prompt, given[4], given[5], max];
-        refused.push(evaluated(ENTRY, &args(&case)).unwrap_err());
+        refused.push(evaluated(&entry("claude_code", &OWN), &args(&OWN, &case)).unwrap_err());
     }
     // Each argument given `None`, as a task's `arg(…, default = None)` gives it when no one
     // passes one, and given a value of another type.
@@ -254,9 +171,12 @@ fn refusals() {
         ("effort = EFFORT,", "effort = None,"),
         ("workspace = WORKSPACE,", "workspace = None,"),
         ("prompt = PROMPT,", "prompt = None,"),
-        ("deadline_seconds = DEADLINE,", "deadline_seconds = None,"),
         (
-            "finalize_grace_seconds = GRACE,",
+            "deadline_seconds = DEADLINE_SECONDS,",
+            "deadline_seconds = None,",
+        ),
+        (
+            "finalize_grace_seconds = FINALIZE_GRACE_SECONDS,",
             "finalize_grace_seconds = None,",
         ),
         (
@@ -265,14 +185,17 @@ fn refusals() {
         ),
         ("model = MODEL,", "model = 5,"),
         ("prompt = PROMPT,", "prompt = [PROMPT],"),
-        ("deadline_seconds = DEADLINE,", "deadline_seconds = \"60\","),
+        (
+            "deadline_seconds = DEADLINE_SECONDS,",
+            "deadline_seconds = \"60\",",
+        ),
         (
             "max_output_tokens = MAX_OUTPUT_TOKENS,",
             "max_output_tokens = \"128000\",",
         ),
     ] {
-        let entry = ENTRY.replacen(argument, value, 1);
-        refused.push(evaluated(&entry, &args(&given)).unwrap_err());
+        let entry = entry("claude_code", &OWN).replacen(argument, value, 1);
+        refused.push(evaluated(&entry, &args(&OWN, &given)).unwrap_err());
     }
     check(
         &refused.join("\n"),
@@ -280,85 +203,85 @@ fn refusals() {
             @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `High` is not a reasoning effort: use one of low, medium, high, xhigh, max
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:85:13: `/pumpkin/home/.claude-code` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
-            task.star:6:13: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
-                6 | WORKSPACE = arg("workspace", str)
+            task.star:5:13: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
+                5 | WORKSPACE = arg("workspace", str)
                   |             ^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/command/cwd
             @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
                 79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:81:9: fail: `0` is not a number of tokens: give a positive int
                 81 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
-            task.star:15:5: a value of `image`'s `contexts` can't be `None`: give an image, as `image()` makes
-                15 |     None,
+                in `claude_code()`, called at task.star:13:9
+            task.star:14:5: a value of `image`'s `contexts` can't be `None`: give an image, as `image()` makes
+                14 |     None,
                    |     ^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and `None`: give it two ints, two strings, two lists or two tuples
                 97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
                 the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
-                the right operand, `None`, is made at task.star:16:13
-                in `claude_code()`, called at task.star:14:9
+                the right operand, `None`, is made at task.star:15:13
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:77:69: `format` of `None` is not in Pumpkin's Starlark: give it an int or a string
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |                                                                     ^^^^^^
-                the argument, `None`, is made at task.star:17:14
-                in `claude_code()`, called at task.star:14:9
+                the argument, `None`, is made at task.star:16:14
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:85:52: `+` can't take `None` and a string: give it two ints, two strings, two lists or two tuples
                 85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |                                                    ^
-                the left operand, `None`, is made at task.star:18:17
+                the left operand, `None`, is made at task.star:17:17
                 the right operand, `"/.claude-code"`, is made at @pumpkin//harness/claude_code/claude_code.star:85:54
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
                 79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
-            task.star:20:24: `deadline_seconds` can't be `None`: expected an int
-                20 |     deadline_seconds = None,
+                in `claude_code()`, called at task.star:13:9
+            task.star:19:24: `deadline_seconds` can't be `None`: expected an int
+                19 |     deadline_seconds = None,
                    |                        ^^^^
                 the IR's /roles/0/runtime/agent/deadline_seconds
-            task.star:21:30: `finalize_grace_seconds` can't be `None`: expected an int
-                21 |     finalize_grace_seconds = None,
+            task.star:20:30: `finalize_grace_seconds` can't be `None`: expected an int
+                20 |     finalize_grace_seconds = None,
                    |                              ^^^^
                 the IR's /roles/0/runtime/agent/finalize_grace_seconds
             @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take `None` and an int: give it two ints or two strings
                 80 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `None`, is made at task.star:22:25
+                the left operand, `None`, is made at task.star:21:25
                 the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:13:9
             @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
                 97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
                 the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
-                the right operand, `5`, is made at task.star:16:13
-                in `claude_code()`, called at task.star:14:9
-            task.star:19:14: `stdin` can't be a list: expected a string
-                19 |     prompt = [PROMPT],
+                the right operand, `5`, is made at task.star:15:13
+                in `claude_code()`, called at task.star:13:9
+            task.star:18:14: `stdin` can't be a list: expected a string
+                18 |     prompt = [PROMPT],
                    |              ^^^^^^^^
                 the IR's /roles/0/runtime/agent/stdin
-            task.star:20:24: `deadline_seconds` can't be a string: expected an int
-                20 |     deadline_seconds = "60",
+            task.star:19:24: `deadline_seconds` can't be a string: expected an int
+                19 |     deadline_seconds = "60",
                    |                        ^^^^
                 the IR's /roles/0/runtime/agent/deadline_seconds
             @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take a string and an int: give it two ints or two strings
                 80 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `"128000"`, is made at task.star:22:25
+                the left operand, `"128000"`, is made at task.star:21:25
                 the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
-                in `claude_code()`, called at task.star:14:9"#]],
+                in `claude_code()`, called at task.star:13:9"#]],
     );
 }

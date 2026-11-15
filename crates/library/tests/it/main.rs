@@ -89,6 +89,107 @@ fn file(path: &str) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// The arguments every harness's function takes by keyword, each with the Starlark that gives
+/// its value from the `--arg` of its name.
+const SHARED: [(&str, &str); 6] = [
+    ("model", r#"arg("model", str)"#),
+    ("effort", r#"arg("effort", str)"#),
+    ("workspace", r#"arg("workspace", str)"#),
+    ("prompt", r#"arg("prompt", str)"#),
+    ("deadline_seconds", r#"arg("deadline_seconds", int)"#),
+    (
+        "finalize_grace_seconds",
+        r#"arg("finalize_grace_seconds", int)"#,
+    ),
+];
+
+/// A task's entry that calls `function`, the library's harness of that name, with each of
+/// `SHARED` and then `own`, and builds its agent on the image of `//images/Dockerfile`, which the
+/// judge runs on too.
+fn entry(function: &str, own: &[(&str, &str)]) -> String {
+    let arguments: Vec<&(&str, &str)> = SHARED.iter().chain(own).collect();
+    let mut entry = String::new();
+    let _ = writeln!(
+        entry,
+        r#"load("@pumpkin//harness/{function}/{function}.star", "{function}")"#
+    );
+    let _ = writeln!(entry);
+    for (keyword, value) in &arguments {
+        let _ = writeln!(entry, "{} = {value}", keyword.to_uppercase());
+    }
+    let _ = writeln!(entry);
+    let _ = writeln!(entry, r#"BASE = image("Dockerfile", context = "//images")"#);
+    let _ = writeln!(entry);
+    let _ = writeln!(entry, "agent = {function}(");
+    let _ = writeln!(entry, "    BASE,");
+    for (keyword, _) in &arguments {
+        let _ = writeln!(entry, "    {keyword} = {},", keyword.to_uppercase());
+    }
+    let _ = writeln!(entry, ")");
+    entry.push_str(WORKFLOW);
+    entry
+}
+
+const WORKFLOW: &str = r#"
+workflow(
+    name = "harness",
+    roles = [
+        {
+            "name": "agent",
+            "image": agent["image"],
+            "user": {"uid": 1000, "gid": 1000},
+            "needs": {"cpu_millis": 1000, "memory_bytes": GiB},
+            "runtime": agent["runtime"],
+            "egress": agent["egress"],
+            "grants": [{"submit": {"name": "final"}}],
+        },
+        {
+            "name": "judge",
+            "image": BASE,
+            "user": {"uid": 65532, "gid": 65532},
+            "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
+            "runtime": {"judge": {
+                "command": {"argv": ["true"], "cwd": "/pumpkin/home"},
+                "slots": [{"name": "payload", "max_bytes": KiB}],
+                "result": {"score": "/score", "returns": ["/score"]},
+            }},
+        },
+    ],
+    score = {"role": "judge", "slot": "payload", "timeout_seconds": 60},
+)
+"#;
+
+/// The arguments of `case`, a value for each of `SHARED` and then `own`, by their keywords, as
+/// [`entry`] takes them.
+fn args(own: &[(&str, &str)], case: &[&str]) -> Args {
+    let keywords: Vec<&str> = (SHARED.iter().chain(own))
+        .map(|(keyword, _)| *keyword)
+        .collect();
+    assert_eq!(keywords.len(), case.len(), "a value for each argument");
+    let given: Vec<String> = (keywords.iter().zip(case))
+        .map(|(keyword, value)| format!("{keyword}={value}"))
+        .collect();
+    Args::parse(given.iter().map(String::as_str)).unwrap()
+}
+
+/// A prompt of the task repository's form, shortened.
+const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
+
+When the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.
+";
+
+/// The agent's role of `workflow`, the first, and its runtime, whose deadline and grace are
+/// those of `case`, as [`args`] takes it.
+fn agent<'w>(workflow: &'w Workflow, case: &[&str]) -> (&'w ir::Role, &'w AgentRuntime) {
+    let agent = &workflow.ir().roles[0];
+    let ir::Runtime::Agent(runtime) = &agent.runtime else {
+        panic!("the first role is the agent");
+    };
+    assert_eq!(runtime.deadline_seconds.to_string(), case[4]);
+    assert_eq!(runtime.finalize_grace_seconds.to_string(), case[5]);
+    (agent, runtime)
+}
+
 /// The workflow that `entry` gives, given `args`, its images standing as IDs of their number,
 /// with what each image's build is, as `shown` has it; or the problems of its evaluation.
 fn evaluated(entry: &str, args: &Args) -> Result<(Workflow, Vec<String>), String> {
