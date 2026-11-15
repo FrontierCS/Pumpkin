@@ -4,15 +4,14 @@
 use std::fmt::Write as _;
 
 use expect_test::expect;
-use schema::ir;
 
-use super::zcode::{ENTRY, FCS_PROMPT, args};
-use super::{check, evaluated, layer, route, show};
+use super::{FCS_PROMPT, agent, args, check, entry, evaluated, layer, route, show};
 
-/// The task's entry, `ENTRY` of `pi()`.
-fn entry() -> String {
-    ENTRY.replace("zcode", "pi")
-}
+/// The arguments `pi()` takes besides `SHARED`, each with the Starlark of its value.
+const OWN: [(&str, &str); 2] = [
+    ("context_tokens", r#"arg("context_tokens", int)"#),
+    ("max_output_tokens", r#"arg("max_output_tokens", int)"#),
+];
 
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
@@ -51,24 +50,10 @@ fn roles() {
     ];
     let mut shown = String::new();
     for (index, case) in cases.iter().enumerate() {
-        let (workflow, images) = evaluated(&entry(), &args(case)).unwrap();
-        let [
-            model,
-            effort,
-            workspace,
-            _,
-            deadline,
-            grace,
-            context,
-            output,
-        ] = case;
-        let agent = &workflow.ir().roles[0];
-        let ir::Runtime::Agent(runtime) = &agent.runtime else {
-            panic!("the first role is the agent");
-        };
+        let (workflow, images) = evaluated(&entry("pi", &OWN), &args(&OWN, case)).unwrap();
+        let [model, effort, workspace, _, _, _, context, output] = case;
+        let (agent, runtime) = agent(&workflow, case);
         assert_eq!(runtime.stdin, None);
-        assert_eq!(runtime.deadline_seconds.to_string(), *deadline);
-        assert_eq!(runtime.finalize_grace_seconds.to_string(), *grace);
         let _ = writeln!(shown, "{model} {effort} {workspace} {context} {output}:");
         // Each file's whole text, but in the last case, whose files differ from the first's
         // only in the values the case names.
@@ -160,7 +145,7 @@ fn refusals() {
         let case = [
             given[0], effort, workspace, prompt, given[4], given[5], context, output,
         ];
-        refused.push(evaluated(&entry(), &args(&case)).unwrap_err());
+        refused.push(evaluated(&entry("pi", &OWN), &args(&OWN, &case)).unwrap_err());
     }
     // Each argument that Pi checks given `None`, as a task's `arg(…, default = None)` gives it
     // when no one passes one.
@@ -172,8 +157,8 @@ fn refusals() {
             "max_output_tokens = None,",
         ),
     ] {
-        let entry = entry().replacen(argument, value, 1);
-        refused.push(evaluated(&entry, &args(&given)).unwrap_err());
+        let entry = entry("pi", &OWN).replacen(argument, value, 1);
+        refused.push(evaluated(&entry, &args(&OWN, &given)).unwrap_err());
     }
     check(
         &refused.join("\n"),
@@ -181,11 +166,11 @@ fn refusals() {
             @pumpkin//harness/pi/pi.star:60:9: fail: `max` is not a thinking level of Pi's: use one of low, medium, high
                 60 |         fail("`{}` is not a thinking level of Pi's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:60:9: fail: `High` is not a thinking level of Pi's: use one of low, medium, high
                 60 |         fail("`{}` is not a thinking level of Pi's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:75:13: `/pumpkin/home/.pi-home` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 75 |     home = ("" if workspace == "/" else workspace) + "/.pi-home"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -193,34 +178,34 @@ fn refusals() {
             @pumpkin//harness/pi/pi.star:62:9: fail: Pi runs only on a prompt: give a string that is not empty
                 62 |         fail("Pi runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:66:9: fail: Pi reads a prompt that begins with `@` as a file's path: begin it with another character
                 66 |         fail("Pi reads a prompt that begins with `@` as a file's path: begin it with another character")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:68:9: fail: `0` is not a number of tokens: give a positive int
                 68 |         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:70:9: fail: `0` is not a number of tokens: give a positive int
                 70 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:62:9: fail: Pi runs only on a prompt: give a string that is not empty
                 62 |         fail("Pi runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:67:23: `<` can't take `None` and an int: give it two ints or two strings
                 67 |     if context_tokens < 1:
                    |                       ^
-                the left operand, `None`, is made at task.star:23:22
+                the left operand, `None`, is made at task.star:22:22
                 the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:67:25
-                in `pi()`, called at task.star:15:9
+                in `pi()`, called at task.star:14:9
             @pumpkin//harness/pi/pi.star:69:26: `<` can't take `None` and an int: give it two ints or two strings
                 69 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `None`, is made at task.star:24:25
+                the left operand, `None`, is made at task.star:23:25
                 the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:69:28
-                in `pi()`, called at task.star:15:9"#]],
+                in `pi()`, called at task.star:14:9"#]],
     );
 }
