@@ -912,6 +912,7 @@ dependencies = [
  "sha2",
  "stdx",
  "tempfile",
+ "toml",
  "xflags",
  "xshell",
 ]

@@ -415,9 +415,12 @@ controller (`controller`), over `ssh` through SSM, and copy each record that has
   operator's umask.
 
 **`xtask`.** `cargo xtask ci`, the checks every change passes (its checks of Rust files in `tidy`,
-the check that the repository's `.star` files are formatted in `star`, and with `--docker` the
-tests that need Docker), `cargo xtask fmt`, which formats the workspace with the pinned nightly
-rustfmt, `cargo xtask sandboxd`, `cargo xtask install`, which installs `pumpkin` beside a static
+the check that the repository's `.star` files are formatted in `star`, and the tests that reach
+no Docker engine, network or cloud), `cargo xtask live`, the checks that reach a real
+environment (`live`: `docker`, the tests that need Docker; `ec2` and `modal`, a run of
+`examples/smoke` through the controller, reading the configuration's `settings`),
+`cargo xtask fmt`, which formats the workspace with the pinned nightly rustfmt,
+`cargo xtask sandboxd`, `cargo xtask install`, which installs `pumpkin` beside a static
 `sandboxd` and `ec2-boot`, the Modal provider's helper and the formatter, `cargo xtask mutants`,
 which runs cargo-mutants on the working tree's changes (`diff`), `cargo xtask refill`, which
 rewrites a package's snapshots, and `cargo xtask install-tools`, which installs the contributor
@@ -443,7 +446,8 @@ and the units that stop it when idle and reap at its boot. No crate depends on i
 are the client's `[controller]` table and IAM policy, and settings of a machine's configuration.
 
 **`examples/`.** Tasks in Pumpkin's workflow language: `hello` needs no model, and `codex` takes
-one as `--arg model`. No crate depends on it, but `pumpkin`'s tests copy `hello`.
+one as `--arg model`; `smoke`, which `cargo xtask live` runs, probes each sandbox's confinement.
+No crate depends on it, but `pumpkin`'s tests copy `hello`.
 
 ## Cross-cutting concerns
 

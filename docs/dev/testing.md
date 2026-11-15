@@ -16,9 +16,17 @@ The rules for writing Pumpkin's tests and their snapshots.
 - RUN `cargo xtask mutants crates/decision crates/schema` at review of a change to the decision
   core or to the schema's refusals, which mutates the change in those crates alone, and read each
   mutant it reports missed, a change that no test catches: ci doesn't run it
-- IGNORE each test that needs a Docker engine or the static `sandboxd`, or that waits out a bound
-  of minutes on the real clock: `cargo xtask ci --docker` builds that `sandboxd` and runs the
+- KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud, and wait on no
+  real clock; temporary files, Pumpkin's own processes and loopback sockets are fine. IGNORE each
+  test that needs a Docker engine, the static `sandboxd` or a server elsewhere (`#[ignore = "…:
+  run cargo xtask live docker"]`): `cargo xtask live docker` builds that `sandboxd` and runs the
   ignored tests
+- NEVER test against an invented model of a cloud or a service, which pins what the model answers:
+  `cargo xtask live ec2` and `cargo xtask live modal` run `examples/smoke` through the controller,
+  probe each sandbox's confinement, and check that nothing of the run is left; RUN them at review
+  of a change to a provider, `crates/aws`, `crates/tls`, the gateway's meeting, `sandboxd`'s
+  listen, dial or user drop, `ec2-boot`, the EC2 entry or the Modal helper, and give the run's id
+  in the pull request
 - SET `test = false` on each library and binary target: tests live in the integration test
   binary, and `cargo test` would build each target again for an empty unit-test harness; SET
   `doctest = false` too on each library whose docs hold no Rust example, which rustdoc would build

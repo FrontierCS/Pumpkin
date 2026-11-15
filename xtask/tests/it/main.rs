@@ -1,5 +1,6 @@
 //! xtask's checks of Rust files ([`tidy`]) and its diff ([`diff`]), on scratch Git
-//! repositories, and the consumer entry `deploy/pumpkin` ([`entry`]). xtask is a binary, so its
+//! repositories, what `cargo xtask live` reads of a configuration and of a run's progress
+//! ([`live`]), and the consumer entry `deploy/pumpkin` ([`entry`]). xtask is a binary, so its
 //! test binary compiles their modules itself.
 
 #![expect(
@@ -15,8 +16,13 @@ use xshell::{Shell, cmd};
 #[path = "../../src/diff.rs"]
 mod diff;
 mod entry;
+mod live;
+#[path = "../../src/settings.rs"]
+mod settings;
 #[path = "../../src/tidy.rs"]
 mod tidy;
+#[path = "../../src/wait.rs"]
+mod wait;
 
 /// The result the check returns, as xtask's tasks do.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;

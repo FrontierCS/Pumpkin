@@ -119,7 +119,7 @@ pub fn build(dockerfile: &str, contexts: &[(&str, &str)], tag: &str) -> String {
 pub fn sandboxd() -> PathBuf {
     let Some(sandboxd) = std::env::var_os("PUMPKIN_SANDBOXD") else {
         panic!(
-            "`PUMPKIN_SANDBOXD` is unset: run the ignored tests with `cargo xtask ci --docker`, \
+            "`PUMPKIN_SANDBOXD` is unset: run the ignored tests with `cargo xtask live docker`, \
              which builds sandboxd and sets it"
         );
     };

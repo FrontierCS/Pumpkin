@@ -285,7 +285,7 @@ fn build_output() {
 }
 
 #[test]
-#[ignore = "builds the static sandboxd: run cargo xtask ci --docker"]
+#[ignore = "builds the static sandboxd: run cargo xtask live docker"]
 fn install_root() {
     let held = tempfile::Builder::new()
         .prefix("pumpkin-install-")

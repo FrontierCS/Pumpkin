@@ -84,7 +84,7 @@ fn check(script: &str, expect: &Expect) {
 }
 
 #[test]
-#[ignore = "needs Docker: run cargo xtask ci --docker"]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn codex_layer() {
     let script = "cd /harness/codex-0.167.0 && find . | sort | xargs stat -c '%A %u:%g %n' \
                   && ./bin/codex --version";
