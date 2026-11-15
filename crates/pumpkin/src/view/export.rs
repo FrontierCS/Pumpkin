@@ -28,6 +28,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use miniz_oxide::deflate::{CompressionLevel, compress_to_vec_zlib};
 use miniz_oxide::inflate::decompress_to_vec_zlib;
@@ -47,13 +48,64 @@ use crate::say;
 /// <https://github.com/UKGovernmentBEIS/inspect_ai/blob/7cf09c929b3ea9138762ca9e4d8d23f119554ee6/src/inspect_ai/log/_bundle.py#L246-L257>.
 const ROBOTS: &str = "User-agent: *\nDisallow: /\n";
 
-/// Writes the runs in the directory `runs` names, or the default one, into `to`, as the module's
-/// doc says, each reply with what `scrub` and each run's record name replaced
-/// ([`Scrub::of_run`]), and reports each run it left out, with why, and the counts of what it
-/// exported, left out and wrote.
+/// Writes the runs in the directory `runs` names, or the default one, into `to`, as [`exported`]
+/// does, and says each run it left out, the replies refused, and the counts of what it exported,
+/// left out and wrote.
 pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<ExitCode, String> {
     let (runs, _) = crate::runs_dir(runs)?;
-    let view = View::new(PathBuf::from(&runs), None);
+    let exported = exported(Path::new(&runs), to, scrub, None)?;
+    exported.say_refused();
+    let Exported {
+        ids,
+        left_out,
+        written,
+        refused: _,
+    } = exported;
+    say(format_args!(
+        "exported {} into {}, and left out {}: wrote {written} files",
+        crate::counted(ids.len(), "run"),
+        to.display(),
+        left_out.len(),
+    ));
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) struct Exported {
+    /// The id of each run that it exported, newest first, as `runs.json` lists them.
+    pub(crate) ids: Vec<RunTag>,
+    /// Each run that it left out, which has no `run.json` and no row of `runs.json`, with why.
+    pub(crate) left_out: Vec<String>,
+    pub(crate) written: usize,
+    /// Each reply that the view refused, with its request, which has no file.
+    pub(crate) refused: Vec<String>,
+}
+
+impl Exported {
+    /// Says each run left out, with why, and how many replies were refused, and the first, if
+    /// any was.
+    pub(crate) fn say_refused(&self) {
+        for left_out in &self.left_out {
+            say(format_args!("left out {left_out}"));
+        }
+        if let Some(first) = self.refused.first() {
+            say(format_args!(
+                "replies refused, which have no file: {}; the first: {first}",
+                self.refused.len()
+            ));
+        }
+    }
+}
+
+/// Writes the runs in `runs` into `to`, as the module's doc says, each reply with what `scrub` and
+/// each run's record name replaced ([`Scrub::of_run`]); a run that started before `since`, a time
+/// since the Unix epoch, is skipped.
+pub(crate) fn exported(
+    runs: &Path,
+    to: &Path,
+    scrub: Scrub,
+    since: Option<Duration>,
+) -> Result<Exported, String> {
+    let view = View::new(runs.to_owned(), None);
     // As the controller's view answers: the command that runs a run again names this machine.
     let mut view = View {
         again: false,
@@ -74,14 +126,23 @@ pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<Ex
         }
     }
     out.put("robots.txt", ROBOTS.as_bytes())?;
+    let mut rows = rows(&mut view)?;
+    // A run's id starts with the time its run started.
+    rows.retain(|row| {
+        let minted = row["id"].as_str().and_then(runtime::minted);
+        since.is_none_or(|since| minted.is_some_and(|minted| minted >= since))
+    });
     // Only a run that has its `run.json` is a row of `runs.json`, and counted.
-    let (mut listed, mut left_out) = (Vec::new(), Vec::new());
-    for row in rows(&mut view)? {
+    let (mut listed, mut ids, mut left_out) = (Vec::new(), Vec::new(), Vec::new());
+    for row in rows {
         let Some(Ok(id)) = row["id"].as_str().map(|id| RunTag::try_from(id.to_owned())) else {
             continue;
         };
         match out.run(&mut view, &id)? {
-            Ok(()) => listed.push(row),
+            Ok(()) => {
+                listed.push(row);
+                ids.push(id);
+            }
             Err(why) => left_out.push(format!("run {}: {why}", id.as_str())),
         }
     }
@@ -91,22 +152,12 @@ pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<Ex
     let Out {
         written, refused, ..
     } = out;
-    for left_out in &left_out {
-        say(format_args!("left out {left_out}"));
-    }
-    if let Some(first) = refused.first() {
-        say(format_args!(
-            "replies refused, which have no file: {}; the first: {first}",
-            refused.len()
-        ));
-    }
-    say(format_args!(
-        "exported {} into {}, and left out {}: wrote {written} files",
-        crate::counted(listed.len(), "run"),
-        to.display(),
-        left_out.len(),
-    ));
-    Ok(ExitCode::SUCCESS)
+    Ok(Exported {
+        ids,
+        left_out,
+        written,
+        refused,
+    })
 }
 
 /// Every run's row of the list, newest first, as the pages of `/api/runs` give them.

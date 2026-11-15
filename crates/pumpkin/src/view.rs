@@ -50,8 +50,10 @@ use rustix::io::Errno;
 use serde_json::{Value, json};
 use stdx::Context;
 
+pub(crate) use self::export::{Exported, exported};
 use self::http::{Method, Request, Response};
 use self::json::{listed_json, live_row, record_json, run_json, scored, tokens_json};
+pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
 use crate::progress::{self, Listed};
 use crate::{cli, config, controller, next, say};
@@ -79,7 +81,7 @@ const HELD_ENDED_RUNS: usize = 8;
 pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     let cli::View { runs, port, export } = flags;
     if let Some(export) = export {
-        return export::export(runs, &export, scrub::Scrub::of_machine());
+        return export::export(runs, &export, Scrub::of_machine());
     }
     let (source, serving) = if runs.is_none()
         && let Some(client) = config::client(None)?

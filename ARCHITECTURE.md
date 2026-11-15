@@ -388,6 +388,7 @@ workspace's commands share (`Reached`), over which its `send` sends a run's or a
 stop and reap them; `manifest`
 is what `send` sends a task's tree as, by content, to the controller's store, `job` is the
 controller's side, with the prune and the slots that admit its builds and publishes (`Admission`),
+`publish` copies the runs, as `view` exports them, to the public page's bucket as their jobs run,
 `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs the formatter,
 `view` serves the runs' records to a browser, its `json` the JSON forms of what it answers with,
 its `frame` the frames in which it asks the view on a controller, and `Workspace` is the

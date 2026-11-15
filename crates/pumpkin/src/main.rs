@@ -39,6 +39,7 @@ mod lock;
 mod manifest;
 mod next;
 mod progress;
+mod publish;
 mod sandboxd;
 mod star;
 mod style;
@@ -88,6 +89,7 @@ fn main() -> ExitCode {
         Ok(cli::Command::Follow(id)) => job::follow(&id),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::ViewFor) => view::over_pipe(),
+        Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
@@ -434,6 +436,7 @@ fn prepared<'e>(
         providers,
         gateway,
         upstreams,
+        publish: _,
     } = config::read(config)?;
     let servings = task
         .workflow()
@@ -1317,6 +1320,7 @@ fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
         providers: _,
         gateway: _,
         upstreams: _,
+        publish: _,
     } = config::read(path)?;
     engine(context, reader)
 }

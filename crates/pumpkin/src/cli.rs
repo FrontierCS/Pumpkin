@@ -7,6 +7,7 @@
 
 use std::ffi::OsString;
 use std::iter;
+use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ use provider::RunTag;
 use recipe::Stage;
 use schema::ir::Sha256Digest;
 
+use crate::publish::{Bucket, Since};
 use crate::star::Entry;
 
 /// A command, as clap parses it.
@@ -125,7 +127,8 @@ run` and `pumpkin build` start there in a unit of its own; `boot` reaps what los
 runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
 and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
 ending from its copy of the record; `view` answers, on its standard input and
-output, `pumpkin view` on a client, which shows the controller's runs.")]
+output, `pumpkin view` on a client, which shows the controller's runs; and
+`publish` uploads the runs to the bucket of the public page.")]
     #[command(after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -180,6 +183,62 @@ writes.")]
     },
     #[command(about = "Answer a client's view of the runs, on the standard input and output")]
     View,
+    #[command(about = "Upload the runs to the bucket of the public page")]
+    #[command(long_about = PUBLISH_ABOUT, after_help = PUBLISH_NOTES)]
+    Publish(Publish),
+}
+
+const PUBLISH_ABOUT: &str = "\
+Upload the runs in --runs to an S3 bucket, from which a static copy of the
+view's page serves them: export them, as `pumpkin view --export` does, but those
+that started before --since, into public/ beside --runs, with each of the
+controller's addresses replaced too; then upload, with `aws`, AWS CLI v2, in
+--region, what changed since the last publish that uploaded all it planned, in
+an order in which no file names one not uploaded yet.
+It deletes nothing, so the credentials that `aws` finds need only list the
+bucket and put objects there. One publish at a time: this one waits for another
+that runs. A run's job on the controller publishes every minute while its
+run is live, and once more as it ends, as [publish] in the controller's settings
+says (`pumpkin help config`).";
+
+const PUBLISH_NOTES: &str = "\
+Example, of the runs copied from a controller:
+  pumpkin controller publish --runs records --bucket pumpkin-alice-public --region us-west-1 --since 2026-11-15T00:00:00Z --controller-address 172.31.5.6 --controller-address 198.51.100.9
+
+Exit status:
+  0  Every upload ran.
+  1  An error, which a `pumpkin:` line on the standard error says; the next
+     publish uploads what this one didn't.
+  2  A usage error.";
+
+/// What `pumpkin controller publish` is asked for, as its help says.
+#[derive(Args)]
+pub(crate) struct Publish {
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
+The directory of the runs to publish.
+Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+    pub(crate) runs: Option<String>,
+    #[arg(long, value_name = "name", help = "The S3 bucket to upload to.")]
+    #[arg(value_parser = |name: &str| Bucket::try_from(name.to_owned()))]
+    pub(crate) bucket: Bucket,
+    #[arg(long, value_name = "region", help = "The bucket's AWS region.")]
+    #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
+    pub(crate) region: Region,
+    #[arg(long, value_name = "instant", value_parser = |since: &str| since.parse::<Since>())]
+    #[arg(help = "\
+An instant, as RFC 3339 writes one, such as 2026-11-15T00:00:00Z: a run that
+started before it, as its id says, is not published.
+Default: every run")]
+    pub(crate) since: Option<Since>,
+    #[arg(
+        long = "controller-address",
+        value_name = "ipv4",
+        help = "\
+An IPv4 address of the controller that ran the runs, which becomes
+<controller> in what is published; given once for each.
+Default: none"
+    )]
+    pub(crate) controller_addresses: Vec<Ipv4Addr>,
 }
 
 /// What a command line asks for.
@@ -204,6 +263,8 @@ pub(crate) enum Command {
     CancelFor(Cancel),
     /// `pumpkin controller view`, a client's view of the runs.
     ViewFor,
+    /// `pumpkin controller publish`, a publish of the runs by hand.
+    Publish(Publish),
     /// Help, or the version, for the standard output.
     Print(String),
 }
@@ -917,10 +978,10 @@ const CONFIG: &str = "\
 pumpkin.toml, the machine's configuration, which every `pumpkin run` and
 `pumpkin build` reads: the file that --config names,
 $HOME/.config/pumpkin/pumpkin.toml by default. It is TOML, with the tables below.
-Every key is required, but those of [gateway] and the [upstreams.<name>] tables,
-and any other key is refused. [controller] takes the place of [docker],
-[providers.<name>.<kind>] and [gateway] on a machine whose runs go to the
-person's controller.
+Every key is required, but those of [gateway], the [upstreams.<name>] tables,
+[publish] and its `since`, and any other key is refused. [controller] takes the
+place of [docker], [providers.<name>.<kind>] and [gateway] on a machine whose
+runs go to the person's controller.
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -1065,6 +1126,16 @@ settings:
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
 
+[publish], on the controller, which deploy/aws writes into its settings: where
+each run's job publishes the runs, as `pumpkin controller publish --help` says;
+without it, nothing is published:
+  bucket        The S3 bucket of the public page.
+  distribution  The ID of the CloudFront distribution that serves the bucket.
+  address       The page's address, which each job's log names.
+  since         An instant, as a TOML offset date-time, such as
+                2026-11-15T00:00:00Z, unquoted: a run that started before it is
+                not published; absent, every run is.
+
 [controller], the person's controller, which deploy/aws makes, and to which
 `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
@@ -1106,9 +1177,21 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
         .position(|arg| !arg.as_bytes().starts_with(b"-"));
     let named = first.and_then(|at| cli.find_subcommand(&args[at]));
     let named = named.map(|command| command.get_name().to_owned());
+    // The controller's action, which the word after `controller` names, as `help` lists none of
+    // the controller's.
+    let action = (named.as_deref() == Some("controller"))
+        .then(|| first.and_then(|at| args.get(at + 1)))
+        .flatten()
+        .and_then(|word| word.to_str())
+        .filter(|word| !word.starts_with('-'))
+        .map(str::to_owned);
     let mut options = args.iter().take_while(|arg| *arg != "--");
     if options.any(|arg| arg == "-h" || arg == "--help") {
-        return Ok(Command::Print(help(&mut cli, named.as_deref())));
+        return Ok(Command::Print(help(
+            &mut cli,
+            named.as_deref(),
+            action.as_deref(),
+        )));
     }
     let before = &args[..first.unwrap_or(args.len())];
     if before.iter().any(|arg| arg == "-V" || arg == "--version") {
@@ -1116,9 +1199,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     }
     let refusal = |error| Refusal {
         error,
-        help: match &named {
-            Some(name) => format!("pumpkin help {name}"),
-            None => "pumpkin help".to_owned(),
+        help: match (&named, &action) {
+            (Some(controller), Some(action)) => format!("pumpkin {controller} {action} --help"),
+            (Some(name), None) => format!("pumpkin help {name}"),
+            (None, _) => "pumpkin help".to_owned(),
         },
     };
     let line = iter::once(OsString::from("pumpkin")).chain(args.iter().cloned());
@@ -1163,6 +1247,9 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::View,
         } => Command::ViewFor,
         Parsed::Controller {
+            action: Action::Publish(publish),
+        } => Command::Publish(publish),
+        Parsed::Controller {
             action:
                 Action::Job {
                     id,
@@ -1201,6 +1288,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Follow(_)
         | Command::CancelFor(_)
         | Command::ViewFor
+        | Command::Publish(_)
         | Command::Print(_) => {
             let problem = "the job's command is neither `run` nor `build`: give one";
             let controller = cli.find_subcommand_mut("controller");
@@ -1217,7 +1305,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
 /// `pumpkin help <topic>`: a command's help, a topic, or `pumpkin --help` without one.
 fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap::Error> {
     let Some(topic) = topic else {
-        return Ok(Command::Print(help(cli, None)));
+        return Ok(Command::Print(help(cli, None, None)));
     };
     if topic == "config" {
         return Ok(Command::Print(CONFIG.to_owned()));
@@ -1227,7 +1315,7 @@ fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap
         .map(|command| format!("`{}`", command.get_name()))
         .collect();
     if names.iter().any(|name| name.trim_matches('`') == topic) {
-        return Ok(Command::Print(help(cli, Some(topic))));
+        return Ok(Command::Print(help(cli, Some(topic), None)));
     }
     let problem = format!(
         "there is no help for `{topic}`: expected a command ({}) or a topic (`config`)",
@@ -1290,11 +1378,15 @@ does, and `pumpkin help <topic>` a topic.",
     ))
 }
 
-/// The help of the command of `cli` that `name` names, or of `pumpkin` if it names none.
-fn help(cli: &mut clap::Command, name: Option<&str>) -> String {
+/// The help of the command of `cli` that `name` names, or of its action `action`, or of `pumpkin`
+/// if it names none.
+fn help(cli: &mut clap::Command, name: Option<&str>, action: Option<&str>) -> String {
     cli.build();
     let help = match name.and_then(|name| cli.find_subcommand_mut(name)) {
-        Some(command) => command.render_long_help(),
+        Some(command) => match action.and_then(|action| command.find_subcommand_mut(action)) {
+            Some(action) => action.render_long_help(),
+            None => command.render_long_help(),
+        },
         None => cli.render_long_help(),
     };
     help.to_string()
