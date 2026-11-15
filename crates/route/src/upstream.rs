@@ -13,7 +13,7 @@ use schema::ir::{Api, ModelName, Name};
 use schema::sandbox::frame;
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
-use ureq::http::{HeaderMap, HeaderValue, Uri};
+use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
 
 use super::Keep;
 use super::closure::{Closed, Headers, Refusal, Route, Status, refusal};
@@ -54,7 +54,8 @@ pub struct Key(HeaderValue);
 /// The model provider's endpoint, with its key, which forwards closed requests.
 pub struct Upstream {
     url: Uri,
-    authorization: HeaderValue,
+    /// The header that carries the key, and its value.
+    authorization: (HeaderName, HeaderValue),
     // One for the upstream's every exchange, so that `shutdown` ends them all at once.
     agent: ureq::Agent,
     // Set before `shutdown` ends the exchanges in flight, so that one it ends before the head is
@@ -68,10 +69,9 @@ pub struct Upstream {
 
 /// How the route answered a model request: never with what the request or the response held.
 ///
-/// An upstream's response comes with the provider's id for the request, from its `x-request-id`
-/// or else `x-oai-request-id`, if it gave one, which an operator names to ask the provider about
-/// the request, the usage that its body reported, if it did ([`Usage`]), and the failure that it
-/// stated, if it did ([`Failure`]).
+/// An upstream's response comes with the provider's id for the request, if it gave one, which an
+/// operator names to ask the provider about the request, the usage that its body reported, if it
+/// did ([`Usage`]), and the failure that it stated, if it did ([`Failure`]).
 #[derive(Debug)]
 pub enum Answer {
     /// With the upstream's response, whole, which had `status`.
@@ -197,23 +197,22 @@ impl Key {
             .as_deref()
             .map(str::trim)
             .filter(|key| !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic()));
-        let Some(mut authorization) =
-            key.and_then(|key| HeaderValue::try_from(format!("Bearer {key}")).ok())
-        else {
+        let Some(mut key) = key.and_then(|key| HeaderValue::try_from(key).ok()) else {
             return Err(format!(
                 "the key file {} holds no API key: write the key alone, on one line",
                 path.display()
             ));
         };
         // The HTTP client's types show a sensitive value as such, never the value.
-        authorization.set_sensitive(true);
-        Ok(Self(authorization))
+        key.set_sensitive(true);
+        Ok(Self(key))
     }
 }
 
 impl Upstream {
-    /// The endpoint at `url`, which takes `key`, with connections of its own.
-    pub fn new(url: &UpstreamUrl, key: &Key) -> Self {
+    /// The endpoint of `api` at `url`, which takes `key` in the header that `api` names, with
+    /// connections of its own.
+    pub fn new(api: Api, url: &UpstreamUrl, key: &Key) -> Self {
         let agent = ureq::Agent::config_builder()
             // The provider's own errors reach the client as the provider gave them.
             .http_status_as_error(false)
@@ -232,10 +231,23 @@ impl Upstream {
             .timeout_per_write(Some(IDLE_TIMEOUT))
             .build()
             .into();
-        let (UpstreamUrl(url), Key(authorization)) = (url, key);
+        let (UpstreamUrl(url), Key(key)) = (url, key);
+        let mut authorization = match api {
+            Api::Responses | Api::Chat => {
+                let key = key.to_str().unwrap_or_else(|_| {
+                    unreachable!("a key read is printable ASCII, which is a header's value")
+                });
+                let bearer = HeaderValue::try_from(format!("Bearer {key}")).unwrap_or_else(|_| {
+                    unreachable!("printable ASCII after `Bearer ` is a header's value")
+                });
+                (AUTHORIZATION, bearer)
+            }
+            Api::Messages => (HeaderName::from_static("x-api-key"), key.clone()),
+        };
+        authorization.1.set_sensitive(true);
         Self {
             url: url.clone(),
-            authorization: authorization.clone(),
+            authorization,
             agent,
             shut_down: OnceLock::new(),
             refused: OnceLock::new(),
@@ -258,13 +270,14 @@ impl Upstream {
     ) -> io::Result<()> {
         client.keep.dropped_headers(closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
-        let call = self.agent.post(self.url.clone()).config();
+        let call = self.agent.post(self.url(closed)).config();
         let call = call.timeout_global(bound(client.by)).build();
         let call = closed
             .headers()
             .iter()
             .fold(call, |call, (name, value)| call.header(name, value));
-        let call = call.header(AUTHORIZATION, &self.authorization);
+        let (name, key) = &self.authorization;
+        let call = call.header(name, key);
         forwarding();
         let response = match call.send(closed.body()) {
             Ok(response) => response,
@@ -274,14 +287,15 @@ impl Upstream {
                 } else {
                     unanswered(&error)
                 };
-                return refuse(refusal, (None, None), client, answered);
+                return refuse(refusal, (None, None), closed, client, answered);
             }
         };
         let status = response.status().as_u16();
         let request_id = request_id(response.headers());
         if let Some(refusal) = self.refusal(status, response.headers()) {
             let mut body = response.into_body().into_reader();
-            return replaced(refusal, (status, request_id), &mut body, client, answered);
+            let upstream = (status, request_id);
+            return replaced(refusal, upstream, closed, &mut body, client, answered);
         }
         let headers = returned(response.headers(), closed);
         let Client { request, by, keep } = client;
@@ -298,7 +312,7 @@ impl Upstream {
             }
         };
         let content_type = (response.headers().get("content-type")).and_then(|v| v.to_str().ok());
-        let mut scan = Scan::new(content_type, closed.usage(), closed.output());
+        let mut scan = closed.scan(content_type);
         let mut body = response.into_body().into_reader();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
         let (usage, failed) = scan.finish();
@@ -363,7 +377,7 @@ impl Upstream {
         };
         let _ = match taken {
             Ok(closed) => self.forward(&closed, client, forwarding, answered),
-            Err(refusal) => barred(refusal, client, answered),
+            Err(refusal) => barred(refusal, route.api(), client, answered),
         };
     }
 
@@ -382,6 +396,15 @@ impl Upstream {
         // The agent's clones share its pool, whose shutdown closes every connection that any of
         // them reads or writes.
         self.agent.clone().shutdown();
+    }
+
+    /// The endpoint's URL for `closed`, with the query that its target carried.
+    fn url(&self, closed: &Closed<'_>) -> Uri {
+        let Some(query) = closed.query() else {
+            return self.url.clone();
+        };
+        Uri::try_from(format!("{}?{query}", self.url))
+            .unwrap_or_else(|_| unreachable!("a URL and a query of URL characters is a URL"))
     }
 
     pub fn was_shut_down(&self) -> bool {
@@ -415,8 +438,17 @@ pub fn serve(
     let client = Client { request, by, keep };
     let Some(index) = taken else {
         let path = &client.request.request.path;
-        let refusal = Refusal::unserved(path, entries.iter().map(|(route, _)| route));
-        let _ = barred(refusal, client, |answer| answered(None, answer));
+        let routes = || entries.iter().map(|(route, _)| route);
+        let refusal = Refusal::unserved(path, routes());
+        // In the form of the entries' API, so that a client of the Messages API alone, which may
+        // try its other endpoints, reads it.
+        let messages = routes().all(|route| route.api() == Api::Messages) && !entries.is_empty();
+        let api = if messages {
+            Api::Messages
+        } else {
+            Api::Responses
+        };
+        let _ = barred(refusal, api, client, |answer| answered(None, answer));
         return;
     };
     let (route, upstream) = &entries[index];
@@ -430,14 +462,19 @@ pub(crate) struct Client<'k> {
     keep: &'k dyn Keep,
 }
 
-/// Answers `client`'s request with `refusal`, before it reached the upstream, once the request as
-/// its client sent it and the refusal are kept, and `answered` is told so.
-fn barred(refusal: Refusal, client: Client<'_>, answered: impl FnOnce(Answer)) -> io::Result<()> {
+/// Answers `client`'s request, of `api`, with `refusal`, before it reached the upstream, once the
+/// request as its client sent it and the refusal are kept, and `answered` is told so.
+fn barred(
+    refusal: Refusal,
+    api: Api,
+    client: Client<'_>,
+    answered: impl FnOnce(Answer),
+) -> io::Result<()> {
     let Client { request, by, keep } = client;
     keep.request(&request.request.body, None);
-    keep.response(refusal.body().as_bytes());
+    keep.response(refusal.body(api).as_bytes());
     answered(refusal.barred());
-    refusal.answer(request, by)
+    refusal.answer(api, request, by)
 }
 
 /// The time that `until` leaves the exchange: none once it has passed, and no bound if it is
@@ -456,13 +493,15 @@ fn bound(until: Deadline) -> Option<Duration> {
 fn refuse(
     refusal: Refusal,
     (upstream_status, request_id): (Option<u16>, Option<String>),
+    closed: &Closed<'_>,
     client: Client<'_>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
     let Client { request, by, keep } = client;
-    keep.response(refusal.body().as_bytes());
+    let api = closed.route().api();
+    keep.response(refusal.body(api).as_bytes());
     answered(refusal.answered(upstream_status, request_id));
-    refusal.answer(request, by)
+    refusal.answer(api, request, by)
 }
 
 /// Answers `client`'s request with `refusal` in place of the upstream's response with the status
@@ -471,6 +510,7 @@ fn refuse(
 fn replaced(
     refusal: Refusal,
     (status, request_id): (u16, Option<String>),
+    closed: &Closed<'_>,
     body: &mut impl Read,
     client: Client<'_>,
     answered: impl FnOnce(Answer),
@@ -482,7 +522,7 @@ fn replaced(
         keep.response(&buffer[..read]);
     }
     answered(refusal.answered(Some(status), request_id));
-    refusal.answer(request, by)
+    refusal.answer(closed.route().api(), request, by)
 }
 
 enum Relayed {
@@ -524,10 +564,11 @@ fn relay(
     }
 }
 
-/// The provider's id for the request that `headers` answer, if it gave one: `x-request-id`, or
-/// else `x-oai-request-id`, as Codex keeps them for an error and Inspect for a model call.
+/// The provider's id for the request that `headers` answer, if it gave one: `x-request-id`, as
+/// OpenAI's APIs give it, `request-id`, as the Messages API does, or else `x-oai-request-id`, as
+/// Codex keeps them for an error and Inspect for a model call.
 fn request_id(headers: &HeaderMap) -> Option<String> {
-    ["x-request-id", "x-oai-request-id"]
+    ["x-request-id", "request-id", "x-oai-request-id"]
         .into_iter()
         .find_map(|name| headers.get(name)?.to_str().ok())
         .map(str::to_owned)

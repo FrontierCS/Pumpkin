@@ -367,6 +367,8 @@ pub enum Api {
     /// OpenAI's Chat Completions API, which most clients of a provider that speaks OpenAI's API
     /// write.
     Chat,
+    /// Anthropic's Messages API.
+    Messages,
 }
 
 impl fmt::Display for Api {
@@ -374,6 +376,7 @@ impl fmt::Display for Api {
         f.write_str(match self {
             Self::Responses => "responses",
             Self::Chat => "chat",
+            Self::Messages => "messages",
         })
     }
 }

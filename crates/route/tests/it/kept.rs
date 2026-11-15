@@ -1,5 +1,8 @@
 //! Model exchanges kept from real upstreams: Codex's over the Responses API, and a client's of
-//! Chat Completions, each served by Z.ai's GLM, cut short, their ids made up.
+//! Chat Completions, each served by Z.ai's GLM, cut short, their ids made up; and exchanges of the
+//! Messages API, which no record keeps, written from its documentation's forms:
+//! <https://platform.claude.com/docs/en/api/messages> and
+//! <https://platform.claude.com/docs/en/build-with-claude/streaming>.
 
 /// A Codex request of the Responses API, its texts and tools cut short.
 pub(crate) const RESPONSES_REQUEST: &str = r##"{"client_metadata":{"session_id":"25e1ab03-9a58-4703-9e58-4d0369258fab"},"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"You are a coding","type":"input_text"}],"id":"msg_4703cdef-bcd0-6b2d-f470-e925cd4703cd","role":"developer","type":"message"},{"content":[{"text":"Solve the evaluation task","type":"input_text"}],"id":"msg_58b4de36-2d81-7036-258d-f0369e58bcde","role":"user","type":"message"},{"content":[{"text":"We need inspect README","type":"reasoning_text"}],"encrypted_content":null,"id":"rs_resp_6925814703692581e7abc92f8b4703","summary":[],"type":"reasoning"},{"content":[{"annotations":[],"text":"I’ll read the task","type":"output_text"}],"id":"msg_resp_6925814703692581e7abc92f8b4703","role":"assistant","status":"completed","type":"message"},{"arguments":"{\"cmd\":\"cat /frontier/task/README.md\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":30000}","call_id":"call_7036f25cd4703cd25abc703a","id":"fc_call_7036f25cd4703cd25abc703a","name":"exec_command","status":"completed","type":"function_call"},{"call_id":"call_7036f25cd4703cd25abc703a","id":"fco_81e7ab69-fab4-0369-def4-cd6fabc1e703","output":"Chunk ID: d1afae Wall time: 0.0000 seconds Process exited","type":"function_call_output"}],"model":"glm-5.3-flash","parallel_tool_calls":true,"prompt_cache_key":"25e1ab03-9a58-4703-9e58-4d0369258fab","reasoning":{"effort":"xhigh","summary":"auto"},"store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Runs a command in","name":"exec_command","parameters":{"type":"object","properties":{}},"strict":false,"type":"function"},{"description":"Writes characters to an","name":"write_stdin","parameters":{"type":"object","properties":{}},"strict":false,"type":"function"}]}"##;
@@ -133,5 +136,75 @@ data: {"id":"147036925814703c9e58b47e36925e","created":1794610560,"object":"chat
 data: {"id":"147036925814703c9e58b47e36925e","created":1794610560,"object":"chat.completion.chunk","model":"glm-5.3-flash","choices":[{"index":0,"finish_reason":"stop","delta":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":20,"completion_tokens":57,"total_tokens":77,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":52}}}
 
 data: [DONE]
+
+"##;
+
+/// A stream of the Messages API of thinking, text and a tool call: its usage in `message_start`,
+/// then the stream's output count in `message_delta`.
+pub(crate) const MESSAGES_STREAM: &str = r##"event: message_start
+data: {"type":"message_start","message":{"id":"msg_01X","type":"message","role":"assistant","content":[],"model":"m-large","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":2000,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event: ping
+data: {"type":"ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The tests"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" fail"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Running"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" them."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_01B","name":"Bash","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":" \"cargo test\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":89}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"##;
+
+/// A stream of the Messages API that its upstream broke off within a tool call's input.
+pub(crate) const MESSAGES_CUT: &str = r##"event: message_start
+data: {"type":"message_start","message":{"id":"msg_01Y","type":"message","role":"assistant","content":[],"model":"m-large","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":40,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01C","name":"Read","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}
 
 "##;

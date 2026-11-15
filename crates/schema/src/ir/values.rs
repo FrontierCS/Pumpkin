@@ -471,6 +471,15 @@ fn check_header_name(name: &str) -> Result<(), String> {
         | "anthropic-organization-id" => {
             "carries a credential or picks an account, which are the host's alone"
         }
+        // The Messages API's request headers that pick an account:
+        // https://platform.claude.com/docs/en/api/messages
+        "anthropic-workspace-id" => {
+            "picks the workspace that the request runs and is billed in, which is the host's alone"
+        }
+        "anthropic-user-profile-id" => {
+            "attributes the request to a user profile, on whose behalf it acts, which is the \
+             host's alone"
+        }
         // AWS's SigV4 signs the request in `x-amz-` headers and carries a session's token in
         // one: an agent's own would sign as another principal.
         _ if name.starts_with("x-amz-") => {

@@ -379,11 +379,15 @@ fn usage_json(usage: &Usage) -> Value {
         input_tokens,
         output_tokens,
         cached_tokens,
+        cache_write_tokens,
         reasoning_tokens,
     } = usage;
     let mut json = json!({ "input_tokens": input_tokens, "output_tokens": output_tokens });
     if let Some(cached) = cached_tokens {
         json["cached_tokens"] = json!(cached);
+    }
+    if let Some(written) = cache_write_tokens {
+        json["cache_write_tokens"] = json!(written);
     }
     if let Some(reasoning) = reasoning_tokens {
         json["reasoning_tokens"] = json!(reasoning);
@@ -991,6 +995,8 @@ pub struct Tokens {
     pub input: u64,
     pub output: u64,
     pub cached: Option<u64>,
+    /// The input tokens written to the provider's cache.
+    pub cache_write: Option<u64>,
     pub reasoning: Option<u64>,
 }
 
@@ -1839,8 +1845,9 @@ impl PlaceUse {
 /// What a run used, as its `outcome.json` records it: `{"ran_ns": r, "model_requests": m,
 /// "tokens": t, "calls": [c, ...], "sandboxes": [s, ...], "usd": d}`: when its log last
 /// wrote, the model requests its routes answered and the tokens they reported, `{"responses": n,
-/// "input": i, "output": o}` with `"cached"` and `"reasoning"` where given; each judge call's
-/// share, if it made model requests, `{"job": j, "grant": g, "model_requests": m, "tokens": t}`;
+/// "input": i, "output": o}` with `"cached"`, `"cache_write"` and `"reasoning"` where given;
+/// each judge call's share, if it made model requests, `{"job": j, "grant": g, "model_requests":
+/// m, "tokens": t}`;
 /// each place's sandboxes, `{"provider": p, "class": c, "count": n, "lasted_ns": l}`, with
 /// `"charged_ns"` and `"busy_ns"` for leases' ([`PlaceUse::charged`]), `"undeleted"`, and
 /// `"usd_per_hour"` and `"usd"` for a priced class ([`Progress::sandboxes`]); and their cost.
@@ -1921,6 +1928,7 @@ pub(super) fn used(usage: &Value) -> Result<Used, String> {
         input: u64,
         output: u64,
         cached: Option<u64>,
+        cache_write: Option<u64>,
         reasoning: Option<u64>,
     }
     #[derive(Deserialize)]
@@ -1939,6 +1947,7 @@ pub(super) fn used(usage: &Value) -> Result<Used, String> {
         input,
         output,
         cached,
+        cache_write,
         reasoning,
     } = tokens;
     Ok(Used {
@@ -1949,6 +1958,7 @@ pub(super) fn used(usage: &Value) -> Result<Used, String> {
             input,
             output,
             cached,
+            cache_write,
             reasoning,
         },
         usd,
@@ -1963,11 +1973,15 @@ fn tokens_json(tokens: &Tokens) -> Value {
         input,
         output,
         cached,
+        cache_write,
         reasoning,
     } = tokens;
     let mut json = json!({ "responses": reported, "input": input, "output": output });
     if let Some(cached) = cached {
         json["cached"] = json!(cached);
+    }
+    if let Some(written) = cache_write {
+        json["cache_write"] = json!(written);
     }
     if let Some(reasoning) = reasoning {
         json["reasoning"] = json!(reasoning);
@@ -2157,6 +2171,9 @@ impl ModelUse {
             tokens.output += usage.output_tokens;
             if let Some(cached) = usage.cached_tokens {
                 *tokens.cached.get_or_insert(0) += cached;
+            }
+            if let Some(written) = usage.cache_write_tokens {
+                *tokens.cache_write.get_or_insert(0) += written;
             }
             if let Some(reasoning) = usage.reasoning_tokens {
                 *tokens.reasoning.get_or_insert(0) += reasoning;

@@ -333,6 +333,7 @@ pub(super) struct Usage {
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) cached_tokens: Option<u64>,
+    pub(super) cache_write_tokens: Option<u64>,
     pub(super) reasoning_tokens: Option<u64>,
 }
 

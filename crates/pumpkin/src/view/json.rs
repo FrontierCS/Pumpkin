@@ -121,6 +121,7 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
         input,
         output,
         cached,
+        cache_write: _,
         reasoning: _,
     } = tokens;
     let known = *reported > 0 || requests == 0;

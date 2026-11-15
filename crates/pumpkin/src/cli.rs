@@ -1116,9 +1116,12 @@ settings:
 [upstreams.<name>], for each upstream that a workflow's model route may reach:
   url           The base URL of its API: https, or http to a loopback IP
                 address, such as 127.0.0.1 but not localhost. The route reaches
-                each API's endpoint below it: /responses, or /chat/completions.
+                each API's endpoint below it: /responses, /chat/completions, or
+                /messages, which an Anthropic Messages API serves, such as
+                https://api.anthropic.com/v1.
   key_file      The file that holds its key, below this file's directory unless
-                absolute.
+                absolute. The route sends it as `authorization: Bearer <key>`,
+                and to /messages as `x-api-key: <key>`.
   models        The models it serves, each with the `name` that a route allows
                 and the `upstream_name` that the upstream takes for it. No model
                 is listed twice, under one upstream or two.

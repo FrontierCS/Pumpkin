@@ -12,23 +12,74 @@ const MAX_HELD_BYTES: usize = 16 << 20;
 // room for another provider's codes, and none for what a response held.
 const MAX_CODE_BYTES: usize = 64;
 
-/// Where an API's usage gives its input and output tokens, and the pointers to its cached and
-/// reasoning tokens.
-pub(crate) type Fields = [&'static str; 4];
+/// How an API's response reports its usage: the usage after one value of it, a response that is
+/// one JSON value or an event of its stream, given the usage before it, if any.
+pub(crate) type Reported = fn(Option<Usage>, &Value) -> Option<Usage>;
 
-pub(crate) const RESPONSES_FIELDS: Fields = [
+/// Where an API of OpenAI's gives its input and output tokens in a usage, and the pointers to
+/// its cached and reasoning tokens.
+type Fields = [&'static str; 4];
+
+const RESPONSES_FIELDS: Fields = [
     "input_tokens",
     "output_tokens",
     "/input_tokens_details/cached_tokens",
     "/output_tokens_details/reasoning_tokens",
 ];
 
-pub(crate) const CHAT_FIELDS: Fields = [
+const CHAT_FIELDS: Fields = [
     "prompt_tokens",
     "completion_tokens",
     "/prompt_tokens_details/cached_tokens",
     "/completion_tokens_details/reasoning_tokens",
 ];
+
+/// The Responses API's usage: a response's, or that of the last event that holds one.
+pub(crate) const RESPONSES: Reported =
+    |before, value| Usage::of(value, RESPONSES_FIELDS).or(before);
+
+/// The Chat Completions API's usage: a response's, or that of the last chunk that holds one.
+pub(crate) const CHAT: Reported = |before, value| Usage::of(value, CHAT_FIELDS).or(before);
+
+/// The Messages API's usage: a message's, or a stream's, whose `message_start` gives the counts
+/// so far in its message's `usage`, and each `message_delta` in its own, of those it gives.
+// The counts of a `message_delta` are the stream's so far, not added to those before, and one may
+// give the input's counts again as well as the output's:
+// https://platform.claude.com/docs/en/build-with-claude/streaming#event-types
+pub(crate) fn messages(before: Option<Usage>, value: &Value) -> Option<Usage> {
+    let usage = match value["type"].as_str() {
+        Some("message_start") => &value["message"]["usage"],
+        Some("message" | "message_delta") => &value["usage"],
+        _ => return before,
+    };
+    let count = |field: &str| usage.get(field).and_then(Value::as_u64);
+    let cached =
+        count("cache_read_input_tokens").or(before.and_then(|before| before.cached_tokens));
+    let cache_write = (count("cache_creation_input_tokens"))
+        .or(before.and_then(|before| before.cache_write_tokens));
+    // The input that the API counts leaves out the cache's reads and writes.
+    let uncached = count("input_tokens").or(before.map(|before| {
+        (before.input_tokens)
+            .saturating_sub(before.cached_tokens.unwrap_or_default())
+            .saturating_sub(before.cache_write_tokens.unwrap_or_default())
+    }));
+    let output = count("output_tokens").or(before.map(|before| before.output_tokens));
+    let reasoning = (usage.pointer("/output_tokens_details/thinking_tokens"))
+        .and_then(Value::as_u64)
+        .or(before.and_then(|before| before.reasoning_tokens));
+    let (Some(uncached), Some(output)) = (uncached, output) else {
+        return before;
+    };
+    Some(Usage {
+        input_tokens: uncached
+            .saturating_add(cached.unwrap_or_default())
+            .saturating_add(cache_write.unwrap_or_default()),
+        output_tokens: output,
+        cached_tokens: cached,
+        cache_write_tokens: cache_write,
+        reasoning_tokens: reasoning,
+    })
+}
 
 /// Whether an event of an API's stream is the model's output: the first that is marks the
 /// stream's first token.
@@ -41,13 +92,19 @@ pub(crate) fn event(line: &[u8]) -> Option<Value> {
     serde_json::from_slice(data).ok()
 }
 
-/// The tokens that a model response reports it used, as its provider counts them.
+/// The tokens that a model response reports it used, the same in meaning for every API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
+    /// Every token of the prompt: those served from the provider's cache and those written to it
+    /// included, which the Messages API counts apart from its `input_tokens`.
     pub input_tokens: u64,
+    /// Every token generated, the reasoning's included.
     pub output_tokens: u64,
     /// The input tokens that the provider served from its cache, if it says.
     pub cached_tokens: Option<u64>,
+    /// The input tokens that the provider wrote to its cache, if it says, as only the Messages
+    /// API does.
+    pub cache_write_tokens: Option<u64>,
     /// The output tokens that went to the model's reasoning, if the provider says.
     pub reasoning_tokens: Option<u64>,
 }
@@ -65,6 +122,7 @@ impl Usage {
             input_tokens: count(usage.get(input))?,
             output_tokens: count(usage.get(output))?,
             cached_tokens: count(usage.pointer(cached)),
+            cache_write_tokens: None,
             reasoning_tokens: count(usage.pointer(reasoning)),
         })
     }
@@ -73,8 +131,9 @@ impl Usage {
 /// The failure that a streamed response states in one of its events, whatever its status.
 ///
 /// A Responses `response.failed` states one, whose response's `error` gives its code, as does an
-/// `error` event, which gives it itself, and an event of either API that holds an `error`, which
-/// gives it there, as a Chat Completions stream states one.
+/// `error` event, which gives it itself, and an event of any API that holds an `error`, which
+/// gives it there, as a Chat Completions stream and a Messages `error` event state one. The
+/// Messages API gives the code as its error's `type`, such as `overloaded_error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     code: Option<String>,
@@ -88,14 +147,15 @@ impl Failure {
         self.code.as_deref()
     }
 
-    fn of(event: &Value) -> Option<Self> {
+    /// The failure that `event` states, whose error gives its code in `code`.
+    fn of(event: &Value, code: &str) -> Option<Self> {
         let error = match (event.get("error"), event["type"].as_str()) {
             (Some(error), _) if !error.is_null() => Some(error),
             (_, Some("response.failed")) => event.pointer("/response/error"),
             (_, Some("error")) => Some(event),
             _ => return None,
         };
-        let code = error.and_then(|error| error.get("code")?.as_str());
+        let code = error.and_then(|error| error.get(code)?.as_str());
         let code = code.filter(|code| {
             (1..=MAX_CODE_BYTES).contains(&code.len())
                 && (code.bytes()).all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
@@ -110,7 +170,9 @@ impl Failure {
 /// that holds one, or from a response that is one JSON value, the failure that a stream states
 /// ([`Failure`]), and where a stream's output begins ([`Output`]).
 pub(crate) struct Scan {
-    fields: Fields,
+    usage_of: Reported,
+    /// The field of a failure's error that gives its code.
+    code: &'static str,
     output: Output,
     stream: bool,
     /// Whether an event of the stream was output.
@@ -123,10 +185,16 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    pub(crate) fn new(content_type: Option<&str>, fields: Fields, output: Output) -> Self {
+    pub(crate) fn new(
+        content_type: Option<&str>,
+        usage_of: Reported,
+        code: &'static str,
+        output: Output,
+    ) -> Self {
         let stream = content_type.is_some_and(|value| value.contains("text/event-stream"));
         Self {
-            fields,
+            usage_of,
+            code,
             output,
             stream,
             began: false,
@@ -159,7 +227,7 @@ impl Scan {
         } else if let Some(held) = &self.held {
             self.usage = serde_json::from_slice(held)
                 .ok()
-                .and_then(|body| Usage::of(&body, self.fields));
+                .and_then(|body| (self.usage_of)(None, &body));
         }
         (self.usage, self.failed)
     }
@@ -182,9 +250,9 @@ impl Scan {
         let Some(event) = event(&held) else {
             return;
         };
-        self.usage = Usage::of(&event, self.fields).or(self.usage);
+        self.usage = (self.usage_of)(self.usage, &event);
         self.began |= (self.output)(&event);
-        if let Some(failure) = Failure::of(&event) {
+        if let Some(failure) = Failure::of(&event, self.code) {
             let code = self.failed.take().and_then(|failed| failed.code);
             self.failed = Some(Failure {
                 code: code.or(failure.code),

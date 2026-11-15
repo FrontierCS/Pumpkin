@@ -886,6 +886,7 @@ impl StandIn {
         let path = match entry.api {
             ir::Api::Responses => "responses",
             ir::Api::Chat => "chat/completions",
+            ir::Api::Messages => "messages",
         };
         let url = format!("http://{}/v1/{path}", self.address);
         Serving {

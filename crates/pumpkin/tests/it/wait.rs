@@ -709,7 +709,7 @@ fn summarizes() {
              8:20 gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
             16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36
                     model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; no response reported its tokens
-          model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3000 in (2600 cached), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+          model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
           sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
         pumpkin: run 20261110-100000-0000000a finished with a score of 49.36, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
@@ -955,7 +955,7 @@ fn summarizes_an_interrupted_run() {
              0:00 agent on aws/judge, started at 0:05
              0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 26s: deleted as the run stopped
              0:50   box lease 0 of job 0 on aws/box, 21s: charged 16s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; deleted as the run stopped
-          model: 3 requests, all answered 200; tokens 3000 in (2600 cached), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+          model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
           sandboxes: 1 on aws/box, 21s in all, leases charged 16s, 5s of it busy, 1 created, all deleted; 1 on aws/judge, 1m20s in all, $0.01 at $0.3672 an hour, 1 created, all deleted; 1 on modal/a100_80, 32s in all, $0.02 at $2.5 an hour, 1 created, all deleted
         pumpkin: run 20261113-123335-5ea1ea5f was interrupted by SIGTERM; its record is <scratch>/runs/20261113-123335-5ea1ea5f
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
