@@ -8,7 +8,7 @@
 //! and `plan` reads it through `ir`: none uses one before it.
 //!
 //! An evaluation is hermetic: it reads source only through its [`Loader`], by [`Label`]s, which
-//! stay below the root, and its `--arg`s ([`Args`]); and the crate is `no_std`, as `harness` is,
+//! stay below their root, and its `--arg`s ([`Args`]); and the crate is `no_std`, as `harness` is,
 //! whose adapter `codex()` runs, so that their own code can name no file, clock, environment,
 //! process or randomly seeded hash, though `schema`'s I/O items stay reachable through it. An
 //! image is only declared, for its caller to build. The same sources and args always give the
@@ -82,9 +82,9 @@ impl Bounds {
 ///
 /// # Errors
 ///
-/// A file's first syntax error, or every name in it that resolution rejects; the first error
-/// while the files run, passing `bounds` among them; or, once they have run, the entry calling
-/// no `workflow()`, and each of `args` that no `arg()` call declares.
+/// An entry of the standard library; a file's first syntax error, or every name it fails to
+/// resolve; the first error while the files run, passing `bounds` among them; or, once they have
+/// run, the entry calling no `workflow()`, and each of `args` that no `arg()` call declares.
 pub fn evaluate(
     entry: &Label,
     loader: &mut impl Loader,
@@ -100,7 +100,7 @@ pub fn evaluate(
     Plan::new(entry, evaluation.sources, evaluation.planned)
 }
 
-/// Where an evaluation reads its source.
+/// Where an evaluation reads its source, below either [`Root`].
 pub trait Loader {
     /// The text of the file at `label`, or why it can't be read, which the evaluation reports at
     /// the `load` that names it, or as the entry's problem.
@@ -149,43 +149,82 @@ impl Args {
     }
 }
 
-/// A place below the root: `//`, then `/`-separated components of ASCII letters,
-/// digits, `.`, `_` and `-`, none of them empty, `.` or `..`, so that it names no place outside
-/// the root.
+/// A place below a [`Root`], which names no place outside it.
+///
+/// It is `//`, the task's root, or `@pumpkin//`, the standard library's, then `/`-separated
+/// components of ASCII letters, digits, `.`, `_` and `-`, none of them empty, `.` or `..`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Label(String);
+pub struct Label {
+    root: Root,
+    path: String,
+}
+
+/// The root that a [`Label`] names a place below. A [`Loader`] reads the files below both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Root {
+    /// The root of the task's repository, which the entry is below.
+    Task,
+    /// Pumpkin's standard library, whose files load only files of its own, so that it depends
+    /// on no task.
+    Library,
+}
+
+/// What starts a label of the standard library, [`Root::Library`].
+// As Bazel names a repository's root, `@rules_oci//` (https://bazel.build/concepts/labels), and
+// Buck2 the cell of its bundled prelude, `prelude//`:
+// https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/docs/users/advanced/external_cells.md#L50-L56
+const LIBRARY: &str = "@pumpkin//";
 
 impl Label {
-    /// Parses a label, such as `//lib/bench.star`.
+    /// Parses a label, such as `//lib/bench.star` or `@pumpkin//harness/codex/codex.star`.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let Some(path) = text.strip_prefix("//") else {
+        let (root, path) = if let Some(path) = text.strip_prefix(LIBRARY) {
+            (Root::Library, path)
+        } else if let Some(path) = text.strip_prefix("//") {
+            (Root::Task, path)
+        } else if text.starts_with('@') && text.contains("//") {
+            return Err(format!(
+                "`{}` names a root Pumpkin has none of: start it with `//`, the task's root, or \
+                 `{LIBRARY}`, the standard library's",
+                text.escape_debug()
+            ));
+        } else {
             return Err(format!(
                 "`{}` is no label: start it with `//`, the root",
                 text.escape_debug()
             ));
         };
-        Self::below(String::from(path)).ok_or_else(|| {
+        Self::below(root, String::from(path)).ok_or_else(|| {
+            let start = &text[..text.len() - path.len()];
             format!(
-                "`{}` is no label: after `//`, write `/`-separated components of ASCII letters, \
-                 digits, `.`, `_` and `-`, none of them empty, `.` or `..`",
+                "`{}` is no label: after `{start}`, write `/`-separated components of ASCII \
+                 letters, digits, `.`, `_` and `-`, none of them empty, `.` or `..`",
                 text.escape_debug()
             )
         })
     }
 
-    pub(crate) fn below(path: String) -> Option<Self> {
-        path.split('/').all(is_component).then_some(Self(path))
+    pub(crate) fn below(root: Root, path: String) -> Option<Self> {
+        (path.split('/').all(is_component)).then_some(Self { root, path })
     }
 
-    /// The path below the root, such as `lib/bench.star`.
+    pub fn root(&self) -> Root {
+        self.root
+    }
+
+    /// The path below its root, such as `lib/bench.star`.
     pub fn path(&self) -> &str {
-        &self.0
+        &self.path
     }
 }
 
 impl fmt::Display for Label {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "//{}", self.0)
+        let start = match self.root {
+            Root::Task => "//",
+            Root::Library => LIBRARY,
+        };
+        write!(f, "{start}{}", self.path)
     }
 }
 

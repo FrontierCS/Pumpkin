@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Range;
 
-use crate::Label;
 use crate::value::{FileId, Span};
+use crate::{Label, Root};
 
 /// `names`, each in backticks, separated by commas, for a message.
 pub(crate) fn list(names: &[&str]) -> String {
@@ -31,6 +31,15 @@ pub(crate) fn count(n: usize, noun: &str) -> String {
 /// it nests, or one of Pumpkin's own, as of a label or a Pumpkin function.
 pub(crate) fn refusal(what: impl fmt::Display, instead: impl fmt::Display) -> String {
     format!("{what} is not in Pumpkin's Starlark: {instead}")
+}
+
+/// How a problem names the file at `label`: a task's by its path below the root, as an editor
+/// opened there names it, and one of the standard library whole.
+fn file(label: &Label) -> String {
+    match label.root() {
+        Root::Task => String::from(label.path()),
+        Root::Library => format!("{label}"),
+    }
 }
 
 /// What a check finds wrong at a span, before it reads as a [`Problem`].
@@ -146,7 +155,7 @@ impl Sources {
     /// Where `at` starts: `<file>:<line>:<column>`.
     fn place(&self, at: Span) -> String {
         let Location { line, column, .. } = self.locate(at);
-        format!("{}:{line}:{column}", self.0[at.file.0].label.path())
+        format!("{}:{line}:{column}", file(&self.0[at.file.0].label))
     }
 
     fn locate(&self, at: Span) -> Location<'_> {
@@ -176,7 +185,7 @@ impl Sources {
             span,
             text,
         } = self.locate(*at);
-        let file = self.0[at.file.0].label.path();
+        let file = file(&self.0[at.file.0].label);
         write!(f, "{file}:{line}:{column}: {message}")?;
         let width = format!("{line}").len();
         write!(f, "\n    {line} | {text}\n    {:width$} | ", "")?;
@@ -251,7 +260,7 @@ impl fmt::Display for Problems {
             }
             match problem {
                 Problem::At(fault) => self.sources.write(f, fault)?,
-                Problem::File { label, message } => write!(f, "{}: {message}", label.path())?,
+                Problem::File { label, message } => write!(f, "{}: {message}", file(label))?,
             }
         }
         match self.problems.len().saturating_sub(MAX_SHOWN) {

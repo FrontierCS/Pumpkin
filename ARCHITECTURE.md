@@ -152,9 +152,12 @@ given its `Args`, to a `Plan` of the images it declares and the workflow that na
 its `Problems`.
 
 **Architecture Invariant:** evaluation is hermetic, so the same sources and args always give the
-same plan. It reads source only through its `Loader`, by `Label`s that stay below the root; it only
-declares images, for its caller to build; and the crate is `#![no_std]`. Every evaluation ends,
-within its `Bounds` and `STACK_BYTES`.
+same plan. It reads source only through its `Loader`, by `Label`s that stay below their root, the
+task's (`//`) or the standard library's (`@pumpkin//`); it only declares images, for its caller to
+build; and the crate is `#![no_std]`. Every evaluation ends, within its `Bounds` and `STACK_BYTES`.
+
+**Architecture Invariant:** the standard library depends on no task: a file below `@pumpkin//`
+loads only files below it, which evaluation refuses otherwise.
 
 **Architecture Invariant:** only `pumpkin` depends on it, so the runtime, the core and the
 providers never see the language.

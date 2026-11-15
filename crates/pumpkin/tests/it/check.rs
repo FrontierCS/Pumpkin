@@ -808,3 +808,49 @@ fn roots() {
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/linkmark/task.star"#]],
     );
 }
+
+#[test]
+fn library() {
+    let scratch = Scratch::new("check-library");
+    write_repository(&scratch, "");
+    write_repository(&scratch, "images/");
+    let library = LIBRARY.replace(
+        "    agent_image = image(\"agent/Dockerfile\", context = \".\", mount = SHARED)",
+        "    agent_image = image(\n        \"Dockerfile\",\n        context = \"@pumpkin//harness/one\",\n        \
+         mount = {\"m\": \"@pumpkin//harness/two\"},\n    )",
+    );
+    scratch.write("images/lib/bench.star", &library);
+    let loads = "load(\"@pumpkin//harness/codex.star\", \"codex_agent\")\n";
+    scratch.write("tasks/loads/task.star", loads);
+    let pumpkin = |entry: &str| Step::from(scratch.pumpkin(&["check", entry, "--arg=model=m"]));
+    let steps = [
+        pumpkin("tasks/loads/task.star"),
+        pumpkin("images/tasks/bench/task.star"),
+    ];
+    check(
+        &scratch,
+        steps,
+        false,
+        &[],
+        &expect![[r#"
+        $ pumpkin check tasks/loads/task.star --arg=model=m
+        exit status: Some(1)
+        tasks/loads/task.star:1:6: loading `@pumpkin//harness/codex.star`: the standard library holds no file, so `@pumpkin//harness/codex.star` names nothing: name one below `//`
+            1 | load("@pumpkin//harness/codex.star", "codex_agent")
+              |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        pumpkin: tasks/loads/task.star: the task has 1 problem
+        pumpkin: to check it again: pumpkin check --arg model=m <scratch>/tasks/loads/task.star
+        $ pumpkin check images/tasks/bench/task.star --arg=model=m
+        exit status: Some(1)
+        lib/bench.star:78:19: the standard library holds no file, so `@pumpkin//harness/one` names nothing: name one below `//`
+            78 |     agent_image = image(
+               |                   ^^^^^^
+            in `bench_task()`, called at tasks/bench/task.star:5:1
+        lib/bench.star:78:19: the standard library holds no file, so `@pumpkin//harness/two` names nothing: name one below `//`
+            78 |     agent_image = image(
+               |                   ^^^^^^
+            in `bench_task()`, called at tasks/bench/task.star:5:1
+        pumpkin: images/tasks/bench/task.star: the task has 2 problems
+        pumpkin: to check it again: pumpkin check --arg model=m <scratch>/images/tasks/bench/task.star"#]],
+    );
+}

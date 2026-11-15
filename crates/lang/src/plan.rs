@@ -177,8 +177,9 @@ pub struct Recipe {
     pub target: Option<recipe::Stage>,
     /// Each build argument's value, by its name.
     pub args: BTreeMap<String, String>,
-    /// The repository the image is built in: `pumpkin/` and the recipe's directory below the
-    /// root, a name that Docker takes for a repository.
+    /// The repository the image is built in, a name that Docker takes for a repository:
+    /// `pumpkin/` and the recipe's directory below the task's root, or `pumpkin-library/` and its
+    /// directory below the standard library's.
     pub repository: String,
 }
 
