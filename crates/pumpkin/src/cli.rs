@@ -772,8 +772,9 @@ on the controller, of the `pumpkin` of this one's commit, which a `pumpkin run`
 or `pumpkin build` of a task that pins the commit builds there, and refuses to
 start without it. It reaches the controller as it starts, starting it if it is
 stopped; once the connection has ended, the next request opens it again, and
-fails if that fails. --runs serves a directory here, such as the copies of the
-controller's runs that `wait` makes.";
+while that fails the page says so and asks again after 5 s, then after twice
+the wait before, up to a minute. --runs serves a directory here, such as the
+copies of the controller's runs that `wait` makes.";
 
 const LOCK_ABOUT: &str = "\
 Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
