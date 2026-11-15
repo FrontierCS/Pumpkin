@@ -335,7 +335,6 @@ fn depths(lines: &[&str]) -> Vec<usize> {
     depths
 }
 
-/// Whether the line at `at` of `lines` starts a top-level statement, given their `depths`.
 fn starts_statement(lines: &[&str], depths: &[usize], at: usize) -> bool {
     depths[at] == 0 && lines[at].starts_with(|char: char| !char.is_whitespace())
 }
@@ -351,7 +350,6 @@ fn statement_end(lines: &[&str], depths: &[usize], at: usize) -> Option<usize> {
     Some(next.unwrap_or(lines.len()))
 }
 
-/// The ranges of `lines` that each top-level `assert.fails` statement spans.
 fn fails_statements(lines: &[&str]) -> Vec<std::ops::Range<usize>> {
     let depths = depths(lines);
     (0..lines.len())
@@ -365,7 +363,6 @@ fn fails_statements(lines: &[&str]) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
-/// The file that runs `lines`, as `runs` has it.
 fn case(lines: &[String]) -> String {
     let mut body = lines.join("\n");
     for name in ["eq", "ne", "true", "lt", "contains", "fail", "fails"] {
@@ -394,7 +391,6 @@ fn case(lines: &[String]) -> String {
     format!("{load}\n{body}\nconformance_done = True\n")
 }
 
-/// Whether `text` holds `name` as a whole word.
 fn names_used(text: &str, name: &str) -> bool {
     let word = |char: char| char.is_ascii_alphanumeric() || char == '_';
     text.match_indices(name).any(|(at, _)| {

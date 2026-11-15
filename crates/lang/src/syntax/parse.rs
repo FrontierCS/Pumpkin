@@ -16,11 +16,8 @@ use crate::problem::{Fault, refusal};
 use crate::value::{FileId, Span};
 use crate::{Label, MAX_NESTING};
 
-/// The module that `text`, the text of `file`, holds.
-///
-/// # Errors
-///
-/// The first place where the text is no module of the language.
+/// The module that `text`, the text of `file`, holds, or the first place where the text is no
+/// module of the language.
 pub(crate) fn parse(file: FileId, text: &str) -> Result<Module, Fault> {
     let tokens = lex(file, text);
     let mut parser = Parser {
@@ -90,7 +87,6 @@ struct Parser<'t> {
     deepest: usize,
 }
 
-/// A call's argument.
 enum Argument {
     Positional(Expr),
     Keyword(Name, Expr),
@@ -147,7 +143,6 @@ impl Parser<'_> {
         }
     }
 
-    /// Reads a line of a function's body into `steps`, the first statement `at` its place.
     fn steps_line(&mut self, at: At, steps: &mut Vec<Step>) -> Result<(), Fault> {
         self.line(at, |parser| {
             steps.push(parser.step()?);
@@ -155,7 +150,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads an assignment, an expression statement or `pass`.
     fn simple(&mut self) -> Result<Simple, Fault> {
         if self.at_keyword(Keyword::Pass) {
             return Ok(Simple::Pass(self.advance()));
@@ -175,7 +169,6 @@ impl Parser<'_> {
         Ok(Simple::Assign { target, value })
     }
 
-    /// Reads a small statement of a function's body.
     fn step(&mut self) -> Result<Step, Fault> {
         if !self.at_keyword(Keyword::Return) {
             return Ok(Step::Simple(self.simple()?));
@@ -290,7 +283,6 @@ impl Parser<'_> {
         Err(Fault::new(span, message))
     }
 
-    /// Reads a parameter's name and its default, if it has one.
     fn param(&mut self) -> Result<Param, Fault> {
         let name = self.name("a parameter's name, or `*`")?;
         if self.at_punct(Punct::Colon) {
@@ -429,7 +421,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads an expression, which may be a conditional one.
     fn test(&mut self) -> Result<Expr, Fault> {
         let then = self.binary(OR)?;
         if self.at_keyword(Keyword::If) {
@@ -546,11 +537,8 @@ impl Parser<'_> {
         })
     }
 
-    /// The binary operator at the next token, and its precedence, if one is there.
-    ///
-    /// # Errors
-    ///
-    /// The operator is one the subset leaves out, which it refuses wherever it is.
+    /// The binary operator at the next token, and its precedence, if one is there. An operator
+    /// the subset leaves out is refused wherever it is.
     fn infix(&self) -> Result<Option<(Infix, u8)>, Fault> {
         let infix = match self.peek().kind {
             TokenKind::Keyword(Keyword::Or) => (Infix::Logic(Logic::Or), OR),
@@ -564,11 +552,7 @@ impl Parser<'_> {
     }
 
     /// The binary operator, but `and` and `or`, at the next token, and its precedence, if one
-    /// is there.
-    ///
-    /// # Errors
-    ///
-    /// The token is punctuation that the subset leaves out, which it refuses wherever it is.
+    /// is there. Punctuation that the subset leaves out is refused wherever it is.
     fn operator(&self) -> Result<Option<(Operator, u8)>, Fault> {
         let Token { kind, span } = self.peek();
         let arithmetic = |arithmetic, precedence| (Operator::Arithmetic(arithmetic), precedence);

@@ -1,6 +1,6 @@
-//! Values into the IR: [`workflow`] reads a `workflow()` call's values as an `ir::Workflow`,
-//! through a `serde::Deserializer` over values, and [`locate`] walks a `Workflow::parse`
-//! error's pointer through the same values.
+//! A `workflow()` call's values read into the IR as an `ir::Workflow`, through a
+//! `serde::Deserializer` over values, and a `Workflow::parse` error's pointer walked through the
+//! same values.
 //!
 //! The kinds map one to one: a dict to a struct, or to an enum as its one key, the kind, and
 //! that key's value (`{"judge": {…}}`); a list or a tuple to a sequence; a string to a string,
@@ -31,11 +31,7 @@ use crate::problem::{Fault, list};
 use crate::value::{Entry, Key, Kind, Span, Value, escape, quote};
 
 /// The IR of the workflow whose fields a `workflow()` call gives as `fields`, each image named by
-/// its ID in `images`.
-///
-/// # Errors
-///
-/// The first value the IR's types refuse.
+/// its ID in `images`, refused at the first value the IR's types refuse.
 pub(crate) fn workflow(fields: &Value, images: &[ir::Image]) -> Result<ir::Workflow, Fault> {
     /// The fields of `ir::Workflow` that a workflow's writer gives.
     #[derive(Deserialize)]
@@ -99,7 +95,6 @@ pub(crate) fn locate(fields: &Value, errors: &[ParseError]) -> Vec<Fault> {
         .collect()
 }
 
-/// The value that `token` names in `value`: a dict's by its key, a list's by its index.
 fn child<'v>(value: &'v Value, token: &str) -> Option<&'v Value> {
     match &value.kind {
         Kind::Dict(entries) => (entries.iter())
@@ -116,7 +111,6 @@ fn child<'v>(value: &'v Value, token: &str) -> Option<&'v Value> {
     }
 }
 
-/// The note that names `pointer`'s place in the IR.
 fn place(pointer: &JsonPointer) -> String {
     if pointer.as_str().is_empty() {
         String::from("the whole IR")
@@ -141,7 +135,6 @@ enum Token {
     Index(usize),
 }
 
-/// What an [`Error`] says, once it can name its place.
 #[derive(Debug)]
 enum Message {
     /// A whole message, as an IR type's check writes it.
@@ -318,12 +311,10 @@ struct De<'v> {
 }
 
 impl<'v> De<'v> {
-    /// Reads `value`, a part of this one's.
     fn of(self, value: &'v Value) -> Self {
         Self { value, ..self }
     }
 
-    /// The error of reading this value as `expected`.
     fn mismatch(&self, expected: &str) -> Error {
         let found = String::from(self.value.kind.describe());
         let expected = String::from(expected);
@@ -536,7 +527,6 @@ impl<'de> SeqAccess<'de> for &mut Seq<'_> {
 
 /// A dict's entries, each key a field's name.
 struct Map<'v> {
-    /// What reads the dict.
     de: De<'v>,
     entries: core::slice::Iter<'v, Entry>,
     /// The entry whose key the visitor has read, the field's name, and whose value it reads next.
@@ -667,7 +657,6 @@ impl<'v> Variant<'v> {
         error.at(self.entry.value.span, Token::Key(String::from(self.kind)))
     }
 
-    /// Reads the kind's value.
     fn value(&self) -> De<'v> {
         self.de.of(&self.entry.value)
     }

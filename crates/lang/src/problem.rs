@@ -41,7 +41,6 @@ pub(crate) struct Fault(
     Box<Found>,
 );
 
-/// What a [`Fault`] holds.
 #[derive(Debug)]
 struct Found {
     at: Span,
@@ -89,8 +88,6 @@ pub struct Finding {
     pub message: String,
 }
 
-/// Something wrong in the sources an evaluation read: a fault at a span, or a problem with a
-/// whole file.
 #[derive(Debug)]
 pub(crate) enum Problem {
     At(Fault),
@@ -98,7 +95,6 @@ pub(crate) enum Problem {
 }
 
 impl Problem {
-    /// A problem with the whole file at `label`.
     pub(crate) fn file(label: &Label, message: impl Into<String>) -> Self {
         Self::File {
             label: label.clone(),
@@ -171,7 +167,6 @@ impl Sources {
         }
     }
 
-    /// Writes `fault` as it reads.
     fn write(&self, f: &mut fmt::Formatter<'_>, fault: &Fault) -> fmt::Result {
         let Found { at, message, notes } = &*fault.0;
         let Location {
@@ -228,7 +223,6 @@ const MAX_SHOWN: usize = 20;
 /// `MAX_SHOWN`'s.
 #[derive(Debug)]
 pub struct Problems {
-    /// The files that the problems are in.
     sources: Sources,
     problems: Vec<Problem>,
 }

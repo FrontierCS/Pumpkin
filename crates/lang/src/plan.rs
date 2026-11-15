@@ -1,6 +1,5 @@
-//! What an evaluation gives: a [`Plan`] of the images it declares, which its caller checks and
-//! builds, and of the workflow that names them, which the IR's types and rules check once the
-//! images have IDs.
+//! What an evaluation gives: a [`Plan`] of the images it declares and of the workflow that names
+//! them, which the IR's types and rules check once the images have IDs.
 //!
 //! The images are declared in the order the calls of `image()` and `codex()` run, so that each
 //! comes after the image it is built on, and an image declared again, equal to one before, is
@@ -22,7 +21,6 @@ use crate::problem::{Fault, Finding, Problem, Problems, Sources, list};
 use crate::value::{ImageId, Span, Value};
 use crate::{Args, Label};
 
-/// What Pumpkin's functions have planned in an evaluation, and the `--arg`s they read.
 pub(crate) struct Planned<'a> {
     pub(crate) args: &'a Args,
     /// The entry file's directory below the root, such as `tasks/bench`, or empty for one at the
@@ -36,7 +34,6 @@ pub(crate) struct Planned<'a> {
 }
 
 impl<'a> Planned<'a> {
-    /// Nothing, as an evaluation of the entry at `entry`, given `args`, begins.
     pub(crate) fn new(entry: &Label, args: &'a Args) -> Self {
         let package = entry.path().rsplit_once('/').map_or("", |(dir, _)| dir);
         Self {
@@ -81,13 +78,11 @@ pub(crate) struct WorkflowCall {
     pub(crate) fields: Value,
 }
 
-/// An image declared, and the call that declares it.
 pub(crate) struct Declaration {
     pub(crate) image: Image,
     place: Place,
 }
 
-/// What a declared image is built as.
 pub(crate) enum Image {
     /// `recipe`'s image, given each image of `contexts` as the named context of its key.
     Recipe {
@@ -103,7 +98,6 @@ pub(crate) enum Image {
 }
 
 impl Image {
-    /// The images this one is built on.
     fn bases(&self) -> impl Iterator<Item = &ImageId> {
         let (contexts, base) = match self {
             Self::Recipe { contexts, .. } => (Some(contexts.values()), None),
@@ -112,7 +106,6 @@ impl Image {
         contexts.into_iter().flatten().chain(base)
     }
 
-    /// The repository the image is built in.
     pub(crate) fn repository(&self) -> &str {
         match self {
             Self::Recipe { recipe, .. } => &recipe.repository,
@@ -153,7 +146,6 @@ pub(crate) struct Place {
 }
 
 impl Place {
-    /// The fault of `message` here.
     fn fault(&self, message: String) -> Fault {
         let fault = Fault::new(self.at, message);
         (self.calls.iter()).fold(fault, |fault, (note, at)| {
@@ -209,10 +201,8 @@ pub enum Declared<'p, B> {
     },
 }
 
-/// What an evaluation gives: the images it declares, which [`Plan::check`] checks and
-/// [`Plan::build`] builds, and the workflow that names them.
+/// What an evaluation gives: the images it declares and the workflow that names them.
 pub struct Plan {
-    /// The files the evaluation read.
     sources: Sources,
     workflow: WorkflowCall,
     /// No two equal, and each after the image it is built on.
@@ -220,12 +210,9 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The plan of the evaluation of the entry at `entry`, which has run, reading `sources`.
-    ///
-    /// # Errors
-    ///
-    /// The entry calls no `workflow()`, or an `--arg` given names no arg that an `arg()` call
-    /// declares, each one.
+    /// The plan of the evaluation of the entry at `entry`, which has run, reading `sources`;
+    /// refused if the entry calls no `workflow()`, or an `--arg` given names no arg that an
+    /// `arg()` call declares, each one.
     pub(crate) fn new(
         entry: &Label,
         sources: Sources,
@@ -252,10 +239,6 @@ impl Plan {
     }
 
     /// `lint`'s findings in each file the evaluation read, given its label and text, in order.
-    ///
-    /// # Errors
-    ///
-    /// As `lint` fails; and gives the findings, if there are any.
     ///
     /// # Panics
     ///
@@ -458,7 +441,6 @@ impl Plan {
         Err(Problems::new(self.sources.clone(), problems))
     }
 
-    /// The workflow, parsed, whose images have the IDs of `images`, in order.
     fn workflow(&self, images: &[ir::Image]) -> Result<Workflow, Vec<Problem>> {
         let fields = &self.workflow.fields;
         let ir = crate::ir::workflow(fields, images)?;

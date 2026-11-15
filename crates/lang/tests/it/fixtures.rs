@@ -22,7 +22,6 @@ enum Folder {
 }
 
 impl Folder {
-    /// The folder that holds the fixture at `path`.
     fn of(path: &str) -> Self {
         match path.split_once('/') {
             Some(("tasks", _)) => Self::Tasks,
@@ -35,7 +34,6 @@ impl Folder {
     }
 }
 
-/// Checks what each file in `folder` shows, as `show` has it, against `expect`.
 fn check(folder: Folder, expect: &Expect) {
     let files = files();
     let shown = on_stack(|| {

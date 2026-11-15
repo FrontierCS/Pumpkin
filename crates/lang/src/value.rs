@@ -34,7 +34,6 @@ use crate::syntax::Def;
 pub(crate) struct FileId(pub(crate) usize);
 
 impl FileId {
-    /// The entry's: the first file an evaluation reads.
     pub(crate) const ENTRY: Self = Self(0);
 }
 
@@ -96,7 +95,6 @@ pub(crate) struct Budget {
 }
 
 impl Budget {
-    /// The budget of an evaluation whose values may take `max` bytes.
     pub(crate) fn new(max: usize) -> Self {
         Self {
             used: Cell::new(0),
@@ -104,11 +102,7 @@ impl Budget {
         }
     }
 
-    /// Counts `bytes` more, of a value made at `at`.
-    ///
-    /// # Errors
-    ///
-    /// The count passes the most.
+    /// Counts `bytes` more, of a value made at `at`, refused if the count passes the most.
     fn charge(&self, bytes: usize, at: Span) -> Result<(), Fault> {
         self.fits(bytes, at)?;
         self.used.set(self.used.get() + bytes);
@@ -117,10 +111,6 @@ impl Budget {
 
     /// Refuses `bytes` more, of a value to be made at `at`, if they would pass the most: so
     /// that a value that may outgrow what makes it, as `replace`'s, is refused before it is made.
-    ///
-    /// # Errors
-    ///
-    /// The count would pass the most.
     pub(crate) fn fits(&self, bytes: usize, at: Span) -> Result<(), Fault> {
         if bytes <= self.max - self.used.get() {
             return Ok(());
@@ -140,10 +130,6 @@ pub(crate) struct Text(Rc<str>);
 
 impl Text {
     /// `text`, as the string made at `at`, counted in `budget`.
-    ///
-    /// # Errors
-    ///
-    /// `budget` runs out.
     pub(crate) fn new(text: &str, at: Span, budget: &Budget) -> Result<Self, Fault> {
         budget.charge(text.len(), at)?;
         Ok(Self(text.into()))
@@ -184,11 +170,7 @@ pub(crate) trait Element {
 
 impl<T: Element> Nested<T> {
     /// `elements`, as those of the list, the tuple or the dict made at `at`, counted in
-    /// `budget`.
-    ///
-    /// # Errors
-    ///
-    /// An element nests `MAX_NESTING` deep already, or `budget` runs out.
+    /// `budget`, refused if one nests `MAX_NESTING` deep already.
     pub(crate) fn new(elements: Vec<T>, at: Span, budget: &Budget) -> Result<Self, Fault> {
         budget.charge(elements.len() * T::BYTES, at)?;
         let depth = deeper(elements.iter().map(Element::depth), at)?;
@@ -197,11 +179,8 @@ impl<T: Element> Nested<T> {
     }
 }
 
-/// One more than the deepest of `depths`, of what the value made at `at` holds.
-///
-/// # Errors
-///
-/// That is more than `MAX_NESTING`.
+/// One more than the deepest of `depths`, of what the value made at `at` holds, refused past
+/// `MAX_NESTING`.
 fn deeper(depths: impl Iterator<Item = usize>, at: Span) -> Result<usize, Fault> {
     let depth = 1 + depths.max().unwrap_or(0);
     if depth <= MAX_NESTING {
@@ -216,10 +195,6 @@ fn deeper(depths: impl Iterator<Item = usize>, at: Span) -> Result<usize, Fault>
 
 impl<T: Clone + Element> Nested<T> {
     /// This one's elements, then `other`'s, made at `at`, counted in `budget`.
-    ///
-    /// # Errors
-    ///
-    /// `budget` runs out.
     pub(crate) fn concat(&self, other: &Self, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let elements = self.elements.iter().chain(other.elements.iter());
         Self::new(elements.cloned().collect(), at, budget)
@@ -282,11 +257,8 @@ pub(crate) struct Dict {
 
 impl Dict {
     /// The dict of `entries`, made at `at`: each key at the place where it is first given, with
-    /// the value, and the key's span, of the last entry that gives it.
-    ///
-    /// # Errors
-    ///
-    /// A value nests `MAX_NESTING` deep already, or `budget`, which counts it, runs out.
+    /// the value, and the key's span, of the last entry that gives it. A value that nests
+    /// `MAX_NESTING` deep already is refused.
     pub(crate) fn new(entries: Vec<Entry>, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let (entries, index) = merged(entries);
         let entries = Nested::new(entries, at, budget)?;
@@ -294,17 +266,12 @@ impl Dict {
         Ok(Self { entries, index })
     }
 
-    /// The entry of `key`, if the dict has one.
     pub(crate) fn get(&self, key: &Key) -> Option<&Entry> {
         self.index.get(key).map(|&place| &self.entries[place])
     }
 
     /// This dict's entries, then `other`'s, whose values replace this one's for the keys that
     /// both have (spec.md, "Dictionaries"), made at `at`, counted in `budget`.
-    ///
-    /// # Errors
-    ///
-    /// `budget` runs out.
     pub(crate) fn union(&self, other: &Self, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let entries = self.entries.iter().chain(other.entries.iter()).cloned();
         Self::new(entries.collect(), at, budget)
@@ -379,12 +346,9 @@ fn hashable(value: &Value) -> bool {
 }
 
 impl Key {
-    /// The key that `value` is, if it is a string or an int.
-    ///
-    /// # Errors
-    ///
-    /// The message that refuses it as a key: a refusal of a value that the specification takes,
-    /// a hashable one, and else Starlark's own error.
+    /// The key that `value` is, if it is a string or an int; else the message that refuses it: a
+    /// refusal of a value that the specification takes, a hashable one, and else Starlark's own
+    /// error.
     pub(crate) fn of(value: &Value) -> Result<Self, String> {
         let what = value.kind.describe();
         let instead = "key a dict with strings or ints";
@@ -425,11 +389,7 @@ pub(crate) struct Function {
 
 impl Function {
     /// The function that `def`, run at `module`'s top level, makes, with `defaults`, counted in
-    /// `budget`.
-    ///
-    /// # Errors
-    ///
-    /// A default nests `MAX_NESTING` deep already, or `budget` runs out.
+    /// `budget`, refused if a default nests `MAX_NESTING` deep already.
     pub(crate) fn new(
         def: Rc<Def>,
         module: FileId,

@@ -1,5 +1,4 @@
-//! A file's syntax: [`parse`] reads its text, through its tokens (`lex`), into a [`Module`], and
-//! [`resolve`] checks the module's names before it runs.
+//! A file's syntax: its text read into a [`Module`], whose names are checked before it runs.
 //!
 //! The grammar is the specification's (spec.md, "Lexical elements", "Expressions" and
 //! "Statements"), cut down to these:
@@ -106,7 +105,6 @@ pub(crate) enum Step {
     },
 }
 
-/// An `if` or `elif`: its condition, and the steps it runs.
 pub(crate) struct Branch {
     pub(crate) condition: Expr,
     pub(crate) steps: Vec<Step>,
@@ -333,7 +331,6 @@ pub(crate) enum Arithmetic {
 }
 
 impl Operator {
-    /// The operator's text, as its tokens write it.
     pub(crate) fn symbol(self) -> &'static str {
         let punct = match self {
             Self::Equal => Punct::EqEq,
@@ -352,7 +349,6 @@ impl Operator {
 }
 
 impl Arithmetic {
-    /// The operator's text, as its token writes it.
     pub(crate) fn symbol(self) -> &'static str {
         let punct = match self {
             Self::Add => Punct::Plus,

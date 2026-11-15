@@ -23,7 +23,6 @@ use lang::{Args, Bounds, Declared, Label, Loader, Problems, Recipe};
 use schema::ir;
 use schema::workflow::Workflow;
 
-/// Each file of `tests/fixtures`, by its path below it.
 fn files() -> BTreeMap<String, String> {
     files_below("tests/fixtures")
 }
@@ -207,18 +206,15 @@ fn on_stack(show: impl FnOnce() -> String + Send) -> String {
     shown.unwrap()
 }
 
-/// Checks the case that `fixture` writes, as [`check_within`] does, within a workflow's bounds.
 #[track_caller]
 fn check(fixture: &str, expect: &Expect) {
     check_within(Bounds::WORKFLOW, fixture, expect);
 }
 
 /// Checks what the case that `fixture` writes, as `Case::parse` reads it, within `bounds`, shows
-/// against
-/// `expect`, with each carriage return written as `\r`, and each of U+2028 to U+202E as
-/// `\u{…}`: what it evaluates to, or the problems
-/// of its `--arg`s; and that every prefix of each file it holds evaluates or gives problems
-/// that read.
+/// against `expect`, with each carriage return written as `\r`, and each of U+2028 to U+202E as
+/// `\u{…}`: what it evaluates to, or the problems of its `--arg`s; and that every prefix of each
+/// file it holds evaluates or gives problems that read.
 #[track_caller]
 fn check_within(bounds: Bounds, fixture: &str, expect: &Expect) {
     let files = files();
@@ -261,11 +257,10 @@ impl AsRef<ir::Image> for Built {
 }
 
 /// The workflow that the entry at `path` gives, given `args`, within `bounds`, through each
-/// image's build, which
-/// a line of `built` describes, as does each step of the builds, by the images it builds at
-/// once: a stand-in check refuses each recipe of the package `bad/refused`, naming its named
-/// contexts, and each of its mounts, and a stand-in build, of [`JOBS`] images at once, the
-/// oldest ending at each step, fails each of `bad/broken`'s.
+/// image's build, which a line of `built` describes, as does each step of the builds, by the
+/// images it builds at once: a stand-in check refuses each recipe of the package `bad/refused`,
+/// naming its named contexts, and each of its mounts, and a stand-in build, of [`JOBS`] images at
+/// once, the oldest ending at each step, fails each of `bad/broken`'s.
 fn run(
     path: &str,
     loader: &mut impl Loader,

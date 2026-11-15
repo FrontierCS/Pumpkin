@@ -1,6 +1,6 @@
-//! Pumpkin's predeclared names: [`Pumpkin`]'s functions, which make what an evaluation gives
-//! ([`crate::plan`]), its workflow, its images and the `--arg`s ([`Args`](crate::Args)) it
-//! reads; and the units `KiB`, `MiB` and `GiB`, the ints 2^10, 2^20 and 2^30.
+//! Pumpkin's predeclared names: the functions that make an evaluation's workflow and images and
+//! read its `--arg`s ([`Args`](crate::Args)), and the units `KiB`, `MiB` and `GiB`, the ints
+//! 2^10, 2^20 and 2^30.
 //!
 //! Each function takes its arguments as a `def` of its signature would. All but `arg()` refuse a
 //! call made while a file other than the entry loads ([`Site::in_entry`]).
@@ -43,7 +43,6 @@ pub(crate) fn predeclared(name: &str) -> Option<Kind> {
     Some(kind)
 }
 
-/// Pumpkin's own predeclared functions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pumpkin {
     Workflow,
@@ -73,10 +72,6 @@ impl Pumpkin {
     }
 
     /// What `call` of this function, made at `site`, gives, adding what it plans to `planned`.
-    ///
-    /// # Errors
-    ///
-    /// As the function's own doc says.
     pub(crate) fn call(
         self,
         call: &Call<'_>,
@@ -93,13 +88,9 @@ impl Pumpkin {
     }
 }
 
-/// Where a call of one of Pumpkin's functions is made.
 pub(crate) struct Site<'e> {
-    /// The module whose statements run.
     pub(crate) module: &'e Label,
-    /// Whether that module is the entry file.
     pub(crate) entry: bool,
-    /// The functions that run, outermost first, each by its `def`, with the call that runs it.
     pub(crate) calls: &'e [(Rc<Def>, Span)],
 }
 
@@ -118,7 +109,6 @@ impl Site<'_> {
         Err(Fault::new(at, message))
     }
 
-    /// The place of the call at `at`, in the calls that run.
     fn place(&self, at: Span) -> Place {
         let calls = self.calls.iter().rev();
         Place {
@@ -145,11 +135,8 @@ struct Bound<const P: usize, const R: usize, const O: usize> {
 }
 
 impl<const P: usize, const R: usize, const O: usize> Params<P, R, O> {
-    /// The arguments that `call` gives `function`, whose parameters these are.
-    ///
-    /// # Errors
-    ///
-    /// As [`place`]'s, or a required argument that the call doesn't give.
+    /// The arguments that `call` gives `function`, whose parameters these are; refused as
+    /// [`place`] refuses, or if a required one is missing.
     fn bind(&self, function: Pumpkin, call: &Call<'_>) -> Result<Bound<P, R, O>, Fault> {
         let name = function.name();
         let params: Vec<&str> = (self.positional.iter())
@@ -299,7 +286,6 @@ enum Type {
 }
 
 impl Type {
-    /// The type that `value`, given as `arg()`'s `type`, names.
     fn of(value: &Value) -> Result<Self, Fault> {
         let kind = match &value.kind {
             Kind::Builtin(Builtin::Universal(universal)) => match universal {
@@ -337,7 +323,6 @@ impl Type {
         }
     }
 
-    /// `default`, as the default of an arg of this type.
     fn default(self, default: Value) -> Result<Value, Fault> {
         // `None` leaves the program to pick the value of an arg not given, from what it knows,
         // such as a task's own values.
@@ -459,11 +444,8 @@ fn image(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<
 }
 
 /// The entries of `dict`, `image()`'s argument `what`, if given, which gives a dict of `values`,
-/// each by `key`, a string: each entry, with its key.
-///
-/// # Errors
-///
-/// `dict` is no dict, or, as the iterator reaches it, a key is no string.
+/// each by `key`, a string: each entry, with its key; refused if `dict` is no dict, or, as the
+/// iterator reaches it, a key is no string.
 fn keyed<'v>(
     what: &'static str,
     dict: Option<&'v Value>,
@@ -496,7 +478,6 @@ fn keyed<'v>(
     }))
 }
 
-/// The directories that `mount`, `image()`'s, mounts in the context, each by its path there.
 fn mounts(package: &str, mount: Option<&Value>) -> Result<BTreeMap<RelativePath, Label>, Fault> {
     let entries = keyed(
         "`image`'s `mount`",
@@ -515,7 +496,6 @@ fn mounts(package: &str, mount: Option<&Value>) -> Result<BTreeMap<RelativePath,
         .collect()
 }
 
-/// The stage that `target`, `image()`'s, names in any case, if any.
 fn stage(target: Option<Value>) -> Result<Option<recipe::Stage>, Fault> {
     match target {
         Some(Value {
@@ -532,7 +512,6 @@ fn stage(target: Option<Value>) -> Result<Option<recipe::Stage>, Fault> {
     }
 }
 
-/// The images that `contexts`, `image()`'s, gives as named contexts, each by its key.
 fn named(contexts: Option<&Value>) -> Result<BTreeMap<String, ImageId>, Fault> {
     let entries = keyed(
         "`image`'s `contexts`",
@@ -556,7 +535,6 @@ fn named(contexts: Option<&Value>) -> Result<BTreeMap<String, ImageId>, Fault> {
         .collect()
 }
 
-/// The build arguments that `args`, `image()`'s, gives, each string by its key.
 fn build_args(args: Option<&Value>) -> Result<BTreeMap<String, String>, Fault> {
     let entries = keyed(
         "`image`'s `args`",
@@ -593,7 +571,6 @@ fn directory(package: &str, text: &str, at: Span) -> Result<Label, Fault> {
     })
 }
 
-/// The path that `text`, written at `at`, names in an image's context.
 fn in_context(text: &str, at: Span) -> Result<RelativePath, Fault> {
     let path = RelativePath::try_from(String::from(text)).ok();
     let path = path.filter(|path| path.as_str().split('/').all(is_component));
@@ -786,7 +763,6 @@ fn package_name(
     })
 }
 
-/// The dict of `fields`, each value by its key, made by `call`.
 fn record<K: AsRef<str>>(
     fields: impl IntoIterator<Item = (K, Value)>,
     call: &Call<'_>,

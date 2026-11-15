@@ -1,6 +1,5 @@
-//! The predeclared names (spec.md, "Built-in constants and functions" and "Built-in methods"):
-//! of the specification's, `None`, `True` and `False`, the functions of [`Universal`] and the
-//! methods of [`method`], then Pumpkin's own, which [`crate::pumpkin`] defines.
+//! The predeclared names (spec.md, "Built-in constants and functions" and "Built-in methods"),
+//! Pumpkin's own among them.
 //!
 //! Each does what the specification has it do, but for what the subset refuses:
 //! - `str`, `fail` and `format` format ints and strings only;
@@ -16,8 +15,7 @@
 //!   value, as none does in the subset.
 //!
 //! Each takes its arguments by position, as the specification has it, but `format`, which takes
-//! keyword ones too. A [`Call`]'s arguments bind to a function's parameters by [`place`] and
-//! [`lacks`], for a `def` and Pumpkin's functions alike.
+//! keyword ones too.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -66,14 +64,12 @@ pub(crate) fn left_out(name: &str) -> Option<String> {
     ))
 }
 
-/// A call of a builtin or a function, its arguments evaluated.
 pub(crate) struct Call<'a> {
     pub(crate) at: Span,
     /// Each positional argument, with the span of the expression that gives it.
     pub(crate) positional: Vec<(Span, Value)>,
     /// Each keyword argument, no two named alike.
     pub(crate) keyword: Vec<(&'a Name, Value)>,
-    /// What the values the evaluation has made take, which counts those the call makes.
     pub(crate) budget: &'a Budget,
 }
 
@@ -125,8 +121,6 @@ pub(crate) fn place(
     Ok(given)
 }
 
-/// The error of a call of `function`, made at `at`, that gives none of `missing`, its
-/// parameters.
 pub(crate) fn lacks(function: &str, missing: &[&str], at: Span) -> Fault {
     let them = if missing.len() == 1 { "it" } else { "them" };
     let message = format!("`{function}` lacks {}: give {them}", list(missing));
@@ -187,7 +181,6 @@ impl Universal {
         }
     }
 
-    /// What Starlark lets a call of this function give.
     fn takes(self) -> Takes {
         match self {
             Self::Bool => Takes {
@@ -215,10 +208,6 @@ impl Universal {
     }
 
     /// What `call` of this function gives, as the module doc has it.
-    ///
-    /// # Errors
-    ///
-    /// `fail`'s message, or arguments the function doesn't take.
     pub(crate) fn call(self, call: &Call<'_>) -> Result<Value, Fault> {
         let name = self.name();
         let [argument] = positional::<1>(name, self.takes(), call)?;
@@ -393,7 +382,6 @@ fn text(function: &str, argument: &(Span, Value)) -> Result<String, Fault> {
     }
 }
 
-/// The int that `int` makes of `argument`.
 fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
     let (at, value) = argument;
     let text = match &value.kind {
@@ -470,13 +458,11 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
     Nested::new(elements, *at, budget)
 }
 
-/// What a call of a dict's method gives, given the method's name.
 type DictMethod = fn(&str, &Dict, &Call<'_>) -> Result<Value, Fault>;
 
 /// What a call of a string's method makes of the string, the receiver's, given the method's name.
 type StringMethod = fn(&str, &str, &(Span, Value), &Call<'_>) -> Result<Kind, Fault>;
 
-/// A dict's methods in the subset, by name.
 const DICT_METHODS: [(&str, DictMethod); 4] = [
     ("get", get),
     ("items", items),
@@ -484,7 +470,6 @@ const DICT_METHODS: [(&str, DictMethod); 4] = [
     ("values", values),
 ];
 
-/// A string's methods in the subset, by name.
 const STRING_METHODS: [(&str, StringMethod); 6] = [
     ("endswith", ends_with),
     ("format", format),
@@ -531,11 +516,8 @@ const STRING_LEFT_OUT: [&str; 26] = [
 ];
 
 /// What `call` of the method `name` of `receiver`, with the span of the expression that gives
-/// it, gives (spec.md, "Built-in methods"), as the module doc has it.
-///
-/// # Errors
-///
-/// The receiver has no such method in the subset, or the method refuses the arguments.
+/// it, gives (spec.md, "Built-in methods"), as the module doc has it. A method the subset doesn't
+/// give the receiver is refused.
 pub(crate) fn method(
     receiver: &(Span, Value),
     name: &Name,
@@ -606,7 +588,6 @@ fn changes(name: &Name, kind: &str, instead: &str) -> Fault {
     Fault::new(name.span, message)
 }
 
-/// The list of `values`, made by `call`.
 fn made_list(values: Vec<Value>, call: &Call<'_>) -> Result<Value, Fault> {
     let kind = Kind::List(Nested::new(values, call.at, call.budget)?);
     Ok(Value {
@@ -637,7 +618,6 @@ fn items(name: &str, dict: &Dict, call: &Call<'_>) -> Result<Value, Fault> {
     made_list(dict.iter().map(pair).collect::<Result<_, Fault>>()?, call)
 }
 
-/// What `dict.get(key)` or `dict.get(key, default)`, `call`, gives.
 fn get(name: &str, dict: &Dict, call: &Call<'_>) -> Result<Value, Fault> {
     let (key, default) = match call.positional.as_slice() {
         [key] if call.keyword.is_empty() => (key, None),
@@ -794,7 +774,6 @@ fn replace(name: &str, text: &str, _: &(Span, Value), call: &Call<'_>) -> Result
     Ok(Kind::Str(Text::new(&text, call.at, call.budget)?))
 }
 
-/// The string that `argument`, given to `function`, is.
 fn text_of<'v>(function: &str, argument: &'v (Span, Value)) -> Result<&'v str, Fault> {
     string(
         format_args!("`{function}`'s argument"),
