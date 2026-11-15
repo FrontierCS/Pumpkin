@@ -1,13 +1,13 @@
-//! A task's source, as the workflow language reads it on this machine: an entry file, the root of
-//! its repository, below which `lang` reads each file, and the one path from an entry and its
-//! args to the plan that they evaluate to, checked with no engine, and on to the workflow that
-//! the plan's images give, built on one.
+//! A task's source, read below its root, and the standard library's, as the language's loader and
+//! the builds read them.
 //!
-//! What a `//` label or an image names is a path below the root, as `lang::Label` says, and it
-//! stays below the root on disk, as no component on its way from the root may be a symbolic link
-//! ([`Root::reach`]). What a `@pumpkin//` label names is a file or a directory of the standard
-//! library, which this `pumpkin` holds (`library::FILES`): a build is given one of its directories
-//! as its files written into a directory of the command's own ([`Library`]).
+//! The root is the nearest directory at or above the entry that holds [`MARKER`], a file of
+//! comments alone, as this `pumpkin` reads nothing else there. Each path that a task names is
+//! looked up below the root with no symbolic link on the way, and each one found is kept, as what
+//! the task reaches. A `@pumpkin//` path is a file or a directory of the standard library, which
+//! this `pumpkin` holds: a build is given one of its directories as files written out
+//! ([`Library`]). Evaluating is `lang`'s and building is `engine`'s: this module gives them the
+//! files, and says each task's problems.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -27,16 +27,14 @@ use crate::say;
 use crate::style::Formatter;
 use crate::workspace::Workspace;
 
-/// The file that marks the root of a task's repository, where its `//` labels start.
+/// The file at a task's root, where its `//` labels start.
 pub(crate) const MARKER: &str = "PUMPKIN.star";
 
-/// A task's entry file, by a path, in UTF-8, whose last component names a `.star` file, as each
-/// file that the workflow language reads does.
 #[derive(Clone)]
+/// A task's entry file, as the operator named it: a path whose name ends in `.star`.
 pub(crate) struct Entry(String);
 
 impl Entry {
-    /// The entry file at `path`, refused if its last component names no `.star` file.
     pub(crate) fn parse(path: String) -> Result<Self, String> {
         let star = Path::new(&path)
             .file_name()
@@ -61,10 +59,6 @@ impl fmt::Display for Entry {
     }
 }
 
-/// The root of a task's repository, by its canonical path: the nearest directory, at or above
-/// its entry file's, that holds [`MARKER`] as anything but a directory. The marker is a regular
-/// file of comments alone, as this pumpkin reads nothing else there. Beside it, each path below it
-/// that [`Root::reach`] has reached.
 struct Root {
     dir: PathBuf,
     reached: BTreeSet<String>,
@@ -86,13 +80,6 @@ impl Kind {
 }
 
 impl Root {
-    /// The root of the repository of `entry`, whose marker is as [`Root`] says, and `entry`'s
-    /// label.
-    ///
-    /// # Errors
-    ///
-    /// Fails if no directory at or above the entry's holds the marker, if the marker isn't as
-    /// [`Root`] says, or if the entry's path below the root is no label.
     fn find(entry: &Entry) -> Result<(Self, Label), String> {
         let path = Path::new(entry.path());
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
@@ -110,13 +97,12 @@ impl Root {
                 given.display()
             )
         })?;
-        // The components from the root down to the entry, the entry's own first.
         let mut below = vec![name];
         let mut at = dir.as_path();
         loop {
             let marker = at.join(MARKER);
-            // A directory of the marker's name marks nothing, as it can't be the file; anything
-            // else marks the root, and is refused there unless it is the file.
+            // A directory of the marker's name marks nothing; anything else marks the root, and is
+            // refused there unless it is the file.
             match fs::symlink_metadata(&marker) {
                 Ok(metadata) => {
                     if !metadata.is_dir() {
@@ -152,7 +138,6 @@ impl Root {
         let label = Label::parse(&format!("//{}", below.join("/"))).map_err(|error| {
             format!("the entry, below the root {}: {error}", root.dir.display())
         })?;
-        // Named by its whole path, as the root the entry's labels are below is found, not given.
         let place = root.dir.join(MARKER);
         let marker = root.text(MARKER);
         let marker = marker.map_err(|error| format!("{}: {error}", place.display()))?;
@@ -160,10 +145,6 @@ impl Root {
         Ok((root, label))
     }
 
-    /// The path of `below`, `/`-separated components below the root, which names a `kind`, and
-    /// none of whose components, from the root down, is a symbolic link, which could lead out of
-    /// the root. Fails if `below` names nothing or no `kind`, or if one of its components is a
-    /// link.
     fn reach(&mut self, below: &str, kind: Kind) -> Result<PathBuf, String> {
         let mut path = self.dir.clone();
         let mut reached = String::new();
@@ -205,26 +186,18 @@ impl Root {
         Ok(path)
     }
 
-    /// The path and the bytes of the regular file at `below`, reached as [`Root::reach`] reaches
-    /// it.
     fn bytes(&mut self, below: &str) -> Result<(PathBuf, Vec<u8>), String> {
         let path = self.reach(below, Kind::File)?;
         let bytes = fs::read(&path).map_err(|error| format!("`{below}` can't be read: {error}"))?;
         Ok((path, bytes))
     }
 
-    /// The text of the regular file at `below`, reached as [`Root::reach`] reaches it.
     fn text(&mut self, below: &str) -> Result<String, String> {
         let (_, bytes) = self.bytes(below)?;
         String::from_utf8(bytes)
             .map_err(|error| format!("`{below}` isn't UTF-8 ({error}): write it in UTF-8"))
     }
 
-    /// The problems of `recipe`, an image's, given the named contexts `contexts`, that
-    /// `engine::Engine::build` would refuse before building: a context or a mount that is no
-    /// directory below the root, as [`Root::reach`] reaches it, or of the standard library; and a
-    /// recipe, in the directory that `engine::mounted` says holds it, that is no regular file
-    /// there, or that `recipe::check` refuses, with its target and args.
     fn recipe(&mut self, declared: &Recipe, contexts: &[&str]) -> Vec<String> {
         let Recipe {
             context,
@@ -248,7 +221,7 @@ impl Root {
             }
         }
         let (dir, file) = Self::located(declared);
-        // A directory that can't be reached has said why.
+        // A recipe in a directory that wasn't found has that problem already.
         if reached.contains(&dir) {
             let given = Given {
                 target: target.clone(),
@@ -268,9 +241,6 @@ impl Root {
         problems
     }
 
-    /// The image that `declared` is, found on `engine`, or its build started there, by
-    /// `engine::Engine::start`, which `admit` holds the image and admits the build for, with its
-    /// recipe's context and mounts, its target, args and named contexts.
     fn start(
         &self,
         engine: &Engine,
@@ -287,10 +257,8 @@ impl Root {
         engine.start(&context, &file, &given, &recipe.repository, admit)
     }
 
-    /// The context and what else a build of `recipe` is given, with the named contexts
-    /// `contexts`: its context and mounts, below the root or written out of the standard library,
-    /// its target and its args; and the [`Library`] they are written in, if any is, which the
-    /// caller holds while the context is read. Fails if the library can't be written.
+    /// The inputs of a build of `recipe`. The `Library` holds the standard library's files that
+    /// the context reads: keep it until the context has been read.
     fn inputs<'b>(
         &self,
         recipe: &Recipe,
@@ -335,8 +303,6 @@ impl Root {
         Ok((context, given, library))
     }
 
-    /// The directory that holds `recipe`'s file, as `engine::mounted` says, its context or one
-    /// of its mounts, and the file, below that directory's root.
     fn located(recipe: &Recipe) -> (&Label, Placed) {
         let mounted = engine::mounted(&recipe.mounts, recipe.recipe.as_str());
         let (dir, within) = mounted.unwrap_or((&recipe.context, recipe.recipe.as_str()));
@@ -351,9 +317,6 @@ impl Root {
         (dir, file)
     }
 
-    /// The path below the root of the file at `path`, relative to the working directory, as an
-    /// entry's is: its directory's canonical path below the root, then its name. Fails if its
-    /// directory isn't below the root, or the path isn't UTF-8.
     fn below_root(&self, path: &str) -> Result<String, String> {
         let given = Path::new(path);
         let (dir, Some(name)) = (given.parent(), given.file_name()) else {
@@ -380,7 +343,6 @@ impl Root {
     }
 }
 
-/// `contexts`, a declared image's named contexts, as a build is given them.
 fn named<'b>(contexts: &BTreeMap<&str, &'b Built>) -> BTreeMap<String, &'b Built> {
     (contexts.iter())
         .map(|(name, built)| ((*name).to_owned(), *built))
@@ -401,8 +363,6 @@ impl Loader for Root {
     }
 }
 
-/// A file by its path below a root, as a recipe's is ([`Root::located`]): shown by its path, a
-/// task's, or by its whole label, the standard library's, as `lang` names a file in a problem.
 #[derive(PartialEq, Eq)]
 struct Placed {
     root: lang::Root,
@@ -418,37 +378,28 @@ impl fmt::Display for Placed {
     }
 }
 
-/// The bytes of the standard library's file at `path`, below its root, if it holds one.
 fn library_file(path: &str) -> Option<&'static [u8]> {
     let found = library::FILES.iter().find(|(file, _)| *file == path);
     found.map(|(_, bytes)| *bytes)
 }
 
-/// Whether the standard library holds the directory `dir`, below its root: a file below it.
 fn library_dir(dir: &str) -> bool {
     (library::FILES.iter()).any(|(path, _)| below_dir(path, dir))
 }
 
-/// Whether `path` is below the directory `dir`, both below the same root.
 fn below_dir(path: &str, dir: &str) -> bool {
     (path.strip_prefix(dir)).is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// The problem of `place`, below `@pumpkin//`, which names no `kind` of the standard library.
 fn not_in_library(place: &impl fmt::Display, kind: Kind) -> String {
     let noun = kind.noun();
     format!("`{place}` names no {noun} of the standard library: name one that it holds")
 }
 
-/// Directories of the standard library, written into a directory of the command's own in the
-/// workspace's `tmp`, which is removed once this is dropped: the library's root, below which a
-/// build's context or mount of the library is its directory there.
+/// Files of the standard library written out for a build, and removed when this is dropped.
 struct Library(TempDir);
 
 impl Library {
-    /// Writes the files below each of `dirs`, directories of the standard library, below a new
-    /// directory at their paths, each 0644 in directories of 0755, which a build's stage gives
-    /// them anyway. Fails if one can't be written.
     fn write(dirs: &[&str]) -> Result<Self, String> {
         let dir = Workspace::find()?.scratch("pumpkin-library-")?;
         let below = |path: &str| (dirs.iter()).any(|dir| below_dir(path, dir));
@@ -463,8 +414,6 @@ impl Library {
     }
 }
 
-/// Refuses `text`, the marker's, unless each of its lines holds a comment or nothing after its
-/// spaces and tabs, with the line and the column of the first that holds more.
 fn comments_only(text: &str) -> Result<(), String> {
     for (number, line) in (1..).zip(text.split('\n')) {
         let line = line.strip_suffix('\r').unwrap_or(line);
@@ -481,10 +430,8 @@ fn comments_only(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The root of the task whose entry is `entry`, given `args`, and each path below it, of a file
-/// or a directory, that checking it, as [`check`] does, reaches: the files it evaluates, and its
-/// images' contexts and mounts, all that a build of it reads. Fails as [`checked`] does; gives the
-/// task's problems, if it has any.
+/// The root of `entry`'s task and each path below it that checking it with `args` reaches, which
+/// is all that building it reads. The outcome is as `checked`'s.
 pub(crate) fn reached(
     entry: &Entry,
     args: &Args,
@@ -494,9 +441,8 @@ pub(crate) fn reached(
     })
 }
 
-/// Checks the task whose entry is `entry`, given `args`, as `pumpkin check --help` says: once it
-/// is [`checked`], lints each file that its evaluation read with `formatter`. Fails as
-/// [`checked`] and the lint do; gives what the lint finds, if anything.
+/// Checks the task as `checked` does, then lints each of its files but the library's, by
+/// `formatter`.
 pub(crate) fn check(
     entry: &Entry,
     args: &Args,
@@ -514,26 +460,19 @@ pub(crate) fn check(
     })
 }
 
-/// What a build of a task's images asks of its caller ([`Task::build`]): what `engine::Admit`
-/// asks, as each build starts, and to hear of each build's end while others run.
+/// An [`engine::Admit`] that is told when a build ends while others are still running.
 pub(crate) trait Admission: engine::Admit {
-    /// Hears that a build on `engine` has ended, whether it built its image or failed, while
-    /// others run: the next to start is admitted, and the last to end is the caller's to see, as
-    /// [`Task::build`] returns.
     fn ended(&mut self, engine: &Engine);
 }
 
-/// Holds nothing, admits every build at once, and does nothing as one ends.
 impl Admission for () {
     fn ended(&mut self, _: &Engine) {}
 }
 
-/// The tag of each image of a built task, by the image's ID: what its build's inputs name
-/// ([`Built::tag`]).
+/// The tag of each image that a task's build made.
 pub(crate) type Tags = BTreeMap<Image, String>;
 
-/// A task, [`checked`], on the thread that evaluated it, which its plan can't leave: its
-/// workflow, and how to build its images.
+/// A task that evaluated and checked, whose files are those of the root that `checked` read.
 pub(crate) struct Task<'r> {
     root: &'r mut Root,
     plan: Plan,
@@ -541,16 +480,12 @@ pub(crate) struct Task<'r> {
 }
 
 impl Task<'_> {
-    /// The task's workflow, as checked, before its images are built.
     pub(crate) fn workflow(&self) -> &Workflow {
         &self.workflow
     }
 
-    /// Builds the task's images on `engine`, as `pumpkin build --help` says ([`Root::start`]),
-    /// as `admission` admits them, as many at once as [`jobs`] says, each once those it is built
-    /// on are, saying each repository as its first build starts, and each build, after its
-    /// output, as it ends. Gives the workflow that names them, and their tags; or each build that
-    /// failed, at its place.
+    /// Builds the task's images on `engine`, each build as `admission` admits it, and gives the
+    /// workflow with its images built, and the tag of each.
     pub(crate) fn build(
         self,
         engine: &Engine,
@@ -567,11 +502,10 @@ impl Task<'_> {
     }
 }
 
-/// Writes the fetch stage `stage` of the recipe `recipe` of the task `entry`, given `args`, as
-/// `pumpkin lock --help` says: builds the named contexts that the task's images give the recipe,
-/// as [`Task::build`] does, then locks the stage with the images' inputs. Calls `reach` for the
-/// engine only once the task is [`checked`] and the stage read. Fails if no image, or two that
-/// differ in their inputs, build `recipe`; gives the task's problems, or the failed builds.
+/// Rewrites the recipe at `recipe`, a path below the task's root, with the lock of its fetch
+/// `stage`, resolved on the engine that `reach` makes. It fails unless every image of the task that
+/// builds the recipe gives it the same inputs. The outcome is as `checked`'s, and `reach` is
+/// called only once the task is checked and the recipe found.
 pub(crate) fn lock(
     entry: &Entry,
     args: &Args,
@@ -619,10 +553,6 @@ pub(crate) fn lock(
     })
 }
 
-/// Nothing if each of `picked`, the task's images of the recipe at `below` below the root, with
-/// their named contexts, gives it the same inputs, but for their targets: its context, mounts,
-/// args and named contexts. Fails if `picked` is empty, or two of them give the recipe different
-/// inputs.
 fn same_inputs<'p>(
     entry: &Entry,
     below: &str,
@@ -645,7 +575,7 @@ fn same_inputs<'p>(
              an image() call of the task builds"
         ));
     };
-    // The step's image may read any of them, so they all must agree, rather than those it reads.
+    // The stage's step may read any of them, so they must all agree, not only those it reads.
     if picked.map(inputs).any(|other| other != first) {
         return Err(format!(
             "{entry}: the task's images give the recipe `//{below}` different inputs, as its \
@@ -656,14 +586,10 @@ fn same_inputs<'p>(
     Ok(())
 }
 
-/// The builds that [`Task::build`] and [`lock`] run: each running build, by its image's index and
-/// how it is said; each repository said to be built in, once, though several stages of one recipe
-/// are built there; and what admits them.
 struct Builds<'a> {
     building: Vec<((usize, String), Building)>,
     said: BTreeSet<String>,
     admission: &'a mut (dyn Admission + Send),
-    /// The tag of each image that ended, by the image's ID, which the run's record keeps.
     tags: Tags,
 }
 
@@ -677,10 +603,6 @@ impl<'a> Builds<'a> {
         }
     }
 
-    /// A step of `Plan::build`: starts the build of each of `ready` on `engine`, from `root`
-    /// ([`Root::start`]), as the admission admits it, saying each repository as its first build
-    /// starts, and gives each that has ended, waiting for one if none has, said, after its
-    /// output, as it ends, which the admission hears of while others run.
     fn step(
         &mut self,
         root: &Root,
@@ -702,8 +624,9 @@ impl<'a> Builds<'a> {
                 Err(why) => ended.push((index, Err(why))),
             }
         }
+        // Wait for a build only when no start has ended, as nothing else can go on.
         if ended.is_empty() && !self.building.is_empty() {
-            // After all that its `docker build` wrote, which this closes.
+            // `finish` writes a failed build's output, so the line that says it failed comes after.
             let ((index, image), built) = engine::finish(&mut self.building);
             match &built {
                 Ok(_) => say(format_args!("built an image in {image}")),
@@ -722,27 +645,22 @@ impl<'a> Builds<'a> {
     }
 }
 
-/// The repository that `declared` is built in, and its stage, as `, stage <name>`, if its recipe
-/// names one.
 fn image<'d>(declared: &Declared<'d, Built>) -> (&'d str, String) {
     let recipe = declared.recipe;
     let stage = recipe.target.iter().map(|stage| format!(", stage {stage}"));
     (&recipe.repository, stage.collect())
 }
 
-/// How many images [`Task::build`] builds at once: as many as the CPUs this process may run on, or
-/// one if that can't be told.
 // This machine's, though the builds run on the engine, which may be another's: they are its
 // processes that wait on the engine, and hash and stage what it builds.
 fn jobs() -> NonZeroUsize {
     thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
 }
 
-/// What `then` gives for the task whose entry is `entry`, given `args`, once it has no problem:
-/// finds its [`Root`], evaluates it, then checks each image's recipe ([`Root::recipe`]) and the
-/// workflow ([`Plan::check`]), all reaching no engine, and calls `then` on the thread that
-/// evaluated it ([`Task`]). Fails if the root can't be found or isn't as [`Root`] says, or as
-/// `then` does; gives the task's problems, if it has any.
+/// Evaluates and checks the task of `entry` with `args`, then gives it to `then`.
+///
+/// The outer error is a failure outside the task, such as a file that can't be read; the inner is
+/// the task's own problems, which `then` never sees.
 pub(crate) fn checked<T: Send>(
     entry: &Entry,
     args: &Args,
@@ -767,8 +685,6 @@ pub(crate) fn checked<T: Send>(
     })?
 }
 
-/// What `evaluate` gives, run on a thread named `evaluation` with the stack that
-/// `lang::evaluate` needs, [`lang::STACK_BYTES`].
 fn evaluating<T: Send>(evaluate: impl FnOnce() -> T + Send) -> Result<T, String> {
     thread::scope(|scope| {
         // A thread of its own for its stack alone: the main thread's is as large as the process's
@@ -779,6 +695,7 @@ fn evaluating<T: Send>(evaluate: impl FnOnce() -> T + Send) -> Result<T, String>
         let evaluating = thread.spawn_scoped(scope, evaluate).map_err(|error| {
             format!("a thread to evaluate the task on can't be started: {error}")
         })?;
+        // A panic of the evaluation is the process's: pass it on.
         Ok(evaluating
             .join()
             .unwrap_or_else(|panic| panic::resume_unwind(panic)))
