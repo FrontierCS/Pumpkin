@@ -713,11 +713,13 @@ fn starts_over_a_shortened_log() {
     );
 }
 
-/// The paths of the modules that a file of the page loads, and of the files its style names.
+/// The paths of the scripts and modules that a file of the page loads, and of the files its style
+/// names.
 fn loaded(body: &str) -> Vec<String> {
     let found = body
         .match_indices(" from \"./")
-        .chain(body.match_indices("url(\"/"));
+        .chain(body.match_indices("url(\"/"))
+        .chain(body.match_indices(" src=\"/"));
     found
         .map(|(at, _)| {
             let rest = &body[at..];
@@ -789,6 +791,7 @@ fn serves_the_page() {
             policy: default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
             /style.css: HTTP/1.1 200 OK text/css; charset=utf-8; no-store
             /app.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; no-store
             /h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store

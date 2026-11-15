@@ -6,7 +6,7 @@
 use super::http::Response;
 
 /// The page's files, by the path each is served at, with its type.
-const FILES: [(&str, &str, &[u8]); 12] = [
+const FILES: [(&str, &str, &[u8]); 13] = [
     (
         "/",
         "text/html; charset=utf-8",
@@ -46,6 +46,11 @@ const FILES: [(&str, &str, &[u8]); 12] = [
         "/run.js",
         "text/javascript; charset=utf-8",
         include_bytes!("page/run.js"),
+    ),
+    (
+        "/scheme.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("page/scheme.js"),
     ),
     (
         "/steps.js",
