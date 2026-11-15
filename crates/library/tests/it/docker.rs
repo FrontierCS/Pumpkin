@@ -98,3 +98,58 @@ fn codex_layer() {
             the layer on another base: the same"#]],
     );
 }
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn claude_code_layer() {
+    // The libraries the loader finds for `claude`, without their tabs and their addresses, which
+    // differ from run to run; `claude` run as the library's `argv` runs it; and `claude` run again
+    // under the names its shell's `find` and `grep` give it.
+    let script = "cd /harness/claude-code-2.1.296 && find . | sort | xargs stat -c '%A %u:%g %n' \
+                  && ./lib/ld-linux-x86-64.so.2 --list ./claude \
+                  | tr -d '\t' | sed 's/ (0x[0-9a-f]*)//' \
+                  && /harness/claude-code-2.1.296/claude --version \
+                  && (exec -a bfs /harness/claude-code-2.1.296/claude --version) \
+                  && (exec -a ugrep /harness/claude-code-2.1.296/claude --version)";
+    check(
+        "harness/claude_code/layer/Dockerfile",
+        script,
+        &expect![[r#"
+            dr-xr-xr-x 0:0 .
+            -r--r--r-- 0:0 ./LICENSE.md
+            -r-xr-xr-x 0:0 ./claude
+            dr-xr-xr-x 0:0 ./lib
+            -r-xr-xr-x 0:0 ./lib/ld-linux-x86-64.so.2
+            -r--r--r-- 0:0 ./lib/libc.so.6
+            -r--r--r-- 0:0 ./lib/libdl.so.2
+            -r--r--r-- 0:0 ./lib/libm.so.6
+            -r--r--r-- 0:0 ./lib/libpthread.so.0
+            -r--r--r-- 0:0 ./lib/librt.so.1
+            linux-vdso.so.1
+            librt.so.1 => /harness/claude-code-2.1.296/lib/librt.so.1
+            libc.so.6 => /harness/claude-code-2.1.296/lib/libc.so.6
+            /harness/claude-code-2.1.296/lib/ld-linux-x86-64.so.2 => ./lib/ld-linux-x86-64.so.2
+            libpthread.so.0 => /harness/claude-code-2.1.296/lib/libpthread.so.0
+            libdl.so.2 => /harness/claude-code-2.1.296/lib/libdl.so.2
+            libm.so.6 => /harness/claude-code-2.1.296/lib/libm.so.6
+            2.1.296 (Claude Code)
+            bfs 4.1.1
+
+            Copyright © Tavian Barnes and the bfs contributors
+            No rights reserved (https://opensource.org/license/0BSD)
+
+            CONFFLAGS := --enable-release --with-oniguruma --without-libselinux --without-libacl
+            CC        := /usr/lib/llvm-23/bin/clang --target=x86_64-linux-gnu --sysroot=/opt/linux-sysroot-glibc
+            CPPFLAGS  := -Isrc -Igen -include src/prelude.h -DNDEBUG -MD -MP -Wundef-prefix=BFS_ -Dposix_getdents=__bfs_poison_posix_getdents_musl_1_2_5 -Dgetdents64=__bfs_poison_getdents64_glibc_2_30 -Dposix_spawn_file_actions_addfchdir_np=__bfs_poison_addfchdir_np_glibc_2_29 -I/tmpfs/bun/embedded/oniguruma/src
+            CFLAGS    := -O3 -std=c23 -pthread -Wformat=2 -Wimplicit-fallthrough -Werror=implicit -Wmissing-declarations -Wmissing-variable-declarations -Wshadow -Wsign-compare -Wstrict-prototypes -g -Wall 
+            LDFLAGS   := -Wl,-z,now -L/tmpfs/bun/build/release/deps/oniguruma -no-pie
+            LDLIBS    := -lonig -lrt
+
+            https://tavianator.com/projects/bfs.html
+            ugrep 7.8.4 x86_64-pc-linux-gnu +sse2; -P:pcre2jit; -z:zlib,bzip2,zstd,brotli,7z,tar/pax/cpio/zip
+            License: BSD-3-Clause; ugrep user manual: <https://ugrep.com>
+            Written by Robert van Engelen and others: <https://github.com/Genivia/ugrep>
+            Ugrep utilizes the RE/flex regex library: <https://github.com/Genivia/RE-flex>
+            the layer on another base: the same"#]],
+    );
+}
