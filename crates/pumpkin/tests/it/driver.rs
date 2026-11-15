@@ -1,8 +1,3 @@
-//! The driver: until its run has started, what ends `run` ends the driver too; after, the run
-//! goes on without `run`. The tests but one reach a stand-in `docker` ([`StandIn`]), which can
-//! hold the driver before it makes the run's record, before the start, or after. The one on
-//! Docker is ignored, as the Docker provider's tests are.
-
 use std::fs::{self, File, TryLockError};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -21,11 +16,8 @@ use super::{
     with_room, workflow,
 };
 
-/// `pumpkin wait` for the run that `output`, `pumpkin run`'s in `scratch`, named, once its
-/// driver, `driver`, has ended, and let go of the record ([`unlocked`]), as [`report`] shows it,
-/// with the run's id as `<id>`.
 fn wait_once_ended(scratch: &Scratch, output: &Output, driver: i64) -> String {
-    // Ended, as its log is whole only then, which a driver writes after its lock goes.
+    // A driver writes its log whole only after its lock goes, so wait for its end first.
     poll(|| Some(()).filter(|()| !alive(driver)));
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
     let (id, dir) = record(&stderr).unwrap();
@@ -34,19 +26,13 @@ fn wait_once_ended(scratch: &Scratch, output: &Output, driver: i64) -> String {
     ran(wait, &scratch.0, false).replace(id, "<id>")
 }
 
-/// Whom [`unstarted`] signals.
 #[derive(Clone, Copy)]
 enum Whom {
     Run,
     Driver,
-    /// Both `run` and its driver, by `run`'s process group, as a terminal signals.
     Both,
 }
 
-/// Holds the driver of a `pumpkin run` in a scratch directory of its own, `name`, at `at`, then
-/// sends `signal_name` to `whom`, then lets the driver go on if `released`, and shows what
-/// becomes of `run`, that the driver ends, and, if it made the run's record, what `wait` finds of
-/// it.
 fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str, released: bool) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
@@ -60,13 +46,14 @@ fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str, released: bool
     let target = match whom {
         Whom::Run => pid,
         Whom::Driver => driver,
+        // A negative pid signals the run's whole process group, as a terminal's ^C does.
         Whom::Both => -pid,
     };
     assert!(signal(signal_name, target), "the process to signal is gone");
     if released {
         stand_in.release(at);
     }
-    // Before `run`'s output is read to its end, which a driver that lives on would hold off.
+    // `run`'s output ends only once the driver has, if it was still running.
     poll(|| Some(()).filter(|()| !alive(driver)));
     let stderr = child.stderr.take().unwrap();
     let output = ended(child, stderr, String::new());
@@ -81,8 +68,6 @@ fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str, released: bool
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-/// What becomes of a `pumpkin run` in a scratch directory of its own, `name`, whose record
-/// loses its `driver.log` while the stand-in holds the driver at `image`, before the start.
 fn unlogged(name: &str) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
@@ -101,9 +86,6 @@ fn unlogged(name: &str) -> String {
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-/// What becomes of a `pumpkin run` in a scratch directory of its own, `name`, of a task whose
-/// image the stand-in engine lacks and fails to build: the failure at the image's place, and no
-/// record and no id.
 fn unbuilt(name: &str) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
@@ -113,9 +95,6 @@ fn unbuilt(name: &str) -> String {
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-/// What becomes of a `pumpkin run` of the stand-in's `task` in a scratch directory of its own,
-/// `name`, against a stand-in engine of which `docker info` prints `info`, and `docker image
-/// inspect` prints `image`.
 fn on_engine(name: &str, task: &str, info: &str, image: &str) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::with(&scratch, info, image);
@@ -179,7 +158,6 @@ fn fails_its_build() {
 
 #[test]
 fn refuses_the_classic_store() {
-    // As an engine of the classic store reports its graph driver's status.
     let containerd = r#"["driver-type","io.containerd.snapshotter.v1"]"#;
     let classic = INFO.replace(containerd, r#"["Backing Filesystem","extfs"]"#);
     let shown = on_engine("classic", "stand-in", &classic, IMAGE);
@@ -192,8 +170,6 @@ fn refuses_the_classic_store() {
 
 #[test]
 fn refuses_an_undescribed_image() {
-    // As an engine before Docker 28.0, or one that drops the experimental field, inspects an
-    // image.
     let descriptor = r#","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
     let shown = on_engine(
         "undescribed",
@@ -214,7 +190,7 @@ fn refuses_an_undescribed_image() {
 
 #[test]
 fn refuses_unlimited_swap() {
-    // Of a task whose image the engine would build.
+    // The task builds its image, and no build starts: the refusal comes first.
     let unlimited = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
     let shown = on_engine("unlimited", "unbuilt", &unlimited, IMAGE);
     expect![[r#"
@@ -273,7 +249,6 @@ fn unstarted_context_both_int() {
 
 #[test]
 fn unstarted_lookup_driver_kill() {
-    // While it builds the task's images, before any record is made.
     let shown = unstarted("unstarted", "lookup", Whom::Driver, "KILL", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
@@ -375,8 +350,6 @@ fn unstarted_image_both_int() {
         pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]].assert_eq(&shown);
 }
 
-/// What [`detaches`] shows of a run that `run`, invoked as `invoked`, started while the stand-in
-/// held its driver, `driver`, at `create`, once `run` has ended with `output`.
 fn detached(stand_in: &StandIn, invoked: String, output: &Output, driver: i64) -> String {
     let scratch = stand_in.scratch;
     let mut lines = vec![report(invoked, output, &scratch.0, false)];
@@ -396,7 +369,6 @@ fn detached(stand_in: &StandIn, invoked: String, output: &Output, driver: i64) -
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-/// [`detached`], for a `run` that prints the id and exits with 0.
 fn returns() -> String {
     let scratch = Scratch::new("detaches-returns");
     let stand_in = StandIn::new(&scratch);
@@ -407,8 +379,6 @@ fn returns() -> String {
     detached(&stand_in, invoked, &output, stand_in.held("create"))
 }
 
-/// [`detached`], for a `run --wait` that follows the run until a SIGINT to its process group,
-/// as from its terminal, ends it.
 fn interrupted() -> String {
     let scratch = Scratch::new("detaches-interrupted");
     let stand_in = StandIn::new(&scratch);
@@ -428,8 +398,6 @@ fn interrupted() -> String {
     detached(&stand_in, invoked, &output, driver)
 }
 
-/// [`detached`], for a `run` stopped before it heard of the start, then sent SIGTERM once the
-/// driver is past it, and let go on.
 fn stopped() -> String {
     let scratch = Scratch::new("detaches-stopped");
     let stand_in = StandIn::new(&scratch);
@@ -444,6 +412,7 @@ fn stopped() -> String {
     assert!(signal("STOP", pid), "run is gone");
     stand_in.release("image");
     let driver = stand_in.held("create");
+    // A stopped process holds a TERM pending until it continues.
     assert!(signal("TERM", pid) && signal("CONT", pid), "run is gone");
     let stderr = child.stderr.take().unwrap();
     let output = ended(child, stderr, String::new());
@@ -516,18 +485,13 @@ fn detaches() {
     );
 }
 
-/// What becomes of a run that `run` started in a scratch directory of its own, `name`, with
-/// SIGHUP ignored if `ignoring`, once its driver, held at `create`, has been sent `signals`, each
-/// as `kill --signal` names it, and let go on if `released`: which of SIGHUP, SIGINT and SIGTERM
-/// the driver catches and ignores as it is held; then, once it has ended, what `wait` finds of
-/// the run, and what the driver wrote to `driver.log`.
 fn signaled(name: &str, ignoring: bool, signals: &[&str], released: bool) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
     let mut run = stand_in.run("stand-in/task.star", &[]);
     if ignoring {
-        // As `nohup` starts a program.
+        // Ignores SIGHUP, as `nohup` starts a program.
         run = through_shell(&run, "trap '' HUP");
     }
     let output = run.output().unwrap();
@@ -548,7 +512,6 @@ fn signaled(name: &str, ignoring: bool, signals: &[&str], released: bool) -> Str
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-/// Which of SIGHUP, SIGINT and SIGTERM the process `pid` catches, and which it ignores.
 fn dispositions(pid: i64) -> String {
     let (caught, ignored) = masks(pid).unwrap();
     let names = |mask: u64| {
@@ -568,8 +531,6 @@ fn dispositions(pid: i64) -> String {
     format!("catches {}; ignores {}", names(caught), names(ignored))
 }
 
-/// The masks of the signals that the process `pid` catches and ignores, as its `status` gives
-/// them, if it runs.
 fn masks(pid: i64) -> Option<(u64, u64)> {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let mask = |field: &str| {
@@ -582,7 +543,6 @@ fn masks(pid: i64) -> Option<(u64, u64)> {
     Some((mask("SigCgt:"), mask("SigIgn:")))
 }
 
-/// Whether `mask`, a signal mask as `/proc` gives one, holds signal `number`.
 fn has(mask: u64, number: libc::c_int) -> bool {
     mask >> (number - 1) & 1 == 1
 }
@@ -645,14 +605,12 @@ fn signaled_after_the_start() {
     );
 }
 
-/// What a test on Docker leaves behind, to remove once it is over, however it ends: for each
-/// run recorded in `runs` its driver and its containers; its socket directory goes with the
-/// scratch directory, as its record does.
 struct Cleanup<'a> {
     containers: &'a Reached,
     runs: PathBuf,
 }
 
+// Kills the drivers and removes the containers that a failed test would leave on the engine.
 impl Drop for Cleanup<'_> {
     fn drop(&mut self) {
         let Ok(entries) = fs::read_dir(&self.runs) else {
@@ -676,26 +634,23 @@ impl Drop for Cleanup<'_> {
     }
 }
 
-/// Waits until no process holds the lock of the record `dir`, by which `wait` finds that its run
-/// is no longer live.
 fn unlocked(dir: &Path) {
-    // Not until the driver's process shows as ended: its main thread does, as a zombie, while
-    // another of its threads may still be exiting, holding the descriptors, and so the lock.
+    // A driver's main thread shows as ended, a zombie, while another thread may still be exiting,
+    // holding the descriptors and so the lock.
     poll(|| Some(()).filter(|()| live_driver(dir).is_none()));
 }
 
-/// The process ID of the driver of the record `dir`, if it holds the record's lock.
 fn live_driver(dir: &Path) -> Option<i64> {
     let pid = File::open(dir.join("driver.pid")).ok()?;
+    // A live driver holds an exclusive lock on its pid file; a stale file is unlocked.
     let held = matches!(pid.try_lock_shared(), Err(TryLockError::WouldBlock));
     let text = fs::read_to_string(dir.join("driver.pid")).ok()?;
     text.trim().parse().ok().filter(|_| held)
 }
 
-/// The ID of the session that process `pid` is in, if there is one: the sixth field of its
-/// `stat`, after the name in parentheses, which may hold anything.
 fn session(pid: i64) -> Option<i64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name, in parentheses, may itself hold spaces and parentheses.
     let (_, after) = stat.rsplit_once(')').unwrap();
     Some(after.split_whitespace().nth(3).unwrap().parse().unwrap())
 }
@@ -740,8 +695,7 @@ fn lost_on_docker() {
     let rootful = !engine.report().security.rootless;
     let mut killed = vec![report(invoked, &output, &scratch.0, rootful)];
     killed.extend(sandboxes(&record));
-    // By name alone, as the agent's socket goes once the agent connects, which the kill may
-    // come before or after.
+    // Names only: the agent's socket goes once the agent connects, which the kill may precede.
     let sockets = fs::read_dir(scratch.0.join(dir).join("sockets")).unwrap();
     let mut sockets: Vec<_> = sockets.map(|entry| entry.unwrap().file_name()).collect();
     sockets.sort();
@@ -751,7 +705,6 @@ fn lost_on_docker() {
     let pumpkin = |args: &[&str]| ran(scratch.pumpkin(args), &scratch.0, false);
     steps.push(pumpkin(&["wait", id, "--runs", "runs"]));
     steps.push(pumpkin(&["cancel", id, "--runs", "runs"]));
-    // The image that the run built, which its IR names.
     let ir = fs::read_to_string(record.join("ir.json")).unwrap();
     let ir: serde_json::Value = serde_json::from_str(&ir).unwrap();
     let image = ir["roles"][0]["image"].as_str().unwrap();
@@ -848,14 +801,14 @@ fn signaled_on_docker() {
     poll(|| Some(()).filter(|()| log().contains(r#""kind":"agent_started""#)));
     let driver = live_driver(&record).unwrap();
     assert!(signal("TERM", driver), "the driver is gone");
-    // So that `wait` finds the run ended, rather than follow it for as long as its end takes.
+    // So that `wait` finds the run ended, rather than follow it while the driver ends.
     unlocked(&record);
     let wait = ran(
         scratch.pumpkin(&["wait", id, "--runs", "runs"]),
         &scratch.0,
         false,
     );
-    // The deletes of the sandboxes the stop left follow the stop's note.
+    // The sandboxes' deletes come after the stop's note, in records that hold none.
     let log = log();
     let records = log
         .lines()
