@@ -54,10 +54,8 @@ esac
     )
 }
 
-// [`LOOKS`] looks at once at an image's platform, from as many threads, on one engine, run in
-// a child that finds the stand-in `docker` first on its `PATH`: at most 4 run at once, as many
-// as there are slots, and the engine says once that it waits for one. The first looks hold their
-// slots until the engine has said so, so that the others find every slot held.
+// The first looks hold their slots until the engine has said that it waits, so that the others
+// find every slot held.
 #[test]
 fn publishes_at_once() {
     if let Some(dir) = env::var_os(CHILD) {

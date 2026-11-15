@@ -111,7 +111,6 @@ const OPTIONS: [&str; 2] = [
     "--output=type=image,compression=zstd,oci-mediatypes=true,force-compression=true",
 ];
 
-/// The options every build gives `docker build`, as [`OPTIONS`] says.
 fn options() -> impl Iterator<Item = String> {
     let time = format!("--build-arg=SOURCE_DATE_EPOCH={}", BUILD_TIME.as_secs());
     (OPTIONS.into_iter().map(str::to_owned)).chain([time])
@@ -195,18 +194,12 @@ pub enum Recipe {
 /// prune that spares what the caller holds spares it once found or built; and admits each build
 /// that finds no image before it starts.
 pub trait Admit {
-    /// Holds the image tagged `tag`, from now until the caller lets it go.
-    ///
-    /// # Errors
-    ///
-    /// Says why it can't be held, which fails the build.
+    /// Holds the image tagged `tag`, from now until the caller lets it go; an error fails the
+    /// build.
     fn hold(&mut self, tag: &str) -> Result<(), String>;
 
-    /// Admits a build on `engine`, waiting, if need be, for its turn.
-    ///
-    /// # Errors
-    ///
-    /// Says why the build is refused, which fails it.
+    /// Admits a build on `engine`, waiting, if need be, for its turn; an error refuses it, and
+    /// fails the build.
     fn admit(&mut self, engine: &Engine) -> Result<(), String>;
 }
 
@@ -224,10 +217,6 @@ impl Admit for () {
 impl Engine {
     /// The image that `recipe` builds with `context`, given `given`, tagged `<repository>:<hex>`,
     /// as [`Engine::start`] starts its build, once that build has ended ([`finish`]).
-    ///
-    /// # Errors
-    ///
-    /// As [`Engine::start`] and [`finish`] fail.
     pub fn build(
         &self,
         context: &BuildContext,
@@ -246,10 +235,9 @@ impl Engine {
     /// `admit` holds the tag, the engine's image under it, or, once `admit` admits the build, a
     /// `docker build` of a stage of the context, to be tagged once it has ended ([`finish`]).
     ///
-    /// # Errors
-    ///
-    /// Fails as [`recipe::check`] and `admit` do, if `context` isn't as [`BuildContext`] says, if
-    /// a [`Recipe::File`] is no regular file of it, or if `docker` or the stage fails.
+    /// Refuses a recipe that [`recipe::check`] refuses, a `context` that isn't as
+    /// [`BuildContext`] says, and a [`Recipe::File`] that is no regular file of it; and fails if
+    /// `admit` does.
     pub fn start(
         &self,
         context: &BuildContext,
@@ -285,7 +273,6 @@ impl Engine {
         }
     }
 
-    /// The image that the engine has under `tag`, if any.
     fn tagged(&self, tag: &str) -> Result<Option<Built>, String> {
         let found = image_id(&self.report.context, tag).map_err(|error| {
             let error = fix_reported(&error);
@@ -372,10 +359,9 @@ pub struct Building {
 /// The image is tagged as [`Engine::start`] says, once its directory is removed. A failed
 /// `docker build` has all it wrote put on standard error at once, as `make --output-sync` does.
 ///
-/// # Errors
+/// # Panics
 ///
-/// Gives, with that key, why: `docker build`, or its waiting, output, image's ID, tag or
-/// directory's removal failed. Panics if `building` is empty, as none of it would ever end.
+/// If `building` is empty, as none of it would ever end.
 pub fn finish<K>(building: &mut Vec<(K, Building)>) -> (K, Result<Built, String>) {
     let mut children: Vec<&mut Child> = (building.iter_mut()).map(|(_, b)| &mut b.child).collect();
     let (index, status) = stdx::process::wait_any(&mut children);
@@ -719,7 +705,6 @@ impl Inputs {
         })
     }
 
-    /// The hexadecimal digits of the inputs' digest.
     fn digest(&self) -> String {
         hex(Sha256::digest(self.to_string()).into())
     }
@@ -793,7 +778,6 @@ fn make_dir(dir: &Path) -> Result<(), String> {
         .context(dir.display())
 }
 
-/// Sets the time the file or directory at `path` was last modified to [`BUILD_TIME`].
 fn set_build_time(path: &Path) -> Result<(), String> {
     (File::open(path))
         .and_then(|file| file.set_modified(UNIX_EPOCH + BUILD_TIME))
@@ -854,7 +838,6 @@ fn ambiguous(name: &str) -> bool {
     name.contains(|char: char| char.is_whitespace() || char.is_control())
 }
 
-/// The SHA-256 of the file at `path`, in hexadecimal.
 fn file_sha256(path: &Path) -> io::Result<String> {
     let mut hasher = Hasher(Sha256::new());
     io::copy(&mut File::open(path)?, &mut hasher)?;
@@ -876,7 +859,6 @@ impl io::Write for Hasher {
     }
 }
 
-/// The hexadecimal digits of the [`Sha256Digest`] of SHA-256's 32 bytes, `sha256`.
 fn hex(sha256: [u8; 32]) -> String {
     Sha256Digest::from(sha256).hex().to_owned()
 }

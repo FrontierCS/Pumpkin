@@ -164,12 +164,6 @@ impl Helper {
 
     /// Makes `request`, and returns what the helper answers, as a `T`, or kills the helper at
     /// `by`, if it hasn't ended by then.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the temporary directory can't be made, or `uv` doesn't run; if the helper is
-    /// killed at `by`, or never starts, as `by` has passed, fails, or prints what isn't an answer
-    /// of a `T`; or with what Modal reported, if the helper answers so.
     pub(crate) fn call<T: DeserializeOwned>(
         &self,
         request: &Request<'_>,

@@ -44,13 +44,12 @@ const GRANT_FILE: &str = "grant.env";
 /// read-only.
 const HOST_DIR: &str = "opt/pumpkin";
 
-/// The container's name on its instance.
 const CONTAINER: &str = "pumpkin-sandbox";
 
-/// The container's DNS server.
-// Its own loopback, where nothing answers: on Docker's default bridge, the address goes into
-// the container's `/etc/resolv.conf` with no resolver of Docker's between, so no lookup leaves
-// the container, and one fails at once rather than waiting on an address the rules drop.
+// The container's DNS server is its own loopback, where nothing answers: on Docker's default
+// bridge, the address goes into the container's `/etc/resolv.conf` with no resolver of Docker's
+// between, so no lookup leaves the container, and one fails at once rather than waiting on an
+// address the rules drop.
 const DNS: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 /// How many of the container's last lines of output the boot's end copies to the console.

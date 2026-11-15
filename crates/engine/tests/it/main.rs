@@ -29,12 +29,10 @@ use test_support::{BUSYBOX, docker};
 mod prune;
 mod publish;
 
-/// The scratch of one test: a directory for its builds' contexts.
 struct Fixture {
     dir: TempDir,
 }
 
-/// Runs `scenario` against a new fixture, and checks what it reported against `expect`.
 fn check(name: &str, scenario: impl FnOnce(&Fixture) -> Vec<String>, expect: &Expect) {
     let dir = tempfile::Builder::new()
         .prefix(&format!("engine-{name}-"))
@@ -43,8 +41,6 @@ fn check(name: &str, scenario: impl FnOnce(&Fixture) -> Vec<String>, expect: &Ex
     expect.assert_eq(&scenario(&Fixture { dir }).join("\n"));
 }
 
-/// The engine the tests reach Docker through, by the context `PUMPKIN_DOCKER_CONTEXT` names,
-/// or `default`, or why it can't be reached.
 fn connected() -> &'static Result<Engine, String> {
     static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
     ENGINE.get_or_init(|| {
@@ -53,13 +49,11 @@ fn connected() -> &'static Result<Engine, String> {
     })
 }
 
-/// The directory of what the tests' engine writes on this machine, which every run of the tests
-/// shares, as a machine's runs share their workspace's.
+// Shared by every run of the tests, as a machine's runs share their workspace's.
 fn engine_dir() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("docker")
 }
 
-/// The engine the tests reach Docker through.
 fn engine() -> &'static Engine {
     connected().as_ref().unwrap()
 }
@@ -68,17 +62,14 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
-/// `message`, with the fixture's directory as `<dir>` and the tests' context as `<context>`.
 fn redact(fixture: &Fixture, message: &str) -> String {
     let context = format!("context `{}`", engine().report().context.as_str());
     (message.replace(&fixture.dir.path().display().to_string(), "<dir>"))
         .replace(&context, "context `<context>`")
 }
 
-// What the engine reports of itself before anything starts, as far as every engine shows the
-// same, and how it refuses an empty context name, and names no context has, among them
-// `--help`, which `docker context inspect` mustn't take for its own option, which prints its
-// help and succeeds.
+// `--help` is refused as a context's name, as `docker context inspect` mustn't take it for its
+// own option, which prints its help and succeeds.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn report() {
@@ -171,14 +162,6 @@ fn platforms() {
     );
 }
 
-// A build is tagged by its inputs, and its image is a manifest for the engine's platform. And it is found by that tag rather than built again: another
-// file's content, another mode or another recipe gives another tag, and the same inputs give
-// the image their tag names, even one another build made. A recipe, here a text, may build on
-// an image it is given as a named context, and is refused without it; and it gets that image
-// even once the image's tag has moved to another. A context that can't name its inputs is
-// refused before anything is built, and so is a repository that Docker can't tag, whose tag
-// pins the digest's text of a build given nothing. A build removes what a build of a process
-// that has ended left in the engine's directory, but not a running one's.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
@@ -332,9 +315,6 @@ fn images() {
     );
 }
 
-// A directory mounted in a build's context is there for its recipe to copy from, and its files
-// are in the build's inputs. One to be mounted where the context holds something, or holds no
-// directory, or at a path with whitespace, is refused before anything is built.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn mounts() {
@@ -376,10 +356,8 @@ fn mounts() {
     );
 }
 
-// A recipe's `RUN` step may bind-mount the build's context, whose files are in the build's
-// inputs, so another content of a file it mounts gives another tag, and another image, which
-// holds what was mounted; and it may bind-mount a named context it is given, whose tag is in the
-// inputs too, so another image there gives another tag.
+// A file that a `RUN` bind-mounts from the context, or a named context it mounts, is in the
+// build's inputs, so changing either gives another tag.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn bind_mounts() {
@@ -430,9 +408,8 @@ fn bind_mounts() {
     );
 }
 
-// A build's stage gives its files and directories git's modes, so files that differ only in
-// other permission bits, as checkouts under other umasks do, have one tag; and the image holds
-// them with those modes, a file its owner may execute still executable.
+// Files that differ only in other permission bits, as checkouts under other umasks give, have one
+// tag, and the image holds git's modes.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn modes() {
@@ -469,14 +446,8 @@ fn modes() {
     );
 }
 
-// A build's stage gives its files and directories one time, and the build gives it to its
-// image's history, so builds of the same inputs that share no cache make the same layer of each
-// copy of staged files into `/`, and the same image when its every layer is one: a registry that
-// holds the first has the second. Another content of a file, of the same size, changes only the
-// layer that copies it. A layer that a copy into a directory of the base makes is another in
-// each build, as Docker gives that directory the build's own time. A `RUN` isn't given the
-// build's time as `SOURCE_DATE_EPOCH`, which would change how Python compiles what it installs.
-// Each image's layers, its base's too, are zstd's, in an OCI manifest.
+// Builds of the same inputs that share no cache make the same layers, but for a copy into a
+// directory of the base, which Docker gives the build's own time.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn reproducible() {
@@ -497,7 +468,9 @@ fn reproducible() {
                 ..Given::default()
             };
             // Each build mounts a `nonce` of its own in a `RUN` that changes nothing, so that each
-            // step after it misses the cache, as on a machine of its own.
+            // step after it misses the cache, as on a machine of its own. The `RUN` isn't given
+            // the build's time as `SOURCE_DATE_EPOCH`, which would change how Python compiles
+            // what it installs.
             let recipe = |last: &str| {
                 Recipe::Text(format!(
                     "FROM {BUSYBOX} AS nonce\nCOPY nonce /\nFROM base\nRUN \
@@ -550,7 +523,6 @@ fn reproducible() {
     );
 }
 
-/// Runs `docker` with `args`, which must succeed.
 fn run(args: &[&str]) {
     let output = docker().args(args).output().unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -606,7 +578,6 @@ impl<'f> Builds<'f> {
         }
     }
 
-    /// The fixture's `context`, with nothing mounted in it.
     fn context(&self) -> BuildContext {
         BuildContext {
             dir: Some(self.fixture.dir.path().join("context")),
@@ -614,7 +585,6 @@ impl<'f> Builds<'f> {
         }
     }
 
-    /// [`Builds::build_in`] of the file `recipe` of the fixture's `context`, given nothing.
     fn build(&mut self, recipe: &str) -> String {
         let recipe = Recipe::File(relative(recipe));
         self.build_in(&self.context(), &recipe, &Given::default())
@@ -672,7 +642,6 @@ impl<'f> Builds<'f> {
         Image::try_from(id).unwrap()
     }
 
-    /// The manifest of `image`, as `docker image save` writes it.
     fn manifest(&self, image: &Image) -> serde_json::Value {
         let saved = self.fixture.dir.path().join("saved");
         let _ = fs::remove_dir_all(&saved);

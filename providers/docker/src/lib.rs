@@ -4,9 +4,7 @@
 //!
 //! - no network but loopback; the dial's socket, in a host directory mounted read-only, is the
 //!   only way out, and files move only over the session;
-//! - the role's [`confinement`]: its user from its first process, no capabilities,
-//!   `no-new-privileges`, CPU, memory, swap and process limits, no core file, `/pumpkin` and a
-//!   read-only `/tmp`; and CPUs of its run's own (`cpus`);
+//! - the role's [`confinement`], and CPUs of its run's own (`cpus`);
 //! - `sandboxd`, read-only, as its first process, dialing its [`SocketDial`], its log's only
 //!   writer;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), read-only;
@@ -52,10 +50,8 @@ const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
 /// Where the session's socket directory is mounted in the container.
 const GATEWAY_DIR: &str = "/.pumpkin/gateway";
 
-/// The label that carries a container's run tag.
 const RUN_LABEL: &str = "pumpkin.run";
 
-/// The label that carries the name of a container's role.
 const ROLE_LABEL: &str = "pumpkin.role";
 
 /// The provider of sandboxes as containers on an [`Engine`], which every container of its runs
@@ -72,12 +68,8 @@ pub struct Docker<'e> {
 
 impl<'e> Docker<'e> {
     /// The provider on `engine`, whose sandboxes are given the CPUs of `cpus`, or else all that
-    /// are online.
-    ///
-    /// # Errors
-    ///
-    /// Fails, saying what to do, if what the engine said of itself can't be read, if it can't
-    /// enforce every container's limits, or if `cpus` isn't online.
+    /// are online. It refuses an engine that can't enforce every container's limits, and `cpus`
+    /// that aren't online.
     pub fn connect(engine: &'e Engine, cpus: Option<&CpuList>) -> Result<Self, String> {
         let report = engine.report();
         let &engine::Host {
@@ -120,17 +112,11 @@ impl<'e> Docker<'e> {
 
     /// Reaches the engine through `context`, as [`Engine::reach`] does, for a sweep of a run's
     /// containers alone: whether the engine is fit to run on is not checked.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the context can't be read, or the engine can't be reached through it, saying
-    /// what to do.
     pub fn reach(context: ContextName) -> Result<Reached, String> {
         Engine::reach(&context)?;
         Ok(Reached { context })
     }
 
-    /// The context `docker` reaches the engine through.
     fn context(&self) -> &'e ContextName {
         &self.engine.report().context
     }
@@ -360,8 +346,6 @@ fn remove(context: &ContextName, id: &str, bound: Bound) -> Result<(), Failure> 
     }
 }
 
-/// Deletes the containers of run `run` that `ids` name, on the engine of `context`, as
-/// [`Sweep::delete`] does.
 fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
     // With no id to filter by, the lookup would list every run's containers, for nothing.
     if ids.is_empty() {
@@ -420,7 +404,6 @@ fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<Listed>, String> {
 
 /// A container that carries a run label, as `docker container ls` shows it.
 struct Labelled {
-    /// Its full ID.
     id: String,
     /// Its state, as [`ended`] reads it.
     state: String,

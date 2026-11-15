@@ -12,9 +12,9 @@
 //!
 //! One later step reads it, a `RUN` that bind-mounts it (`--mount=type=bind,from=<name>,…`), so
 //! no layer of the image holds the files. Its comment holds its lock line, `# pumpkin lock:
-//! <resolver> <argument>…`, from which `pumpkin lock <recipe> <name>` writes the body afresh,
-//! with what the resolver prints, run online in the image that the recipe builds up to that
-//! step ([`FetchStage::prefix`]). Its resolvers are a [`Resolver`]'s.
+//! <resolver> <argument>…`, from which the body is written afresh, with what the resolver
+//! prints, run online in the image that the recipe builds up to that step
+//! ([`FetchStage::prefix`]). Its resolvers are a [`Resolver`]'s.
 //!
 //! A lock goes stale safely: a step that asks for a file the stage lacks fails, offline.
 
@@ -38,7 +38,6 @@ pub struct FetchStage {
     from_index: usize,
     end_index: usize,
     resolver: Resolver,
-    /// The recipe up to the step that reads the stage, without the stage's body.
     prefix: String,
 }
 

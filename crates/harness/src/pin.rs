@@ -49,7 +49,6 @@ pub struct Pin {
     pub files: &'static [PinnedFile],
 }
 
-/// A file a [`Pin`] keeps.
 #[derive(Clone, Copy, Debug)]
 pub struct PinnedFile {
     /// Its path below the pin's [`dir`](Pin::dir), which it keeps below the harness's root: from

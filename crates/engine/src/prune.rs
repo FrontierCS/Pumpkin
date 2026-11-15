@@ -2,8 +2,8 @@
 //! disk is too full for a build to start.
 //!
 //! Once more than [`HIGH_PERCENT`] of the disk is used, the least recently used images that live
-//! runs and builds don't hold ([`Held`]), until their sizes bring the use down to [`LOW_PERCENT`] ([`evicted`]). The build
-//! cache is then pruned to the same mark
+//! runs and builds don't hold ([`Held`]), until their sizes bring the use down to
+//! [`LOW_PERCENT`] ([`evicted`]). The build cache is then pruned to the same mark
 //! ([`Engine::prune_build_cache`](crate::Engine::prune_build_cache)), which also frees the
 //! layers that it shared with the images removed. Past [`REFUSED_PERCENT`], as once a prune has
 //! left the disk there, a build is refused ([`Disk::refused`]).
@@ -82,7 +82,6 @@ pub struct Held {
 }
 
 impl Held {
-    /// Whether `cached` is held.
     fn holds(&self, cached: &Cached) -> bool {
         self.images.contains(&cached.image)
             || cached.tags.iter().any(|tag| self.tags.contains(tag))
@@ -93,9 +92,10 @@ impl Held {
 /// The images of `cached` that a prune removes from an engine whose images are on `disk`.
 ///
 /// Each was last used as `last_used` says, by what orders the uses, such as the start of the
-/// newest job that named it, or never. None unless the disk is [full](Disk::full); else, of those that `held` doesn't hold, least
-/// recently used first, those never used, then the rest by their last use, each tie by its ID,
-/// until their sizes add up to what brings the disk's use down to [`LOW_PERCENT`], or all.
+/// newest job that named it, or never. None unless the disk is [full](Disk::full); else, of those
+/// that `held` doesn't hold, least recently used first, those never used, then the rest by their
+/// last use, each tie by its ID, until their sizes add up to what brings the disk's use down to
+/// [`LOW_PERCENT`], or all.
 pub fn evicted<U: Ord>(
     disk: Disk,
     cached: Vec<Cached>,

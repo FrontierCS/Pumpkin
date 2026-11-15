@@ -122,7 +122,6 @@ impl Instance {
         format!("{path}: {text}")
     }
 
-    /// `text`, with the directory shown as `<dir>`.
     fn shown(&self, text: &str) -> String {
         text.replace(self.dir.path().to_str().unwrap(), "<dir>")
     }
@@ -134,7 +133,6 @@ impl Drop for Instance {
     }
 }
 
-/// Runs `scenario` and checks the lines it reports against `expect`.
 fn check(scenario: impl FnOnce() -> Vec<String>, expect: &Expect) {
     expect.assert_eq(&scenario().join("\n"));
 }
@@ -157,9 +155,6 @@ fn start() -> Start {
     }
 }
 
-// How a boot goes: what it says on the console, the commands it runs, in order, the rules it
-// gives `nft`, the grant's file, as `docker run` found it, 0600, and gone once it returns, and
-// the `sandboxd` it copied out of its image.
 #[test]
 fn boots() {
     check(

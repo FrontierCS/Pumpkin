@@ -1,10 +1,4 @@
-//! What the tests of more than one of Pumpkin's crates share: the conformance suite every
-//! provider passes ([`suite`]); a complete workflow ([`WORKFLOW`]), and what a run's record holds
-//! of its commands' standard output ([`standard_outputs`]) and of its sandboxes, with their
-//! consoles ([`sandboxes`]); a directory's listing ([`files`]); for the tests that need Docker or
-//! the static `sandboxd`, the engine they reach ([`docker`]), the pinned image they build on
-//! ([`BUSYBOX`]) and that `sandboxd` ([`sandboxd`]); a stand-in for a provider's TLS edge
-//! ([`edge`]); and a stand-in HTTP server's end of a connection ([`http`]).
+//! What the tests of more than one of Pumpkin's crates share.
 
 #![expect(
     clippy::unwrap_used,
@@ -80,7 +74,7 @@ pub fn docker_context() -> String {
     std::env::var("PUMPKIN_DOCKER_CONTEXT").unwrap_or_else(|_| "default".to_owned())
 }
 
-/// `docker`, run as the Docker provider runs it, against [`docker_context`] alone.
+/// `docker`, given only the environment it needs, against [`docker_context`] alone.
 pub fn docker() -> Command {
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
     let mut docker = stdx::process::command("docker", kept);

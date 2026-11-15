@@ -41,17 +41,13 @@ const ENTRY: &str = include_str!("entry.sh");
 /// The tag that carries an instance's run, by which its run's list finds it.
 const RUN_TAG: &str = "pumpkin:run";
 
-/// The tag that carries the name of an instance's role.
 const ROLE_TAG: &str = "pumpkin:role";
 
-/// How long a launched instance may take to be found in its run's list.
 // EC2's API is eventually consistent, so an instance just launched may be missing from a list
 // for a while; one still missing minutes later is lost, not late. This is the usual bound of a
 // wait for a new instance to be listed.
 const LISTED_TIMEOUT: Duration = Duration::from_secs(200);
 
-/// How long a delete waits, once it has terminated the instances, for EC2 to describe each as
-/// terminated.
 // An instance ends some time after it is told to: its OS shuts down, then EC2 frees its volume
 // and network interface, which the envelope's templates delete with it. That takes seconds, or
 // minutes for a slow shutdown; one still not terminated after 10 min is stuck, not slow.
@@ -68,8 +64,8 @@ impl Ec2<'_> {
     /// # Errors
     ///
     /// Fails before launching if `dial` isn't to IPv4 or the class isn't the envelope's; fails if
-    /// AWS refuses the launch or the timer, `create.by` passes first, or the list misses the
-    /// instance for 200 s, leaving any instance it launched, which carries the run's tag.
+    /// `create.by` passes first, or the list misses the instance for 200 s, leaving any instance
+    /// it launched, which carries the run's tag.
     pub(crate) fn create_instance(
         &self,
         create: &Create,
@@ -275,12 +271,8 @@ impl Ec2<'_> {
     /// Reads what instance `id` of run `run` has printed on its serial console, the latest that EC2
     /// shows, of which it keeps the lines its boot wrote there, whose last say how the boot ended
     /// and what its container printed last. EC2 may show a line only tens of seconds after it is
-    /// printed, and shows nothing of a terminated instance.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `id` isn't an instance of run `run` that EC2 describes, such as another run's; if
-    /// AWS refuses to describe it or to read its console; or if `aws` prints JSON of another form.
+    /// printed, and shows nothing of a terminated instance. It fails if `id` isn't an instance of
+    /// run `run` that EC2 describes, such as another run's.
     pub(crate) fn read_console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let not_ours = || {
             format!(
@@ -320,11 +312,6 @@ impl Sweep for Reached {
     /// those terminated, which EC2 has freed, as the [envelope](crate#the-envelope) asks; each
     /// [ended](Listed::ended) unless it is pending or running. Its `aws` call is killed after
     /// 10 min.
-    ///
-    /// # Errors
-    ///
-    /// Fails if AWS refuses to describe the instances, or `aws` describes them in JSON of another
-    /// form.
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
         let found = self.described(&[run_filter(run)], Bound::Call)?;
         let listed = found.into_iter().filter_map(|found| {
@@ -624,7 +611,6 @@ struct InstanceState {
     name: State,
 }
 
-/// An instance's state, each that EC2 names.
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum State {

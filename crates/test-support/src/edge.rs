@@ -1,8 +1,5 @@
 //! A stand-in for a provider's TLS edge, which ends the TLS of a connection to a sandbox's port.
 //!
-//! It stands [`front`] of a port: the [`server`] end of that TLS, as `localhost` ([`NAME`]), and
-//! a [`client`] that trusts it alone.
-//!
 //! Its keys are made for these tests, and are public, so they keep nothing secret.
 
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -31,8 +28,7 @@ OE4X9vsjYwIhAIo0jOTuyYjUKYSbNmkQdlSGe+918YSmcv9xEWpYHiuE
 -----END CERTIFICATE-----
 ";
 
-/// The stand-in's certificate, for [`NAME`], issued from its root, in PEM, as a stand-in of
-/// another language's, such as a fake provider's tunnel, may load it.
+/// The stand-in's certificate, for [`NAME`], issued from its root, in PEM.
 pub const CERTIFICATE: &str = "\
 -----BEGIN CERTIFICATE-----
 MIIBxTCCAWqgAwIBAgIUCn71eAhIceONCe/g/Ogz1uWYpWgwCgYIKoZIzj0EAwIw

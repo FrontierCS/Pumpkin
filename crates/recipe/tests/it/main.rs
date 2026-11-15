@@ -274,11 +274,11 @@ fn sources() {
 fn steps() {
     check(
         &[
-            // A Git repository's tree, which its commit names in full, and, refused, the other shapes:
-            // a prefix and a branch, which may move; a commit in uppercase, which Docker takes for a
-            // ref's name; a path that ends in `.git` in uppercase, or no path, which Docker doesn't
-            // clone; a query, which can hide what the URL names; plain `http://`; and the flags that add
-            // nothing to the commit or a `.git` of each build's own.
+            // A Git repository's tree, which its commit names in full, and, refused, the other
+            // shapes: a prefix and a branch, which may move; a commit in uppercase, which Docker
+            // takes for a ref's name; a path that ends in `.git` in uppercase, or no path, which
+            // Docker doesn't clone; a query, which can hide what the URL names; plain `http://`;
+            // and the flags that add nothing to the commit or a `.git` of each build's own.
             (
                 "git-commit",
                 "FROM scratch\nADD --link https://example.com/notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
@@ -319,8 +319,9 @@ fn steps() {
                 "git-keep",
                 "FROM scratch\nADD --keep-git-dir=true https://example.com/notes.git#0123456789abcdef0123456789abcdef01234567 /notes\n",
             ),
-            // The build gives no step the host's network, a device or a privilege, which these flags
-            // may; `--network` is refused whatever it names, as the check doesn't read its value.
+            // The build gives no step the host's network, a device or a privilege, which these
+            // flags may; `--network` is refused whatever it names, as the check doesn't read its
+            // value.
             (
                 "run-network",
                 "FROM scratch\nRUN --mount=target=/src --network=host true\n",
@@ -339,8 +340,8 @@ fn steps() {
                 "mount",
                 "FROM scratch\nRUN --mount=from=ubuntu:24.04,target=/ubuntu true\n",
             ),
-            // A bind mount, Docker's default, of the build's context, an earlier stage, in any case,
-            // or an image pinned by digest.
+            // A bind mount, Docker's default, of the build's context, an earlier stage, in any
+            // case, or an image pinned by digest.
             (
                 "mount-bind",
                 "FROM docker.io/library/ubuntu@<sha256> AS tools\nFROM scratch\n\

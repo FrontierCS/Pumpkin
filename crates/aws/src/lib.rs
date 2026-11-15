@@ -1,15 +1,10 @@
-//! AWS's command line, `aws`, as Pumpkin's providers run it ([`Cli`]), and ECR's repositories on
-//! it: each described by its name ([`Cli::repositories`]), and an image pushed to one from the
-//! operator's Docker engine, named there by its manifest's digest ([`Cli::publish`]); and the IAM
-//! roles that providers name in their settings ([`RoleArn`]).
+//! AWS's command line, `aws`, as Pumpkin's providers run it ([`Cli`]), with ECR's repositories
+//! on it, and the IAM roles that providers name in their settings ([`RoleArn`]).
 //!
 //! Every call `aws` makes is in the region its [`Cli`] was made for, with the credentials that
-//! `aws` finds on its own, which on an EC2 instance are the instance's role. Nothing of this
-//! process's environment reaches `aws` but what it needs to find its own configuration, so no
-//! variable, such as `AWS_REGION` or `AWS_PROFILE`, steers it to another region or account; it
-//! is given how to retry, so that it waits out AWS's throttling of a burst of calls. A
-//! push goes through the operator's Docker engine, with a login that `aws` gets for that push
-//! alone ([`engine::Pusher::push`]).
+//! `aws` finds on its own, which on an EC2 instance are the instance's role. No variable of this
+//! process's environment, such as `AWS_REGION` or `AWS_PROFILE`, steers `aws` to another region
+//! or account.
 
 use std::io::ErrorKind;
 use std::process::{Command, Output};
@@ -22,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-/// How long an `aws` command that isn't a create's may run before it is killed; a create's are
-/// killed at its deadline.
 // Every command a provider runs is one AWS answers at once, in one page. Throttled, `aws` tries
 // again ([`RETRIES`]), waiting about 7 min in all at most; it gives up on a connection, and on a
 // read that gets nothing, after 60 s each. So past 10 min a command is hung, as on a credentials
@@ -178,7 +171,6 @@ pub enum Bound {
 #[derive(Debug)]
 pub struct Cli {
     region: Region,
-    /// What `aws --version` printed, such as `aws-cli/2.38.1 Python/3.14.6 Linux/…`.
     version: String,
 }
 
@@ -229,10 +221,6 @@ struct ImageId {
 
 impl Cli {
     /// The command line, run in `region`, with the version `aws --version` printed.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `aws` doesn't run, hangs or fails.
     pub fn connect(region: Region) -> Result<Self, String> {
         let shown = "aws --version";
         let stdout = succeeded(output(aws().arg("--version"), shown, Bound::Call)?, shown)?;
@@ -267,10 +255,6 @@ impl Cli {
     }
 
     /// Runs `aws` with `args`, killed at `bound`, and parses the JSON it prints.
-    ///
-    /// # Errors
-    ///
-    /// Fails as [`run`](Self::run) does, or if the JSON isn't of the form `T` expects.
     pub fn json<T: DeserializeOwned>(&self, args: &[&str], bound: Bound) -> Result<T, String> {
         serde_json::from_slice(&self.run(args, bound)?).map_err(|error| {
             format!(
@@ -281,10 +265,6 @@ impl Cli {
     }
 
     /// Runs `aws` with `args`, killed at `bound`, and returns what it prints on standard output.
-    ///
-    /// # Errors
-    ///
-    /// Fails, saying what `aws` reports, if it doesn't run, is killed or fails.
     pub fn run(&self, args: &[&str], bound: Bound) -> Result<Vec<u8>, String> {
         let shown = format!("aws {}", subcommand(args));
         succeeded(output(&mut self.command(args), &shown, bound)?, &shown)
@@ -292,10 +272,6 @@ impl Cli {
 
     /// Runs `aws` with `args`, killed at `bound`, and returns what it prints on standard output,
     /// or `None` if AWS reports that what it names doesn't exist (`ResourceNotFoundException`).
-    ///
-    /// # Errors
-    ///
-    /// Fails as [`run`](Self::run) does for any other failure.
     pub fn run_found(&self, args: &[&str], bound: Bound) -> Result<Option<Vec<u8>>, String> {
         let shown = format!("aws {}", subcommand(args));
         let output = output(&mut self.command(args), &shown, bound)?;
@@ -309,10 +285,6 @@ impl Cli {
 
     /// The repositories that `names` name, in their order, each described by one call, or why
     /// AWS described none of that name.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the call does, as [`json`](Self::json) does.
     pub fn repositories<const N: usize>(
         &self,
         names: [&RepositoryName; N],
@@ -338,13 +310,8 @@ impl Cli {
 
     /// `image`, an image of `engine`'s, in `repository`, `<URI>@<image>`, once the repository holds
     /// it: pushed from the engine, tagged with its digest's hexadecimal digits, unless the
-    /// repository holds it already, by its digest, as ECR answers.
-    ///
-    /// # Errors
-    ///
-    /// Fails if ECR can't say whether the repository holds the image, or answers in JSON of another
-    /// form; if AWS refuses the push's login, or the engine can't push the image; or if the
-    /// repository holds no image by its digest once pushed.
+    /// repository holds it already, by its digest, as ECR answers. It fails if the repository
+    /// holds no image by its digest once the push ends.
     pub fn publish(
         &self,
         engine: &Pusher<'_>,
@@ -440,7 +407,6 @@ impl Cli {
         pusher.push(image, &login, &repository.name.0, image.hex())
     }
 
-    /// `aws` with `args`, in the region, printing JSON.
     fn command(&self, args: &[&str]) -> Command {
         let mut command = aws();
         command.args([
@@ -455,7 +421,6 @@ impl Cli {
     }
 }
 
-/// The `aws` command line, found on `PATH`, given [`CALL_ENVIRONMENT`] alone, and [`RETRIES`].
 fn aws() -> Command {
     Cli::proxied("aws")
 }

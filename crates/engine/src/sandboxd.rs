@@ -1,7 +1,6 @@
-//! The image of a static `sandboxd`, with the static programs a provider runs beside it, for a
-//! provider whose sandboxes pull what they run from a registry, which [`Engine::load_sandboxd`]
-//! makes byte for byte, as an OCI image layout, and loads into the engine, from which
-//! [`Pusher::push`](crate::Pusher::push) pushes it.
+//! The image of a static `sandboxd`, with the static programs a provider runs beside it, which
+//! [`Engine::load_sandboxd`] makes byte for byte, as an OCI image layout, and loads into the
+//! engine, from which [`Pusher::push`](crate::Pusher::push) pushes it.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -15,8 +14,8 @@ use stdx::Context as _;
 use crate::build::in_scratch;
 use crate::{Engine, Platform, docker, fix_reported};
 
-/// The media types of the image's manifest, its configuration, its one layer, an uncompressed
-/// archive, and the index of the layout that holds it.
+// The media types of the image's manifest, its configuration, its one layer, an uncompressed
+// archive, and the index of the layout that holds it.
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const CONFIG_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 const LAYER_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
@@ -32,12 +31,7 @@ impl Engine {
     /// Loads into the engine, and returns the ID of, the image for [`Platform::sandboxd`] that
     /// holds copies of the static programs `binaries` alone, each by its path in the image and
     /// the file it copies, owned by root, mode 0755: one layer, no time or command, so the same
-    /// files give the same image wherever it is loaded.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a file can't be read or holds 8 GiB or more, or if the archive, `docker load` or
-    /// the publish slot fails.
+    /// files give the same image wherever it is loaded. A file of 8 GiB or more is refused.
     pub fn load_sandboxd(&self, binaries: &[(&str, &Path)]) -> Result<Image, String> {
         let mut read = Vec::new();
         for &(in_image, path) in binaries {
@@ -104,12 +98,10 @@ fn archive(binaries: &[(&str, Vec<u8>)], platform: &Platform) -> Result<(Vec<u8>
     Ok((archive, Image::try_from(digest(&manifest).to_string())?))
 }
 
-/// The OCI descriptor of `blob`, of media type `media_type`.
 fn descriptor(media_type: &str, blob: &[u8]) -> Value {
     json!({"mediaType": media_type, "digest": digest(blob).as_str(), "size": blob.len()})
 }
 
-/// The SHA-256 digest of `bytes`.
 fn digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(bytes)))
 }
