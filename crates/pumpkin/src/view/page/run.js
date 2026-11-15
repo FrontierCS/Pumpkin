@@ -30,6 +30,7 @@ import {
   typing,
   utc,
 } from "./h.js";
+import { RowList } from "./rows.js";
 
 /**
  * @typedef {object} Run `/api/runs/<id>`
@@ -67,6 +68,7 @@ import {
  * @property {boolean} more_dropped_headers whether it left more than `dropped_headers`
  * @typedef {object} Lane a sandbox's lane: the agent's, a judge call's (`job <n>`) or a lease's
  * @property {string} lane
+ * @property {string} [caller] the caller that the lane's trace is of, `agent` or `job-<n>`; none for a lease
  * @property {"agent" | "judge" | "runner"} kind
  * @property {string | null} [role]
  * @property {string | null} [grant]
@@ -96,8 +98,6 @@ import {
  * @typedef {LogRecord | Fold} Item
  */
 
-// The rows drawn past those in view.
-const OVERSCAN_ROWS = 20;
 // The widths of a character of the diagram's names and places, in its font, `--fs-diagram`.
 const NAME_CHAR_PX = 7.3;
 const PLACE_CHAR_PX = 7.3;
@@ -109,77 +109,6 @@ const LABEL_MAX_CHARS = 48;
 const DRAW_EVERY_RECORDS = 2000;
 // How often a cancel under way is read.
 const CANCEL_POLL_MS = 1000;
-
-// ---- a list of one-line rows, drawing only those in view
-
-class LogList {
-  // `draw(item, index)` makes an item's row; `pick(item, index)` is called when one is clicked.
-  /** @param {(item: Item, index: number) => HTMLElement} draw @param {(item: Item, index: number) => void} pick */
-  constructor(draw, pick) {
-    /** @type {Item[]} */
-    this.items = [];
-    this.selected = -1;
-    this.draw = draw;
-    this.pick = pick;
-    // Whether the list keeps to its end as items are added: a reader at the end stays there.
-    this.tail = false;
-    // The height of a row in px, `--row` in the style.
-    this.px = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row"));
-    this.rows = h("div", { class: "rows" });
-    this.node = h("div", { class: "list", tabindex: 0 }, this.rows);
-    this.node.addEventListener("scroll", () => {
-      this.tail = this.atTail();
-      this.paint();
-    });
-  }
-
-  atTail() {
-    const node = this.node;
-    return node.scrollTop + node.clientHeight >= node.scrollHeight - 2;
-  }
-
-  // Shows `items`, the one at `selected` selected, keeping to the end if the reader was there.
-  /** @param {Item[]} items @param {number} selected */
-  set(items, selected) {
-    this.items = items;
-    this.selected = selected;
-    this.rows.style.setProperty("--count", String(items.length));
-    if (this.tail) this.node.scrollTop = this.node.scrollHeight;
-    this.paint();
-  }
-
-  // Goes to the end, and keeps to it.
-  end() {
-    this.tail = true;
-    this.node.scrollTop = this.node.scrollHeight;
-    this.paint();
-  }
-
-  /** @param {number} index @param {boolean} scroll */
-  select(index, scroll) {
-    this.selected = index;
-    if (scroll && index >= 0) {
-      const top = index * this.px;
-      if (top < this.node.scrollTop || top > this.node.scrollTop + this.node.clientHeight - this.px) this.node.scrollTop = top - this.node.clientHeight / 2;
-    }
-    this.paint();
-  }
-
-  paint() {
-    const first = Math.max(0, Math.floor(this.node.scrollTop / this.px) - OVERSCAN_ROWS);
-    const end = Math.min(this.items.length, first + Math.ceil(this.node.clientHeight / this.px) + 2 * OVERSCAN_ROWS);
-    const rows = [];
-    for (let index = first; index < end; index++) {
-      const row = this.draw(this.items[index], index);
-      row.classList.add("row");
-      if (index === this.selected) row.classList.add("on");
-      row.style.top = index * this.px + "px";
-      row.addEventListener("click", () => this.pick(this.items[index], index));
-      rows.push(row);
-    }
-    this.rows.replaceChildren(...rows);
-  }
-}
 
 // ---- what a record says
 
@@ -323,6 +252,7 @@ export async function runView(id) {
   const verdict = h("div", { class: "verdict" });
   const facts = h("div", { class: "facts" });
   const again = h("div", { class: "again" });
+  const traces = h("div", { class: "traces" });
   const cancelBox = h("div", { class: "cancel" });
   const unread = h("div", { class: "unread" });
   const startedOver = h("p", { class: "empty" });
@@ -330,7 +260,8 @@ export async function runView(id) {
   const talk = h("div", { class: "talk panel" });
   const filter = h("div", { class: "filter" }, kinds, search, counted, all);
   const inspector = h("div", { class: "inspector panel" });
-  const list = new LogList(
+  /** @type {RowList<Item>} */
+  const list = new RowList(
     (item) => {
       const fold = "fold" in item ? item.fold : null;
       const first = fold ? fold[0] : /** @type {LogRecord} */ (item);
@@ -358,7 +289,7 @@ export async function runView(id) {
       select(item);
     },
   );
-  show(verdict, facts, again, cancelBox, unread, startedOver, h("div", { class: "split" }, h("div", { class: "left" }, lanes, filter, list.node), h("div", { class: "right" }, talk, inspector)));
+  show(verdict, facts, again, traces, cancelBox, unread, startedOver, h("div", { class: "split" }, h("div", { class: "left" }, lanes, filter, list.node), h("div", { class: "right" }, talk, inspector)));
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
@@ -471,6 +402,7 @@ export async function runView(id) {
     fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.verdict));
     drawFacts(facts, data);
     drawAgain(again, data);
+    drawTraces(traces, data);
     drawCancel();
     fill(unread, data.unread ? h("p", { class: "warn" }, h("span", { class: "mark warn" }), plural(data.unread.count, "line") + " of the log can't be read: " + data.unread.said) : null);
     drawFollow();
@@ -783,6 +715,23 @@ function drawAgain(node, data) {
     h("span", { class: "name" }, "Again"),
     h("code", { title: command }, command),
     h("button", { title: "Copy the command that runs this run again", onclick: () => navigator.clipboard && navigator.clipboard.writeText(command) }, "Copy"),
+  );
+}
+
+// A link to the trace of each caller with model answers: the agent, each judge call.
+/** @param {HTMLElement} node @param {Run} data */
+function drawTraces(node, data) {
+  const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "judge") && lane.answers && lane.answers.count > 0);
+  fill(
+    node,
+    callers.length ? h("span", { class: "name" }, "Traces") : null,
+    callers.map((lane) =>
+      h(
+        "a",
+        { href: "#/run/" + encodeURIComponent(data.id) + "/trace?caller=" + encodeURIComponent(lane.caller ?? ""), class: "kind " + lane.kind, title: "What " + lane.lane + " and the model said to each other: " + plural(lane.answers?.count ?? 0, "answer") },
+        lane.lane,
+      ),
+    ),
   );
 }
 

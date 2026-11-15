@@ -103,15 +103,24 @@ export class Refused extends Error {
 }
 
 // The JSON at `path`; a `Refused` if the server refuses it, a `SyntaxError` if its reply is cut
-// short.
-/** @param {string} path @returns {Promise<any>} */
-export async function get(path) {
-  const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN } });
+// short. `signal` aborts the read.
+/** @param {string} path @param {AbortSignal} [signal] @returns {Promise<any>} */
+export async function get(path, signal) {
+  const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN }, signal });
   if (!response.ok) {
     const refusal = await response.json().catch(() => ({}));
     throw new Refused(response.status, refusal.error || response.status + " " + response.statusText);
   }
   return response.json();
+}
+
+// The bytes at `path` as text, as the server keeps them; a `Refused` if it refuses them.
+/** @param {string} path @returns {Promise<string>} */
+export async function getText(path) {
+  const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN } });
+  const text = await response.text();
+  if (!response.ok) throw new Refused(response.status, response.status + " " + response.statusText);
+  return text;
 }
 
 // A POST to `path`: the status and the JSON that the server answers, which for a refusal is
@@ -246,3 +255,27 @@ export const tone = (run) => (run.live ? "live" : run.state === "finished" && !r
 // such as a run's state.
 /** @param {string} text */
 export const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// A time of the run's clock as the record writes it, decimal nanoseconds, in seconds; null for
+// one the record doesn't give.
+/** @param {string | null | undefined} nanos */
+export const seconds = (nanos) => (nanos === null || nanos === undefined ? null : Number(nanos) / 1e9);
+
+// A setting of this browser's, such as a panel's width, which the page works without: storage
+// can be refused, as in a private window.
+/** @param {string} name @returns {string | null} */
+export function setting(name) {
+  try {
+    return localStorage.getItem("pumpkin." + name);
+  } catch {
+    return null;
+  }
+}
+/** @param {string} name @param {string} value */
+export function keepSetting(name, value) {
+  try {
+    localStorage.setItem("pumpkin." + name, value);
+  } catch {
+    // Not kept: the setting is the default next time.
+  }
+}

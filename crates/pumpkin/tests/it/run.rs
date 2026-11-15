@@ -436,6 +436,10 @@ fn usage() {
               another site that the browser has open. It reads the records as `ls` and `wait`
               do, and asks nothing of a provider.
 
+              A run's page links to the trace of each caller that used a model, the agent or
+              a judge call: its model requests as threads of steps, each with the entries it
+              added and the model's answer, as the record's log and the bodies it keeps say.
+
               The page's cancel of a run runs `pumpkin cancel --runs <dir> <run>`, and shows
               what that says. Nothing else the page does changes a run.
 

@@ -793,6 +793,11 @@ fn serves_the_page() {
             /h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
+            /steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; no-store
             /nothing.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/nothing.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             / [("Host", "pumpkin.example")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}
             /app.js [("Host", "pumpkin.example:80")]: HTTP/1.1 403 Forbidden {"error":"the request names the host `pumpkin.example:80`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}"#]],
