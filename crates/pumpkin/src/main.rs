@@ -1093,8 +1093,8 @@ fn follow(record: &Record, command: &str, runs: Option<&str>) -> Result<ExitCode
     end(record, &ending, runs, record.args())
 }
 
-// A milestone said within a second is timely, and a run's log, at most about 100 KB, costs
-// nothing to read again.
+// A milestone said within a second is timely, and each poll reads only what the log gained, and
+// each sandbox's `sandbox.json`.
 const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
@@ -1103,10 +1103,14 @@ const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 fn followed(record: &Record) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
     let mut said_unread = false;
+    let mut log = record.fold();
     loop {
         // How it ended first, so that the log read after holds every milestone before the end.
         let ending = record.ending()?;
-        let runtime::Readout { progress, unread } = record.progress()?;
+        if let Some(started_over) = log.take()? {
+            say(format_args!("run {}: {started_over}", record.id()));
+        }
+        let runtime::Readout { progress, unread } = log.readout()?;
         if !said_unread && let Some(unread) = progress::unread(&unread) {
             say(format_args!("run {}: {unread}", record.id()));
             said_unread = true;

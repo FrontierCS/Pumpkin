@@ -51,8 +51,8 @@ use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
 pub use log::{
-    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Direction, LeaseSpan, ModelUse, Part, Place,
-    PlaceUse, Progress, Readout, Sandbox, Tokens, Unread, Work,
+    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Direction, LeaseSpan, LogFold, ModelUse, Part,
+    Place, PlaceUse, Progress, Readout, Sandbox, StartedOver, Tokens, Unread, Work,
 };
 use log::{Entry, Log, ModelAnswer};
 use model::{Exchange, Served};
