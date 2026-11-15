@@ -225,6 +225,18 @@ fn write_served(scratch: &Scratch) -> File {
         });
         write_record(scratch, id, true, Some(outcome));
     }
+    // A run of which a response left tokens unreported, so that its cost is a floor.
+    let mut outcome = json!({
+        "state": "finished",
+        "verdict": { "kind": "no_submission" },
+        "work_end": { "kind": "deadline" },
+    });
+    outcome["usage"] = json!({
+        "ran_ns": "60000000000", "model_requests": 2,
+        "tokens": { "responses": 2, "input": 1000, "output": 100 }, "sandboxes": [],
+        "usd": 0.45, "unreported_responses": 1,
+    });
+    write_record(scratch, "20261110-083000-0000000c", true, Some(outcome));
     // A directory with no record.
     fs::create_dir_all(scratch.0.join("runs/20261110-130000-0000000e")).unwrap();
     driver
@@ -346,6 +358,7 @@ fn serves_runs() {
               {"bound":"of 30m","id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","scored":false,"state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"}
+              {"bound":"-","id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"}
               {"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"}
               {"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}
               {"bound":"49.36","id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"}
@@ -353,10 +366,10 @@ fn serves_runs() {
               {"bound":"49.36","id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}
 
             GET /api/runs?before=<live>
-            {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"},{"bound":"49.36","id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"},{"bound":"49.36","id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"},{"bound":"49.36","id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}]}
+            {"next":null,"runs":[{"bound":"-","id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","scored":false,"state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"49.36","id":"<ended>","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"},{"bound":"-","id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"},{"bound":"-","id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","scored":false,"state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"},{"bound":"49.36","id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"},{"bound":"49.36","id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"},{"bound":"49.36","id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","scored":true,"state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
-            cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price","shown":"$1.10+"}
+            cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.10+"}
             end: 8432
             id: "<ended>"
             lanes:
@@ -383,7 +396,7 @@ fn serves_runs() {
             unread: null
             verdict: "Run <ended> finished with a score of 49.36, after the work phase ended when the agent exited with status 0"
 
-            GET /api/runs/20261110-060000-00000005: its cost: {"said":"$0.66 for tokens, and more for sandboxes, which lack a price","shown":"$0.66+"}
+            GET /api/runs/20261110-060000-00000005: its cost: {"said":"$0.66 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens","shown":"$0.66+"}
             GET /api/runs/20261110-050000-00000006: its cost: {"said":"$0.44 for sandboxes, and more for tokens, which lack a price","shown":"$0.44+"}
             GET /api/runs/20261110-040000-00000007: its cost: null
             GET /api/runs/<ended>/since?log=<end>

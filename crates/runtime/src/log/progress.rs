@@ -346,6 +346,11 @@ pub struct ModelUse {
     pub tokens: Tokens,
     /// What the answers that name their model reported, by the route's name for it.
     pub by_model: BTreeMap<String, Tokens>,
+    /// How many responses went with tokens unreported, in whole or in part, by the route's name
+    /// for their model: those with a 2xx status that were cut short, whose usage, if any, is only
+    /// the stream's so far, and those with one that came whole and reported none. An error status
+    /// and the route's own barred and refused answers are not counted.
+    pub unreported: BTreeMap<String, u64>,
     /// The names of request headers that the route left behind, at most
     /// `route::MAX_DROPPED_HEADERS`.
     pub dropped_headers: BTreeSet<String>,
@@ -935,6 +940,17 @@ impl ModelUse {
                     self.first_tokens.push(first_token.saturating_sub(started));
                 }
             }
+        }
+        // An upstream bills a 2xx response's tokens whether it reported them or not, and an
+        // error's not at all.
+        let unreported = upstream_status.is_some_and(|status| (200..300).contains(&status))
+            && match answer {
+                logged::Answer::Cut => true,
+                logged::Answer::Forwarded => usage.is_none(),
+                logged::Answer::Barred | logged::Answer::Refused => false,
+            };
+        if unreported && let Some(model) = model {
+            *self.unreported.entry((*model).to_owned()).or_default() += 1;
         }
         // As the log gives the status: `null` for none.
         let status = upstream_status.map_or_else(|| "null".to_owned(), |status| status.to_string());

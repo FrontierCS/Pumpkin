@@ -1,36 +1,76 @@
 //! The words for what a run cost, from [`runtime::Progress::cost`], each amount to the cent.
 //!
 //! A cost without a price is unknown, never zero: a run of which nothing has a price shows no
-//! cost, and a part of it without one is said to lack one.
+//! cost, and a part of it without one is said to lack one. The tokens that a response didn't
+//! report, which its provider bills all the same, are unknown too: a cost that leaves them out
+//! says so.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
-use runtime::{Cost, ModelUse, Priced, TokenPrices};
+use runtime::{Cost, ModelUse, Priced, TokenPrices, TokensCost};
 
-/// The cost column of a run that cost `usd`, in dollars, and more if something of it was
-/// `unpriced`, as `$1.20+`.
-pub(crate) fn usd(usd: f64, unpriced: bool) -> String {
-    let more = if unpriced { "+" } else { "" };
+/// The cost column of a run that cost `usd`, in dollars, and more if the cost is `partial`
+/// ([`Cost::partial`]), as `$1.20+`.
+pub(crate) fn usd(usd: f64, partial: bool) -> String {
+    let more = if partial { "+" } else { "" };
     format!("${usd:.2}{more}")
 }
 
-/// What the tokens of `model`, a run's or a judge call's requests, cost at `prices`, as a model
-/// line of a summary ends it: `; $1.02 at the models' prices`, then `, but for model-b's tokens,
-/// which lack a price` if some have no cost, or `; model-b's tokens lack a price` if none has
-/// one; nothing if the requests reported no tokens of a model.
+/// The end of a model line: what the tokens of `model` cost at `prices`, `; $1.02 at the models'
+/// prices`, then `, but for model-b's tokens, which lack a price`, `, but for 1 response's
+/// unreported tokens`, or both, `, but for model-b's tokens, which lack a price, and 1 response's
+/// unreported tokens`, for what that leaves out. If no model with a price reported tokens: `;
+/// model-b's tokens lack a price`, `; 3 responses of priced models reported no tokens`, or both,
+/// `; model-b's tokens lack a price, and 3 responses of priced models reported none`. Nothing if
+/// there is nothing to say.
 pub(super) fn tokens(model: &ModelUse, prices: &BTreeMap<String, TokenPrices>) -> String {
-    let (usd, unpriced) = model.usd(prices);
+    let TokensCost {
+        usd,
+        unpriced,
+        unreported,
+    } = model.usd(prices);
     let owners = owners(&unpriced);
-    match (usd, owners) {
-        (Some(usd), None) => format!("; ${usd:.2} at the models' prices"),
-        (Some(usd), Some(owners)) => {
+    let unreported = (unreported > 0).then_some(unreported);
+    match (usd, owners, unreported) {
+        (Some(usd), None, None) => format!("; ${usd:.2} at the models' prices"),
+        (Some(usd), Some(owners), None) => {
             format!(
                 "; ${usd:.2} at the models' prices, but for {owners} tokens, which lack a price"
             )
         }
-        (None, Some(owners)) => format!("; {owners} tokens lack a price"),
-        (None, None) => String::new(),
+        (Some(usd), None, Some(count)) => {
+            let unreported = unreported_tokens(count);
+            format!("; ${usd:.2} at the models' prices, but for {unreported}")
+        }
+        (Some(usd), Some(owners), Some(count)) => {
+            let unreported = unreported_tokens(count);
+            format!(
+                "; ${usd:.2} at the models' prices, but for {owners} tokens, which lack a price, \
+                 and {unreported}"
+            )
+        }
+        (None, Some(owners), None) => format!("; {owners} tokens lack a price"),
+        (None, Some(owners), Some(count)) => {
+            let responses = crate::counted(count, "response");
+            format!(
+                "; {owners} tokens lack a price, and {responses} of priced models reported none"
+            )
+        }
+        (None, None, Some(count)) => {
+            let responses = crate::counted(count, "response");
+            format!("; {responses} of priced models reported no tokens")
+        }
+        (None, None, None) => String::new(),
+    }
+}
+
+/// The tokens that `count` responses left unreported, `1 response's unreported tokens` or
+/// `2 responses' unreported tokens`.
+fn unreported_tokens(count: u64) -> String {
+    if count == 1 {
+        "1 response's unreported tokens".to_owned()
+    } else {
+        format!("{count} responses' unreported tokens")
     }
 }
 
@@ -46,35 +86,45 @@ fn owners(models: &[String]) -> Option<String> {
 }
 
 /// The cost line of a summary, after `cost: `: `$1.13, $1.02 of it for tokens and $0.11 for
-/// sandboxes`, then `, and more without a price` if something has none; of a run of which only
-/// one part has a price, that part, then the other if something of it lacks one: `$1.02 for
-/// tokens, and more for sandboxes, which lack a price`.
+/// sandboxes`, then what the total leaves out: `, and more without a price`, `, and more for 1
+/// response's unreported tokens`, or `, and more without a price, and for 1 response's unreported
+/// tokens`; of a run of which only one part has a price, that part, then what it leaves out:
+/// `$1.02 for tokens, and more for sandboxes, which lack a price`.
 pub(crate) fn line(cost: &Cost) -> String {
+    let unpriced_models = !cost.unpriced_models.is_empty();
     // Each amount is its exact sum rounded, so the parts may add up to a cent off the whole.
-    match cost.priced {
-        Priced::Both { tokens, sandboxes } => {
-            let mut line = format!(
+    let (priced, unpriced) = match cost.priced {
+        Priced::Both { tokens, sandboxes } => (
+            format!(
                 "${:.2}, ${tokens:.2} of it for tokens and ${sandboxes:.2} for sandboxes",
                 cost.usd()
-            );
-            if cost.unpriced() {
-                line.push_str(", and more without a price");
-            }
-            line
-        }
-        Priced::Tokens(usd) => alone(usd, "tokens", "sandboxes", cost.unpriced_classes),
-        Priced::Sandboxes(usd) => {
-            alone(usd, "sandboxes", "tokens", !cost.unpriced_models.is_empty())
-        }
-    }
+            ),
+            (unpriced_models || cost.unpriced_classes).then_some("without a price"),
+        ),
+        Priced::Tokens(usd) => (
+            format!("${usd:.2} for tokens"),
+            cost.unpriced_classes
+                .then_some("for sandboxes, which lack a price"),
+        ),
+        Priced::Sandboxes(usd) => (
+            format!("${usd:.2} for sandboxes"),
+            unpriced_models.then_some("for tokens, which lack a price"),
+        ),
+    };
+    priced + &more(unpriced, cost.unreported)
 }
 
-/// The cost line of a run of which only `part` has a price, `usd`: `$1.02 for tokens`, then
-/// `, and more for sandboxes, which lack a price` if some of `other` was used.
-fn alone(usd: f64, part: &str, other: &str, other_used: bool) -> String {
-    let mut line = format!("${usd:.2} for {part}");
-    if other_used {
-        let _ = write!(line, ", and more for {other}, which lack a price");
+/// What a cost leaves out, to follow it: `, and more without a price`, `, and more for 1
+/// response's unreported tokens`, or both, `, and more without a price, and for 1 response's
+/// unreported tokens`, where `unpriced` says what lacks a price. Nothing if it leaves nothing out.
+pub(super) fn more(unpriced: Option<&str>, unreported: u64) -> String {
+    let unreported = (unreported > 0).then(|| unreported_tokens(unreported));
+    match (unpriced, unreported) {
+        (None, None) => String::new(),
+        (Some(unpriced), None) => format!(", and more {unpriced}"),
+        (None, Some(unreported)) => format!(", and more for {unreported}"),
+        (Some(unpriced), Some(unreported)) => {
+            format!(", and more {unpriced}, and for {unreported}")
+        }
     }
-    line
 }

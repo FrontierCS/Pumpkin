@@ -57,7 +57,7 @@ pub use progress::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress,
     Readout, Sandbox, Tokens, Unread, Work,
 };
-pub use usage::{Cost, PlaceUse, Priced, Used};
+pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};
 pub(super) use usage::{usage_of, used};
 
 pub(super) struct Log<'h, H: Host> {

@@ -369,7 +369,7 @@ fn lists_phases() {
               20261110-120000-0000000c finished     18m20s  49.36      $0.66+  example/lease
               20261110-120000-0000000d finished     18m20s  49.36      $0.44+  example/lease
               20261110-120000-0000000e finished     18m20s  49.36           -  example/lease
-              5 runs: 5 finished (1 without a score); $2.20 so far, and more without a price
+              5 runs: 5 finished (1 without a score); $2.20 so far, and more without a price, and for 2 responses' unreported tokens
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
@@ -386,7 +386,7 @@ fn lists_phases() {
               20261111-090000-0000000h agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet
               20261111-090000-0000000i agent           <t>  of 30m      $0.00  example/lease: 2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
               20261111-090000-0000000j agent           <t>  of 30m      $0.00  example/lease: 2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
-              11 runs: 10 running, 1 finished; $4.15 so far, and more without a price; every live run ends by <t> UTC"#]],
+              11 runs: 10 running, 1 finished; $4.15 so far, and more without a price, and for 3 responses' unreported tokens; every live run ends by <t> UTC"#]],
     );
 }
 
@@ -448,7 +448,7 @@ fn lists_leases() {
                                        lease 3         <t>                     gpu on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
               20261114-090000-00000009 ending          <t>  of 1h43m   $1.03+  example/lease: the end of lease 2
                                        lease 2         <t>                     cpu on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
-              9 runs: 9 running; $6.95 so far, and more without a price; every live run ends by <t> UTC"#]],
+              9 runs: 9 running; $6.95 so far, and more without a price, and for 9 responses' unreported tokens; every live run ends by <t> UTC"#]],
     );
 }
 
