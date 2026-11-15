@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use expect_test::{Expect, expect};
 use route::read::{self, Item, Reply};
 use schema::ir::Api;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::kept::{
     CHAT_ANSWER, CHAT_REQUEST, CHAT_STREAM, RESPONSES_CUT, RESPONSES_FAILED, RESPONSES_REQUEST,
@@ -73,6 +73,10 @@ fn requests() {
         let alone = (body[field].as_array().unwrap().iter()).flat_map(|item| read::item(api, item));
         assert_eq!(alone.collect::<Vec<_>>(), items);
         let config = read::config(api, &body);
+        // The field that names the tools holds every tool that the config reads.
+        let field = read::tools_field(api);
+        let tools = read::config(api, &json!({ field: body[field] })).tools;
+        assert_eq!(tools, config.tools);
         writeln!(out, "{api}: {config:?}\n{}", shown(&items)).unwrap();
     }
     expect![[r#"

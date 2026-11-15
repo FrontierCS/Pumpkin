@@ -44,6 +44,7 @@ use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
 
 use super::log::{self, LogFold, Place, Readout, Used};
+use super::model::{KeptPart, KeptRequest};
 use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System};
 
@@ -568,6 +569,59 @@ impl Record {
     /// sent and the rebuilt body has another.
     pub fn model_request(&self, number: u64) -> Result<Vec<u8>, String> {
         super::model::rebuilt_request(&self.dir, number)
+    }
+
+    /// The body of the model request that `kept`, its log's `model_answered`'s `kept.request`,
+    /// names, as the record keeps it: the items of its conversation and the fields it keeps
+    /// whole each by its digest, read without the items themselves; each field as it was sent if
+    /// the record kept none apart.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `kept` is no object or names a path that leaves the record, or if its file can't
+    /// be read or isn't a JSON object of the form that `kept` names.
+    pub fn kept_request(&self, kept: &Value) -> Result<KeptRequest, String> {
+        let Value::Object(kept) = kept else {
+            return Err(format!(
+                "the run log's `kept.request` is {kept}: expected an object"
+            ));
+        };
+        if let Some(parts) = super::model::kept_parts(&self.dir, kept)? {
+            return Ok(parts);
+        }
+        let path = super::model::kept_path(&self.dir, kept)?;
+        let bytes = fs::read(&path).context(path.display())?;
+        let Ok(Value::Object(fields)) = serde_json::from_slice(&bytes) else {
+            return Err(format!("{}: the body is no JSON object", path.display()));
+        };
+        let fields = fields.into_iter();
+        Ok(KeptRequest {
+            conversation: None,
+            fields: fields
+                .map(|(field, value)| (field, KeptPart::Sent(value)))
+                .collect(),
+        })
+    }
+
+    /// The bytes of model request `number`'s response as the record keeps it, at the path that
+    /// `kept`, its log's `model_answered`'s `kept.response`, names; while it is in flight, with
+    /// `kept` `null`, as far as it has come.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file can't be read, or `kept` names a path that leaves the record.
+    pub fn model_response(&self, number: u64, kept: &Value) -> Result<Vec<u8>, String> {
+        super::model::kept_response(&self.dir, number, kept)
+    }
+
+    /// The bytes of the conversation's item, or the field kept whole, that `digest` names, as
+    /// the record keeps it in `model/items/`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the record keeps no such item, or it can't be read.
+    pub fn kept_item(&self, digest: &Sha256Digest) -> Result<Vec<u8>, String> {
+        super::model::kept_item(&self.dir, digest)
     }
 
     /// The build of Pumpkin that made the record, shown as a [`Build`] is, if it isn't [`BUILD`];

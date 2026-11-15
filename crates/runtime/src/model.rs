@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -507,8 +507,102 @@ pub(super) fn rebuilt_request(record: &Path, number: u64) -> Result<Vec<u8>, Str
 /// The body of the request that `kept`, its run log's `kept.request`, names in the record at
 /// `record`.
 fn rebuilt_body(record: &Path, kept: &Map<String, Value>) -> Result<Vec<u8>, String> {
-    let path = record.join(kept.get("path").and_then(Value::as_str).unwrap_or_default());
-    let bytes = fs::read(&path).context(path.display())?;
+    let Some(parts) = kept_parts(record, kept)? else {
+        let path = kept_path(record, kept)?;
+        return fs::read(&path).context(path.display());
+    };
+    let resolved = |part: KeptPart| match part {
+        KeptPart::Sent(value) => Ok(value),
+        KeptPart::Kept(digest) => {
+            let text = kept_item(record, &digest)?;
+            let path = record.join("model/items").join(digest.hex());
+            serde_json::from_slice(&text).map_err(|error| format!("{}: {error}", path.display()))
+        }
+    };
+    let KeptRequest {
+        conversation,
+        fields,
+    } = parts;
+    let mut body = Map::new();
+    if let Some((field, items)) = conversation {
+        let items = items.into_iter().map(resolved).collect::<Result<_, _>>()?;
+        body.insert(field, Value::Array(items));
+    }
+    for (field, part) in fields {
+        body.insert(field, resolved(part)?);
+    }
+    Ok(Value::Object(body).to_string().into_bytes())
+}
+
+/// A model request's body as the record keeps it
+/// ([`Record::kept_request`](super::Record::kept_request)): each of its fields as it was sent, or
+/// named by its digest where the record kept it apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeptRequest {
+    /// The field that holds the conversation, and each of its items, the earliest first, if the
+    /// record kept them apart.
+    pub conversation: Option<(String, Vec<KeptPart>)>,
+    /// The body's other fields.
+    pub fields: Vec<(String, KeptPart)>,
+}
+
+/// A part of a kept request's body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeptPart {
+    /// Kept apart, once, in `model/items/` ([`Record::kept_item`](super::Record::kept_item)).
+    Kept(Sha256Digest),
+    /// Held in the request's own file, as the client sent it.
+    Sent(Value),
+}
+
+/// The path of the file that `kept`, its run log's `kept.request` or `kept.response`, names in
+/// the record at `record`, or the refusal of a path that may leave the record: one that is
+/// absolute, that holds `..`, or that is a symbolic link, is the record's damage.
+pub(super) fn kept_path(record: &Path, kept: &Map<String, Value>) -> Result<PathBuf, String> {
+    let path = Path::new(kept.get("path").and_then(Value::as_str).unwrap_or_default());
+    let below = (path.components()).all(|part| matches!(part, Component::Normal(_)));
+    if !below || path.as_os_str().is_empty() {
+        return Err(format!(
+            "the run log names the kept file `{}`: expected a path below the record",
+            path.display()
+        ));
+    }
+    linked(record.join(path))
+}
+
+/// `path`, or the refusal of a symbolic link, which may lead out of the record.
+fn linked(path: PathBuf) -> Result<PathBuf, String> {
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(format!(
+            "`{}` is a symbolic link: expected a file of the record's own",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// The bytes of model request `number`'s response in the record at `record`, as
+/// [`Record::model_response`](super::Record::model_response) gives them.
+pub(super) fn kept_response(record: &Path, number: u64, kept: &Value) -> Result<Vec<u8>, String> {
+    let path = match kept {
+        Value::Null => linked(record.join(format!("model/{number}.response")))?,
+        Value::Object(kept) => kept_path(record, kept)?,
+        other => {
+            return Err(format!(
+                "the run log's `kept.response` is {other}: expected an object"
+            ));
+        }
+    };
+    fs::read(&path).context(path.display())
+}
+
+/// The parts of the body of the request that `kept`, its run log's `kept.request`, names in the
+/// record at `record`, as [`Record::kept_request`](super::Record::kept_request) says; `None` if
+/// the record kept none of them apart, so its file holds the body as it went.
+pub(super) fn kept_parts(
+    record: &Path,
+    kept: &Map<String, Value>,
+) -> Result<Option<KeptRequest>, String> {
     // A record names the fields it kept apart, so a field that a client sent as a digest's text
     // stays as it was sent.
     let items = kept.get("items").and_then(|items| items["field"].as_str());
@@ -517,48 +611,61 @@ fn rebuilt_body(record: &Path, kept: &Map<String, Value>) -> Result<Vec<u8>, Str
         .filter_map(Value::as_str)
         .collect();
     if items.is_none() && whole.is_empty() {
-        return Ok(bytes);
+        return Ok(None);
     }
+    let path = kept_path(record, kept)?;
+    let bytes = fs::read(&path).context(path.display())?;
     let unkept = |what: &str| {
         format!(
             "{}: {what}: expected a body kept with its parts apart",
             path.display()
         )
     };
-    let Ok(Value::Object(mut fields)) = serde_json::from_slice(&bytes) else {
+    let Ok(Value::Object(fields)) = serde_json::from_slice(&bytes) else {
         return Err(unkept("not a JSON object"));
     };
-    if let Some(field) = items {
-        let Some(Value::Array(items)) = fields.get_mut(field) else {
-            return Err(unkept(&format!("no array `{field}`")));
-        };
-        for item in items.iter_mut() {
-            *item =
-                kept_item(record, item).ok_or_else(|| unkept("an item that is no digest"))??;
+    let digest = |value: Value| match value {
+        Value::String(digest) => Sha256Digest::try_from(digest).ok(),
+        _ => None,
+    };
+    let mut request = KeptRequest {
+        conversation: None,
+        fields: Vec::new(),
+    };
+    for (field, value) in fields {
+        if items == Some(field.as_str()) {
+            let Value::Array(values) = value else {
+                return Err(unkept(&format!("no array `{field}`")));
+            };
+            let parts = (values.into_iter())
+                .map(|value| digest(value).map(KeptPart::Kept))
+                .collect::<Option<_>>()
+                .ok_or_else(|| unkept("an item that is no digest"))?;
+            request.conversation = Some((field, parts));
+        } else if whole.contains(&field.as_str()) {
+            let part = digest(value).ok_or_else(|| unkept(&format!("`{field}` is no digest")))?;
+            request.fields.push((field, KeptPart::Kept(part)));
+        } else {
+            request.fields.push((field, KeptPart::Sent(value)));
         }
     }
-    for field in whole {
-        let Some(value) = fields.get_mut(field) else {
-            return Err(unkept(&format!("no field `{field}`")));
-        };
-        *value = kept_item(record, value)
-            .ok_or_else(|| unkept(&format!("`{field}` is no digest")))??;
+    if let Some(field) = items
+        && request.conversation.is_none()
+    {
+        return Err(unkept(&format!("no array `{field}`")));
     }
-    Ok(Value::Object(fields).to_string().into_bytes())
+    if let Some(field) =
+        (whole.iter()).find(|&&field| !request.fields.iter().any(|(name, _)| name == field))
+    {
+        return Err(unkept(&format!("no field `{field}`")));
+    }
+    Ok(Some(request))
 }
 
-/// The item of the record at `record` that `digest` names, as kept, or why it couldn't be read;
-/// `None` if `digest` is no digest.
-fn kept_item(record: &Path, digest: &Value) -> Option<Result<Value, String>> {
-    let hex = digest
-        .as_str()
-        .and_then(|digest| digest.strip_prefix("sha256:"));
-    let hex = hex.filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
-    let path = record.join("model/items").join(hex);
-    let read = fs::read(&path).context(path.display()).and_then(|text| {
-        serde_json::from_slice(&text).map_err(|error| format!("{}: {error}", path.display()))
-    });
-    Some(read)
+/// The bytes of the item of the record at `record` that `digest` names, as kept.
+pub(super) fn kept_item(record: &Path, digest: &Sha256Digest) -> Result<Vec<u8>, String> {
+    let path = record.join("model/items").join(digest.hex());
+    fs::read(&path).context(path.display())
 }
 
 impl<C: Clock> Keep for Exchange<C> {

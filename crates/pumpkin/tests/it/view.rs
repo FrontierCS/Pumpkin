@@ -303,16 +303,16 @@ fn serves_runs() {
             end: 8220
             id: "<ended>"
             lanes:
-              {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"failed":[],"grant":"train","kind":"judge","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: 49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
+              {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"grant":"train","kind":"judge","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: 49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
               {"grant":"box","holder":"job 0","kind":"runner","lane":"lease 0","role":"box","said":"box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\\nprint 7` exited 0; closed as its call ended","sandbox":{"asked":50.0,"deleted":true,"gone":102.0,"place":"aws/box","started":55.0},"work":[{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 1","role":"gpu","said":"gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder","sandbox":{"asked":120.0,"deleted":true,"gone":145.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":126.0},"work":[{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]}
               {"grant":"cpu","holder":"agent","kind":"runner","lane":"lease 2","role":"cpu","said":"cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended","sandbox":{"asked":120.0,"deleted":true,"gone":1005.0,"place":"aws/judge","started":150.0},"work":[{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]}
-              {"answered":[],"answers":{"count":0,"failed":0},"failed":[],"grant":"train","kind":"judge","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
-              {"answered":[],"answers":{"count":0,"failed":0},"failed":[],"grant":"train","kind":"judge","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"failed":[],"grant":"train","kind":"judge","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {\"exit_status\":1,\"stderr_tail\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"grant":"train","kind":"judge","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"grant":"train","kind":"judge","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"grant":"train","kind":"judge","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {\"exit_status\":1,\"stderr_tail\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
-              {"answered":[1020.0],"answers":{"count":1,"failed":1},"failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":null,"output":null},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
+              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":null,"output":null},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
             live: false
             log_epoch: 0
             model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3000,"output":300},"took":{"count":3,"median":5.0}}
@@ -881,5 +881,1126 @@ fn pages_the_list() {
         &expect![[r#"
             of 101 runs: 100 runs, next "20261111-000001-00000001"; 1 runs, next null
             of 201 runs: 100 runs, next "20261111-000141-00000065"; 100 runs, next "20261111-000001-00000001"; 1 runs, next null"#]],
+    );
+}
+
+/// The model files of a record in the making, `model/` of `dir`: its items, each named by its
+/// number, as a test needs no SHA-256, and each request's and response's file.
+struct Model {
+    dir: std::path::PathBuf,
+    items: Vec<String>,
+}
+
+impl Model {
+    fn new(dir: &std::path::Path) -> Self {
+        fs::create_dir_all(dir.join("model/items")).unwrap();
+        Self {
+            dir: dir.join("model"),
+            items: Vec::new(),
+        }
+    }
+
+    /// `value`'s digest, once kept as an item.
+    fn item(&mut self, value: &Value) -> Value {
+        let text = value.to_string();
+        let index = self.items.iter().position(|item| *item == text);
+        let index = index.unwrap_or_else(|| {
+            self.items.push(text.clone());
+            self.items.len() - 1
+        });
+        let hex = format!("{index:064x}");
+        fs::write(self.dir.join("items").join(&hex), text).unwrap();
+        json!(format!("sha256:{hex}"))
+    }
+
+    /// Keeps request `n`, whose conversation is `items` in `field`, with its fields `whole`
+    /// kept whole, if this build's form, and `rest` as sent, and its response `response`; the
+    /// `kept` of its `model_answered`.
+    fn keep(
+        &mut self,
+        n: u64,
+        field: &str,
+        items: &[Value],
+        whole: &[(&str, Value)],
+        rest: Value,
+        response: Option<&str>,
+    ) -> Value {
+        let mut body = rest;
+        body[field] = Value::Array(items.iter().map(|item| self.item(item)).collect());
+        for (name, value) in whole {
+            body[*name] = self.item(value);
+        }
+        let request = format!("model/{n}.request");
+        fs::write(self.dir.join(format!("{n}.request")), body.to_string()).unwrap();
+        let mut kept = json!({ "request": { "path": request, "bytes": body.to_string().len(),
+            "body_bytes": 100, "items": { "field": field, "count": items.len() } } });
+        if !whole.is_empty() {
+            kept["request"]["whole"] =
+                json!(whole.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+        }
+        if let Some(response) = response {
+            fs::write(self.dir.join(format!("{n}.response")), response).unwrap();
+        }
+        kept["response"] = json!({ "path": format!("model/{n}.response"),
+            "bytes": response.map_or(0, str::len) });
+        kept
+    }
+}
+
+/// The `model_request_started` of `caller`'s request `n`, at `seconds`.
+fn started(seconds: u64, caller: &str, n: u64) -> Value {
+    let event = json!({ "kind": "model_request_started", "caller": caller, "request": n });
+    let mut record = logged(seconds, event, json!([]));
+    record["observed_ns"] = json!((seconds * 1_000_000_000 - 1).to_string());
+    record
+}
+
+/// The `model_answered` of `caller`'s request `n`, at `seconds`, with `status`, kept as `kept`.
+fn answered(
+    seconds: u64,
+    caller: &str,
+    n: u64,
+    status: u64,
+    kept: Value,
+    api: Option<&str>,
+) -> Value {
+    let mut event = json!({ "kind": "model_answered", "caller": caller, "request": n,
+        "answer": { "kind": "forwarded" }, "upstream_status": status,
+        "usage": { "input_tokens": 100 * n, "output_tokens": 10, "cached_tokens": 50 } });
+    event["kept"] = kept;
+    if let Some(api) = api {
+        event["api"] = json!(api);
+        event["upstream"] = json!("zai");
+        event["first_byte_ns"] = json!((seconds * 1_000_000_000 - 500).to_string());
+        event["first_token_ns"] = json!((seconds * 1_000_000_000 - 400_000_000).to_string());
+    }
+    logged(seconds, event, json!([]))
+}
+
+/// The reply `reply` of columns in its `field`, a row a line, and its other fields.
+fn columns_text(reply: &Value, field: &str) -> String {
+    let columns = reply[field].as_object().unwrap();
+    let mut text = String::new();
+    let rows = columns
+        .values()
+        .next()
+        .map_or(0, |column| column.as_array().unwrap().len());
+    for row in 0..rows {
+        let cells: Vec<String> = (columns.iter())
+            .filter(|(_, column)| !column[row].is_null())
+            .map(|(name, column)| format!("{name}={}", column[row]))
+            .collect();
+        let _ = writeln!(text, "{}", cells.join(" "));
+    }
+    for (name, value) in reply.as_object().unwrap() {
+        if name != field {
+            let _ = writeln!(text, "{name}: {value}");
+        }
+    }
+    text
+}
+
+/// The entries reply `entries`, an entry a line.
+fn entries_text(entries: &Value) -> String {
+    let mut text = String::new();
+    for entry in entries["entries"].as_array().unwrap() {
+        let _ = writeln!(text, "{entry}");
+    }
+    let _ = write!(text, "next: {}", entries["next"]);
+    text
+}
+
+/// Asserts that each of `steps`'s rows, a steps reply of trace `trace`, counts as
+/// `added_entries` and `answers` the added and answer entries that the entries reply gives of its
+/// step.
+fn entries_counted(served: &Served, trace: &str, steps: &Value) {
+    let columns = &steps["steps"];
+    let column = |name: &str| columns[name].as_array().unwrap();
+    for (row, request) in column("request").iter().enumerate() {
+        let entries = served.get(&format!("{trace}/entries?from={request}&to={request}"));
+        let given = |side: &str| {
+            (entries["entries"].as_array().unwrap().iter())
+                .filter(|entry| entry["side"] == side)
+                .count()
+        };
+        let added = column("added_entries")[row].as_u64().unwrap_or(0);
+        let given_added = u64::try_from(given("added")).unwrap();
+        assert_eq!(added, given_added, "request {request}");
+        assert_eq!(
+            column("answers")[row],
+            json!(given("answer")),
+            "request {request}"
+        );
+    }
+}
+
+/// A user's message, in the Responses API's form.
+fn user(text: &str) -> Value {
+    json!({ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] })
+}
+
+/// An assistant's message, in the Responses API's form.
+fn said(text: &str) -> Value {
+    json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": text }] })
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the record's exchanges and the snapshot"
+)]
+fn traces_a_caller() {
+    let scratch = Scratch::new("traces-a-caller");
+    let id = "20261110-170000-00000012";
+    let dir = scratch.0.join("runs").join(id);
+    let mut model = Model::new(&dir);
+    let tools = json!([{ "type": "function", "name": "exec" }]);
+    let whole = [
+        ("instructions", json!("be brief")),
+        ("tools", tools.clone()),
+    ];
+    let rest = || json!({ "model": "glm-5.3", "stream": false });
+    let call = json!({ "type": "function_call", "call_id": "c1", "name": "exec", "arguments": "{\"cmd\":\"ls\"}" });
+    let output = json!({ "type": "function_call_output", "call_id": "c1", "output": "a.txt" });
+    let answer = |items: Value| json!({ "status": "completed", "output": items }).to_string();
+    let first = [user("list the files")];
+    let second = [user("list the files"), call.clone(), output];
+    let mut third = second.to_vec();
+    third.extend([said("a.txt is there"), user("and now?")]);
+    let other = [user("another thread")];
+    let mut log = vec![started(1, "agent", 0)];
+    let kept = model.keep(
+        0,
+        "input",
+        &first,
+        &whole,
+        rest(),
+        Some(&answer(json!([call]))),
+    );
+    log.push(answered(2, "agent", 0, 200, kept, Some("responses")));
+    log.push(started(3, "agent", 1));
+    let kept = model.keep(
+        1,
+        "input",
+        &second,
+        &whole,
+        rest(),
+        Some(&answer(json!([said("a.txt is there")]))),
+    );
+    log.push(answered(4, "agent", 1, 200, kept, Some("responses")));
+    // A thread of its own, failed, retried, then sent again.
+    log.push(started(5, "agent", 2));
+    let kept = model.keep(
+        2,
+        "input",
+        &other,
+        &whole,
+        rest(),
+        Some("{\"error\":{\"message\":\"slow down\"}}"),
+    );
+    log.push(answered(6, "agent", 2, 429, kept, Some("responses")));
+    for n in [3, 4] {
+        log.push(started(n * 2 + 1, "agent", n));
+        let kept = model.keep(
+            n,
+            "input",
+            &other,
+            &whole,
+            rest(),
+            Some(&answer(json!([said("hello")]))),
+        );
+        log.push(answered(
+            n * 2 + 2,
+            "agent",
+            n,
+            200,
+            kept,
+            Some("responses"),
+        ));
+    }
+    // A new turn, whose response is a link out of the record, as damage would leave it.
+    log.push(started(11, "agent", 5));
+    let kept = model.keep(5, "input", &third, &whole, rest(), None);
+    let outside = scratch.0.join("outside");
+    fs::write(&outside, "not the record's").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("model/5.response")).unwrap();
+    log.push(answered(12, "agent", 5, 200, kept, Some("responses")));
+    // A judge's Chat Completions, by a build that kept its tools in every request and named no
+    // API.
+    let system = json!({ "role": "system", "content": "judge it" });
+    let asked = json!({ "role": "user", "content": "is it right?" });
+    let calls = |id: &str| {
+        json!({ "role": "assistant", "content": "let me look", "reasoning_content": "check",
+            "tool_calls": [{ "id": id, "type": "function", "function": { "name": "grep", "arguments": "{}" } }] })
+    };
+    let tool = json!({ "role": "tool", "tool_call_id": "t1", "content": "found" });
+    let chat_rest = || json!({ "model": "glm-5.3-flash", "tools": [{ "type": "function", "function": { "name": "grep" } }] });
+    let chat = |message: Value, finish: &str| {
+        json!({ "choices": [{ "index": 0, "message": message, "finish_reason": finish }] })
+            .to_string()
+    };
+    // Two samples of one list, whose answers say the same and call apart: the child continues
+    // the first, as each of its first item's entries, the text and the call, sends it back.
+    for (n, id) in [(6, "t1"), (7, "t2")] {
+        let kept = model.keep(
+            n,
+            "messages",
+            &[system.clone(), asked.clone()],
+            &[],
+            chat_rest(),
+            Some(&chat(calls(id), "tool_calls")),
+        );
+        log.push(answered(7 + n, "job-0", n, 200, kept, None));
+    }
+    let back = json!({ "role": "assistant", "content": "let me look",
+        "tool_calls": [{ "id": "t1", "type": "function", "function": { "name": "grep", "arguments": "{}" } }] });
+    let kept = model.keep(
+        8,
+        "messages",
+        &[system, asked, back, tool],
+        &[],
+        chat_rest(),
+        Some(&chat(
+            json!({ "role": "assistant", "content": "yes" }),
+            "stop",
+        )),
+    );
+    log.push(answered(15, "job-0", 8, 200, kept, None));
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(60)).unwrap(),
+        &log,
+        Some(json!({ "state": "failed" })),
+        &lease_places(true),
+    );
+    let served = Served::start(&scratch);
+    let run = format!("/api/runs/{id}");
+    let mut said = Vec::new();
+    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    entries_counted(&served, &format!("{run}/trace/agent"), &steps);
+    said.push(format!(
+        "the agent's steps:\n{}",
+        columns_text(&steps, "steps")
+    ));
+    let entries = served.get(&format!("{run}/trace/agent/entries?from=0&to=5"));
+    said.push(format!("its entries:\n{}", entries_text(&entries)));
+    let window = served.get(&format!(
+        "{run}/trace/agent/entries?from=0&to=5&kind=user&thread=2"
+    ));
+    said.push(format!("thread 2's users':\n{}", entries_text(&window)));
+    let found = served.get(&format!("{run}/trace/agent/search?q=A.TXT"));
+    said.push(format!("found: {found}"));
+    let found = served.get(&format!("{run}/trace/agent/search?q=a.txt&kind=output"));
+    said.push(format!("found in outputs: {found}"));
+    for by in ["step", "turn", "thread"] {
+        let folded = served.get(&format!("{run}/trace/agent/stats?by={by}"));
+        said.push(format!("by {by}:\n{}", columns_text(&folded, "rows")));
+    }
+    let steps = served.get(&format!("{run}/trace/job-0/steps"));
+    entries_counted(&served, &format!("{run}/trace/job-0"), &steps);
+    said.push(format!(
+        "the judge's steps:\n{}",
+        columns_text(&steps, "steps")
+    ));
+    let entries = served.get(&format!("{run}/trace/job-0/entries?from=0&to=9"));
+    said.push(format!("its entries:\n{}", entries_text(&entries)));
+    let folded = served.get(&format!("{run}/trace/job-0/stats?by=thread"));
+    said.push(format!("by thread:\n{}", columns_text(&folded, "rows")));
+    let exchange = served.get(&format!("{run}/exchange/1"));
+    said.push(format!("exchange 1:\n{}", fields(&exchange, &[])));
+    let (status, request) = served.get_with(&format!("{run}/exchange/1/request"), &[]);
+    said.push(format!("its request: {status}\n{request}"));
+    let (status, response) = served.get_with(&format!("{run}/exchange/5/response"), &[]);
+    said.push(format!("exchange 5's response: {status}\n{response}"));
+    for at in ["0/head/instructions/0", "1/in/2/0", "8/out/0"] {
+        let caller = if at.starts_with('8') {
+            "job-0"
+        } else {
+            "agent"
+        };
+        let entry = served.get(&format!("{run}/trace/{caller}/entry?at={at}"));
+        said.push(format!("entry {at}: {entry}"));
+    }
+    let item = format!("{:064x}", 0);
+    let (status, body) = served.get_with(&format!("{run}/item/{item}"), &[]);
+    said.push(format!("item 0: {status}\n{body}"));
+    let search = format!("trace/agent/search?q={}", "a".repeat(1025));
+    for path in [
+        "trace/someone/steps",
+        "trace/job-01/steps",
+        "item/abc",
+        "exchange/99",
+        "trace/agent/entries?from=0",
+        "trace/agent/entries?from=5&to=3",
+        "trace/agent/stats?by=day",
+        "trace/agent/entry",
+        "trace/agent/entry?at=1/in/x/0",
+        "trace/agent/entry?at=1/out",
+        "trace/agent/entry?at=1/in/9/0",
+        "trace/agent/entry?at=6/out/0",
+        &search,
+    ] {
+        let (status, body) = served.get_with(&format!("{run}/{path}"), &[]);
+        let path = if path.len() > 80 {
+            "a search of 1025 bytes"
+        } else {
+            path
+        };
+        said.push(format!("{path}: {status}\n{body}"));
+    }
+    // The view drops the run's fold as other ended runs are read, and the log is cut back while
+    // no fold holds it: the trace is read again from the log as it is.
+    served.get(&format!("{run}/trace/agent/steps"));
+    for other in 0..9 {
+        let other = format!("20261110-170100-{other:08x}");
+        let outcome = Some(json!({ "state": "failed" }));
+        write_run(&scratch, &other, since, &[], outcome, &lease_places(true));
+        served.get(&format!("/api/runs/{other}"));
+    }
+    let log_path = dir.join("log.jsonl");
+    let log = fs::read_to_string(&log_path).unwrap();
+    fs::write(
+        &log_path,
+        log.split_inclusive('\n').take(3).collect::<String>(),
+    )
+    .unwrap();
+    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    said.push(format!("once cut: {}", steps["steps"]["request"]));
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+            the agent's steps:
+            added=1 added_entries=2 answer="forwarded" answers=1 api="responses" back_bytes=118 cached=50 calls=["exec"] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=0 items=1 kept_bytes=289 model_ns=1000000001 output=10 request=0 sent_bytes=100 start_ns="999999999" status=200 stop="completed" thread=0 tools=0 turn=0 upstream="zai" whole=true
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=130 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=3 kept_bytes=437 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 stop="completed" thread=0 tools=0 turn=0 upstream="zai" whole=true
+            added=1 added_entries=2 answer="forwarded" answers=0 api="responses" back_bytes=33 cache_hit=0.25 cached=50 calls=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=200 items=1 kept_bytes=289 model_ns=1000000001 output=10 request=2 sent_bytes=100 start_ns="4999999999" status=429 thread=2 tools=0 turn=2 upstream="zai" whole=true
+            added=1 added_entries=2 answer="forwarded" answers=1 api="responses" back_bytes=121 cache_hit=0.16666666666666666 cached=50 calls=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=1 kept_bytes=289 model_ns=1000000001 output=10 request=3 retry_count=1 retry_of=2 sent_bytes=100 start_ns="6999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
+            added=1 added_entries=2 answer="forwarded" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
+            added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
+            caller: "agent"
+            end: 5267
+            live: false
+            log_epoch: 0
+            thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
+            threads: 2
+            tool_lists: [{"digest":"0000000000000000000000000000000000000000000000000000000000000002","names":["exec"]}]
+
+            its entries:
+            {"at":"0/head/instructions/0","digest":"0000000000000000000000000000000000000000000000000000000000000001","index":0,"kind":"system","request":0,"side":"added","text":"be brief"}
+            {"at":"0/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000000","index":1,"kind":"user","request":0,"side":"added","text":"list the files"}
+            {"at":"0/out/0","call_id":"c1","digest":null,"index":2,"kind":"call","name":"exec","output":"1/in/2/0","request":0,"side":"answer","text":"{\"cmd\":\"ls\"}"}
+            {"at":"1/in/2/0","call":"0/out/0","call_id":"c1","digest":"0000000000000000000000000000000000000000000000000000000000000004","index":0,"kind":"output","request":1,"side":"added","text":"a.txt"}
+            {"at":"1/out/0","digest":null,"index":1,"kind":"assistant","request":1,"side":"answer","text":"a.txt is there"}
+            {"at":"2/head/instructions/0","digest":"0000000000000000000000000000000000000000000000000000000000000001","index":0,"kind":"system","request":2,"side":"added","text":"be brief"}
+            {"at":"2/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"user","request":2,"side":"added","text":"another thread"}
+            {"at":"3/head/instructions/0","digest":"0000000000000000000000000000000000000000000000000000000000000001","index":0,"kind":"system","request":3,"side":"added","text":"be brief"}
+            {"at":"3/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"user","request":3,"side":"added","text":"another thread"}
+            {"at":"3/out/0","digest":null,"index":2,"kind":"assistant","request":3,"side":"answer","text":"hello"}
+            {"at":"4/head/instructions/0","digest":"0000000000000000000000000000000000000000000000000000000000000001","index":0,"kind":"system","request":4,"side":"added","text":"be brief"}
+            {"at":"4/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"user","request":4,"side":"added","text":"another thread"}
+            {"at":"4/out/0","digest":null,"index":2,"kind":"assistant","request":4,"side":"answer","text":"hello"}
+            {"at":"5/in/4/0","digest":"0000000000000000000000000000000000000000000000000000000000000007","index":0,"kind":"user","request":5,"side":"added","text":"and now?"}
+            next: null
+            thread 2's users':
+            {"at":"2/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"user","request":2,"side":"added","text":"another thread"}
+            {"at":"3/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"user","request":3,"side":"added","text":"another thread"}
+            {"at":"4/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"user","request":4,"side":"added","text":"another thread"}
+            next: null
+            found: {"count":2,"hits":[{"at":"1/in/2/0","byte":0,"context":["","a.txt",""],"index":0,"kind":"output","request":1},{"at":"1/out/0","byte":0,"context":["","a.txt"," is there"],"index":1,"kind":"assistant","request":1}]}
+            found in outputs: {"count":1,"hits":[{"at":"1/in/2/0","byte":0,"context":["","a.txt",""],"index":0,"kind":"output","request":1}]}
+            by step:
+            cached=50 calls={"exec":1} decode_ns=400000000 input=0 model_ns=1000000001 outcome="ok" output=10 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
+            cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
+            cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="failed" output=10 request=2 status=429 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
+            cache_hit=0.16666666666666666 cached=50 calls={} decode_ns=400000000 input=300 model_ns=1000000001 outcome="ok" output=10 request=3 retry_of=2 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
+            cache_hit=0.125 cached=50 calls={} decode_ns=400000000 input=400 model_ns=1000000001 outcome="ok" output=10 repeat_of=3 request=4 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
+            cache_hit=0.1 cached=50 calls={} decode_ns=400000000 input=500 model_ns=1000000001 outcome="ok" output=10 queue_ns=6999999999 request=5 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=5
+            by: "step"
+            caller: "agent"
+            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3}
+
+            by turn:
+            cache_hit=1.0 cache_write_unknown=2 cached=100 cached_unknown=0 calls={"exec":1} decode_ns=800000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=100 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=2000000002 model_ns_unknown=0 output=20 output_unknown=0 queue_ns=999999999 queue_ns_unknown=1 reasoning_unknown=2 refusals=0 repeats=0 retries=0 span_ns=3000000001 steps=2 thread=0 tok_s=25.0 turn=0
+            cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=1 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0 turn=2
+            cache_hit=0.1 cache_write_unknown=1 cached=50 cached_unknown=0 calls={} decode_ns=400000000 decode_ns_unknown=0 failures=0 first_request=5 in_flight=0 input=500 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=1000000001 model_ns_unknown=0 output=10 output_unknown=0 queue_ns=6999999999 queue_ns_unknown=0 reasoning_unknown=1 refusals=0 repeats=0 retries=0 span_ns=1000000001 steps=1 thread=0 tok_s=25.0 turn=5
+            by: "turn"
+            caller: "agent"
+            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3}
+
+            by thread:
+            cache_hit=0.25 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"exec":1} decode_ns=1200000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=600 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns=7999999998 queue_ns_unknown=1 reasoning_unknown=3 refusals=0 repeats=0 retries=0 span_ns=11000000001 steps=3 thread=0 tok_s=25.0
+            cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=1 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0
+            by: "thread"
+            caller: "agent"
+            totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":1,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3}
+
+            the judge's steps:
+            added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.08333333333333333 cached=50 calls=["grep"] end_ns="13000000000" input=600 items=2 kept_bytes=243 output=10 request=6 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
+            added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.07142857142857142 cached=50 calls=["grep"] end_ns="14000000000" input=700 items=2 kept_bytes=243 output=10 repeat_of=6 request=7 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
+            added=2 added_entries=1 answer="forwarded" answers=1 back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
+            caller: "job-0"
+            end: 5267
+            live: false
+            log_epoch: 0
+            thread_spans: {"span_ns":[null],"thread":[6]}
+            threads: 1
+            tool_lists: [{"digest":null,"names":["grep"]}]
+
+            its entries:
+            {"at":"6/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000008","index":0,"kind":"system","request":6,"side":"added","text":"judge it"}
+            {"at":"6/in/1/0","digest":"0000000000000000000000000000000000000000000000000000000000000009","index":1,"kind":"user","request":6,"side":"added","text":"is it right?"}
+            {"at":"6/out/0","digest":null,"index":2,"kind":"reasoning","request":6,"side":"answer","text":"check"}
+            {"at":"6/out/1","digest":null,"index":3,"kind":"assistant","request":6,"side":"answer","text":"let me look"}
+            {"at":"6/out/2","call_id":"t1","digest":null,"index":4,"kind":"call","name":"grep","output":"8/in/3/0","request":6,"side":"answer","text":"{}"}
+            {"at":"7/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000008","index":0,"kind":"system","request":7,"side":"added","text":"judge it"}
+            {"at":"7/in/1/0","digest":"0000000000000000000000000000000000000000000000000000000000000009","index":1,"kind":"user","request":7,"side":"added","text":"is it right?"}
+            {"at":"7/out/0","digest":null,"index":2,"kind":"reasoning","request":7,"side":"answer","text":"check"}
+            {"at":"7/out/1","digest":null,"index":3,"kind":"assistant","request":7,"side":"answer","text":"let me look"}
+            {"at":"7/out/2","call_id":"t2","digest":null,"index":4,"kind":"call","name":"grep","request":7,"side":"answer","text":"{}"}
+            {"at":"8/in/3/0","call":"6/out/2","call_id":"t1","digest":"000000000000000000000000000000000000000000000000000000000000000b","index":0,"kind":"output","request":8,"side":"added","text":"found"}
+            {"at":"8/out/0","digest":null,"index":1,"kind":"assistant","request":8,"side":"answer","text":"yes"}
+            next: null
+            by thread:
+            cache_hit=0.07142857142857142 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"grep":2} decode_ns_unknown=3 failures=0 first_request=6 in_flight=0 input=2100 input_unknown=0 median_to_first_byte_ns_unknown=3 median_to_first_token_ns_unknown=3 model_ns_unknown=3 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=0 steps=3 thread=6
+            by: "thread"
+            caller: "job-0"
+            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":3,"cached":150,"cached_unknown":0,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":3,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":0,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":3,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":3,"model_ns":null,"model_ns_unknown":3,"output":30,"output_unknown":0,"queue_ns":null,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":1,"retries":0,"span_ns":null,"steps":3,"threads":1,"tok_s":null,"turns":1}
+
+            exchange 1:
+            answer: {"kind":"forwarded"}
+            api: "responses"
+            caller: "agent"
+            config: {"max_tokens":null,"model":"glm-5.3","reasoning_effort":null,"stop":[],"stream":false,"temperature":null,"tools":["exec"]}
+            failed: null
+            kept: {"request":{"body_bytes":100,"bytes":437,"items":{"count":3,"field":"input"},"path":"model/1.request","whole":["instructions","tools"]},"response":{"bytes":130,"path":"model/1.response"}}
+            request: 1
+            request_id: null
+            stats: {"cache_hit":0.5,"cache_write":null,"cached":50,"calls":{},"decode_ns":400000000,"input":100,"model_ns":1000000001,"outcome":"ok","output":10,"queue_ns":999999999,"reasoning":null,"repeat_of":null,"request":1,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":25.0,"turn":0}
+            status: 200
+            times: {"end_ns":"4000000000","first_byte_ns":"3999999500","first_token_ns":"3600000000","start_ns":"2999999999"}
+            upstream: "zai"
+            usage: {"cached_tokens":50,"input_tokens":100,"output_tokens":10}
+
+            its request: HTTP/1.1 200 OK
+            {"input":[{"content":[{"text":"list the files","type":"input_text"}],"role":"user","type":"message"},{"arguments":"{\"cmd\":\"ls\"}","call_id":"c1","name":"exec","type":"function_call"},{"call_id":"c1","output":"a.txt","type":"function_call_output"}],"instructions":"be brief","model":"glm-5.3","stream":false,"tools":[{"name":"exec","type":"function"}]}
+            exchange 5's response: HTTP/1.1 404 Not Found
+            {"error":"`<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"}
+            entry 0/head/instructions/0: {"at":"0/head/instructions/0","digest":"0000000000000000000000000000000000000000000000000000000000000001","index":0,"kind":"system","request":0,"side":"added","text":"be brief","text_bytes":8}
+            entry 1/in/2/0: {"at":"1/in/2/0","call":"0/out/0","call_id":"c1","digest":"0000000000000000000000000000000000000000000000000000000000000004","index":0,"kind":"output","request":1,"side":"added","text":"a.txt","text_bytes":5}
+            entry 8/out/0: {"at":"8/out/0","digest":null,"index":1,"kind":"assistant","request":8,"side":"answer","text":"yes","text_bytes":3}
+            item 0: HTTP/1.1 200 OK
+            {"content":[{"text":"list the files","type":"input_text"}],"role":"user","type":"message"}
+            trace/someone/steps: HTTP/1.1 400 Bad Request
+            {"error":"`someone` is no caller: expected `agent` or `job-<n>`"}
+            trace/job-01/steps: HTTP/1.1 400 Bad Request
+            {"error":"`job-01` is no caller: expected `agent` or `job-<n>`"}
+            item/abc: HTTP/1.1 400 Bad Request
+            {"error":"`abc` is no item: expected 64 lowercase hexadecimal digits"}
+            exchange/99: HTTP/1.1 404 Not Found
+            {"error":"run <id>'s log names no model request 99"}
+            trace/agent/entries?from=0: HTTP/1.1 400 Bad Request
+            {"error":"give a request's number: `?to=<request>`"}
+            trace/agent/entries?from=5&to=3: HTTP/1.1 400 Bad Request
+            {"error":"`to` is 3, before `from`, 5: expected `from` <= `to`"}
+            trace/agent/stats?by=day: HTTP/1.1 400 Bad Request
+            {"error":"`by` is `day`: expected `step`, `turn` or `thread`"}
+            trace/agent/entry: HTTP/1.1 400 Bad Request
+            {"error":"give an entry's address: `?at=<address>`"}
+            trace/agent/entry?at=1/in/x/0: HTTP/1.1 400 Bad Request
+            {"error":"`1/in/x/0` is no entry's address: expected `<request>/in/<item>/<part>`, `<request>/head/<field>/<part>` or `<request>/out/<part>`"}
+            trace/agent/entry?at=1/out: HTTP/1.1 400 Bad Request
+            {"error":"`1/out` is no entry's address: expected `<request>/in/<item>/<part>`, `<request>/head/<field>/<part>` or `<request>/out/<part>`"}
+            trace/agent/entry?at=1/in/9/0: HTTP/1.1 404 Not Found
+            {"error":"agent's trace has no entry at `1/in/9/0`"}
+            trace/agent/entry?at=6/out/0: HTTP/1.1 404 Not Found
+            {"error":"agent's trace has no entry at `6/out/0`"}
+            a search of 1025 bytes: HTTP/1.1 400 Bad Request
+            {"error":"`q` is 1025 bytes: expected at most 1024"}
+            once cut: [0]"#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the record's exchanges and the snapshot"
+)]
+fn follows_a_trace() {
+    let scratch = Scratch::new("follows-a-trace");
+    let id = "20261110-180000-00000013";
+    let dir = scratch.0.join("runs").join(id);
+    let mut model = Model::new(&dir);
+    let rest = || json!({ "model": "glm-5.3", "stream": true });
+    let event = |data: Value| {
+        format!(
+            "event: {}\ndata: {data}\n\n",
+            data["type"].as_str().unwrap()
+        )
+    };
+    let done = |item: Value| {
+        event(json!({ "type": "response.output_item.done", "output_index": 0, "item": item }))
+    };
+    let kept = model.keep(
+        0,
+        "input",
+        &[user("hi")],
+        &[],
+        rest(),
+        Some(&done(said("hello"))),
+    );
+    // Request 2 sends request 1's list again while 1 is in flight, and is answered first.
+    let again = model.keep(
+        2,
+        "input",
+        &[user("hi"), said("hello"), user("more")],
+        &[],
+        rest(),
+        Some(&done(said("again"))),
+    );
+    let log = [
+        started(1, "agent", 0),
+        answered(2, "agent", 0, 200, kept, Some("responses")),
+        started(3, "agent", 1),
+        started(4, "agent", 2),
+        answered(5, "agent", 2, 200, again, Some("responses")),
+    ];
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(60)).unwrap(),
+        &log,
+        None,
+        &lease_places(true),
+    );
+    let driver = File::open(dir.join("driver.pid")).unwrap();
+    driver.lock().unwrap();
+    // Request 1 is in flight, its answer begun, its last line torn.
+    let response = dir.join("model/1.response");
+    let begun = done(said("part one"));
+    fs::write(&response, format!("{begun}data: {{\"type\":\"resp")).unwrap();
+    let served = Served::start(&scratch);
+    let run = format!("/api/runs/{id}/trace/agent");
+    let mut said_ = Vec::new();
+    let first = served.get(&format!("{run}/steps"));
+    entries_counted(&served, &run, &first);
+    said_.push(format!("in flight:\n{}", columns_text(&first, "steps")));
+    let entries = served.get(&format!("{run}/entries?from=1&to=1"));
+    said_.push(format!("its answer so far:\n{}", entries_text(&entries)));
+    let end = first["end"].as_u64().unwrap();
+    let nothing = served.get(&format!("{run}/steps?since={end}&log_epoch=0"));
+    said_.push(format!("nothing new:\n{}", columns_text(&nothing, "steps")));
+    let whole = json!({ "type": "response.completed",
+        "response": { "status": "completed", "output": [said("part one"), said("part two")] } });
+    fs::write(&response, format!("{begun}{}", event(whole))).unwrap();
+    let kept = model.keep(
+        1,
+        "input",
+        &[user("hi"), said("hello"), user("more")],
+        &[],
+        rest(),
+        None,
+    );
+    // Request 1 fails, so request 2, answered before it, becomes its retry.
+    let line = answered(6, "agent", 1, 429, kept, Some("responses"));
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(dir.join("log.jsonl"))
+        .unwrap();
+    // Request 3 calls a tool, whose output request 4 sends.
+    let call =
+        json!({ "type": "function_call", "call_id": "c1", "name": "exec", "arguments": "{}" });
+    let output = json!({ "type": "function_call_output", "call_id": "c1", "output": "a.txt" });
+    let mut asked = vec![
+        user("hi"),
+        said("hello"),
+        user("more"),
+        said("again"),
+        user("run it"),
+    ];
+    let kept = model.keep(3, "input", &asked, &[], rest(), Some(&done(call.clone())));
+    let mut lines = vec![line, started(7, "agent", 3)];
+    lines.push(answered(8, "agent", 3, 200, kept, Some("responses")));
+    let mut append = |lines: &mut [Value], seq: usize| {
+        for (at, line) in lines.iter_mut().enumerate() {
+            line["seq"] = json!(seq + at);
+            writeln!(file, "{line}").unwrap();
+        }
+    };
+    append(&mut lines, log.len() + 1);
+    let ended = served.get(&format!("{run}/steps?since={end}&log_epoch=0"));
+    entries_counted(&served, &run, &ended);
+    said_.push(format!("once answered:\n{}", columns_text(&ended, "steps")));
+    let entries = served.get(&format!("{run}/entries?from=1&to=1"));
+    said_.push(format!("its entries:\n{}", entries_text(&entries)));
+    let entries = served.get(&format!("{run}/entries?from=3&to=3"));
+    said_.push(format!(
+        "a call with no output yet:\n{}",
+        entries_text(&entries)
+    ));
+    asked.extend([call, output]);
+    let kept = model.keep(4, "input", &asked, &[], rest(), Some(&done(said("done"))));
+    let mut lines = [
+        started(9, "agent", 4),
+        answered(10, "agent", 4, 200, kept, Some("responses")),
+    ];
+    append(&mut lines, log.len() + 4);
+    drop(driver);
+    let since = ended["end"].as_u64().unwrap();
+    let output = served.get(&format!("{run}/steps?since={since}&log_epoch=0"));
+    entries_counted(&served, &run, &output);
+    said_.push(format!(
+        "its output sent:\n{}",
+        columns_text(&output, "steps")
+    ));
+    let entries = served.get(&format!("{run}/entries?from=3&to=3"));
+    said_.push(format!("the call's output:\n{}", entries_text(&entries)));
+    let stale = served.get_with(&format!("{run}/steps?since={end}&log_epoch=1"), &[]);
+    said_.push(format!("of another epoch: {}\n{}", stale.0, stale.1));
+    check(
+        &scratch,
+        said_.into_iter().map(Step::Ran),
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+            in flight:
+            added=1 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cached=50 calls=[] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=0 items=1 kept_bytes=117 model_ns=1000000001 output=10 request=0 sent_bytes=100 start_ns="999999999" status=200 thread=0 turn=0 upstream="zai" whole=false
+            answers=1 calls=[] request=1 start_ns="2999999999" whole=false
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="5000000000" first_byte_ns="4999999500" first_token_ns="4600000000" input=200 items=3 kept_bytes=265 model_ns=1000000001 output=10 parent=0 request=2 sent_bytes=100 start_ns="3999999999" status=200 thread=0 turn=2 upstream="zai" whole=false
+            caller: "agent"
+            end: 1534
+            live: true
+            log_epoch: 0
+            thread_spans: {"span_ns":[4000000001],"thread":[0]}
+            threads: 1
+            tool_lists: []
+
+            its answer so far:
+            {"at":"1/out/0","digest":null,"index":0,"kind":"assistant","request":1,"side":"answer","text":"part one"}
+            next: null
+            nothing new:
+            caller: "agent"
+            end: 1534
+            live: true
+            log_epoch: 0
+            thread_spans: {"span_ns":[],"thread":[]}
+            threads: 1
+            tool_lists: []
+
+            once answered:
+            added=2 added_entries=1 answer="forwarded" answers=2 api="responses" back_bytes=0 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=100 items=3 kept_bytes=265 model_ns=3000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=429 stop="completed" thread=0 turn=1 upstream="zai" whole=true
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="5000000000" first_byte_ns="4999999500" first_token_ns="4600000000" input=200 items=3 kept_bytes=265 model_ns=1000000001 output=10 parent=0 request=2 retry_count=1 retry_of=1 sent_bytes=100 start_ns="3999999999" status=200 thread=0 turn=1 upstream="zai" whole=false
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=172 cache_hit=0.16666666666666666 cached=50 calls=["exec"] differs=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=5 kept_bytes=413 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
+            caller: "agent"
+            end: 2637
+            live: true
+            log_epoch: 0
+            thread_spans: {"span_ns":[7000000001],"thread":[0]}
+            threads: 1
+            tool_lists: []
+
+            its entries:
+            {"at":"1/in/2/0","digest":"0000000000000000000000000000000000000000000000000000000000000002","index":0,"kind":"user","request":1,"side":"added","text":"more"}
+            {"at":"1/out/0","digest":null,"index":1,"kind":"assistant","request":1,"side":"answer","text":"part one"}
+            {"at":"1/out/1","digest":null,"index":2,"kind":"assistant","request":1,"side":"answer","text":"part two"}
+            next: null
+            a call with no output yet:
+            {"at":"3/in/4/0","digest":"0000000000000000000000000000000000000000000000000000000000000004","index":0,"kind":"user","request":3,"side":"added","text":"run it"}
+            {"at":"3/out/0","call_id":"c1","digest":null,"index":1,"kind":"call","name":"exec","request":3,"side":"answer","text":"{}"}
+            next: null
+            its output sent:
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=172 cache_hit=0.16666666666666666 cached=50 calls=["exec"] differs=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=5 kept_bytes=413 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=188 cache_hit=0.125 cached=50 calls=[] differs=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=7 kept_bytes=561 model_ns=1000000001 output=10 parent=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
+            caller: "agent"
+            end: 3262
+            live: false
+            log_epoch: 0
+            thread_spans: {"span_ns":[9000000001],"thread":[0]}
+            threads: 1
+            tool_lists: []
+
+            the call's output:
+            {"at":"3/in/4/0","digest":"0000000000000000000000000000000000000000000000000000000000000004","index":0,"kind":"user","request":3,"side":"added","text":"run it"}
+            {"at":"3/out/0","call_id":"c1","digest":null,"index":1,"kind":"call","name":"exec","output":"4/in/6/0","request":3,"side":"answer","text":"{}"}
+            next: null
+            of another epoch: HTTP/1.1 409 Conflict
+            {"error":"run <id>'s log started over since the reply that gave byte 1534: read the run again, and its log from byte 0","log_epoch":0}"#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the requests' parts and the snapshot"
+)]
+fn diffs_two_requests() {
+    let scratch = Scratch::new("diffs-two-requests");
+    let id = "20261110-190000-00000014";
+    let dir = scratch.0.join("runs").join(id);
+    let mut model = Model::new(&dir);
+    let exec = json!({ "type": "function", "name": "exec" });
+    let grep = json!({ "type": "function", "name": "grep", "parameters": { "type": "object" } });
+    let numbered = |changed: &[usize]| {
+        let lines = (1..=20).map(|n| {
+            if changed.contains(&n) {
+                format!("line {n}, changed")
+            } else {
+                format!("line {n}")
+            }
+        });
+        json!(lines.collect::<Vec<_>>().join("\n"))
+    };
+    let too_long = json!(vec!["a"; 5001].join("\n"));
+    let sent = [
+        (Some(json!("a\nb\nc")), json!([exec])),
+        (Some(json!("a\nb\nc")), json!([exec])),
+        (Some(json!("x\ny\nz")), json!([exec])),
+        (Some(json!("new\na\nb\nc\nend")), json!([exec, grep])),
+        (None, json!([exec])),
+        (Some(too_long), json!([exec])),
+        (Some(numbered(&[])), json!([exec])),
+        (Some(numbered(&[2, 18])), json!([exec])),
+        (Some(numbered(&[10, 14])), json!([exec])),
+    ];
+    let mut log = Vec::new();
+    for (n, (instructions, tools)) in (0..).zip(sent) {
+        let items: Vec<Value> = (0..=n).map(|at| user(&format!("u{at}"))).collect();
+        let mut whole = vec![("tools", tools)];
+        whole.extend(instructions.map(|text| ("instructions", text)));
+        let response = json!({ "status": "completed", "output": [said("ok")] }).to_string();
+        let kept = model.keep(n, "input", &items, &whole, json!({}), Some(&response));
+        log.push(started(n * 2 + 1, "agent", n));
+        log.push(answered(
+            n * 2 + 2,
+            "agent",
+            n,
+            200,
+            kept,
+            Some("responses"),
+        ));
+    }
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(60)).unwrap(),
+        &log,
+        Some(json!({ "state": "failed" })),
+        &lease_places(true),
+    );
+    let served = Served::start(&scratch);
+    let run = format!("/api/runs/{id}");
+    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    let mut said = vec![format!("differs: {}", steps["steps"]["differs"])];
+    for asked in [
+        "a=0&b=1&part=system",
+        "a=0&b=2&part=system",
+        "a=0&b=3&part=system",
+        "a=0&b=4&part=system",
+        "a=4&b=0&part=system",
+        "a=0&b=5&part=system",
+        "a=6&b=7&part=system",
+        "a=6&b=8&part=system",
+        "a=0&b=1&part=tools",
+        "a=0&b=3&part=tools",
+        "a=0&b=1&part=prompt",
+        "a=0&part=system",
+        "a=0&b=99&part=system",
+    ] {
+        let (status, body) = served.get_with(&format!("{run}/diff?{asked}"), &[]);
+        said.push(format!("{asked}: {status}\n{body}"));
+    }
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+            differs: [null,[],["system"],["system","tools"],["system","tools"],["system"],["system"],["system"],["system"]]
+            a=0&b=1&part=system: HTTP/1.1 200 OK
+            {"a":0,"b":1,"part":"system","same":true}
+            a=0&b=2&part=system: HTTP/1.1 200 OK
+            {"a":0,"b":2,"hunks":[{"at":[0,0],"lines":[["-","a"],["-","b"],["-","c"],["+","x"],["+","y"],["+","z"]]}],"lines":[3,3],"part":"system","same":false}
+            a=0&b=3&part=system: HTTP/1.1 200 OK
+            {"a":0,"b":3,"hunks":[{"at":[0,0],"lines":[["+","new"],[" ","a"],[" ","b"],[" ","c"],["+","end"]]}],"lines":[3,5],"part":"system","same":false}
+            a=0&b=4&part=system: HTTP/1.1 200 OK
+            {"a":0,"b":4,"hunks":[{"at":[0,0],"lines":[["-","a"],["-","b"],["-","c"]]}],"lines":[3,0],"part":"system","same":false}
+            a=4&b=0&part=system: HTTP/1.1 200 OK
+            {"a":4,"b":0,"hunks":[{"at":[0,0],"lines":[["+","a"],["+","b"],["+","c"]]}],"lines":[0,3],"part":"system","same":false}
+            a=0&b=5&part=system: HTTP/1.1 200 OK
+            {"a":0,"b":5,"lines":[3,5001],"part":"system","same":false,"too_long":"too long to diff: 3 and 5001 lines, past 5000 a side"}
+            a=6&b=7&part=system: HTTP/1.1 200 OK
+            {"a":6,"b":7,"hunks":[{"at":[0,0],"lines":[[" ","line 1"],["-","line 2"],["+","line 2, changed"],[" ","line 3"],[" ","line 4"],[" ","line 5"]]},{"at":[14,14],"lines":[[" ","line 15"],[" ","line 16"],[" ","line 17"],["-","line 18"],["+","line 18, changed"],[" ","line 19"],[" ","line 20"]]}],"lines":[20,20],"part":"system","same":false}
+            a=6&b=8&part=system: HTTP/1.1 200 OK
+            {"a":6,"b":8,"hunks":[{"at":[6,6],"lines":[[" ","line 7"],[" ","line 8"],[" ","line 9"],["-","line 10"],["+","line 10, changed"],[" ","line 11"],[" ","line 12"],[" ","line 13"],["-","line 14"],["+","line 14, changed"],[" ","line 15"],[" ","line 16"],[" ","line 17"]]}],"lines":[20,20],"part":"system","same":false}
+            a=0&b=1&part=tools: HTTP/1.1 200 OK
+            {"a":0,"b":1,"part":"tools","same":true}
+            a=0&b=3&part=tools: HTTP/1.1 200 OK
+            {"a":0,"b":3,"hunks":[{"at":[1,1],"lines":[[" ","  \"name\": \"exec\","],[" ","  \"type\": \"function\""],[" ","}"],["+","{"],["+","  \"name\": \"grep\","],["+","  \"parameters\": {"],["+","    \"type\": \"object\""],["+","  },"],["+","  \"type\": \"function\""],["+","}"]]}],"lines":[4,11],"part":"tools","same":false}
+            a=0&b=1&part=prompt: HTTP/1.1 400 Bad Request
+            {"error":"`part` is `prompt`: expected `system` or `tools`"}
+            a=0&part=system: HTTP/1.1 400 Bad Request
+            {"error":"give a request's number: `?b=<request>`"}
+            a=0&b=99&part=system: HTTP/1.1 404 Not Found
+            {"error":"run <id>'s log names no model request 99"}"#]],
+    );
+}
+
+/// A call of tool `exec`, `id`, in the Responses API's form.
+fn call(id: &str) -> Value {
+    json!({ "type": "function_call", "call_id": id, "name": "exec", "arguments": "{}" })
+}
+
+/// The output of call `id`, in the Responses API's form.
+fn output(id: &str) -> Value {
+    json!({ "type": "function_call_output", "call_id": id, "output": format!("ran {id}") })
+}
+
+/// The rows of `reply`'s steps, by request, each as its columns.
+fn rows(reply: &Value) -> std::collections::BTreeMap<u64, Value> {
+    let columns = reply["steps"].as_object().unwrap();
+    let requests = columns["request"].as_array().unwrap();
+    let row = |at: usize| {
+        let cells = columns
+            .iter()
+            .map(|(name, column)| (name.clone(), column[at].clone()));
+        cells.collect::<serde_json::Map<_, _>>()
+    };
+    (requests.iter().enumerate())
+        .map(|(at, request)| (request.as_u64().unwrap(), Value::Object(row(at))))
+        .collect()
+}
+
+/// The span of each thread that a steps reply gives, by its root.
+fn thread_spans(reply: &Value) -> std::collections::BTreeMap<u64, Value> {
+    let spans = &reply["thread_spans"];
+    let threads = spans["thread"].as_array().unwrap().iter();
+    let threads = threads.map(|thread| thread.as_u64().unwrap());
+    threads
+        .zip(spans["span_ns"].as_array().unwrap().clone())
+        .collect()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the record's exchanges and the snapshot"
+)]
+fn places_steps_whatever_their_answers_order() {
+    let scratch = Scratch::new("places-steps");
+    let (live, done) = ("20261110-200000-00000015", "20261110-200000-00000016");
+    let judge = user("judge it");
+    let one = [judge.clone(), call("c1"), output("c1")];
+    let zero = [judge.clone(), call("c0"), output("c0")];
+    let mut waits = zero.to_vec();
+    waits.extend([call("c3"), user("wait")]);
+    let mut ran = waits.clone();
+    ran.extend([said("waiting"), output("c3")]);
+    let longer = [user("ask"), user("more")];
+    let longest = [user("ask"), user("more"), user("most")];
+    // Two identical roots, each answered with its own call and continued by its own child; a
+    // call whose output comes two steps on, in a request that fails and is retried; and a step
+    // that leaves its thread for a longer root answered after it.
+    let requests: [(&[Value], u64, Value); 10] = [
+        (std::slice::from_ref(&judge), 200, json!([call("c0")])),
+        (std::slice::from_ref(&judge), 200, json!([call("c1")])),
+        (&one, 200, json!([said("one")])),
+        (&zero, 200, json!([call("c3")])),
+        (&waits, 200, json!([said("waiting")])),
+        (&ran, 429, json!([])),
+        (&ran, 200, json!([said("done")])),
+        (&longer, 200, json!([said("longer")])),
+        (&longer[..1], 200, json!([said("shorter")])),
+        (&longest, 200, json!([said("longest")])),
+    ];
+    let mut kept = Vec::new();
+    for dir in [live, done] {
+        let mut model = Model::new(&scratch.0.join("runs").join(dir));
+        kept = (0..)
+            .zip(&requests)
+            .map(|(n, (items, _, answer))| {
+                let response = json!({ "status": "completed", "output": answer }).to_string();
+                model.keep(n, "input", items, &[], json!({}), Some(&response))
+            })
+            .collect();
+    }
+    // Each root answered after the other's child, as two samples of a judge run at once.
+    let order = [1, 0, 3, 2, 4, 5, 6, 8, 9, 7];
+    let mut lines: Vec<Value> = (0..10).map(|n| started(n + 1, "job-0", n)).collect();
+    for (at, n) in (0..).zip(order) {
+        let at_n = usize::try_from(n).unwrap();
+        let (kept, status) = (kept[at_n].clone(), requests[at_n].1);
+        lines.push(answered(
+            10 + at,
+            "job-0",
+            n,
+            status,
+            kept,
+            Some("responses"),
+        ));
+    }
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let started_at = since.checked_sub(Duration::from_secs(60)).unwrap();
+    let places = lease_places(true);
+    write_run(
+        &scratch,
+        done,
+        started_at,
+        &lines,
+        Some(json!({ "state": "failed" })),
+        &places,
+    );
+    let dir = write_run(&scratch, live, started_at, &lines, None, &places);
+    // The live run's log grows a line at a time, from the first answer on.
+    let log_path = dir.join("log.jsonl");
+    let whole = fs::read_to_string(&log_path).unwrap();
+    let whole: Vec<&str> = whole.split_inclusive('\n').collect();
+    let first = whole.len() - order.len();
+    fs::write(&log_path, whole[..first].concat()).unwrap();
+    let driver = File::open(dir.join("driver.pid")).unwrap();
+    driver.lock().unwrap();
+    let served = Served::start(&scratch);
+    let trace = |run: &str| format!("/api/runs/{run}/trace/job-0");
+    let first_reply = served.get(&format!("{}/steps", trace(live)));
+    let (mut page, mut end) = (rows(&first_reply), first_reply["end"].clone());
+    let mut spans = thread_spans(&first_reply);
+    let mut said = Vec::new();
+    for line in &whole[first..] {
+        let mut file = OpenOptions::new().append(true).open(&log_path).unwrap();
+        file.write_all(line.as_bytes()).unwrap();
+        let reply = served.get(&format!("{}/steps?since={end}&log_epoch=0", trace(live)));
+        let sent = rows(&reply);
+        said.push(format!("sent again: {:?}", sent.keys().collect::<Vec<_>>()));
+        page.extend(sent);
+        spans.extend(thread_spans(&reply));
+        end = reply["end"].clone();
+    }
+    drop(driver);
+    // The page that replaced each row sent again holds what a fresh read of the log says.
+    let followed = served.get(&format!("{}/steps", trace(live)));
+    let read = served.get(&format!("{}/steps", trace(done)));
+    assert_eq!(page, rows(&read));
+    let fresh = thread_spans(&read);
+    spans.retain(|thread, _| fresh.contains_key(thread));
+    assert_eq!(spans, fresh);
+    assert_eq!(followed, read);
+    let entries = |run: &str| served.get(&format!("{}/entries?from=0&to=6", trace(run)));
+    assert_eq!(entries(live), entries(done));
+    let shown = [
+        "request",
+        "thread",
+        "parent",
+        "turn",
+        "retry_of",
+        "repeat_of",
+        "added",
+    ];
+    for (_, row) in rows(&read) {
+        let cells = shown.map(|name| format!("{name}={}", row[name]));
+        said.push(cells.join(" "));
+    }
+    for entry in entries(done)["entries"].as_array().unwrap() {
+        let paired = entry.get("call").or(entry.get("output"));
+        said.push(format!(
+            "{} {}{}",
+            entry["at"].as_str().unwrap(),
+            entry["kind"].as_str().unwrap(),
+            paired.map_or_else(String::new, |paired| format!(" paired with {paired}"))
+        ));
+    }
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            sent again: [1]
+            sent again: [0, 1]
+            sent again: [0, 3]
+            sent again: [1, 2]
+            sent again: [4]
+            sent again: [3, 5]
+            sent again: [6]
+            sent again: [8]
+            sent again: [9]
+            sent again: [7, 8, 9]
+            request=0 thread=0 parent=null turn=0 retry_of=null repeat_of=null added=1
+            request=1 thread=0 parent=null turn=0 retry_of=null repeat_of=0 added=1
+            request=2 thread=0 parent=1 turn=0 retry_of=null repeat_of=null added=2
+            request=3 thread=0 parent=0 turn=0 retry_of=null repeat_of=null added=2
+            request=4 thread=0 parent=3 turn=4 retry_of=null repeat_of=null added=2
+            request=5 thread=0 parent=4 turn=4 retry_of=null repeat_of=null added=2
+            request=6 thread=0 parent=4 turn=4 retry_of=5 repeat_of=null added=2
+            request=7 thread=7 parent=null turn=7 retry_of=null repeat_of=null added=2
+            request=8 thread=8 parent=null turn=8 retry_of=null repeat_of=null added=1
+            request=9 thread=7 parent=7 turn=9 retry_of=null repeat_of=null added=1
+            0/in/0/0 user
+            0/out/0 call paired with "3/in/2/0"
+            1/in/0/0 user
+            1/out/0 call paired with "2/in/2/0"
+            2/in/2/0 output paired with "1/out/0"
+            2/out/0 assistant
+            3/in/2/0 output paired with "0/out/0"
+            3/out/0 call paired with "5/in/6/0"
+            4/in/4/0 user
+            4/out/0 assistant
+            5/in/6/0 output paired with "3/out/0"
+            6/in/6/0 output paired with "3/out/0"
+            6/out/0 assistant"#]],
+    );
+}
+
+#[test]
+fn holds_the_traces_asked_last() {
+    let scratch = Scratch::new("holds-traces");
+    let id = "20261110-210000-00000017";
+    let mut model = Model::new(&scratch.0.join("runs").join(id));
+    let callers = ["agent", "job-0", "job-1", "job-2"];
+    let response = json!({ "status": "completed", "output": [said("done")] }).to_string();
+    let log: Vec<Value> = (0..)
+        .zip(callers)
+        .map(|(n, caller)| {
+            let items = [user(&format!("ask {caller}"))];
+            let kept = model.keep(n, "input", &items, &[], json!({}), Some(&response));
+            answered(n + 1, caller, n, 200, kept, Some("responses"))
+        })
+        .collect();
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let outcome = Some(json!({ "state": "failed" }));
+    write_run(&scratch, id, since, &log, outcome, &lease_places(true));
+    let served = Served::start(&scratch);
+    let path = |caller: &str| format!("/api/runs/{id}/trace/{caller}/steps");
+    // Each caller's held read costs the bytes of its request alone.
+    let mut held = std::collections::BTreeMap::new();
+    for caller in callers {
+        served.get(&path(caller));
+        let before = served.read_bytes();
+        let reply = served.get(&path(caller));
+        held.insert(caller, (served.read_bytes() - before, reply));
+    }
+    let mut said = Vec::new();
+    for caller in ["job-1", "job-0", "job-2", "agent", "job-1"] {
+        let before = served.read_bytes();
+        let reply = served.get(&path(caller));
+        let (bytes, first) = &held[caller];
+        assert_eq!(&reply, first, "{caller}");
+        let read = served.read_bytes() - before != *bytes;
+        said.push(format!("{caller} asked: its record read again: {read}"));
+    }
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            job-1 asked: its record read again: false
+            job-0 asked: its record read again: false
+            job-2 asked: its record read again: false
+            agent asked: its record read again: true
+            job-1 asked: its record read again: true"#]],
     );
 }

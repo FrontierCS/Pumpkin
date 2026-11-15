@@ -391,8 +391,9 @@ controller's side, with the prune and the slots that admit its builds and publis
 and `Workspace` is the `.pumpkin` directory.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
-readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone; and it says of
-a run what the CLI says through `progress`, so the page and `ls` never differ.
+readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone, and a path
+that a log names is read only below its record; and it says of a run what the CLI says through
+`progress`, so the page and `ls` never differ.
 
 **Architecture Invariant:** `view` serves the person who started it alone, and changes a run only
 by running `pumpkin cancel`, as `pumpkin view --help` says.
