@@ -1,8 +1,5 @@
-//! `cargo xtask live`, the checks that reach real environments, which `ci` leaves out: `docker`,
-//! the tests that need a Docker engine, the static `sandboxd` or a server elsewhere, which are
-//! ignored otherwise; and `ec2` and `modal`, a run of `examples/smoke` on that provider through
-//! the person's controller, at the commit `HEAD` names, which checks its record and that the
-//! provider holds nothing of the run's afterwards.
+//! The checks of `cargo xtask live`, which reach a real environment: Docker, or a real provider
+//! through the controller that the configuration names.
 
 use std::fs::{self, Permissions};
 use std::io::{BufRead as _, BufReader};
@@ -24,8 +21,8 @@ const CHECKS_PER_SANDBOX: usize = 5;
 /// pins (`providers/modal/helper/pumpkin-modal.py`).
 const MODAL_SDK: &str = "modal==1.6.3";
 
-/// Prints the ID of each sandbox on Modal that carries the tag of run `sys.argv[1]` in
-/// Pumpkin's App, as the provider's helper finds a run's sandboxes.
+/// Prints the id of each sandbox on Modal that carries the tag of run `sys.argv[1]` in Pumpkin's
+/// app, as the provider's helper finds a run's sandboxes, and nothing if there is no app.
 const MODAL_LIST: &str = r#"
 import sys
 import modal
@@ -38,9 +35,7 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
     print(sandbox.object_id)
 "#;
 
-/// Runs the tests that `ci` ignores: those that need Docker, through the Docker context
-/// `PUMPKIN_DOCKER_CONTEXT` names, or `default`, which they inherit, with Docker's own variables
-/// set to reach no engine, and the static `sandboxd` built and named in `PUMPKIN_SANDBOXD`.
+/// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
 pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     let sandboxd = sandboxd(cargo)?;
@@ -55,10 +50,10 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         "only",
     ]);
     let test = tested(cargo, test)?;
-    // These poison the variables the Docker provider must ignore: passed on to `docker`, they
-    // would steer it to an engine that doesn't exist, or to TLS without certificates, so the
-    // Docker tests fail unless the provider clears `docker`'s environment.
     let test = test
+        // These poison the variables the Docker provider must ignore: passed on to `docker`, they
+        // would steer it to an engine that doesn't exist, or to TLS without certificates, so the
+        // Docker tests fail unless the provider clears `docker`'s environment.
         .env("DOCKER_HOST", "unix:///nonexistent/pumpkin-poison.sock")
         .env("DOCKER_CONTEXT", "pumpkin-poison-no-such-context")
         .env("DOCKER_TLS_VERIFY", "1");
@@ -78,12 +73,10 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
     .into())
 }
 
-/// Runs `examples/smoke` on `provider` through the controller that this machine's configuration,
-/// `~/.config/pumpkin/pumpkin.toml`, names, with Pumpkin at `HEAD`, from a task
-/// repository of its own below the target directory, whose `./pumpkin` builds that commit from
-/// this checkout; then checks that the run scored every probe, that its record has every
-/// sandbox deleted, and that EC2, `EventBridge` Scheduler and Modal hold nothing of the run, and
-/// removes what they do, through `pumpkin cancel`.
+/// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
+/// probe passed, every sandbox was deleted and nothing of the run is left on the provider. With
+/// `lost`, it loses the run instead, and checks that its sandboxes end by themselves and that a
+/// reap removes the rest. `again` names the command that repeats it.
 pub(crate) fn smoke(
     cargo: &Cargo,
     provider: Provider,
@@ -164,14 +157,9 @@ pub(crate) fn smoke(
 // set for the minute after, and an instance takes up to 10 to be terminated.
 const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 
-/// How often a lost run's sandboxes are looked for, as they end by themselves.
+/// How often a lost run's sandboxes are looked for.
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
-/// Starts the smoke in `repo` with the agent holding a lease of each grant, loses it once they are
-/// ready, by killing its job's unit on the controller that `settings` name, so that nothing
-/// deletes its sandboxes; then waits until the providers hold none, by
-/// [`LOST_BY`], and checks that `pumpkin reap` removes what is left of it, the timers that fired
-/// included, and that nothing of it is left.
 fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<()> {
     let pumpkin = |args: &[&str]| {
         let mut command = stdx::process::command(repo.join("pumpkin"), Environment::Inherited);
@@ -184,6 +172,7 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
         command.args(args);
         command
     };
+    // The agent holds a lease of each grant, so that the run is lost with its sandboxes in use.
     let mut args = vec!["run", "--arg", "hold=true", "--arg", "deadline_seconds=120"];
     let gpu = settings
         .modal
@@ -220,8 +209,6 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
             before.join(", ")
         );
     }
-    // `reap` reaps every run on the controller, and fails if any one can't be reaped: only a
-    // failure that names other runs alone isn't this check's.
     let reaped = pumpkin(&["reap"])
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped())
@@ -229,6 +216,8 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
     let reaped = reaped.map_err(|error| format!("`./pumpkin reap` failed: {error}"))?;
     let said = String::from_utf8_lossy(&reaped.stderr);
     eprint!("{said}");
+    // `reap` reaps every run on the controller, and fails if any one can't be reaped: only a
+    // failure that names other runs alone isn't this check's.
     let failed = !reaped.status.success() && !wait::others_failed(&said, &id);
     let left = left(cargo, settings, &id)?;
     println!(
@@ -246,9 +235,8 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
     Err(format!("the reap of lost run {id} failed, or left something, as said above: fix it, and run `{again} --lost` again").into())
 }
 
-/// Waits until the providers hold no sandbox of lost run `id`, whose job was killed at `killed`,
-/// by [`LOST_BY`], saying when; returns what they held of it then, its timers; fails, saying what
-/// is left, after that.
+/// Waits until no sandbox of run `id` is left, looking every `LOST_EVERY`, and returns what else of
+/// it the providers hold, its schedules. Fails if a sandbox is left `LOST_BY` after `killed`.
 fn ended_by_themselves(
     cargo: &Cargo,
     settings: &Settings,
@@ -282,8 +270,8 @@ fn ended_by_themselves(
     }
 }
 
-/// Runs `wait`, `./pumpkin wait` of run `id`, showing what it says, until it has said that
-/// `leases` leases are ready, then ends it; fails if it ends first.
+/// Follows `wait`, a `./pumpkin wait` of run `id`, until it has said that `leases` leases are
+/// ready, and stops it.
 fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
     let wait = wait.stderr(Stdio::piped()).spawn();
     let mut wait = wait.map_err(|error| format!("running `./pumpkin wait` failed: {error}"))?;
@@ -322,6 +310,8 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
         .map_err(|error| format!("reading the controller's instance failed: {error}"))?;
     let host = format!("pumpkin@{}", instance.trim());
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
+    // `ControlPath=0` is the client's own ssh connection to the controller: a socket in `shared`,
+    // which is why the command runs there.
     let _dir = cargo.sh.push_dir(&shared);
     let ssh = cargo.sh.cmd("ssh");
     ssh.args(["-F", "/dev/null", "-o", "ControlPath=0", &host, &kill])
@@ -329,8 +319,8 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
     Ok(())
 }
 
-/// Fails unless `aws`, and for Modal its SDK through `uv`, answer to the credentials this
-/// machine has, and `aws` may list `EventBridge` Scheduler's schedules, saying how to give them.
+/// Fails, saying what to give, unless the credentials that the smoke's checks use reach AWS,
+/// `EventBridge` Scheduler's list of schedules and, for Modal, the profile's workspace.
 fn reached(cargo: &Cargo, settings: &Settings) -> Result<()> {
     let aws = cargo
         .sh
@@ -367,8 +357,8 @@ fn reached(cargo: &Cargo, settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// `HEAD`'s branch and commit, which the smoke builds Pumpkin from; fails if `HEAD` is detached
-/// or the working tree has changes to tracked files, which the commit doesn't hold.
+/// The branch and the commit of `HEAD`. Fails if `HEAD` is detached or the working tree differs
+/// from it in a tracked file.
 fn head(cargo: &Cargo) -> Result<(String, String)> {
     let git = |args: &[&str]| cargo.sh.cmd("git").args(args).read();
     let branch = git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -385,9 +375,9 @@ fn head(cargo: &Cargo) -> Result<(String, String)> {
     Ok((branch, commit))
 }
 
-/// The smoke's task repository, `live/repo` in cargo's target directory, made if need be, which
-/// keeps its `.pumpkin` from one live run to the next: `examples/smoke` as `smoke`, the examples'
-/// root, the consumer entry as `./pumpkin`, and `.pumpkinversion` naming `branch` and `commit`.
+/// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
+/// keeps its `.pumpkin` from one live run to the next: `examples/smoke`,
+/// the `PUMPKIN.star` marker and the `pumpkin` entry, with Pumpkin pinned at `commit` of `branch`.
 fn task_repository(cargo: &Cargo, branch: &str, commit: &str) -> Result<PathBuf> {
     let metadata = cargo
         .cmd(&["metadata", "--format-version=1", "--no-deps"])
@@ -425,7 +415,6 @@ fn task_repository(cargo: &Cargo, branch: &str, commit: &str) -> Result<PathBuf>
     Ok(repo)
 }
 
-/// Copies the files below `from` to `to`, made with every directory between.
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).map_err(|error| format!("making {} failed: {error}", to.display()))?;
     let entries = fs::read_dir(from)
@@ -443,8 +432,8 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Runs `run`, `pumpkin run --wait`, showing what it says as it says it, and returns the id of
-/// the run it started, as it said it, and how it ended; fails if it said none.
+/// Runs `run`, echoing what it says, and returns the status it ends with and the id of the run it
+/// started, which its first words name.
 fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
     let mut child = run
         .stderr(Stdio::piped())
@@ -478,10 +467,9 @@ fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
     }
 }
 
-/// What is wrong with `record`, the copy of the smoke run's record: each probe line that isn't
-/// `ok`, too few of them for the sandboxes probed, which are 3, or 4 with a GPU runner, or a
-/// sandbox that isn't recorded as deleted, or a file of these that can't be read. Prints the
-/// probes' lines and the sandboxes.
+/// What is wrong in the record of a smoke run at `record`: a run that didn't finish, a probe that
+/// failed or is missing, and a sandbox that isn't deleted. `gpu` is whether the run has a GPU
+/// runner.
 fn checked(record: &Path, gpu: bool) -> Vec<String> {
     let read = |path: &Path| -> std::result::Result<serde_json::Value, String> {
         let text = fs::read_to_string(path)
@@ -543,9 +531,7 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     failed
 }
 
-/// What the providers hold of run `id`: each EC2 instance tagged with it that isn't terminated,
-/// each `EventBridge` Scheduler schedule named for it, and, for Modal, each sandbox tagged with
-/// it, each said with what it is.
+/// What of run `id` the providers still hold: an instance not terminated, a schedule, a sandbox.
 fn left(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
     let aws = |args: &[&str]| -> Result<serde_json::Value> {
         let cmd = cargo.sh.cmd("aws").args([
@@ -591,7 +577,8 @@ fn left(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
     Ok(left)
 }
 
-/// Each `EventBridge` Scheduler schedule named for run `id`, said with its group.
+/// The schedules of `EventBridge` Scheduler whose names start with `id`, each as
+/// `schedule <group>/<name>`.
 fn schedules(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
     let list = cargo
         .sh
@@ -608,8 +595,8 @@ fn schedules(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>
     Ok(named.collect())
 }
 
-/// What `script` prints, run by Python with [`MODAL_SDK`], through `uv`, given `args`, with the
-/// profile and configuration file of `modal`.
+/// The output of `script` run with `args` in a Python that has the Modal SDK, under the profile
+/// of `modal`.
 fn modal_python(
     cargo: &Cargo,
     modal: &crate::settings::Modal,

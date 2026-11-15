@@ -3,9 +3,9 @@
 //! it, and `cargo xtask ci` fails while the committed one differs.
 //!
 //! Its layout is a layered drawing's, as Sugiyama's method makes one
-//! (<https://en.wikipedia.org/wiki/Layered_graph_drawing>): each crate in a row, the
-//! crates it depends on in rows below it, an edge that passes a row going through a gap of its
-//! own there, and each row ordered to cross fewer edges.
+//! (<https://en.wikipedia.org/wiki/Layered_graph_drawing>): each crate in a row, the crates it
+//! depends on in rows below it, an edge that passes a row going through a gap of its own there,
+//! and each row ordered to cross fewer edges.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -39,11 +39,10 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 .head{fill:var(--line)}
 </style>"#;
 
-/// The arrowhead that the arrows of the figure end in.
 const MARKER: &str = r#"<defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker></defs>"#;
 
-// The figure's measures, in pixels: a crate's box is as wide as its name in 13 px monospace,
-// about 8 px a character, needs, with a margin, and an edge passes a row in a gap of its own.
+// The figure's measures, in pixels: a crate's box is as wide as its name needs in 13 px
+// monospace, about 8 px a character, with padding, and an edge passes a row in a gap of its own.
 const MARGIN: usize = 16;
 const BOX_HEIGHT: usize = 32;
 const CHAR_WIDTH: usize = 8;
@@ -79,16 +78,16 @@ pub(crate) fn write(sh: &Shell, metadata: &str) -> Result<()> {
     Ok(())
 }
 
-/// A row's slot: a crate's box, by its index, or where an edge, by its index, passes the row.
+/// A place in a row: a crate's box, or where the arrow `edges[n]` passes a row between its ends.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Slot {
     Crate(usize),
     Pass(usize),
 }
 
-/// The SVG of the figure that `metadata` draws: a box for each package of the workspace, shaded
-/// if it builds a binary, and an arrow from each to each it depends on, but for a build or a
-/// development dependency, and for one that its other arrows already lead to.
+/// The figure's SVG: a box for each package of `metadata`, shaded if it builds a binary, and an
+/// arrow for each of its dependencies on another package, but a build or a development one and one
+/// that the other arrows imply.
 fn crates(metadata: &str) -> Result<String> {
     let metadata: serde_json::Value = serde_json::from_str(metadata)
         .map_err(|error| format!("`cargo metadata` printed what isn't JSON: {error}"))?;
@@ -139,8 +138,7 @@ fn crates(metadata: &str) -> Result<String> {
     }))
 }
 
-/// Each edge of `direct`, a crate's dependencies by index, from a crate to a dependency that no
-/// other of its dependencies leads to.
+/// The edges of `direct` that no path of two edges or more implies: its transitive reduction.
 fn reduced(direct: &[BTreeSet<usize>]) -> Vec<(usize, usize)> {
     let reaches = |from: usize, to: usize| {
         let mut seen = BTreeSet::new();
@@ -169,8 +167,9 @@ fn reduced(direct: &[BTreeSet<usize>]) -> Vec<(usize, usize)> {
     edges
 }
 
-/// The row of each of `count` crates, counted from the bottom: a crate with no dependency's
-/// longest path down, and one that others depend on, the row just below the lowest of theirs.
+/// The layer of each of `count` crates, counted from the bottom: a crate above each one it
+/// depends on, and as near the crates that depend on it as that allows, which keeps its arrows
+/// short.
 fn layers(count: usize, edges: &[(usize, usize)]) -> Vec<usize> {
     fn longest(at: usize, edges: &[(usize, usize)], memo: &mut [Option<usize>]) -> usize {
         if let Some(known) = memo[at] {
@@ -198,7 +197,7 @@ fn layers(count: usize, edges: &[(usize, usize)]) -> Vec<usize> {
     layers
 }
 
-/// Whether an edge of `edges` joins `upper`, a slot of a row, to `lower`, one of the row below.
+/// Whether an arrow leads from `upper` to `lower`, an arrow's pass counting as a part of it.
 fn joined(edges: &[(usize, usize)], upper: Slot, lower: Slot) -> bool {
     match (upper, lower) {
         (Slot::Crate(from), Slot::Crate(to)) => edges.contains(&(from, to)),
@@ -208,8 +207,8 @@ fn joined(edges: &[(usize, usize)], upper: Slot, lower: Slot) -> bool {
     }
 }
 
-/// The rows, top first, each slot in an order that crosses few edges: the crates of each layer,
-/// and a pass for each edge that crosses it.
+/// The slots of each row, the top one first, ordered so that few arrows cross: the order is
+/// improved by sweeps down and up the rows, each slot set at the mean place of those it joins.
 fn ordered(layers: &[usize], edges: &[(usize, usize)]) -> Vec<Vec<Slot>> {
     let top = layers.iter().copied().max().unwrap_or(0);
     let mut rows: Vec<Vec<Slot>> = vec![Vec::new(); top + 1];
@@ -258,7 +257,6 @@ fn sort_by_keys(row: &mut Vec<Slot>, keys: &[Option<usize>]) {
     *row = keyed.into_iter().map(|(_, slot)| slot).collect();
 }
 
-/// `n` as a coordinate.
 fn px(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
@@ -333,7 +331,6 @@ struct Drawing<'a> {
 /// Where a slot's box or pass starts, and how wide it is, by its row and itself.
 type Placed = BTreeMap<(usize, Slot), (usize, usize)>;
 
-/// The SVG of `drawing`.
 fn draw(drawing: &Drawing<'_>) -> String {
     let placed = drawing.placed();
     let (leave, meet) = drawing.ends(&placed);
@@ -405,7 +402,6 @@ fn draw(drawing: &Drawing<'_>) -> String {
     svg
 }
 
-/// The top of row `row`, counted from the top.
 fn top_of(row: usize) -> usize {
     TOP + row * (BOX_HEIGHT + ROW_GAP)
 }
@@ -416,9 +412,10 @@ impl Drawing<'_> {
         self.rows.len() - 1 - self.layers[at]
     }
 
-    /// How wide a slot is: a crate's box fits its name and the ends of its edges.
     fn width_of(&self, slot: Slot) -> usize {
         match slot {
+            // Wide enough for the name, and for a point of its own for each arrow that leaves
+            // the box or meets it.
             Slot::Crate(at) => {
                 let leaving = self.edges.iter().filter(|(from, _)| *from == at).count();
                 let meeting = self.edges.iter().filter(|(_, to)| *to == at).count();
@@ -446,8 +443,9 @@ impl Drawing<'_> {
         placed
     }
 
-    /// Each edge's x where it leaves its crate and where it meets its dependency, spread along
-    /// the box in the order of where the edge goes next.
+    /// The x at which each arrow leaves its upper crate and the x at which it meets its lower one,
+    /// spread along the box in the order of where the arrows go next, so that they don't cross
+    /// there.
     fn ends(&self, placed: &Placed) -> (Vec<usize>, Vec<usize>) {
         let next_x = |edge: usize, leaving: bool| {
             let (from, to) = self.edges[edge];
