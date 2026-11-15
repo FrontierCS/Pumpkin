@@ -85,19 +85,31 @@ pub fn docker() -> Command {
     docker
 }
 
-/// Builds `dockerfile` with [`docker`] into an image tagged `tag`, given each of `contexts`, a
-/// name and an image reference, as a named context, and returns the image's ID.
-pub fn build(dockerfile: &str, contexts: &[(&str, &str)], tag: &str) -> String {
+/// Builds `dockerfile` with [`docker`] into an image tagged `tag`, in `context`, a directory, or
+/// in none, given each of `contexts`, a name and an image reference, as a named context, and
+/// returns the image's ID.
+pub fn build(
+    dockerfile: &str,
+    context: Option<&Path>,
+    contexts: &[(&str, &str)],
+    tag: &str,
+) -> String {
     let contexts = contexts
         .iter()
         .map(|(name, image)| format!("--build-context={name}=docker-image://{image}"));
     // Without provenance: an attestation gives each build an ID of its own, and as a build moves
     // its tag, the image store drops the image by the tag's old ID, which another test process
     // may be running.
-    let mut build = docker()
+    let mut build = docker();
+    build
         .args(["build", "--quiet", "--provenance=false"])
         .args(contexts)
-        .args(["--tag", tag, "-"])
+        .args(["--tag", tag]);
+    match context {
+        Some(context) => build.args(["--file", "-"]).arg(context),
+        None => build.arg("-"),
+    };
+    let mut build = build
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
