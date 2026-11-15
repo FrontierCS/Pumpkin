@@ -18,7 +18,7 @@
 //!   collected, but a result over [`RESULT_MAX_BYTES`](schema::sandbox::RESULT_MAX_BYTES);
 //! - `model/`: each model exchange, each conversation item once (`Exchange`);
 //! - `sockets/`: while the run lasts, where its sandboxes meet the gateway ([`sockets`]);
-//! - `reaps.jsonl`: each sandbox that a reap removed, or found gone ([`REAPS`]);
+//! - `reaps.jsonl`: each sandbox that a reap deleted ([`REAPS`]);
 //! - `outcome.json`: how the run ended, and what it used (`log::usage_of`): `{"state":
 //!   "finished"}` and the outcome's fields (`log::outcome_json`), `{"state": "failed", "reason":
 //!   r}`, as [`Record::reap`] records a lost run too, or `{"state": "interrupted", "signal": s}`.
@@ -338,12 +338,11 @@ pub enum Ending {
 }
 
 /// The file of a record in which each [`Record::reap`] appends a line for each sandbox it
-/// removed, or found gone.
+/// deleted, which a later reap then leaves be.
 ///
-/// A line is `{"at_ns": t, "provider": p, "id": i, "reaped": r}`: at `t` nanoseconds since the
-/// Unix epoch, a decimal string, as the run log gives times, sandbox `i` of provider `p` was
-/// `"removed"`, as `p` listed it and the reap deleted it, or found `"gone"`, as the record holds
-/// it undeleted ([`write_sandbox`]) but `p` no longer listed it.
+/// A line is `{"at_ns": t, "provider": p, "id": i, "reaped": "removed"}`: at `t` nanoseconds
+/// since the Unix epoch, a decimal string, as the run log gives times, the reap deleted sandbox
+/// `i` of provider `p`, as `p` listed it or the record held it undeleted ([`write_sandbox`]).
 const REAPS: &str = "reaps.jsonl";
 
 /// What [`Record::reap`] removed of a run that had ended, or was lost.
@@ -352,10 +351,10 @@ pub struct Reaped {
     /// The sandboxes that each provider it was given still listed, by the provider's name, now
     /// deleted.
     pub sandboxes: Vec<(Name, Vec<SandboxId>)>,
-    /// The sandboxes that the record holds undeleted on a provider it was given, by the
-    /// provider's name, which that provider no longer listed: ended since, or not where the
-    /// provider is reached now.
-    pub gone: Vec<(Name, SandboxId)>,
+    /// The sandboxes that the record held undeleted on a provider it was given, by the
+    /// provider's name, which that provider no longer listed, as they had ended, now deleted
+    /// with what each left there.
+    pub ended: Vec<(Name, SandboxId)>,
     /// Its socket directory, if one was left, now removed.
     pub sockets: Option<PathBuf>,
     /// Whether it was lost, and is now recorded as failed, as its driver ended without an
@@ -595,9 +594,9 @@ impl Record {
         })
     }
 
-    /// Waits until the run's driver, if one runs, has ended, then deletes each sandbox of the run
-    /// that each of `providers`, by name, still lists, removes its `sockets/`, and records a lost
-    /// run as failed. Two reaps of a record take turns. A provider left out deletes nothing.
+    /// Waits for the run's driver, if one runs, to end, then deletes each sandbox of the run that
+    /// `providers`, by name, list or the record holds undeleted, removes its `sockets/` and records
+    /// a lost run as failed. Two reaps of a record take turns. A provider left out deletes nothing.
     ///
     /// # Errors
     ///
@@ -630,20 +629,26 @@ impl Record {
                 &json!({ "state": "failed", "reason": LOST }),
             )?;
         }
+        let undeleted = self.undeleted()?;
         let swept = (providers.iter()).map(|&(name, provider)| {
+            // A sandbox that its provider lists no more may have ended and left what only its
+            // delete removes.
+            let held: Vec<SandboxId> = (undeleted.iter())
+                .filter(|(on, _)| on == name)
+                .map(|(_, id)| id.clone())
+                .collect();
             // A lost run's sandboxes' records keep what its own deletes said.
             let after = |_: &[SandboxId], _: &Result<(), String>| Ok(());
-            sweep(name, provider, &run, |_| {}, after).map(|ids| (name.clone(), ids))
+            sweep(name, provider, &run, &held, |_| {}, after).map(|ids| (name.clone(), ids))
         });
         let sandboxes: Vec<(Name, Vec<SandboxId>)> = swept.collect::<Result<_, _>>()?;
-        let undeleted = self.undeleted()?;
-        let gone: Vec<(Name, SandboxId)> = (undeleted.into_iter())
+        let ended: Vec<(Name, SandboxId)> = (undeleted.into_iter())
             .filter(|(name, id)| {
                 let swept = sandboxes.iter().find(|(swept, _)| swept == name);
                 swept.is_some_and(|(_, ids)| !ids.contains(id))
             })
             .collect();
-        self.note_reaped(&sandboxes, &gone)?;
+        self.note_reaped(&sandboxes, &ended)?;
         let sockets = sockets(&self.dir);
         let sockets = match fs::remove_dir_all(&sockets) {
             Ok(()) => Some(sockets),
@@ -652,7 +657,7 @@ impl Record {
         };
         Ok(Reaped {
             sandboxes,
-            gone,
+            ended,
             sockets,
             lost,
         })
@@ -674,8 +679,9 @@ impl Record {
         Ok(finished && self.undeleted()?.is_empty())
     }
 
-    /// Each sandbox that the record holds without a delete that succeeded, the agent's and each
-    /// job's, by its provider's name, but those that an earlier reap removed ([`REAPS`]).
+    /// Each sandbox that the record holds without a delete that succeeded, the agent's, each
+    /// job's and each lease's, by its provider's name, but those that an earlier reap removed
+    /// ([`REAPS`]).
     fn undeleted(&self) -> Result<Vec<(Name, SandboxId)>, String> {
         let reaps = self.dir.join(REAPS);
         let reaped = read_optional(&reaps)?.unwrap_or_default();
@@ -688,15 +694,17 @@ impl Record {
             }
         }
         let mut dirs = vec![self.dir.join("agent")];
-        let jobs = self.dir.join("jobs");
-        match fs::read_dir(&jobs) {
-            Ok(entries) => {
-                for entry in entries {
-                    dirs.push(entry.context(jobs.display())?.path());
+        for of in ["jobs", "leases"] {
+            let of = self.dir.join(of);
+            match fs::read_dir(&of) {
+                Ok(entries) => {
+                    for entry in entries {
+                        dirs.push(entry.context(of.display())?.path());
+                    }
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context(of.display()),
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context(jobs.display()),
         }
         dirs.sort();
         let mut undeleted = Vec::new();
@@ -724,21 +732,19 @@ impl Record {
         Ok(undeleted)
     }
 
-    /// Appends to the record's [`REAPS`] a line for each of `removed` and of `gone`, at once.
+    /// Appends to the record's [`REAPS`] a line for each of `listed` and of `ended`, at once.
     fn note_reaped(
         &self,
-        removed: &[(Name, Vec<SandboxId>)],
-        gone: &[(Name, SandboxId)],
+        listed: &[(Name, Vec<SandboxId>)],
+        ended: &[(Name, SandboxId)],
     ) -> Result<(), String> {
         let at = log::nanos(UnixTime::of(SystemTime::now())?.since_epoch());
-        let removed = (removed.iter()).flat_map(|(name, ids)| ids.iter().map(move |id| (name, id)));
-        let lines = (removed.map(|(name, id)| (name, id, "removed")))
-            .chain(gone.iter().map(|(name, id)| (name, id, "gone")))
-            .map(|(name, id, reaped)| {
-                let line =
-                    json!({ "at_ns": at, "provider": name, "id": id.as_str(), "reaped": reaped });
-                format!("{line}\n")
-            });
+        let listed = (listed.iter()).flat_map(|(name, ids)| ids.iter().map(move |id| (name, id)));
+        let lines = (listed.chain(ended.iter().map(|(name, id)| (name, id)))).map(|(name, id)| {
+            let line =
+                json!({ "at_ns": at, "provider": name, "id": id.as_str(), "reaped": "removed" });
+            format!("{line}\n")
+        });
         let lines: String = lines.collect();
         if lines.is_empty() {
             return Ok(());
