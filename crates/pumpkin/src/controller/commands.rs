@@ -7,6 +7,7 @@
 //!
 //! Sending a job is [`super::send`]'s, and `ls` is [`super::listing`]'s.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::SystemTime;
@@ -28,18 +29,78 @@ const UNSTARTED: i32 = 101;
 
 /// What a command on the controller runs to follow job `id`, below `kind`: shows its unit's
 /// standard error, `log`, as it grows, until the job ends or `done`, a test in its directory,
-/// holds, then runs `then`.
+/// holds, then runs `then`. Without `after`, the log goes to standard error, all of it; with
+/// it, to standard output, past its first `after` lines, and then [`LOGGED`].
 // `tail` follows the log until the loop before it ends, then shows what the log holds by then.
-fn following(kind: &str, id: &str, done: &str, then: &str) -> String {
+fn following(kind: &str, id: &str, done: &str, after: Option<u64>, then: &str) -> String {
+    let (first, to, logged) = match after {
+        None => (1, " >&2", ""),
+        Some(after) => (after + 1, "", "printf '\\0pumpkin: the log ends\\0\\n'\n"),
+    };
     format!(
         r#"cd "$HOME/{kind}/{id}" 2>/dev/null || exit {NO_JOB}
 pid=$(systemctl --user show --property=MainPID --value pumpkin-job-{id})
 while [ "${{pid:-0}}" -gt 0 ] && kill -0 "$pid" 2>/dev/null && ! {done}; do sleep 1; done &
-tail --lines=+1 --follow --pid=$! log >&2 &
+tail --lines=+{first} --follow --pid=$! log{to} &
 wait
-{then}
+{logged}{then}
 "#
     )
+}
+
+/// What [`following`] prints after the log, on the end of the log's last line, which the job may
+/// have left in part: a fixed line between NUL bytes, which a build's output can't plausibly end
+/// a line with. What comes after it is not the log's.
+const LOGGED: &[u8] = b"\0pumpkin: the log ends\0\n";
+
+/// What a follow of a run's job has shown, over each connection it went over, so that the
+/// follow over the next shows no line twice and loses none: of the job's log, which only grows,
+/// the whole lines shown, which the next skips ([`following`]'s `after`); of what the run's
+/// follower says after it, which it says again from its start, each line once. A line that came
+/// in part is shown only once it is whole, so the next connection shows it whole.
+#[derive(Default)]
+struct Shown {
+    /// The whole lines of the log shown.
+    log_lines: u64,
+    /// Whether [`LOGGED`] has come, over this connection or an earlier one.
+    logged: bool,
+    /// Whether [`LOGGED`] has come over the current connection.
+    past_log: bool,
+    /// The lines that the run's follower said.
+    said: BTreeSet<Vec<u8>>,
+}
+
+impl Shown {
+    /// Readies this for what a new connection prints.
+    fn again(&mut self) {
+        self.past_log = false;
+    }
+
+    /// How far this has shown, which changes with each line it shows.
+    fn shown(&self) -> (u64, bool, usize) {
+        (self.log_lines, self.logged, self.said.len())
+    }
+
+    /// Shows `line`, a whole line that [`following`] printed, unless it was shown before.
+    fn show(&mut self, line: &[u8]) {
+        if self.past_log {
+            if self.said.insert(line.to_vec()) {
+                crate::to_stderr(line);
+            }
+            return;
+        }
+        if let Some(rest) = line.strip_suffix(LOGGED) {
+            self.past_log = true;
+            // The log's last line, shown in part as the job wrote it.
+            if !self.logged && !rest.is_empty() {
+                crate::to_stderr(&[rest, b"\n"].concat());
+            }
+            self.logged = true;
+        } else if !self.logged {
+            self.log_lines += 1;
+            crate::to_stderr(line);
+        }
+    }
 }
 
 /// Refuses `flags` of `run` or `build` that name what this machine's runs would use, but its
@@ -125,22 +186,32 @@ fn follow(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode,
     // run's ending as the controller would run it again.
     let then = format!(
         "cd\n[ -d {runs}/{id} ] || exit {UNSTARTED}\n\
-         [ ! -x {JOBS}/{id}/{own} ] || exec {JOBS}/{id}/{own} controller follow {id}\n\
-         exec ./{current} wait {id}",
+         [ ! -x {JOBS}/{id}/{own} ] || exec {JOBS}/{id}/{own} controller follow {id} 2>&1\n\
+         exec ./{current} wait {id} >&2",
         runs = crate::job::runs(),
         own = crate::job::OWN,
         current = crate::job::CURRENT
     );
     let again = format!("follow it again: {}", next::of_run("wait", None, id));
     let mut attempt = 0;
+    let mut shown = Shown::default();
     let code = loop {
-        let attached = reached.attached(&following(JOBS, id, started, &then), None)?;
+        let script = following(JOBS, id, started, Some(shown.log_lines), &then);
+        shown.again();
+        let before = shown.shown();
+        let (attached, rest) = reached.relayed(&script, |line| shown.show(line))?;
+        // A connection that showed a line moved the follow on, as `pause` counts attempts.
+        if shown.shown() != before {
+            attempt = 0;
+        }
         let ended = reached.ended_connection(attached.status, &[SSH_FAILED], attached.master);
-        let what = format!("following run {id} again from the start of its log");
+        let what = format!("following run {id} again from where it was");
+        // `rest`, a line cut in part, is shown only once nothing follows ([`Shown`]).
         if ended && reached.pause(attempt, attached.master, &what) {
             attempt += 1;
             continue;
         }
+        crate::to_stderr(&rest);
         break reached.ended(attached, &again)?;
     };
     let name = &reached.name;
@@ -236,7 +307,8 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
     send(&reached, client, &id, BUILDS, &tree, &words)?;
     let then = format!("[ -s out ] || exit {UNSTARTED}\nexec cat out");
     // Its IR, in `out`, is whole only once the job has ended.
-    let status = reached.attached(&following(BUILDS, id.as_str(), "false", &then), None)?;
+    let following = following(BUILDS, id.as_str(), "false", None, &then);
+    let status = reached.attached(&following, None)?;
     let name = &reached.name;
     let again = format!(
         "the build goes on there: its IR is in ~/{BUILDS}/{}/out there once it ends",

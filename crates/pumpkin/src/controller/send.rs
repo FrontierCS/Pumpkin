@@ -371,8 +371,15 @@ fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
     }
     let _upload = reached.shared.upload(&reached.name)?;
     let mut attempt = 0;
+    let mut lacking = usize::MAX;
     loop {
-        let streams = manifest::deal(manifest::pieces(&lacked(reached, manifest)?));
+        let pieces = manifest::pieces(&lacked(reached, manifest)?);
+        // A connection that delivered a piece moved the send on, as `pause` counts attempts.
+        if pieces.len() < lacking {
+            attempt = 0;
+        }
+        lacking = pieces.len();
+        let streams = manifest::deal(pieces);
         say(holds(&reached.name, manifest, &streams));
         if streams.is_empty() {
             return Ok(());
