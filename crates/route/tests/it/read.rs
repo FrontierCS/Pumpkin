@@ -9,7 +9,8 @@ use schema::ir::Api;
 use serde_json::{Value, json};
 
 use super::kept::{
-    CHAT_ANSWER, CHAT_REQUEST, CHAT_STREAM, RESPONSES_CUT, RESPONSES_FAILED, RESPONSES_REQUEST,
+    CHAT_ANSWER, CHAT_REQUEST, CHAT_STREAM, MESSAGES_ANSWER, MESSAGES_CUT, MESSAGES_FAILED,
+    MESSAGES_REQUEST, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_FAILED, RESPONSES_REQUEST,
     RESPONSES_STREAM,
 };
 
@@ -61,17 +62,19 @@ fn requests() {
     for (api, body) in [
         (Api::Responses, RESPONSES_REQUEST),
         (Api::Chat, CHAT_REQUEST),
+        (Api::Messages, MESSAGES_REQUEST),
     ] {
         let body: Value = serde_json::from_str(body).unwrap();
         let items = read::items(api, &body);
-        // A record keeps each item apart, and the reader reads one alone as it does in its body.
-        let field = if api == Api::Chat {
-            "messages"
-        } else {
+        // A record keeps each item apart, and the reader reads one alone as it does in its body,
+        // after the entries of the fields it reads first, such as the Messages API's `system`.
+        let field = if api == Api::Responses {
             "input"
+        } else {
+            "messages"
         };
         let alone = (body[field].as_array().unwrap().iter()).flat_map(|item| read::item(api, item));
-        assert_eq!(alone.collect::<Vec<_>>(), items);
+        assert!(items.ends_with(&alone.collect::<Vec<_>>()), "{api}");
         let config = read::config(api, &body);
         // The field that names the tools holds every tool that the config reads.
         let field = read::tools_field(api);
@@ -86,19 +89,36 @@ fn requests() {
           Reasoning { text: "We need inspect README" }
           Assistant { text: "I’ll read the task" }
           Call { id: Some("call_7036f25cd4703cd25abc703a"), name: "exec_command", arguments: "{\"cmd\":\"cat /frontier/task/README.md\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":30000}" }
-          Output { call_id: Some("call_7036f25cd4703cd25abc703a"), text: "Chunk ID: d1afae Wall time: 0.0000 seconds Process exited" }
+          Output { call_id: Some("call_7036f25cd4703cd25abc703a"), text: "Chunk ID: d1afae Wall time: 0.0000 seconds Process exited", error: false }
 
         chat: Config { model: Some("glm-5.3-flash"), reasoning_effort: None, temperature: None, max_tokens: Some(4096), stop: [], stream: false, tools: ["send_email", "delete_email"] }
           System { text: "You are an AI language model" }
           User { text: "Please take a look at the" }
           Assistant { text: "I'll start by finding the file" }
           Call { id: Some("call_-4703692581470369258"), name: "search_files_by_filename", arguments: "{\"filename\": \"team-building-activities.docx\"}" }
-          Output { call_id: Some("call_-4703692581470369258"), text: "ValidationError: The tool 'search_files_by_filename' is not" }
+          Output { call_id: Some("call_-4703692581470369258"), text: "ValidationError: The tool 'search_files_by_filename' is not", error: false }
+
+        messages: Config { model: Some("m-large"), reasoning_effort: Some("high"), temperature: Some(1.0), max_tokens: Some(32000), stop: ["</done>"], stream: true, tools: ["Bash", "Read"] }
+          System { text: "You are Claude Code\nWork in /workspace" }
+          User { text: "Solve the task" }
+          Other { json: Object {"source": Object {"data": String("AAAA"), "media_type": String("image/png"), "type": String("base64")}, "type": String("image")} }
+          Reasoning { text: "I should list the files" }
+          Assistant { text: "Listing the files." }
+          Call { id: Some("toolu_01A"), name: "Bash", arguments: "{\"command\":\"ls\"}" }
+          Output { call_id: Some("toolu_01A"), text: "ls: cannot open", error: true }
+          User { text: "Go on" }
+          System { text: "Finish soon" }
+          System { text: "Primary working directory: /workspace" }
+          Assistant { text: "Done." }
 
     "#]].assert_eq(&out);
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn answers() {
     // Torn within the message's text, after its first delta.
     let message = RESPONSES_STREAM
@@ -106,6 +126,8 @@ fn answers() {
         .unwrap();
     let torn = message + RESPONSES_STREAM[message..].find("\n\n").unwrap() + 40;
     let chat_torn = CHAT_STREAM.find("\"content\":\"pumpkin\"").unwrap();
+    // Within the line of its text's second delta.
+    let messages_torn = MESSAGES_STREAM.find(" them.").unwrap();
     // Broken off in a second part of its reasoning.
     let parts = RESPONSES_CUT.to_owned()
         + "event: response.reasoning_text.delta\n"
@@ -133,6 +155,19 @@ fn answers() {
                 &CHAT_STREAM.as_bytes()[..chat_torn],
             ),
             ("no stream", Api::Chat, CHAT_ANSWER.as_bytes()),
+            ("of Messages", Api::Messages, MESSAGES_STREAM.as_bytes()),
+            (
+                "torn in its text",
+                Api::Messages,
+                &MESSAGES_STREAM.as_bytes()[..messages_torn],
+            ),
+            (
+                "broken off in a call",
+                Api::Messages,
+                MESSAGES_CUT.as_bytes(),
+            ),
+            ("failed", Api::Messages, MESSAGES_FAILED.as_bytes()),
+            ("no stream", Api::Messages, MESSAGES_ANSWER.as_bytes()),
         ],
         &expect![[r#"
             a stream: 25 events, first output by byte Some(1275) of 6988, stop Some("completed"), whole: true
@@ -163,6 +198,24 @@ fn answers() {
               Reasoning { text: "Both search_files_by_filename and list_files are unavailable. Let me try search_files with a query, or get_file_by_id (but I don't know the ID)." }
               Assistant { text: "Let me try searching for files by content instead." }
               Call { id: Some("call_-2581470369258147036"), name: "search_files", arguments: "{\"query\":\"team-building\"}" }
+
+            of Messages: 18 events, first output by byte Some(604) of 2207, stop Some("tool_use"), whole: true
+              Reasoning { text: "The tests fail" }
+              Assistant { text: "Running them." }
+              Call { id: Some("toolu_01B"), name: "Bash", arguments: "{\"command\": \"cargo test\"}" }
+
+            torn in its text: 9 events, first output by byte Some(604) of 1292, stop None, whole: false
+              Reasoning { text: "The tests fail" }
+              Assistant { text: "Running" }
+
+            broken off in a call: 3 events, first output by byte Some(385) of 525, stop None, whole: false
+              Call { id: Some("toolu_01C"), name: "Read", arguments: "{\"path\":" }
+
+            failed: 2 events, first output by byte None of 335, stop None, whole: false
+
+            no stream: 0 events, first output by byte None of 357, stop Some("tool_use"), whole: true
+              Assistant { text: "I'll read it." }
+              Call { id: Some("toolu_01D"), name: "Read", arguments: "{\"path\":\"README.md\"}" }
 
         "#]],
     );
@@ -195,6 +248,16 @@ fn answers_of_forms_no_record_keeps() {
                 br#"{"error":{"code":"1302","message":"Rate limit"}}"#,
             ),
             (
+                "of hidden thinking, no stream",
+                Api::Messages,
+                br#"{"content":[{"data":"EmwKAhgB","type":"redacted_thinking"}],"stop_reason":"end_turn","type":"message"}"#,
+            ),
+            (
+                "of a call with no input's deltas",
+                Api::Messages,
+                b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Stop\",\"input\":{}}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+            ),
+            (
                 "of no API",
                 Api::Responses,
                 b"data: {\"type\":\"response.unknown\"}\n\ndata: [1,\n",
@@ -218,6 +281,12 @@ fn answers_of_forms_no_record_keeps() {
               Reasoning { text: "a" }
 
             an error: 0 events, first output by byte None of 48, stop None, whole: true
+
+            of hidden thinking, no stream: 0 events, first output by byte None of 102, stop Some("end_turn"), whole: true
+              Reasoning { text: "" }
+
+            of a call with no input's deltas: 2 events, first output by byte Some(123) of 155, stop None, whole: true
+              Call { id: Some("toolu_1"), name: "Stop", arguments: "{}" }
 
             of no API: 1 events, first output by byte None of 45, stop None, whole: false
 
@@ -244,3 +313,83 @@ pub(crate) const CHAT_CUSTOM: &str = concat!(
     "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
     "data: [DONE]\n\n",
 );
+
+// A body is the provider's, so the reader takes any: each prefix of a stream, and forms of the
+// wrong type or index, give what they hold and never panic.
+#[test]
+fn messages_of_any_form() {
+    for at in 0..=MESSAGES_STREAM.len() {
+        read::answer(Api::Messages, &MESSAGES_STREAM.as_bytes()[..at]);
+    }
+    for at in 0..=MESSAGES_REQUEST.len() {
+        if let Ok(body) = serde_json::from_str::<Value>(&MESSAGES_REQUEST[..at]) {
+            read::items(Api::Messages, &body);
+        }
+    }
+    // The last is of the right form: a thinking budget, and a system prompt of one text.
+    let wrong = [
+        r#"{"system":7,"messages":[{"role":"user","content":7},{"role":3,"content":[7,"a",{"type":7}]}]}"#,
+        r#"{"messages":{"role":"user"},"tools":"Bash","thinking":"high","stop_sequences":"x","output_config":7}"#,
+        r#"[1,2]"#,
+        r#"{"thinking":{"type":"enabled","budget_tokens":2048},"system":"Be brief"}"#,
+    ];
+    let mut out = String::new();
+    for body in wrong {
+        let body: Value = serde_json::from_str(body).unwrap();
+        let config = read::config(Api::Messages, &body);
+        writeln!(
+            out,
+            "{config:?}\n{}",
+            shown(&read::items(Api::Messages, &body))
+        )
+        .unwrap();
+    }
+    expect![[r#"
+        Config { model: None, reasoning_effort: None, temperature: None, max_tokens: None, stop: [], stream: false, tools: [] }
+          Other { json: Object {"content": Number(7), "role": String("user")} }
+          Other { json: Number(7) }
+          Other { json: String("a") }
+          Other { json: Object {"type": Number(7)} }
+
+        Config { model: None, reasoning_effort: None, temperature: None, max_tokens: None, stop: [], stream: false, tools: [] }
+
+        Config { model: None, reasoning_effort: None, temperature: None, max_tokens: None, stop: [], stream: false, tools: [] }
+
+        Config { model: None, reasoning_effort: Some("2048"), temperature: None, max_tokens: None, stop: [], stream: false, tools: [] }
+          System { text: "Be brief" }
+
+    "#]].assert_eq(&out);
+}
+
+#[test]
+fn messages_answers_of_any_form() {
+    check(
+        &[
+            (
+                "of wrong types and a huge index",
+                Api::Messages,
+                concat!(
+                    "data: {\"type\":\"content_block_start\",\"index\":18446744073709551615,\"content_block\":\"text\"}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":-1,\"delta\":{\"type\":\"text_delta\",\"text\":7}}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":\"1\",\"delta\":[]}\n\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":7}}\n\n",
+                    "data: [\"message_stop\"]\n\n",
+                )
+                .as_bytes(),
+            ),
+            (
+                "of a body of no message",
+                Api::Messages,
+                br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            ),
+        ],
+        &expect![[r#"
+            of wrong types and a huge index: 5 events, first output by byte None of 321, stop None, whole: false
+              Other { json: Null }
+              Other { json: String("text") }
+
+            of a body of no message: 0 events, first output by byte None of 75, stop None, whole: true
+
+        "#]],
+    );
+}

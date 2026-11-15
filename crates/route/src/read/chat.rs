@@ -76,6 +76,7 @@ fn item(message: &Value) -> Vec<Item> {
         Some("tool") => vec![Item::Output {
             call_id: string(message, "tool_call_id"),
             text: content,
+            error: false,
         }],
         Some("assistant") => {
             let calls = message["tool_calls"].as_array().into_iter().flatten();

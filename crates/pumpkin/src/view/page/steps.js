@@ -64,6 +64,7 @@ import { count, seconds } from "./h.js";
  * @property {string} [name]
  * @property {string} [call] the address of the call an output answers
  * @property {string} [output] the address of a call's output
+ * @property {boolean} [error] of an output: its tool reported a failure
  * @property {number} [text_bytes] of `trace/<caller>/entry`: the whole text's length, in UTF-8 bytes
  * @typedef {object} StepStats `exchange/<n>`'s `stats`: the step's row of `stats?by=step`
  * @property {number | null} queue_ns

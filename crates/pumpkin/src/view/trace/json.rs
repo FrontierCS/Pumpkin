@@ -497,7 +497,17 @@ fn item_json(item: &Item) -> Value {
             name,
             arguments,
         } => json!({ "call_id": id, "name": name, "text": arguments }),
-        Item::Output { call_id, text } => json!({ "call_id": call_id, "text": text }),
+        Item::Output {
+            call_id,
+            text,
+            error,
+        } => {
+            let mut json = json!({ "call_id": call_id, "text": text });
+            if *error {
+                json["error"] = json!(true);
+            }
+            json
+        }
         Item::Other { json } => json!({ "text": json.to_string() }),
     }
 }

@@ -92,6 +92,7 @@ fn entry(item: &Value) -> Item {
         Some("function_call_output" | "custom_tool_call_output") => Item::Output {
             call_id: string(item, "call_id"),
             text: text(&item["output"]),
+            error: false,
         },
         Some(_) => Item::Other { json: item.clone() },
     }

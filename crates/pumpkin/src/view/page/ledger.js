@@ -212,7 +212,7 @@ export function drawRow(row, ctx) {
   return h(
     "div",
     { class: "lrow entry " + e.side + (hit ? " hit" : ""), title: e.text.length > 2000 ? e.text.slice(0, 2000) + "…" : e.text },
-    h("span", { class: "kind k-" + e.kind }, e.kind),
+    h("span", { class: "kind k-" + e.kind + (e.error ? " error" : ""), title: e.error ? "The tool reported a failure" : null }, e.kind),
     h("span", { class: "text" }, ...text),
   );
 }
