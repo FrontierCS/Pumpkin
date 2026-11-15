@@ -7,18 +7,17 @@
 //! listing shows, and how, is [`crate::progress`]'s.
 
 use std::collections::BTreeSet;
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::{self, Read as _, Seek as _, Write as _};
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use provider::RunTag;
-use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 use tempfile::TempDir;
 
+use super::copy::untar;
 use super::{Name, Reached, SHORT_TIMEOUT, finished};
 use crate::job::{JOBS, WAITING};
 use crate::workspace::Workspace;
@@ -541,12 +540,7 @@ fn extract<'p>(printed: &'p [u8], sent: &Path) -> Result<&'p [u8], String> {
         }
         at += line.len();
     }
-    DirBuilder::new()
-        .mode(0o700)
-        .create(sent)
-        .context(sent.display())?;
-    let mut tar = stdx::process::command("tar", Environment::Only(&["PATH"]));
-    tar.args(["--extract", "--file=-", "--directory"]).arg(sent);
+    let mut tar = untar(sent)?;
     let extracted = stdx::process::fed(&mut tar, archive, Deadline::after(SHORT_TIMEOUT));
     finished(extracted, "tar --extract", SHORT_TIMEOUT)?;
     Ok(&printed[..at])

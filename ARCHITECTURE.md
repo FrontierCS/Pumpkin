@@ -375,7 +375,8 @@ machine's configuration (`Config`, or `Client` for a machine whose runs go to a 
 reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
 starts the driver process. `controller` reaches the controller over the connections that a
 workspace's commands share (`Reached`), over which its `send` sends a run's or a build's job, its
-`listing` lists the runs there for `ls`, and its `commands` follow, stop and reap them; `manifest`
+`copy` copies an ended run's record back, its `listing` lists the runs there for `ls`, and its
+`commands` follow, stop and reap them; `manifest`
 is what `send` sends a task's tree as, by content, to the controller's store, `job` is the
 controller's side, with the prune and the slots that admit its builds and publishes (`Admission`),
 `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs the formatter,

@@ -399,8 +399,8 @@ fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
         };
         if !reached.pause(attempt, master, "asking again what it lacks") {
             return Err(format!(
-                "a connection to controller `{}` ended at each of the send's {} attempts, the last \
-                 as its log says: {}: run it again",
+                "a connection to controller `{}` ended at {} attempts of the send in a row, the \
+                 last as its log says: {}: run it again",
                 reached.name,
                 AGAIN.len() + 1,
                 reached.shared.log(master).display()

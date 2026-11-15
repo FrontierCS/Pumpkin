@@ -34,7 +34,6 @@ packages:
   - [docker-buildx-plugin, "${buildx_version}"]
   - git
   - gcc
-  - rsync
   - unzip
 
 write_files:

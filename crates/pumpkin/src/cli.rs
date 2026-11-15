@@ -976,7 +976,7 @@ every model it allows.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file, into a directory of its own in the
 controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
-Session Manager plugin, and `ssh`, `rsync`, `tar`, `ssh-keygen`
+Session Manager plugin, and `ssh`, `tar`, `ssh-keygen`
 and `git`, from PATH; the controller's settings are the module's, but for
 [controller.modal]. This machine's key to it, which the first command makes
 and enrols through EC2 Instance Connect, and the host key it pins, are in

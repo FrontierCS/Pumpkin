@@ -5,7 +5,8 @@
 //! one that ended before its run started, says so by an exit status of its own, which this turns
 //! into an error; any other exit status is this command's.
 //!
-//! Sending a job is [`super::send`]'s, and `ls` is [`super::listing`]'s.
+//! Sending a job is [`super::send`]'s, copying a record is [`super::copy`]'s, and `ls` is
+//! [`super::listing`]'s.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
