@@ -1,10 +1,9 @@
 //! The page's cancel of a run: `pumpkin cancel` of it, run as a child of the server, which
-//! answers at once, and reaps the child as the page next asks what it says, so that the page
-//! shows the command's own words. They go to a file in a directory of the cancel's own, removed
-//! once the child has ended and they are read.
+//! answers at once and reaps the child as the page next asks what it says, so that the page shows
+//! the command's own words.
 //!
-//! A child, as a cancel waits until the run has ended and its sandboxes are deleted, minutes on
-//! a provider whose sandboxes are instances, while the view answers one request at a time.
+//! A child, as a cancel waits until the run has ended and its sandboxes are deleted, minutes on a
+//! provider whose sandboxes are instances, while the view answers one request at a time.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -20,36 +19,35 @@ use tempfile::TempDir;
 use super::http::Response;
 use crate::workspace;
 
-/// The most bytes of what a cancel says that the page is sent: a cancel says a few lines.
+/// The most bytes of a cancel's output that the page reads: a cancel says a few lines.
 const SAID_MAX_BYTES: u64 = 64 * 1024;
 
-/// The cancels that the page started, the last of each run.
+/// The cancels started so far, the latest of each run.
 #[derive(Default)]
 pub(super) struct Cancels {
     by_run: BTreeMap<String, Cancel>,
 }
 
-/// A `pumpkin cancel`, how it ended, once reaped, and what it said.
 struct Cancel {
     child: Child,
     ended: Option<ExitStatus>,
     said: Said,
 }
 
-/// What a cancel says: into [`SAID`] in a directory of its own while it runs, then, once it has
-/// ended and that was read, the text.
+/// A cancel's output: the file the process writes, in a directory of its own, until the process
+/// has ended and the output is read for the last time.
 enum Said {
     Saying(TempDir),
     Said(String),
 }
 
-/// The file in a cancel's directory that it says what it says into.
 const SAID: &str = "said";
 
 impl Cancels {
-    /// Starts `pumpkin cancel` of run `id`, in the runs directory `runs` if given, or else on the
-    /// controller, and answers `202 Accepted` with what it has said so far; or refuses,
-    /// with `409 Conflict`, while the page's last cancel of it goes on.
+    /// Starts `pumpkin cancel` of run `id`, with `--runs` `runs` if given, and answers with what it
+    /// has said.
+    ///
+    /// Refuses with `409` if a cancel of the run is still going.
     pub(super) fn start(&mut self, id: &RunTag, runs: Option<&str>) -> Response {
         let under_way = match self.by_run.get_mut(id.as_str()) {
             Some(cancel) => cancel.reaped().map(|ended| ended.is_none()),
@@ -75,8 +73,8 @@ impl Cancels {
         }
     }
 
-    /// What the page's last cancel of run `id` has said, and how it ended, once it has, as JSON
-    /// `{"said": text, "ended": bool, "exit": code}`.
+    /// What the latest cancel of run `id` has said, whether it ended and its exit code; refused if
+    /// none was started.
     pub(super) fn said(&mut self, id: &RunTag) -> Response {
         let Some(cancel) = self.by_run.get_mut(id.as_str()) else {
             return Response::refused(
@@ -101,7 +99,6 @@ impl Cancels {
         }
     }
 
-    /// Starts `pumpkin cancel` of run `id`, as [`start`](Self::start) does.
     fn started(&mut self, id: &RunTag, runs: Option<&str>) -> Result<(), String> {
         let scratch = crate::controller::scratch()?;
         let path = scratch.path().join(SAID);
@@ -109,9 +106,9 @@ impl Cancels {
         let also = said.try_clone().context(path.display())?;
         let exe = workspace::exe("expected it to run `pumpkin cancel`")?;
         let mut command = stdx::process::command(exe, Environment::Inherited);
-        // Named when the runs are here, as without `--runs` a machine whose runs go to a controller
-        // cancels the run there.
         command.arg("cancel");
+        // Named when the runs are here, as without `--runs` a machine whose runs go to a
+        // controller cancels the run there.
         if let Some(runs) = runs {
             command.args(["--runs", runs]);
         }
@@ -130,7 +127,6 @@ impl Cancels {
 }
 
 impl Cancel {
-    /// How the cancel ended, once it has, reaping it then.
     fn reaped(&mut self) -> Result<Option<ExitStatus>, String> {
         if self.ended.is_none() {
             let waited = self.child.try_wait();
@@ -139,8 +135,6 @@ impl Cancel {
         Ok(self.ended)
     }
 
-    /// What the cancel has said so far, all it said if it has `ended`, which removes its
-    /// directory then.
     fn said(&mut self, ended: bool) -> Result<String, String> {
         let scratch = match &self.said {
             Said::Said(said) => return Ok(said.clone()),

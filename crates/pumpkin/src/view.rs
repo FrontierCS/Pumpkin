@@ -1,28 +1,20 @@
-//! `pumpkin view`: the runs in a runs directory, as JSON, served on this machine's loopback
-//! interface ([`http`]) to the person who started it, whose requests carry the token in the
-//! address that it prints, in [`http::TOKEN_HEADER`]:
+//! `pumpkin view`: the runs' records served to a browser, from this machine or through the view on
+//! a controller.
 //!
-//! - `GET /api/runs?before=<id>`: a page of the runs, newest first, each as `ls` lists it
-//!   ([`progress::columns`]), those before run `before` if given;
-//! - `GET /api/runs/<id>`: the run, its phase or ending, lanes, who talks to whom ([`talk`]),
-//!   model requests, and `end`, the byte of its log that it was read to;
-//! - `GET /api/runs/<id>/since?log=<byte>`: only `end` and `live` if the log has no line past
-//!   `byte`; else the run as above, and the log's records from `byte` on;
-//! - `GET /api/runs/<id>/log?at=<byte>`: the log's records from `byte` on;
-//! - `POST /api/runs/<id>/cancel`, from the view's page, and `GET …/cancelling` ([`cancel`]).
+//! A [`View`] holds each run it has been asked about between requests, as a fold of its log that
+//! is read further on each request, so that a page that polls reads only what the log has grown
+//! by. Its replies are JSON, built here and in [`json`](mod@json), [`talk`] and [`trace`]. The same
+//! replies are written as files by [`export`], and sent over a pipe by [`frame`] to the view that
+//! asks.
 //!
-//! What it reads, and when. An ended run, whose `outcome.json` is there, is listed from its
-//! `record.json`, `ir.json`'s name and `outcome.json`, read once, as an ended record doesn't
-//! change; a lost run, whose driver ended without one, from its log, read once, until a reap
-//! writes it. A live run, whose driver holds its lock, is held as a fold of its log ([`LogFold`]),
-//! which reads only what the log gained since it last read, and hands each new line to what the
-//! view derives from it; so is a run whose page is read, of which the view holds the
-//! [`HELD_ENDED_RUNS`] read last once they have ended. A poll's answer sends lines the fold holds;
-//! only a window further back reads the log again, the lines it sends.
+//! A run that has ended is listed from its record, read once, as an ended record doesn't change;
+//! one that is lost, whose driver ended without an outcome, is read again until a reap writes it.
+//! The view names a record only by its id as a [`RunTag`], below the runs directory, so that no
+//! path a request gives reaches the disk.
 //!
-//! It names a record only by its id, as a run's tag ([`RunTag`]), below the runs directory, and
-//! reads only what the record holds there: no path a request gives reaches the disk. The JSON
-//! form of what it answers with is a module's of its own ([`json`](mod@json)).
+//! A request is answered only if it names a loopback `Host` ([`http`]) and carries the token that
+//! `pumpkin view` printed, bar the page's own files; a cancel, the one request that changes
+//! anything, is also refused unless it comes from the page's own origin.
 
 mod cancel;
 mod export;
@@ -58,22 +50,22 @@ use self::talk::Talk;
 use crate::progress::{self, Listed};
 use crate::{cli, config, controller, next, say};
 
-/// The most runs that a page of the list holds.
+/// The most runs in one reply of the run list; `next` says where the following reply begins.
 const LIST_PAGE_RUNS: usize = 100;
 
-/// The most bytes of a run's log whose records one answer holds ([`window`]).
-// A page reads a log one window at a time, asking for each once the last has arrived, so each
-// costs a round trip. A link of under 1 MB a second with round trips of a tenth of a second
-// carries under 100 KB in one; at ten times that the round trips add a tenth or less to the read,
-// and the JSON one answer builds stays a few MiB.
+/// The most bytes of log in one window of a run's log, but for a single line longer than that.
+///
+/// A page reads a log one window at a time, each a round trip, so the window is large enough to
+/// read a log in few trips over a slow link, and small enough that the JSON of one answer stays a
+/// few MiB.
 const LOG_WINDOW_BYTES: u64 = 1024 * 1024;
 
-/// How many of a log's last lines a held run keeps, which a poll's answer sends without reading
-/// the log again: a live run's log gains a few between two polls.
+/// How many of a run's latest log lines are kept in memory, to answer a poll without reading the
+/// file: a live run's log gains a few between two polls.
 const RECENT_LINES: usize = 100;
 
-/// How many runs that have ended the view holds the folds of, those read last: a run's page is
-/// read again and again while it is open, and a person opens a few at a time.
+/// How many runs that have ended `View` keeps held; the one read longest ago goes first. A run's
+/// page is read again and again while it is open, and a person opens a few at a time.
 const HELD_ENDED_RUNS: usize = 8;
 
 /// Serves the runs in the directory `flags` name, or else, with `[controller]` in the
@@ -117,9 +109,8 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     match serve(&listener, &mut local)? {}
 }
 
-/// Answers, on the standard output, each request on the standard input for the runs' data in the
-/// default runs directory, in the frames of [`frame`], until the input ends or [`frame::IDLE`]
-/// passes with none.
+/// Runs `pumpkin controller view`: answers on the standard output the requests that come on the
+/// standard input, about the runs of the default directory ([`frame`]).
 pub(crate) fn over_pipe() -> Result<ExitCode, String> {
     let view = View::new(PathBuf::from(crate::default_runs()?), None);
     // The command that runs a run again from here would name the controller's paths.
@@ -131,19 +122,15 @@ pub(crate) fn over_pipe() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// What `pumpkin view` holds between requests: where the runs' data comes from ([`Source`]), and
-/// what it answers itself.
 struct Local {
     source: Source,
-    /// What each request of the view's data carries ([`token`]).
     token: String,
-    /// The port that the view is served at, which its page's `Origin` names.
+    /// The port the view is served at, which its page's `Origin` names.
     port: u16,
     cancels: cancel::Cancels,
     page: page::Page,
 }
 
-/// Where `pumpkin view` gets the runs' data.
 enum Source {
     /// The runs in a directory here, which a cancel names as `runs_given`, as it was given, or
     /// found by default.
@@ -152,69 +139,59 @@ enum Source {
     Controller(controller::Viewing),
 }
 
-/// What the view holds of the runs' data between requests.
+/// The runs of one directory, as the view reads them.
 struct View {
     runs: PathBuf,
-    /// The runs directory as commands name it, if not by default.
+    /// The runs directory as commands name it, `None` for the default.
     named: Option<String>,
-    /// Whether a run's reply holds the command that runs it again ([`run_json`]).
+    /// Whether a run's reply carries the command that runs it again.
     again: bool,
-    /// The list's row of each run that has ended, or is lost, by its id.
+    /// The list row of each run that has ended, or is lost.
     ended: BTreeMap<String, Row>,
-    /// Each run held as a fold of its log, by its id.
+    /// Each run held as a fold of its log.
     held: BTreeMap<String, Held>,
-    /// How many times the view found each run's log started over ([`Held::log_epoch`]), by its
-    /// id, kept as a run is dropped and held again.
+    /// Each run's log epoch, kept after its `Held` is dropped.
     log_epochs: BTreeMap<String, u64>,
-    /// How many requests have read a held run, which orders them by the last read.
+    /// How many runs have been read, in order.
     reads: u64,
-    /// How many folds of a run the view has made ([`Held::made`]).
+    /// How many `Held`s have been made.
     made: u64,
-    /// The traces of runs' callers, the last read last, as [`trace::TRACE_PASSES`] bounds them
-    /// ([`trace::Trace`]).
+    /// The traces of runs' callers, the last read last, as [`trace::TRACE_PASSES`] bounds them.
     trace: Vec<trace::Trace>,
 }
 
-/// The list's row of a run that has ended, or is lost, kept as the module's doc says.
 struct Row {
     record: Record,
+    /// Whether the run ended as lost, which a record that later ends otherwise supersedes.
     lost: bool,
     json: Value,
 }
 
-/// A run held as a fold of its log, with what the view derives from each of its lines.
+/// A run read so far: its record and the fold of its log, with what the replies are made from.
 struct Held {
     record: Record,
     fold: LogFold,
     /// What the lines taken say of the run, read again only once a take gains a line or the
     /// run's ending changes, and shared by every answer until then.
     readout: Readout,
-    /// Who talks to whom, once the record has its `ir.json` and `provider.json`.
     talk: Option<Talk>,
-    /// The run's task, as its `ir.json` names it, once it has one.
     task: Option<String>,
-    /// The byte at which each line taken starts, in the log's order.
+    /// The byte at which each line of the log starts.
     lines: Vec<u64>,
-    /// The last [`RECENT_LINES`] lines taken, by the byte each starts at, without their newlines.
+    /// The last [`RECENT_LINES`] lines, each with its byte.
     recent: VecDeque<(u64, Vec<u8>)>,
-    /// How the run ended, as of the last look; `None` while it is live.
     ending: Option<Ending>,
-    /// How many times the view found the run's log started over, shorter or another file: each
-    /// byte that an answer gave before is of another log.
+    /// How many times the log has started over: a byte of an earlier epoch means nothing now.
     log_epoch: u64,
-    /// The request that read it last ([`View::reads`]).
+    /// The value of `View::reads` when it was last read.
     read: u64,
-    /// The model exchanges its log names.
     exchanges: trace::Exchanges,
-    /// The ops its log names.
     ops: trace::Ops,
-    /// Which of the view's folds of a run it is ([`View::made`]).
+    /// The value of `View::made` when it was made, which a trace compares.
     made: u64,
 }
 
 impl Held {
-    /// The run of `record`, of whose log the view found `log_epoch` starts over before, with
-    /// nothing of its log taken, as the view's fold `made`.
     fn new(record: Record, log_epoch: u64, made: u64) -> Result<Self, String> {
         let fold = record.fold();
         Ok(Self {
@@ -234,8 +211,6 @@ impl Held {
         })
     }
 
-    /// Looks at the record again: how the run ended, if it has, then what its log gained, unless
-    /// the last look knew its ending already, as an ended run's log doesn't grow.
     fn look(&mut self) -> Result<(), String> {
         let (ended, log_epoch) = (self.ending.is_some(), self.log_epoch);
         // How it ended first, so that the log taken after holds every record before the end.
@@ -252,8 +227,6 @@ impl Held {
         Ok(())
     }
 
-    /// Takes what the log gained, and all of it again once it started over
-    /// ([`runtime::StartedOver`]).
     fn take(&mut self) -> Result<(), String> {
         if self.talk.is_none() {
             // A run writes both before it creates its log, so a log without them has no line.
@@ -300,7 +273,6 @@ impl Held {
     }
 }
 
-/// A token of 128 random bits, in hexadecimal.
 fn token() -> Result<String, String> {
     let mut random = [0; 16];
     File::open("/dev/urandom")
@@ -309,19 +281,18 @@ fn token() -> Result<String, String> {
     Ok(format!("{:032x}", u128::from_be_bytes(random)))
 }
 
-/// A connection that has sent nothing yet, as a browser opens one to use later, or never.
+/// An accepted connection that has sent nothing yet, as a browser opens one to use later, or
+/// never.
 struct Silent {
     stream: TcpStream,
     accepted: Instant,
 }
 
-/// Answers the connections to `listener` from `local`, one at a time, first accepted first. A
-/// connection that has sent nothing holds back no other, and is closed once silent for
-/// [`http::IDLE`].
 fn serve(listener: &TcpListener, local: &mut Local) -> Result<Infallible, String> {
-    // In the order they were accepted.
     let mut silent: Vec<Silent> = Vec::new();
     loop {
+        // A connection waits here until it sends a byte, so that one that never does holds up no
+        // other, and is dropped after `http::IDLE`.
         let (incoming, sent) = wait(listener, &silent)?;
         // All that had sent when the wait ended are answered, first accepted first, before the
         // next wait, so none waits on a connection accepted after it.
@@ -346,9 +317,6 @@ fn serve(listener: &TcpListener, local: &mut Local) -> Result<Infallible, String
     }
 }
 
-/// Waits until `listener` has a connection, one of `silent` has sent something or ended, or
-/// [`http::IDLE`] has passed since the first of `silent` was accepted. Gives whether `listener`
-/// has a connection, and whether each of `silent` has sent something or ended.
 fn wait(listener: &TcpListener, silent: &[Silent]) -> Result<(bool, Vec<bool>), String> {
     let mut polled = vec![PollFd::new(listener, PollFlags::IN)];
     polled.extend(
@@ -356,7 +324,7 @@ fn wait(listener: &TcpListener, silent: &[Silent]) -> Result<(bool, Vec<bool>), 
             .iter()
             .map(|connection| PollFd::new(&connection.stream, PollFlags::IN)),
     );
-    // As `silent` is in the order accepted, its first is the first to reach `IDLE`.
+    // `silent` is in the order accepted, so its first is the first to reach `IDLE`.
     let timeout = silent.first().map(|first| {
         let left = (first.accepted + http::IDLE).saturating_duration_since(Instant::now());
         let Ok(left) = Timespec::try_from(left) else {
@@ -373,7 +341,6 @@ fn wait(listener: &TcpListener, silent: &[Silent]) -> Result<(bool, Vec<bool>), 
     Ok((ready(&polled[0]), polled[1..].iter().map(ready).collect()))
 }
 
-/// Answers `stream`, which has sent something or ended, and says why if that fails.
 fn answer_sent(stream: TcpStream, local: &mut Local) {
     // One that ends, or fails, before its first byte asked nothing: a browser closes its spare
     // connections so.
@@ -385,15 +352,15 @@ fn answer_sent(stream: TcpStream, local: &mut Local) {
     }
 }
 
-/// Reads the request on `stream`, which has sent its first byte, and answers it.
 fn answer(stream: TcpStream, local: &mut Local) -> std::io::Result<()> {
     // A request sent in part holds back every other connection until `STALL` after its first
     // byte; a browser sends each request whole.
     let read = http::read(&stream, Instant::now() + http::STALL)?;
-    // No deadline: the answer is made of this machine's records, which no client can slow, or
-    // relayed from the view on the controller, over an `ssh` whose `ServerAliveInterval` ends a
-    // dead connection; and one cut off would be thrown away once its cost was paid. The other
-    // connections wait while it is made, as the view answers one at a time.
+    // No deadline for making the answer: it is made of this machine's records, which
+    // no client can slow, or relayed from the view on the controller, over an `ssh` whose
+    // `ServerAliveInterval` ends a dead connection; and one cut off would be thrown away once its
+    // cost was paid. The other connections wait while it is made, as the view answers one at a
+    // time.
     let (response, deflate) = match read {
         Ok(request) => (route(&request, local), request.deflate),
         Err(refused) => (refused, false),
@@ -401,7 +368,7 @@ fn answer(stream: TcpStream, local: &mut Local) -> std::io::Result<()> {
     http::write(stream, response, deflate)
 }
 
-/// What a request asks for, as the module's doc says.
+/// What a request to `/api/runs` asks for.
 enum Asked {
     Runs {
         before: Option<String>,
@@ -431,7 +398,7 @@ enum Asked {
     },
 }
 
-/// A failure to answer: no such run, or one that can't be read.
+/// Why a reply is not a `200`.
 enum Failed {
     NotFound(String),
     Unreadable(String),
@@ -444,9 +411,8 @@ impl From<String> for Failed {
     }
 }
 
-/// The answer to `request`, of `local`: a page's file, or, for a request that carries the token
-/// and passes [`allowed`], a cancel or the runs' data.
 fn route(request: &Request, local: &mut Local) -> Response {
+    // The browser's own requests for the page's files can't carry the token header.
     if request.method == Method::Get
         && let Some(file) = local.page.file(&request.path)
     {
@@ -489,8 +455,7 @@ fn route(request: &Request, local: &mut Local) -> Response {
     }
 }
 
-/// The answer to `request`, a `GET` of the runs' data, of `view`, with none of the checks of
-/// [`route()`].
+/// The answer to `request`, a `GET` of the runs' data, with none of `route`'s checks.
 fn api(request: &Request, view: &mut View) -> Response {
     match asked(request) {
         Ok(asked) => answered(asked, view),
@@ -498,7 +463,6 @@ fn api(request: &Request, view: &mut View) -> Response {
     }
 }
 
-/// The answer to `asked`, of the runs' data, of `view`.
 fn answered(asked: Asked, view: &mut View) -> Response {
     let answered = match asked {
         Asked::Runs { before } => view.runs_json(before.as_deref()),
@@ -531,8 +495,6 @@ fn answered(asked: Asked, view: &mut View) -> Response {
     }
 }
 
-/// What `request` asks for, or its refusal: not found, for a path that names nothing, or a bad
-/// request, for a run's id or a number that is none.
 fn asked(request: &Request) -> Result<Asked, Response> {
     let path = request.path.as_str();
     let not_found = || {
@@ -583,9 +545,6 @@ fn asked(request: &Request) -> Result<Asked, Response> {
     }
 }
 
-/// Refuses `request` unless its method is the one that what it asks for, `asked`, takes: `POST`
-/// for a cancel, from the view's own page, its `Origin`, as served at `port`, else `GET`; its runs
-/// directory is `named`, as commands name it, if not by default.
 fn allowed(
     asked: &Asked,
     request: &Request,
@@ -595,6 +554,9 @@ fn allowed(
     let refused = |status, message: String| Err(Response::refused(status, &message));
     match (asked, request.method) {
         (Asked::Cancel { id }, Method::Post) => {
+            // A cancel changes a run, so only the view's own page may send it: a page of another
+            // site can make the browser send a `POST` here, but the browser names that site in
+            // `Origin`, which the page can't change.
             let page = http::HOSTS.map(|host| format!("http://{host}:{port}"));
             let from = match &request.origin {
                 Some(origin) if page.contains(origin) => return Ok(()),
@@ -633,8 +595,6 @@ fn allowed(
 }
 
 impl View {
-    /// The view of the runs in `runs`, which commands name as `named`, if not by default, holding
-    /// nothing yet.
     fn new(runs: PathBuf, named: Option<String>) -> Self {
         Self {
             runs,
@@ -649,9 +609,6 @@ impl View {
         }
     }
 
-    /// A page of the runs, newest first, before run `before` if given, as JSON:
-    /// `{"runs": [...], "next": <id or null>}`, where `next` is the `before` of the next page, if
-    /// there is one.
     fn runs_json(&mut self, before: Option<&str>) -> Result<Value, Failed> {
         let names =
             if self.named.is_none() && !self.runs.try_exists().context(self.runs.display())? {
@@ -677,7 +634,6 @@ impl View {
         Ok(json!({ "runs": rows, "next": next }))
     }
 
-    /// The list's row of run `id`, as JSON; `None` if its directory holds no record.
     fn row(&mut self, id: &str) -> Result<Option<Value>, String> {
         if let Some(row) = self.ended.get(id) {
             if !row.lost || row.record.ending()? == Some(Ending::Lost) {
@@ -711,8 +667,6 @@ impl View {
         }
     }
 
-    /// The list's row of the run of `record`, which ended as `ending` says, or is lost, as JSON,
-    /// kept: read from its `outcome.json`, which says what it used, or else from its log.
     fn ended_row(&mut self, record: Record, ending: Ending) -> Result<Value, String> {
         let named = self.named.as_deref();
         let now = crate::unix_now();
@@ -753,7 +707,6 @@ impl View {
         Ok(json)
     }
 
-    /// Run `id`, held, and looked at again, as read by this request.
     fn held(&mut self, id: &RunTag) -> Result<&mut Held, Failed> {
         self.reads += 1;
         let id = id.as_str();
@@ -768,8 +721,8 @@ impl View {
         Ok(held)
     }
 
-    /// Run `id`, held, or else of `record`, looked at again ([`Held::look`]); dropped if the
-    /// look fails, as what a take that failed part-way leaves can't be trusted.
+    /// Run `id`, held, or else of `record`, looked at again. Its fold is dropped if the look
+    /// fails, as what a take that failed part-way leaves can't be trusted.
     fn looked(&mut self, id: &str, record: Option<Record>) -> Result<&mut Held, String> {
         let log_epoch = self.log_epochs.get(id).copied().unwrap_or(0);
         let made = self.made + 1;
@@ -786,17 +739,15 @@ impl View {
         Ok(self.held.entry(id.to_owned()).or_insert(held))
     }
 
-    /// Run `id`, as JSON, as the module's doc says.
     fn run_json(&mut self, id: &RunTag) -> Result<Value, Failed> {
         let (named, again) = (self.named.clone(), self.again);
         let held = self.held(id)?;
         Ok(run_json(held, named.as_deref(), again))
     }
 
-    /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave
-    /// ([`line_at`]), as JSON: `{"end": e, "live": l}` if nothing; else with `"run"`, the run,
-    /// and `"records"`, the records from `log` on, a window as [`window`] bounds it, and `"next"`,
-    /// the byte past the last of them, to ask from next.
+    /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave: only
+    /// `end` and `live` if nothing, else with the run, the records from `log` on in a window, and
+    /// `next`, the byte to ask from next.
     fn since_json(
         &mut self,
         id: &RunTag,
@@ -821,9 +772,6 @@ impl View {
         }))
     }
 
-    /// The records of run `id`'s log from byte `at` on, a byte that a reply of `log_epoch` gave
-    /// ([`line_at`]), a window as [`window`] bounds it, as JSON: `{"records": [...], "next": n,
-    /// "end": e}`, where `n` is the byte past the last.
     fn log_json(&mut self, id: &RunTag, at: u64, log_epoch: Option<u64>) -> Result<Value, Failed> {
         let held = self.held(id)?;
         let at = line_at(held, at, log_epoch)?;
@@ -835,8 +783,7 @@ impl View {
         }))
     }
 
-    /// Drops the folds of the runs that have ended, or are lost, but the [`HELD_ENDED_RUNS`] read
-    /// last.
+    /// Drops the folds of the runs that have ended, but the [`HELD_ENDED_RUNS`] read last.
     fn drop_ended(&mut self) {
         let mut ended: Vec<(u64, String)> = (self.held.iter())
             .filter(|(_, held)| held.ending.is_some())
@@ -851,8 +798,6 @@ impl View {
 }
 
 impl Local {
-    /// Starts `pumpkin cancel` of run `id` ([`cancel::Cancels::start`]); not found if the runs
-    /// directory here holds no record of it.
     fn cancel(&mut self, id: &RunTag) -> Response {
         match &self.source {
             Source::Here { view, runs_given } => {
@@ -866,10 +811,8 @@ impl Local {
     }
 }
 
-/// The index, among the lines that `held` took, of the one that starts at byte `byte`, or the
-/// count of them if `byte` is where its log was taken to; refused if it is neither, or, with
-/// `409 Conflict` and the log's `"log_epoch"`, if a reply gave `byte` of `log_epoch`, another
-/// than the log's: its log started over since, and the byte is of the log before.
+/// The index of the line that starts at `byte`, refused if `log_epoch` is not the log's, or if
+/// `byte` starts no line and is not the log's end.
 fn line_at(held: &Held, byte: u64, log_epoch: Option<u64>) -> Result<usize, Failed> {
     if log_epoch.is_some_and(|log_epoch| log_epoch != held.log_epoch) {
         let error = format!(
@@ -898,14 +841,12 @@ fn line_at(held: &Held, byte: u64, log_epoch: Option<u64>) -> Result<usize, Fail
     })
 }
 
-/// Records of a run's log, as JSON, of the lines up to byte `past`.
+/// Whole lines of a log, as records, and the byte at which the next window begins.
 struct Window {
     records: Vec<Value>,
     past: u64,
 }
 
-/// The records of `held`'s log from its line `from` on, those of its lines that end within
-/// [`LOG_WINDOW_BYTES`] of the start of line `from`, and that line at least.
 fn window(held: &Held, from: usize) -> Result<Window, String> {
     let starts = &held.lines[from..];
     let mut read = from..from;
@@ -924,8 +865,6 @@ fn window(held: &Held, from: usize) -> Result<Window, String> {
     })
 }
 
-/// The records of `held`'s log of its lines `read`, as JSON: from those it holds, if it holds
-/// them all, else read from the log now.
 fn lines(held: &Held, read: std::ops::Range<usize>) -> Result<Vec<Value>, String> {
     let past = held
         .lines
@@ -936,6 +875,7 @@ fn lines(held: &Held, read: std::ops::Range<usize>) -> Result<Vec<Value>, String
     let Some(&start) = starts.first() else {
         return Ok(Vec::new());
     };
+    // The lines held in memory answer it if they hold all of it; else the log is read.
     let held_from = held.recent.front().map(|(byte, _)| *byte);
     if held_from.is_some_and(|held_from| held_from <= start) {
         let recent = held.recent.iter().skip_while(|(byte, _)| *byte < start);
@@ -949,7 +889,7 @@ fn lines(held: &Held, read: std::ops::Range<usize>) -> Result<Vec<Value>, String
 }
 
 /// When `record`, a record of a run's log, happened, in seconds since the run started: when the
-/// runtime observed it, if it says, else when the log wrote it, as the log's doc says.
+/// runtime observed it, if it says, else when the log wrote it.
 fn when(record: &Value) -> Option<f64> {
     let nanos = |name: &str| record[name].as_str()?.parse::<u64>().ok();
     let nanos = nanos("observed_ns").or_else(|| nanos("at_ns"))?;

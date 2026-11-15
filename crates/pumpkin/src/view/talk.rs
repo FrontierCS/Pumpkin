@@ -1,8 +1,6 @@
-//! Who talks to whom in a run, as its log records it: the workflow's roles, from its IR, and
-//! what went between them, by kind, with how many and how many bytes where the log gives them:
-//! each judge call and its payload, the submission the final judge scores, each lease, its
-//! commands and its transfers' trees, each way, and each model request and its answer. And what
-//! each lease's runner did, command by command, for the lanes of the run's sandboxes.
+//! Who a run's roles talked to, folded from its log's records one at a time: the roles, with where
+//! they ran and how they are routed, the traffic between them, each runner's commands and
+//! transfers, and when each lane's model requests were answered.
 //!
 //! What a sandbox reaches other than by an op or its route, the log doesn't hold, and nor does
 //! this.
@@ -15,7 +13,6 @@ use serde_json::{Value, json};
 /// The model upstream, which every role with a route reaches: an end of edges, but no role.
 pub(super) const MODEL: &str = "model";
 
-/// What went along an edge: how many, and the bytes each way where the log gives them.
 #[derive(Default)]
 struct Traffic {
     count: u64,
@@ -35,8 +32,6 @@ impl Traffic {
     }
 }
 
-/// A command or transfer of a lease's runner, from when the core started it until it ended, as
-/// the log says: its end as the log gives it.
 struct Work {
     kind: String,
     label: String,
@@ -45,26 +40,23 @@ struct Work {
     end: Option<Value>,
 }
 
-/// What the log of a run says of who talks to whom, as far as it was taken.
+/// The talk of one run, to which each record of its log is `take`n in order.
 pub(super) struct Talk {
-    /// Each role's name, kind and place, as JSON, in the IR's order.
     roles: Vec<Value>,
     edges: BTreeMap<(String, String, &'static str), Traffic>,
-    /// The role of each lease's runner, by lease.
+    /// Each lease's runner role, for the leases started so far.
     pub(super) runners: BTreeMap<u64, String>,
-    /// Each lease's work, by lease, in the order the core started it.
     work: BTreeMap<u64, Vec<Work>>,
-    /// When each caller's model requests were answered, by its lane: `agent` or `job <n>`.
+    /// The times at which each lane's model requests were answered.
     pub(super) answered: BTreeMap<String, Vec<f64>>,
-    /// Of those, the answers that failed: not forwarded, or stating a failure.
+    /// The times of the answers in `answered` that failed or were not forwarded.
     pub(super) failed: BTreeMap<String, Vec<f64>>,
     reading: Reading,
 }
 
 impl Talk {
-    /// Who talks to whom in the run whose IR is `ir`, whose roles are placed as `places` says,
-    /// and whose roles' model routes are `routes`, if its build kept them, before any of its log
-    /// is read.
+    /// The talk of a run before its log, with the roles of its `ir`, as placed in `places` and
+    /// routed by `routes`, which is `None` where the run's routes are unknown.
     pub(super) fn new(
         ir: &Value,
         places: &BTreeMap<String, Place>,
@@ -114,7 +106,7 @@ impl Talk {
         }
     }
 
-    /// Takes in `record`, the log's next record.
+    /// Adds one log `record`.
     pub(super) fn take(&mut self, record: &Value) {
         let at = super::when(record).unwrap_or_default();
         let request = &record["event"]["request"];
@@ -124,7 +116,6 @@ impl Talk {
         self.event(at, &record["event"]);
     }
 
-    /// The role of `caller`, as the log names one: `agent` or `job-<n>`.
     fn role(&self, caller: &str) -> Option<String> {
         match caller.strip_prefix("job-") {
             Some(job) => self.reading.jobs.get(&job.parse().ok()?).cloned(),
@@ -132,25 +123,18 @@ impl Talk {
         }
     }
 
-    /// The roles of `lease`'s holder and its runner.
     fn ends(&self, lease: u64) -> Option<(String, String)> {
         let holder = self.reading.holders.get(&lease)?.clone();
         Some((holder, self.runners.get(&lease)?.clone()))
     }
 }
 
-/// What a [`Talk`] needs to know of the records to come.
 struct Reading {
-    /// The agent's role, and the score judge's.
     agent: String,
     score: String,
-    /// The role each grant reaches, by the role that holds it and its name.
     granted: BTreeMap<(String, String), String>,
-    /// The role of each judge call, by job.
     jobs: BTreeMap<u64, String>,
-    /// The role of each lease's holder, by lease.
     holders: BTreeMap<u64, String>,
-    /// Each transfer's direction, by lease and transfer.
     directions: BTreeMap<(u64, u64), String>,
 }
 
@@ -274,8 +258,8 @@ impl Talk {
         });
     }
 
-    /// Ends the earliest of `lease`'s work of `kind` that runs: a lease's runner runs one
-    /// command or transfer at a time.
+    /// Ends the earliest of `lease`'s work of `kind` that runs: a lease's runner runs one command
+    /// or transfer at a time.
     fn ended(&mut self, lease: u64, kind: &str, at: f64, end: &Value) {
         let work = self.work.entry(lease).or_default().iter_mut();
         let mut running = work.filter(|work| work.kind == kind && work.to.is_none());
@@ -285,8 +269,7 @@ impl Talk {
         }
     }
 
-    /// The roles and the edges, as JSON: `{"roles": [...], "edges": [{"from", "to", "kind",
-    /// "count", "bytes", "back_bytes"}]}`.
+    /// The roles and edges as the page reads them.
     pub(super) fn json(&self) -> Value {
         let edges: Vec<Value> = (self.edges.iter())
             .map(|((from, to, kind), traffic)| {
@@ -303,7 +286,7 @@ impl Talk {
         json!({ "roles": self.roles, "edges": edges })
     }
 
-    /// Lease `lease`'s work, as JSON, for its lane.
+    /// The commands and transfers of `lease`'s runner so far, with when each began and ended.
     pub(super) fn work_json(&self, lease: u64) -> Value {
         let work = self.work.get(&lease).map_or(&[][..], Vec::as_slice);
         let work: Vec<Value> = (work.iter())
@@ -321,9 +304,6 @@ impl Talk {
     }
 }
 
-/// `role` of the IR as the page shows it: its name, its kind, whether it is the score's, whether
-/// it has a model route, where `places` places it, and its model route's entries as `routes`
-/// says, or `"unknown"` if the record's build kept none.
 fn role_json(
     role: &Value,
     score: &str,

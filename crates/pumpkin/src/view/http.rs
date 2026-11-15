@@ -1,6 +1,6 @@
-//! The view's HTTP, as little of HTTP/1.1 as a browser's page needs: a `GET` of a path and a
-//! query, or a `POST` with no body, answered whole, with its length, deflated if the request
-//! accepts it and that is shorter, and the connection closed, one at a time.
+//! The view's HTTP, as little of HTTP/1.1 as a browser's page needs: a `GET` of a path and a query,
+//! or a `POST` with no body, answered whole, with its length, deflated if the request accepts it
+//! and that is shorter, and the connection closed, one at a time.
 
 use std::borrow::{Borrow, Cow};
 use std::io::{self, BufRead as _, BufReader, Read, Write};
@@ -9,53 +9,47 @@ use std::time::{Duration, Instant};
 
 use miniz_oxide::deflate::{CompressionLevel, compress_to_vec_zlib};
 
-/// The most bytes of a request's line and headers that are read: a browser's `GET`, with the
-/// cookies it keeps for `localhost`, takes a few KiB.
+/// Most bytes of a request's head that `read` takes in; a longer head is refused. A browser's
+/// `GET`, with the cookies it keeps for `localhost`, takes a few KiB.
 pub(super) const HEAD_MAX_BYTES: u64 = 64 * 1024;
 
-/// The most bytes of a `POST`'s body that are read, and dropped: a cancel's has none.
+/// Most bytes of a request's body that `read` takes in and drops; the view's only `POST` has none.
 const BODY_MAX_BYTES: u64 = 1024;
 
 /// How long a connection may take to send its request, from its first byte, and to take its
 /// answer, from the first byte written: no other connection is answered meanwhile.
 pub(super) const STALL: Duration = Duration::from_secs(10);
 
-/// How long a connection, which holds back no other, may wait to send its first byte before it is
-/// closed: as long as nginx's default `client_header_timeout`
+/// How long an accepted connection, which holds back no other, may send nothing before the server
+/// drops it: as long as nginx's default `client_header_timeout`
 /// (<https://github.com/nginx/nginx/blob/d17f1d249d386de1282222172f526973fcd8a702/src/http/ngx_http_core_module.c#L3626-L3627>).
 pub(super) const IDLE: Duration = Duration::from_secs(60);
 
-/// The hosts a request may name, each the machine's loopback: a page of another site that has
-/// its own name resolve to `127.0.0.1` names its own host, and is refused.
+/// The `Host` names of this machine's loopback, the only ones a request may name: a page of
+/// another site that has its own name resolve to `127.0.0.1` names its own host, and is refused.
 pub(super) const HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
 
-/// What a page that an answer is may load and run: the view's own scripts, style and font alone,
-/// never an inline script, a style attribute or another site's file, and no frame may hold it, so
-/// that text of a record a page shows can never run as code.
+/// Every response's content security policy: a page may load and run only the view's own scripts,
+/// style and font, never an inline script, a style attribute or another site's file, and no
+/// frame may hold it, so that text of a record that a page shows can never run as code.
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
      font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
      frame-ancestors 'none'";
 
-/// The header that carries the view's token ([`Request::token`]).
+/// The request header that carries the view's token.
 pub(super) const TOKEN_HEADER: &str = "X-Pumpkin-Token";
 
-/// A request: its method, its path, its query's `name=value` pairs, each value decoded as a form
-/// encodes it, and the headers that the view's checks read.
+/// A request read by `read`, or a `GET` built by `Request::get`.
 pub(super) struct Request {
     pub(super) method: Method,
-    /// Its path and query, as its line gives them.
     pub(super) target: String,
     pub(super) path: String,
     query: Vec<(String, String)>,
-    /// The site of the page that sent it, as a browser names it in `Origin`.
     pub(super) origin: Option<String>,
-    /// The view's token, as its [`TOKEN_HEADER`] gives it.
     pub(super) token: Option<String>,
-    /// Whether its `Accept-Encoding` accepts `deflate` ([`accepts_deflate`]).
     pub(super) deflate: bool,
 }
 
-/// The methods that the view takes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Method {
     Get,
@@ -63,9 +57,9 @@ pub(super) enum Method {
 }
 
 impl Request {
-    /// A `GET` of `target`, a path and its query as a request's line gives them, that carries
-    /// neither an `Origin` nor the token, and accepts a deflated body if `deflate`; or the refusal
-    /// of a query that is no text as a form encodes it.
+    /// A `GET` of `target`, a path with an optional query, naming no origin or token.
+    ///
+    /// Refuses a query that no form encodes.
     pub(super) fn get(target: &str, deflate: bool) -> Result<Self, Response> {
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         Ok(Self {
@@ -79,14 +73,15 @@ impl Request {
         })
     }
 
-    /// The value of the query's `name`, if it has one.
+    /// The first value of the query's `name`, percent-decoded.
     pub(super) fn query(&self, name: &str) -> Option<&str> {
         let mut values = self.query.iter().filter(|(named, _)| named == name);
         values.next().map(|(_, value)| value.as_str())
     }
 
-    /// The value of the query's `name` as a whole number, if it has one, or the refusal of a
-    /// request whose value is none.
+    /// The query's `name` as a whole number, or `None` where it is absent.
+    ///
+    /// Refuses a value that is no whole number.
     pub(super) fn number(&self, name: &str) -> Result<Option<u64>, Response> {
         let Some(value) = self.query(name) else {
             return Ok(None);
@@ -100,8 +95,7 @@ impl Request {
     }
 }
 
-/// An answer: its status line's code and reason, its type (with its charset, if text), its body,
-/// and whether a browser may keep it ([`Response::immutable`]).
+/// What the server answers: a status, a body and how the body is encoded.
 pub(super) struct Response {
     status: Cow<'static, str>,
     content_type: Cow<'static, str>,
@@ -123,6 +117,7 @@ enum Body {
 }
 
 impl Response {
+    /// A `200 OK` with `value` as its body.
     pub(super) fn json(value: &serde_json::Value) -> Self {
         Self {
             status: Cow::Borrowed("200 OK"),
@@ -132,7 +127,7 @@ impl Response {
         }
     }
 
-    /// This answer with the status `status`, such as `202 Accepted`.
+    /// This response under another status.
     pub(super) fn with_status(self, status: &'static str) -> Self {
         Self {
             status: Cow::Borrowed(status),
@@ -140,8 +135,7 @@ impl Response {
         }
     }
 
-    /// A reply that another view sent to the request that this one relays: its status, such as
-    /// `200 OK`, and type, as its head gave them, and its body, deflated if `deflated`.
+    /// An upstream view's response, passed on with the status, type and encoding it came with.
     pub(super) fn relayed(
         status: String,
         content_type: String,
@@ -156,7 +150,7 @@ impl Response {
         }
     }
 
-    /// The bytes `body`, of the type `content_type`, as a record keeps them.
+    /// A `200 OK` with `body`, of `content_type`.
     pub(super) fn bytes(content_type: &'static str, body: Vec<u8>) -> Self {
         Self {
             status: Cow::Borrowed("200 OK"),
@@ -166,8 +160,7 @@ impl Response {
         }
     }
 
-    /// A file of the page's, `body`, of the type `content_type`; `deflated` is its [`deflated`]
-    /// form, if shorter.
+    /// A `200 OK` for a file whose compressed form, if smaller, is made once by the caller.
     pub(super) fn file(
         content_type: &'static str,
         body: Vec<u8>,
@@ -184,8 +177,7 @@ impl Response {
         }
     }
 
-    /// This answer, as what its path always gives, so that a browser keeps it and uses it again
-    /// without asking.
+    /// This response marked as one that never changes, which a browser may keep.
     pub(super) fn immutable(self) -> Self {
         Self {
             immutable: true,
@@ -193,8 +185,7 @@ impl Response {
         }
     }
 
-    /// A refusal, `status`, with `message`, what is wrong and what is expected, as JSON
-    /// `{"error": message}`.
+    /// A response of `status` whose JSON body names `message`, for a request that can't be served.
     pub(super) fn refused(status: &'static str, message: &str) -> Self {
         let body = serde_json::json!({ "error": message }).to_string();
         Self {
@@ -206,18 +197,15 @@ impl Response {
     }
 }
 
-/// What an answer sends, its body deflated as the module's doc says if the request accepts it.
 pub(super) struct Sent {
     pub(super) status: Cow<'static, str>,
     pub(super) content_type: Cow<'static, str>,
     pub(super) body: Vec<u8>,
     pub(super) deflated: bool,
-    /// Whether a browser may keep it ([`Response::immutable`]).
     pub(super) immutable: bool,
 }
 
 impl Response {
-    /// What this answer sends to a request that accepts `deflate` if `deflate`.
     pub(super) fn sent(self, deflate: bool) -> Sent {
         let Self {
             status,
@@ -248,7 +236,7 @@ impl Response {
 }
 
 /// `body` deflated at `level`, in zlib's format, which HTTP's `deflate` names (RFC 9110, section
-/// 8.4.1.2), if that is shorter.
+/// 8.4.1.2), or `None` where that is no shorter.
 pub(super) fn deflated(body: &[u8], level: CompressionLevel) -> Option<Vec<u8>> {
     let deflated = compress_to_vec_zlib(body, level as u8);
     (deflated.len() < body.len()).then_some(deflated)
@@ -268,11 +256,15 @@ fn accepts_deflate(codings: &str) -> bool {
     })
 }
 
-/// Reads the request on `stream`: `Ok(Err(response))` for one that is refused, with the refusal.
+/// Reads one request from `stream` before `due`.
+///
+/// The inner `Err` is the refusal to answer with: a head that is cut short or too long, a method
+/// other than `GET` or `POST`, a body over `BODY_MAX_BYTES`, a `Host` that isn't this machine's
+/// loopback, or a query that is no form encoding. The body, if any, is read and dropped.
 ///
 /// # Errors
 ///
-/// Fails if the connection fails, or is still sending at `due`.
+/// The connection's failure, or a read that passes `due`.
 pub(super) fn read(stream: &TcpStream, due: Instant) -> io::Result<Result<Request, Response>> {
     let mut head = BufReader::new(Due { stream, due }.take(HEAD_MAX_BYTES));
     let mut line = String::new();
@@ -336,8 +328,6 @@ pub(super) fn read(stream: &TcpStream, due: Instant) -> io::Result<Result<Reques
     }))
 }
 
-/// The `name=value` pairs of `query`, each value decoded as a form encodes it; or the refusal of
-/// a value that isn't text so encoded.
 fn pairs(query: &str) -> Result<Vec<(String, String)>, Response> {
     let mut pairs = Vec::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
@@ -356,9 +346,6 @@ fn pairs(query: &str) -> Result<Vec<(String, String)>, Response> {
     Ok(pairs)
 }
 
-/// The request's method, `method`, and the bytes of its body, as its `Content-Length`, `length`,
-/// gives them; or its refusal, for a method that the view doesn't take or a body past
-/// [`BODY_MAX_BYTES`].
 fn parsed(method: &str, length: Option<&str>) -> Result<(Method, u64), Response> {
     let method = match method {
         "GET" => Method::Get,
@@ -387,8 +374,6 @@ fn parsed(method: &str, length: Option<&str>) -> Result<(Method, u64), Response>
     }
 }
 
-/// `value`, a query's, with each `+` a space and each `%` and two hexadecimal digits the byte
-/// they give; `None` unless it decodes so to UTF-8.
 fn decoded(value: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(value.len());
     let mut rest = value.as_bytes();
@@ -410,7 +395,6 @@ fn decoded(value: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// Refuses a request that names `host` unless it is one of [`HOSTS`].
 fn on_loopback(host: Option<&str>) -> Result<(), Response> {
     let name = host.map(|host| match host.rsplit_once(':') {
         Some((name, port)) if !port.contains(']') => name,
@@ -433,12 +417,8 @@ fn on_loopback(host: Option<&str>) -> Result<(), Response> {
     ))
 }
 
-/// Writes `response` on `stream`, whole, deflated if `deflate`, which the request accepts, and
-/// that is shorter; and closes it.
-///
-/// # Errors
-///
-/// Fails if the connection fails, or has yet to take it all [`STALL`] after it is ready to write.
+/// Writes `response` to `stream`, compressed if `deflate` and the response has a smaller form,
+/// within `STALL`, and closes the connection.
 pub(super) fn write(stream: TcpStream, response: Response, deflate: bool) -> io::Result<()> {
     let Sent {
         status,
@@ -484,15 +464,14 @@ pub(super) fn write(stream: TcpStream, response: Response, deflate: bool) -> io:
     stream.flush()
 }
 
-/// A connection, owned or borrowed, each read and write of which fails once `due` has passed, so
-/// that a client that sends or takes a byte at a time can't hold it past then.
+/// A stream whose every read and write is cut off at `due`, so that a peer that sends or takes
+/// bytes slowly can't hold the server past it.
 struct Due<S> {
     stream: S,
     due: Instant,
 }
 
 impl<S: Borrow<TcpStream>> Due<S> {
-    /// The time left until `due`, or the error of a connection that is past it.
     fn left(&self) -> io::Result<Duration> {
         let left = self.due.saturating_duration_since(Instant::now());
         if left.is_zero() {
