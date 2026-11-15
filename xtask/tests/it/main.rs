@@ -14,6 +14,8 @@ use xshell::{Shell, cmd};
 #[path = "../../src/diff.rs"]
 mod diff;
 mod entry;
+#[path = "../../src/figure.rs"]
+mod figure;
 mod live;
 #[path = "../../src/settings.rs"]
 mod settings;
@@ -394,6 +396,134 @@ fn architecture() {
             ARCHITECTURE.md:5:33: a link to `docs/dev/style.md#errors`, which isn't in the repository: link a document that is, or remove the link
             ARCHITECTURE.md:6:13: a link to `src/main.rs`, code in the repository: name it instead, in backticks
             ARCHITECTURE.md:6:37: a link to `src/`, code in the repository: name it instead, in backticks"#]],
+    );
+}
+
+#[test]
+fn figures() {
+    use Standing::Tracked;
+    let figure =
+        |title: &str, body: &str| format!("<svg>\n{title}<desc>A figure.</desc>\n{body}</svg>\n");
+    let good = figure(
+        "<title>A figure</title>",
+        "<text class=\"code mid\">a-crate</text><text class=\"code\">a-bin</text>\n\
+         <text class=\"note\">Words, not code. <tspan class=\"code\">run</tspan></text>\n\
+         <text class=\"name code\">Run::prepare install-tools outcome.json</text>\n",
+    );
+    let bad = "<svg>\n<style>@font-face{}</style>\n<script>run()</script>\n\
+               <image href=\"x.png\"/><text class=\"code\">Gone::prepare</text>\n</svg>\n"
+        .to_owned();
+    let map = "# Architecture\n\n![The machines.](docs/figures/good.svg) beside\n\
+               ![](docs/figures/bad.svg), ![A chart.](docs/chart.png) and\n\
+               ![A gone one.](docs/figures/gone.svg), with `#![no_std]` and `expect![[\"\"]]`.\n"
+        .to_owned();
+    let guide = "![Again.](../figures/good.svg) and ![Out.](../../../good.svg) and \
+                 ![Far.](https://example.com/a.svg)\n"
+        .to_owned();
+    let code = "enum Command {\n    InstallTools,\n    #[expect(dead_code)]\n    Run(Run),\n}\n\
+                struct Run;\nfn prepare() {}\nconst OUTCOME: &str = \"outcome.json\";\n"
+        .to_owned();
+    let manifest = "[package]\nname = \"a-crate\"\n\n[[bin]]\nname = \"a-bin\"\n".to_owned();
+    check(
+        "figures",
+        &[
+            ("ARCHITECTURE.md", map, Tracked),
+            ("docs/dev/guide.md", guide, Tracked),
+            ("docs/figures/good.svg", good, Tracked),
+            ("docs/figures/bad.svg", bad, Tracked),
+            (
+                "docs/figures/orphan.svg",
+                figure("<title id=\"t\">An orphan</title>", ""),
+                Tracked,
+            ),
+            ("docs/figures/chart.png", "PNG\n".to_owned(), Tracked),
+            ("Cargo.toml", manifest, Tracked),
+            ("src/lib.rs", code, Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            ARCHITECTURE.md:4:1: an image of `docs/figures/bad.svg` has no alt text: say in it what the figure shows, for a reader who can't see it
+            ARCHITECTURE.md:4:28: an image of `docs/chart.png`, which isn't an SVG in `docs/figures/`: draw it as one there, and embed that
+            ARCHITECTURE.md:5:1: an image of `docs/figures/gone.svg`, which isn't in the repository: embed a figure that is, or remove the image
+            docs/dev/guide.md:1:36: an image of `../../../good.svg`, which isn't an SVG in `docs/figures/`: draw it as one there, and embed that
+            docs/dev/guide.md:1:67: an image of `https://example.com/a.svg`, which isn't an SVG in `docs/figures/`: draw it as one there, and embed that
+            docs/figures/bad.svg: the figure has no `<title>`: add one that names what it shows, which a screen reader reads
+            docs/figures/bad.svg: the figure has no `<desc>`: add one that says it in prose, which a screen reader reads
+            docs/figures/bad.svg:2: the figure holds `@font-face`: remove it, as a figure is text and shapes alone, in the system's fonts
+            docs/figures/bad.svg:3: the figure holds `<script`: remove it, as a figure is text and shapes alone, in the system's fonts
+            docs/figures/bad.svg:4: the figure holds `<image`: remove it, as a figure is text and shapes alone, in the system's fonts
+            docs/figures/bad.svg:4: the figure sets `Gone` as code, but nothing in the workspace is named so: name it as the code does now, or set it as prose
+            docs/figures/chart.png: a file in `docs/figures/` that isn't an SVG: draw it as one, whose text stays text
+            docs/figures/orphan.svg: no document embeds the figure: embed it beside the prose that states what it shows, or remove it"#]],
+    );
+}
+
+#[test]
+fn figure_of_crates() {
+    let package = |name: &str, bin: bool, dependencies: &[(&str, Option<&str>)]| {
+        let kind = if bin { "bin" } else { "lib" };
+        let dependencies: Vec<_> = (dependencies.iter())
+            .map(|(name, kind)| serde_json::json!({ "name": name, "kind": kind }))
+            .collect();
+        serde_json::json!({
+            "name": name,
+            "targets": [{ "name": name, "kind": [kind] }],
+            "dependencies": dependencies,
+        })
+    };
+    let metadata = serde_json::json!({ "packages": [
+        package("app", true, &[("mid", None), ("side", None), ("helper", Some("dev")), ("serde", None)]),
+        package("mid", false, &[("low", None), ("side", Some("build"))]),
+        package("low", false, &[("base", None)]),
+        package("base", false, &[]),
+        package("side", false, &[]),
+        package("tool", true, &[("side", None), ("base", None)]),
+        package("helper", false, &[]),
+    ]})
+    .to_string();
+    check(
+        "figure-of-crates",
+        &[],
+        |sh| {
+            let stale = figure::check(sh, &metadata).unwrap_err();
+            figure::write(sh, &metadata).unwrap();
+            let fresh = figure::check(sh, &metadata);
+            let drawn = sh.read_file(figure::PATH).unwrap();
+            let drawn = drawn.replace(figure::STYLE, "<style>…</style>");
+            format!("{stale}\n{fresh:?}\n{drawn}")
+        },
+        &expect![[r#"
+            docs/figures/crates.svg is not what the workspace's manifests draw, as a crate or a dependency changed: run `cargo xtask figures`
+            Ok(())
+            <!-- cargo xtask figures writes this file from `cargo metadata`: edit xtask/src/figure.rs, not this -->
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 276 316" width="276" height="316" role="img" aria-labelledby="title desc">
+            <title id="title">How the workspace's crates depend on one another</title>
+            <desc id="desc">A box for each crate of the workspace, shaded if it builds a binary, in rows: an arrow leads from a crate down to each it depends on, but for a build or a development dependency, and for one that another of its arrows already leads to.</desc>
+            <style>…</style>
+            <defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker></defs>
+            <rect class="bg" width="276" height="316"/>
+            <path class="arrow" d="M117 48C117 73 94 73 94 99" marker-end="url(#head)"/>
+            <path class="arrow" d="M141 48C141 74 164 74 164 100V132C164 158 202 158 202 184V216C202 241 236 241 236 267" marker-end="url(#head)"/>
+            <path class="arrow" d="M62 216C62 241 40 241 40 267" marker-end="url(#head)"/>
+            <path class="arrow" d="M94 132C94 157 62 157 62 183" marker-end="url(#head)"/>
+            <path class="arrow" d="M136 216C136 241 64 241 64 267" marker-end="url(#head)"/>
+            <path class="arrow" d="M160 216C160 241 212 241 212 267" marker-end="url(#head)"/>
+            <rect class="hot" x="93" y="16" width="72" height="32" rx="6"/>
+            <text class="code mid" x="129" y="36">app</text>
+            <rect class="box" x="58" y="100" width="72" height="32" rx="6"/>
+            <text class="code mid" x="94" y="120">mid</text>
+            <rect class="box" x="26" y="184" width="72" height="32" rx="6"/>
+            <text class="code mid" x="62" y="204">low</text>
+            <rect class="hot" x="112" y="184" width="72" height="32" rx="6"/>
+            <text class="code mid" x="148" y="204">tool</text>
+            <rect class="box" x="16" y="268" width="72" height="32" rx="6"/>
+            <text class="code mid" x="52" y="288">base</text>
+            <rect class="box" x="102" y="268" width="72" height="32" rx="6"/>
+            <text class="code mid" x="138" y="288">helper</text>
+            <rect class="box" x="188" y="268" width="72" height="32" rx="6"/>
+            <text class="code mid" x="224" y="288">side</text>
+            </svg>
+        "#]],
     );
 }
 

@@ -22,6 +22,7 @@ use std::{env, iter};
 use xshell::{Cmd, Shell};
 
 mod diff;
+mod figure;
 mod live;
 mod settings;
 mod star;
@@ -63,6 +64,11 @@ mod flags {
             /// Runs the checks every change must pass, in order, and stops at the first that
             /// fails. They reach no Docker engine, network or cloud.
             cmd ci {}
+
+            /// Writes the figures drawn from the workspace, which `ci` checks are up to date:
+            /// `docs/figures/crates.svg`, of how its crates depend on one another, from
+            /// `cargo metadata`.
+            cmd figures {}
 
             /// Runs the checks that reach a real environment, which `ci` leaves out: `docker`, the
             /// tests that need a Docker engine, the static sandboxd or a server elsewhere, ignored
@@ -137,6 +143,7 @@ mod flags {
     pub enum XtaskCmd {
         Fmt(Fmt),
         Ci(Ci),
+        Figures(Figures),
         Live(Live),
         Sandboxd(Sandboxd),
         Install(Install),
@@ -152,6 +159,9 @@ mod flags {
 
     #[derive(Debug)]
     pub struct Ci;
+
+    #[derive(Debug)]
+    pub struct Figures;
 
     #[derive(Debug)]
     pub struct Live {
@@ -228,6 +238,7 @@ fn try_main() -> Result<()> {
             Ok(())
         }
         flags::XtaskCmd::Ci(flags::Ci) => ci(&cargo),
+        flags::XtaskCmd::Figures(flags::Figures) => figure::write(&cargo.sh, &metadata(&cargo)?),
         flags::XtaskCmd::Live(flags::Live {
             target,
             gpu_model,
@@ -331,6 +342,7 @@ fn ci(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;
     tidy::check(&cargo.sh)?;
+    figure::check(&cargo.sh, &metadata(cargo)?)?;
     let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
     clippy.args(["--", "--deny", "warnings"]).run()?;
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
@@ -349,6 +361,12 @@ fn ci(cargo: &Cargo) -> Result<()> {
         doctests.env_remove("UPDATE_EXPECT"),
         "cargo xtask ci",
     )
+}
+
+/// What `cargo metadata` says of the workspace's own packages, as JSON.
+fn metadata(cargo: &Cargo) -> Result<String> {
+    let metadata = cargo.cmd(&["metadata", "--format-version", "1", "--no-deps", "--locked"]);
+    Ok(metadata.read()?)
 }
 
 /// Runs `test` and `doctests` at once, and prints what `doctests` printed, if it failed, once

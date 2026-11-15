@@ -1,6 +1,6 @@
-//! The checks of the repository's Rust files, its `ARCHITECTURE.md` and the files under its
-//! `tests/` directories that `cargo xtask ci` runs, each for a rule of `docs/dev/writing.md`,
-//! `docs/dev/style.md` or `docs/dev/testing.md`.
+//! The checks of the repository's Rust files, its `ARCHITECTURE.md`, its figures and the images
+//! its documents embed, and the files under its `tests/` directories that `cargo xtask ci` runs,
+//! each for a rule of `docs/dev/writing.md`, `docs/dev/style.md` or `docs/dev/testing.md`.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -16,6 +16,10 @@ use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream, TokenTree};
 use xshell::{Shell, cmd};
 
 use crate::Result;
+
+// By its path, as xtask's test binary includes this file from elsewhere.
+#[path = "tidy/figures.rs"]
+mod figures;
 
 // The 95th percentiles of module docs' and item docs' lengths in comparable Rust applications.
 
@@ -33,9 +37,11 @@ const TEST_COMMENT_CAP: usize = 2;
 const WIDTH: usize = 100;
 
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
-/// `ARCHITECTURE.md` and the files under its `tests/` directories pass the checks.
+/// `ARCHITECTURE.md`, its Markdown documents, its figures and the files under its `tests/`
+/// directories pass the checks.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     let mut problems = Vec::new();
+    let mut names = BTreeSet::new();
     for path in files(sh, "rs")? {
         let text = sh.read_file(&path)?;
         let tokens: TokenStream = match text.parse() {
@@ -51,6 +57,7 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
                 continue;
             }
         };
+        figures::defined(tokens.clone(), &mut names);
         let comments = comments(&text, tokens.clone());
         let mut found = Found::default();
         for comment in &comments {
@@ -87,7 +94,10 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
         problems.extend(found.into_iter().map(|(_, problem)| problem));
     }
     problems.extend(architecture(sh)?);
-    problems.extend(test_data(&listed(sh)?));
+    let listed = listed(sh)?;
+    problems.extend(test_data(&listed));
+    names.extend(figures::packages(sh, &listed)?);
+    problems.extend(figures::check(sh, &listed, &names)?);
     if problems.is_empty() {
         Ok(())
     } else {
@@ -151,6 +161,10 @@ fn architecture(sh: &Shell) -> Result<Vec<String>> {
             let target = &line[at + opening.len()..];
             let target = &target[..target.find(')').unwrap_or(target.len())];
             if target.contains("://") || target.starts_with('#') {
+                continue;
+            }
+            // An image is the document's own content, which `figures` checks.
+            if (line[..at].rfind('[')).is_some_and(|open| line[..open].ends_with('!')) {
                 continue;
             }
             let path = &target[..target.find('#').unwrap_or(target.len())];
