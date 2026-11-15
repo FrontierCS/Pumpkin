@@ -9,7 +9,7 @@
 //! - `record.json`, written first: the version of the record's form ([`RECORD_VERSION`]), the
 //!   build that made it ([`BUILD`]) and the arguments of its `pumpkin run` ([`Record::args`]);
 //! - `ir.json`: the workflow's IR;
-//! - `provider.json`: the providers that the roles are placed on, and where each is ([`provided`]);
+//! - `provider.json`: where the roles are placed, and each one's model route ([`provided`]);
 //! - `log.jsonl`: the run log, which the `log` module lays out;
 //! - `payloads/<hex>`: the payload of each op the core accepted, named by its SHA-256;
 //! - `agent/`, `jobs/<n>/` and `leases/<n>/`, for the sandbox of the agent, of job `n`'s judge
@@ -34,9 +34,10 @@ use std::time::{Duration, SystemTime};
 
 use decision::PayloadRef;
 use provider::{Meeting, Provider, RunTag, SandboxId, Sweep, UnixTime};
+use route::Serving;
 use schema::ir::{GpuModel, Image, Name, Sha256Digest};
 use schema::sandbox::{command_stderr, log_dir, out_dir};
-use schema::workflow::{ByProvider, Placed, Placement, Workflow};
+use schema::workflow::{ByProvider, ByRole, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
@@ -1033,15 +1034,19 @@ fn utc_stamp(seconds: u64) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
-/// What `provider.json` holds of `placed`, whose roles are placed on `providers`:
-/// `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c, "image": {"digest": d,
-/// "build_tag": t}}}}`, where `r` is what `p` declared ([`Ready`](provider::Ready)), with how its
-/// sandboxes meet the gateway, `"reach"`: `local`, `private` or `listen` ([`Meeting`]); and role
-/// `n` is placed on `p`, in class `c`, and runs image `d`, built as tag `t`.
+/// What `provider.json` holds of `placed`, whose roles are placed on `providers` and served by
+/// `routes`: `{"providers": {p: r}, "roles": {n: {"provider": p, "class": c, "image": {"digest":
+/// d, "build_tag": t}}}, "routes": {n: [{"api": a, "upstream": u, "models": {m: {"upstream_name":
+/// v}}}]}}`, where `r` is what `p` declared ([`Ready`](provider::Ready)), with how its sandboxes
+/// meet the gateway, `"reach"`: `local`, `private` or `listen` ([`Meeting`]); role `n` is placed
+/// on `p`, in class `c`, and runs image `d`, built as tag `t`; and each entry of `n`'s model
+/// route, in its order, takes API `a` to the upstream that the deployment names `u`, which takes
+/// model `m` as `v`. A role without a model route is not in `routes`.
 pub(super) fn provided(
     placed: &Placed,
     providers: &ByProvider<&dyn Provider>,
     tags: &BTreeMap<Image, String>,
+    routes: &ByRole<Vec<Serving>>,
 ) -> Value {
     let declared = (providers.iter())
         .map(|(name, provider)| {
@@ -1069,7 +1074,32 @@ pub(super) fn provided(
         }
         (sandbox.name.to_string(), at)
     });
-    json!({ "providers": declared, "roles": roles.collect::<Map<_, _>>() })
+    // Names alone: the upstream's URL and key are the deployment's, and stay out of the record.
+    let entry = |serving: &Serving| {
+        let Serving {
+            name,
+            api,
+            url: _,
+            key: _,
+            models,
+        } = serving;
+        let models = (models.iter())
+            .map(|(model, upstream_name)| {
+                (model.to_string(), json!({ "upstream_name": upstream_name }))
+            })
+            .collect::<Map<_, _>>();
+        json!({ "api": api, "upstream": name, "models": models })
+    };
+    let served = workflow.roles().filter_map(|(role, sandbox)| {
+        let servings = routes.get(role);
+        let entries: Vec<Value> = servings.iter().map(entry).collect();
+        (!entries.is_empty()).then(|| (sandbox.name.to_string(), Value::Array(entries)))
+    });
+    json!({
+        "providers": declared,
+        "roles": roles.collect::<Map<_, _>>(),
+        "routes": served.collect::<Map<_, _>>(),
+    })
 }
 
 /// What a run of `workflow` keeps in its record's `ir.json`, as [`Run::prepare`] writes it.
