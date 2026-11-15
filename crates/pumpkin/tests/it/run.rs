@@ -440,6 +440,11 @@ fn usage() {
               a judge call: its model requests as threads of steps, each with the entries it
               added and the model's answer, as the record's log and the bodies it keeps say.
 
+              The page's colours follow the browser's light or dark setting; the choice in its
+              header overrides that with light or dark, and the browser keeps the choice.
+              `&scheme=light`, `&scheme=dark` or `&scheme=system` after the token picks one in
+              the address.
+
               The page's cancel of a run runs `pumpkin cancel --runs <dir> <run>`, and shows
               what that says. Nothing else the page does changes a run.
 

@@ -2,22 +2,25 @@
    the runs are of. Its face, Hanken Grotesk, for the interface, the system's monospace for what
    is machine-made; hairlines, no cards, no shadows but a tooltip's; colour only as a mark of
    data, one colour to each meaning, the same on every page. Every colour, face, size and space is
-   a property here, and nothing below names one of its own: the dark scheme is the same names with
-   other values. */
+   a property here, and nothing below names one of its own. Each colour is its light value and its
+   dark one, which `light-dark()` picks by the root's `color-scheme`
+   (https://developer.mozilla.org/en-US/docs/Web/CSS/color_value/light-dark): both, for the
+   browser's setting to pick, unless `data-scheme` on the root element names one. */
 :root {
+  color-scheme: light dark;
   /* surfaces and lines */
-  --bg: #ffffff; --panel: #ffffff; --hover: #f1f3f4; --select: #ecf2fb; --mark: #fdd663;
-  --line: #dadce0; --line-soft: #eceff1; --mark-bar: #e3a008; --rule: #3c4043; --edge: #80868b;
+  --bg: light-dark(#ffffff, #202124); --panel: light-dark(#ffffff, #202124); --hover: light-dark(#f1f3f4, #303134); --select: light-dark(#ecf2fb, #2b3a55); --mark: light-dark(#fdd663, #6b5a1a);
+  --line: light-dark(#dadce0, #3c4043); --line-soft: light-dark(#eceff1, #2c2d30); --mark-bar: light-dark(#e3a008, #fdd663); --rule: light-dark(#3c4043, #9aa0a6); --edge: #80868b;
   /* text */
-  --text: #1f1f1f; --text-2: #3c4043; --dim: #5f6368;
+  --text: light-dark(#1f1f1f, #e8eaed); --text-2: light-dark(#3c4043, #bdc1c6); --dim: light-dark(#5f6368, #9aa0a6);
   /* accent and state */
-  --accent: #0b57d0; --accent-hover: #0842a0; --live: #d01884; --focus: #0b57d0;
-  --ok: #137333; --fail: #c5221f; --warn: #6d4c41;
-  --ok-bar: #1e8e3e; --fail-bar: #d93025; --warn-bar: #8d6e63;
+  --accent: light-dark(#0b57d0, #8ab4f8); --accent-hover: light-dark(#0842a0, #aecbfa); --live: light-dark(#d01884, #ff8bcb); --focus: light-dark(#0b57d0, #8ab4f8);
+  --ok: light-dark(#137333, #81c995); --fail: light-dark(#c5221f, #f28b82); --warn: light-dark(#6d4c41, #bcaaa4);
+  --ok-bar: light-dark(#1e8e3e, #81c995); --fail-bar: light-dark(#d93025, #f28b82); --warn-bar: light-dark(#8d6e63, #bcaaa4);
   /* entities: fills for marks and lines, inks for text */
-  --agent: #3c4043; --judge: #9334e6; --runner: #0e8fa0; --model: #d56a00;
-  --agent-ink: #202124; --judge-ink: #681da8; --runner-ink: #0b6b78; --model-ink: #9a5b00;
-  --on-bar: rgba(255, 255, 255, 0.85);
+  --agent: light-dark(#3c4043, #dadce0); --judge: light-dark(#9334e6, #c58af9); --runner: light-dark(#0e8fa0, #4ecde6); --model: light-dark(#d56a00, #fa903e);
+  --agent-ink: light-dark(#202124, #e8eaed); --judge-ink: light-dark(#681da8, #d7aefb); --runner-ink: light-dark(#0b6b78, #78d9ec); --model-ink: light-dark(#9a5b00, #fcad70);
+  --on-bar: light-dark(rgba(255, 255, 255, 0.85), rgba(32, 33, 36, 0.85));
   /* type: the site's face and type scale, two weights */
   --sans: "Hanken Grotesk", "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
@@ -33,22 +36,11 @@
   /* so that a trace's toolbar keeps its counts on its line at 1100 px */
   --search: 14em;
   --r-box: 4px; --r-panel: 6px;
-  --pop: 0 6px 18px rgba(32, 33, 36, 0.14);
+  --pop: 0 6px 18px light-dark(rgba(32, 33, 36, 0.14), rgba(0, 0, 0, 0.5));
 }
+:root[data-scheme="light"] { color-scheme: light; }
+:root[data-scheme="dark"] { color-scheme: dark; }
 @font-face { font-family: "Hanken Grotesk"; src: url("/hanken-grotesk.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #202124; --panel: #202124; --hover: #303134; --select: #2b3a55; --mark: #6b5a1a;
-    --line: #3c4043; --line-soft: #2c2d30; --mark-bar: #fdd663; --rule: #9aa0a6; --edge: #80868b;
-    --text: #e8eaed; --text-2: #bdc1c6; --dim: #9aa0a6;
-    --accent: #8ab4f8; --accent-hover: #aecbfa; --live: #ff8bcb; --focus: #8ab4f8;
-    --ok: #81c995; --fail: #f28b82; --warn: #bcaaa4; --ok-bar: #81c995; --fail-bar: #f28b82; --warn-bar: #bcaaa4;
-    --agent: #dadce0; --judge: #c58af9; --runner: #4ecde6; --model: #fa903e;
-    --agent-ink: #e8eaed; --judge-ink: #d7aefb; --runner-ink: #78d9ec; --model-ink: #fcad70;
-    --on-bar: rgba(32, 33, 36, 0.85);
-    --pop: 0 6px 18px rgba(0, 0, 0, 0.5);
-  }
-}
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text-2); font: 400 var(--fs)/var(--lh) var(--sans); display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
@@ -84,6 +76,7 @@ input:hover, select:hover { border-color: var(--edge); }
 .crumbs .id { color: var(--text); }
 .follow { margin-left: auto; display: flex; align-items: center; gap: var(--s2); color: var(--dim); white-space: nowrap; }
 .follow .mark { margin: 0; }
+.bar .scheme { flex: none; height: var(--control); }
 main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: var(--s3) var(--s4); gap: var(--s2); overflow: auto; }
 
 /* The runs: a dark rule under the head, hairlines between rows, numbers right-aligned. */
