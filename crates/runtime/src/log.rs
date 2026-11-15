@@ -22,7 +22,7 @@
 //! or `holder` is its sandbox's name in the run, `agent`, or `job-<n>` for job `n`'s call.
 //! `start_judge` names the agent's grant of the call, or `null` for the score, `start_lease` the
 //! lease's grant; a `transfer` gives its paths, and its `transfer_ended` its sizes, never what it
-//! moved. A reply is the [`OpReply`](schema::sandbox::op::OpReply) sent.
+//! moved. A reply is the [`OpReply`] sent, but a `status` or `lease_status` one by its kind alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -42,7 +42,7 @@ use provider::UnixTime;
 use route::{Answer, Usage};
 use schema::ir::{Api, Gpu, GpuModel, Name};
 use schema::sandbox::ExitStatus;
-use schema::sandbox::op::{CommandEnd, TransferEnd};
+use schema::sandbox::op::{CommandEnd, OpReply, TransferEnd};
 use schema::workflow::{JudgeCall, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -532,6 +532,17 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
         Action::StartAgent => json!({ "kind": "start_agent" }),
         Action::Reply { op, reply } => {
+            // A poll's reply says how a job or a lease stood, which the job's and the lease's own
+            // events in the log say too.
+            let reply = match reply {
+                OpReply::Status(_) => json!({ "kind": "status" }),
+                OpReply::LeaseStatus(_) => json!({ "kind": "lease_status" }),
+                OpReply::Ops(_)
+                | OpReply::Judge(_)
+                | OpReply::Submit(_)
+                | OpReply::Lease(_)
+                | OpReply::Refused { .. } => json!(reply),
+            };
             json!({ "kind": "reply", "op": op.0, "reply": reply })
         }
         Action::StartJudge {
