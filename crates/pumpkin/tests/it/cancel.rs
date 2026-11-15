@@ -12,10 +12,8 @@ use super::{
     Scratch, StandIn, Step, check, ended, invocation, ran, record, report, write_gone, write_record,
 };
 
-/// A lost run.
 const LOST: &str = "20261108-120000-0b000001";
 
-/// A run that failed.
 const FAILED: &str = "20261108-120100-0b000002";
 
 /// A record made before records were locked.

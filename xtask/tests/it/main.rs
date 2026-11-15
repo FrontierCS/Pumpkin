@@ -1,7 +1,5 @@
-//! xtask's checks of Rust files ([`tidy`]) and its diff ([`diff`]), on scratch Git
-//! repositories, what `cargo xtask live` reads of a configuration and of a run's progress
-//! ([`live`]), and the consumer entry `deploy/pumpkin` ([`entry`]). xtask is a binary, so its
-//! test binary compiles their modules itself.
+//! Tests of xtask's modules, on scratch Git repositories where they use Git, and of the consumer
+//! entry `deploy/pumpkin`. xtask is a binary, so its test binary compiles their modules itself.
 
 #![expect(
     clippy::unwrap_used,
@@ -24,10 +22,8 @@ mod tidy;
 #[path = "../../src/wait.rs"]
 mod wait;
 
-/// The result the check returns, as xtask's tasks do.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// How a file stands in the scratch repository.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Standing {
     /// In the repository's one commit.
@@ -91,7 +87,6 @@ fn check(
     expect.assert_eq(&reported.replace(dir.to_str().unwrap(), "<repo>"));
 }
 
-/// What the checks of Rust files report.
 fn tidy(sh: &Shell) -> String {
     match tidy::check(sh) {
         Ok(()) => "passed".to_owned(),
@@ -99,7 +94,6 @@ fn tidy(sh: &Shell) -> String {
     }
 }
 
-/// `count` lines, each `line`.
 fn lines(line: &str, count: usize) -> String {
     format!("{line}\n").repeat(count)
 }

@@ -1,9 +1,7 @@
 //! The commands that `pumpkin` says to run next, which end what it says of a run's ending or of
-//! a refusal: to run a run again, follow it, stop it, or remove what runs left, or to check or
-//! build a task again. Each is a line
-//! that a POSIX shell runs as it is, with its words quoted where they need to be ([`quoted`])
-//! and its paths absolute; a flag left at its default is left out, as the default is the same
-//! for the next command.
+//! a refusal. Each is a line that a POSIX shell runs as it is, with its words quoted where they
+//! need to be ([`quoted`]) and its paths absolute; a flag left at its default is left out, as
+//! the default is the same for the next command.
 //!
 //! A run is run again from its task's source, with the arguments that started it, as its record
 //! keeps them ([`runtime::Record::args`]).

@@ -5,7 +5,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// The name of the directory that a workspace keeps Pumpkin in.
 pub(crate) const DIR: &str = ".pumpkin";
 
 /// The runs directory of a workspace's [`DIR`], its default one.
@@ -19,22 +18,16 @@ pub(crate) const RUNS: &str = "runs";
 /// and a directory for the providers of each kind, by its name.
 pub(crate) struct Workspace(PathBuf);
 
-/// This `pumpkin`'s executable, by its canonical path, as Linux gives it.
-///
-/// # Errors
-///
-/// Fails, saying then what was `expected` of it, if it can't be found.
+/// This `pumpkin`'s executable, by its canonical path, as Linux gives it. If it can't be found,
+/// the error says what was `expected` of it.
 pub(crate) fn exe(expected: &str) -> Result<PathBuf, String> {
     let exe = env::current_exe();
     exe.map_err(|error| format!("this `pumpkin`'s executable can't be found ({error}): {expected}"))
 }
 
 impl Workspace {
-    /// The workspace's directory of this `pumpkin`.
-    ///
-    /// # Errors
-    ///
-    /// Fails if this `pumpkin`'s executable can't be found, or is in no `.pumpkin` directory.
+    /// The workspace's directory of this `pumpkin`. Fails if its executable is in no `.pumpkin`
+    /// directory.
     pub(crate) fn find() -> Result<Self, String> {
         let exe = exe(&format!(
             "expected it in a workspace's `{DIR}` directory, which holds all it writes"
@@ -58,7 +51,6 @@ impl Workspace {
         self.0.parent().unwrap_or(&self.0)
     }
 
-    /// The default runs directory.
     pub(crate) fn runs(&self) -> PathBuf {
         self.0.join(RUNS)
     }

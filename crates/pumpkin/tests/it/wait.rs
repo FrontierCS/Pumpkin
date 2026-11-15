@@ -796,9 +796,8 @@ fn follows_milestones() {
     );
 }
 
-// A run whose final judge returned its whole result, as deep as a result may nest, which `wait`
-// and `ls` read back; and one a level deeper, which no run writes, whose line they leave out and
-// say. Each log ends with a line cut short, as by a crash, which they leave out quietly.
+// A result one level deeper than a run writes is left out and said; a log's last line cut short,
+// as by a crash, is left out quietly.
 #[test]
 #[expect(
     clippy::too_many_lines,

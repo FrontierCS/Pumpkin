@@ -1,15 +1,7 @@
 //! `pumpkin`, the operator's command line, which [`cli`] parses and describes, as
-//! `pumpkin --help` prints it. `run` builds a task's images on the machine's engine and starts
-//! its workflow's run with [`runtime`], on the providers that [`config`], the machine's
-//! configuration, places its roles on, each connected as its kind says ([`Connected`]), in a
-//! driver process ([`driver`]), with the `sandboxd` that [`sandboxd`] finds. `check` checks a
-//! task's source, which [`star`] reads, and lints it, and `build` builds its images and prints its
-//! IR. `fmt` formats `.star` files, and `check` lints them, with the formatter beside `pumpkin`
-//! ([`style`]). `ls`
-//! lists the runs, and [`lock`] writes a recipe's fetch stage. What a command says of an ending
-//! or a refusal ends with the commands to run next, as [`next`] makes them. All that it writes
-//! on this machine, but what a command names, as `--runs` does, goes in the workspace's
-//! directory of it ([`Workspace`]).
+//! `pumpkin --help` prints it. What a command says of an ending or a refusal ends with the
+//! commands to run next, as [`next`] makes them. All that it writes on this machine, but what a
+//! command names, as `--runs` does, goes in the workspace's directory of it ([`Workspace`]).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -288,8 +280,7 @@ fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
 /// and the providers and builds the task's images ([`prepared`]), places the roles, listens where
 /// private sandboxes dial ([`listen`]), has signals interrupt the run (`stdx::signal::catch`),
 /// makes the record and tells `run` its id, starts the run and tells `run` so, then drives it to
-/// its end.
-/// Fails, before the start, if `run` has ended or anything above fails or is refused.
+/// its end. Fails, before the start, if `run` has ended or anything above fails or is refused.
 fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let (id, reader, run) = driver_started(args)?;
     let words = recorded_args(&run)?;
@@ -393,10 +384,7 @@ fn begun(id: &str, dir: &Path, pushing: &[String], reader: Reader) {
 
 /// The run that the driver's `args` ask for, by its id, and who reads what it says, once the
 /// driver has asked to end with `run` ([`driver::die_with_run`]) and named its process [`ARGV0`].
-///
-/// # Errors
-///
-/// Fails if `args` aren't what `run` gives the driver, `run` has ended, or the name can't be set.
+/// Fails if `args` aren't what `run` gives the driver, or `run` has ended.
 fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), String> {
     // Only `run` starts the driver, with its process ID and the run's id, but an `argv[0]` of
     // the driver's name can come from anyone.
@@ -434,11 +422,8 @@ struct Prepared<'e> {
 /// names, each step refused before the next begins: the configuration read, and an upstream found
 /// to serve each role's model route; the engine reached, said to `reader` ([`engine()`]), and kept
 /// in `engine`; each provider connected to it ([`Connected::new`]), so that an engine that can't
-/// run sandboxes is refused before any image is built; then the task's images built on it.
-///
-/// # Errors
-///
-/// As each step fails; gives each build that failed, at its place.
+/// run sandboxes is refused before any image is built; then the task's images built on it. Fails
+/// as each step does; gives each build that failed, at its place.
 fn prepared<'e>(
     task: star::Task<'_>,
     config: &Path,
@@ -692,7 +677,6 @@ fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<(Record, Option<Strin
 /// help says.
 const UNREACHED: u8 = 3;
 
-/// What [`reaped`] found of a run.
 struct Swept {
     /// Whether the run had left anything, now removed.
     left: bool,
@@ -1108,7 +1092,6 @@ fn follow(record: &Record, command: &str, runs: Option<&str>) -> Result<ExitCode
     end(record, &ending, runs, record.args())
 }
 
-/// How often [`followed`] looks at a live run's record.
 // A milestone said within a second is timely, and a run's log, at most about 100 KB, costs
 // nothing to read again.
 const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -1353,13 +1336,9 @@ enum Connected<'e> {
 
 impl<'e> Connected<'e> {
     /// Provider `name`, of `kind`, connected, with `engine`, the machine's Docker engine, whose
-    /// sandboxes, if it is one, are given the CPUs of `cpus`.
-    ///
-    /// # Errors
-    ///
-    /// Fails, naming the provider, if the engine can't run sandboxes, an EC2 envelope or a Modal
-    /// workspace can't be reached, as one whose helper isn't beside this `pumpkin`, or if
-    /// `engine` can't push what its sandboxes pull.
+    /// sandboxes, if it is one, are given the CPUs of `cpus`. Fails, naming the provider, if the
+    /// engine can't run sandboxes, or push what the provider's sandboxes pull, or the provider
+    /// can't be reached, as one whose helper isn't beside this `pumpkin`.
     fn new(
         name: &Name,
         kind: config::Kind,
@@ -1402,11 +1381,8 @@ impl<'e> Connected<'e> {
 }
 
 /// The Modal provider's helper, `pumpkin-modal.py`, beside the `pumpkin` executable that runs, as
-/// `cargo xtask install` installs it, with its lock beside it.
-///
-/// # Errors
-///
-/// Fails if that `pumpkin` can't be found, or the helper or its lock isn't beside it.
+/// `cargo xtask install` installs it, with its lock beside it. Fails if the helper or its lock
+/// isn't beside it.
 fn modal_helper() -> Result<PathBuf, String> {
     let pumpkin = workspace::exe("expected Modal's helper beside it")?;
     let helper = pumpkin.with_file_name(MODAL_HELPER);
@@ -1425,9 +1401,8 @@ fn modal_helper() -> Result<PathBuf, String> {
 
 /// `workflow`, of the task whose entry is `path`, placed in the classes that `providers`, read
 /// from the configuration at `config`, offer ([`Workflow::place`]), with each provider that it
-/// places a role on. Of one that can't be, says
-/// each problem on a line of its own, as cargo does, then fails with how many, as [`refused`]
-/// does with `again`.
+/// places a role on. Of one that can't be, says each problem on a line of its own, as cargo does,
+/// then fails with how many, as [`refused`] does with `again`.
 fn place<'p, 'e>(
     path: &Path,
     workflow: Workflow,

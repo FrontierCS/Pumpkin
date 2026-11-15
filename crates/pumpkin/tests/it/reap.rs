@@ -281,10 +281,7 @@ const UNCONFIGURED: &str = "20261108-120900-0a00000a";
 /// A lost run on `aws`, which the configuration that ran it no longer names.
 const UNNAMED: &str = "20261108-121100-0a00000c";
 
-// Lost runs on a provider that `reap` and `cancel` reach, `local`, and on one that they can't,
-// `aws`, whose `aws` fails each call, as one does once its account is gone: each takes what the
-// run's record holds and its configuration names, removes what it can reach, records the run as
-// failed, and says what remains and how to reap it again.
+// `aws` fails each call, as one does once its account is gone.
 #[test]
 #[expect(
     clippy::too_many_lines,

@@ -2110,9 +2110,6 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// What the judges of the run whose agent makes ops do with the payload in their slot: for
-/// `slow`, run past any call's timeout; for any other, write a result whose `raw_score` is the
-/// payload's size, and evidence, and print who judged it, and where.
 const JUDGE: &str = r#"
     payload=/pumpkin/in/payload/raw
     if [ "$(cat $payload)" = slow ]; then sleep 300; fi
@@ -2121,12 +2118,6 @@ const JUDGE: &str = r#"
     echo kept > /pumpkin/out/evidence/evidence.txt
     echo "judged $bytes bytes as $(id -u), with HOME=$HOME, in $(pwd)""#;
 
-/// What the agent of the run that makes ops does: shows the modes of the directories and files
-/// the run put in its sandbox, and its standard input; then makes ops through `sandboxctl`,
-/// whose path stands as `SANDBOXCTL`, printing the reply each got: one the core refuses, for
-/// each of a job and a grant it doesn't have and a payload over its grant's limit, and one that
-/// the gateway refuses, without the core, for a payload over every grant's; a judge call, which
-/// it awaits; one that runs past its timeout; and a submission, which it finalizes.
 /// `sandboxctl` exits with 1 for a refusal and 2 for a job that has no score.
 const AGENT: &str = r#"#!/bin/sh
     cd /workspace && stat -c '%a %n' .codex .codex/skills .codex/config.toml .tmp agent
@@ -2182,11 +2173,6 @@ fn ops_workflow() -> Value {
     ir
 }
 
-/// What the agent of the run that leases a runner does: opens a lease, waits for its runner, puts
-/// a tree of its own there, runs a command that shows where and how it runs and writes a tree from
-/// the one put, gets that tree back, puts the first again, which fails as its destination exists,
-/// runs one that runs past its timeout, reading the lease's status after each, closes the lease,
-/// shows what it got, and finalizes a submission. Each reply's times stand as `<s>`.
 const LEASING_AGENT: &str = r#"#!/bin/sh
     printf xxxxxx > /workspace/six
     mkdir --parents /workspace/src/deep && printf hello > /workspace/src/a && printf deep > /workspace/src/deep/b
@@ -2305,11 +2291,6 @@ fn leases_on_docker() {
 /// `/answers`, a file of the judges' image, or, if it can't read it, 7.
 const PROGRAM: &str = "cat /answers || echo 7";
 
-/// What the final judge of the run whose final judge leases a runner does, through `sandboxctl`,
-/// whose path stands as `SANDBOXCTL`: shows that it reads `/answers`, a file of its image; opens a
-/// lease of a runner of an image of its own, puts its slot there and runs the submitted program
-/// in it, shows the lease's status once the program has ended, its times as `<s>`, and scores
-/// what the program printed.
 const ISOLATING_JUDGE: &str = r#"
     echo "the judge reads /answers: $(cat /answers)"
     ready() { until SANDBOXCTL lease status 0 | grep -q '"state":"ready"'; do sleep 1; done; }

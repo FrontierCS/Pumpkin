@@ -1,9 +1,5 @@
-//! The workflow language's formatter, which `pumpkin fmt` and `pumpkin check` run beside
-//! `pumpkin`: buildifier, Bazel's formatter of Starlark, pinned by its version and by the SHA-256
-//! of its release for each platform that `pumpkin` runs on ([`PINS`]), and fetched once into the
-//! target directory ([`buildifier`]), which `install` and `ci` place beside a `pumpkin`, and
-//! `ci` and `mutants` name to the tests; and
-//! `ci`'s check that the repository's own `.star` files are formatted ([`check`]).
+//! The pinned formatter of `.star` files, buildifier, which `pumpkin fmt` and `pumpkin check` run
+//! beside `pumpkin`, and `ci`'s check that the repository's own `.star` files are formatted.
 
 use std::env;
 use std::fmt::Write as _;
@@ -17,7 +13,6 @@ use xshell::{Shell, cmd};
 
 use crate::{Cargo, Result, tidy};
 
-/// The release of buildifier that is pinned.
 const VERSION: &str = "10.2.0";
 
 /// The release's file for the platform that `pumpkin` runs on, by the names that Rust gives its
@@ -35,8 +30,8 @@ const PINS: [(&str, &str, &str, &str); 1] = [(
 const UNCHECKED: &str = "crates/lang/tests/";
 
 /// The pinned buildifier of this machine's platform, in the target directory, which cargo's
-/// configuration places. It is fetched there with `curl` once, and kept only if its SHA-256 is
-/// the pin's, so that what is there is always the pinned release.
+/// configuration places: fetched there once, and kept only if its SHA-256 is the pin's, so that
+/// what is there is always the pinned release.
 pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
     let (os, arch) = (env::consts::OS, env::consts::ARCH);
     let pin = PINS
@@ -96,7 +91,6 @@ fn fetch(sh: &Shell, url: &str, to: &Path, sha256: &str) -> Result<()> {
         .map_err(|error| format!("making {} executable failed: {error}", to.display()).into())
 }
 
-/// The target directory, as `cargo metadata` reports it.
 fn target_dir(cargo: &Cargo) -> Result<PathBuf> {
     let metadata = cargo.cmd(&["metadata", "--format-version=1", "--no-deps", "--locked"]);
     let metadata: serde_json::Value = serde_json::from_str(&metadata.read()?)?;

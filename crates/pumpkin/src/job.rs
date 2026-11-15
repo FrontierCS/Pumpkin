@@ -1,7 +1,5 @@
-//! The controller's own side of the controller target, as `pumpkin controller --help` says: a
-//! job ([`job`]), which the client starts in a unit of its own, and begins with the prune
-//! ([`prune`]), then builds its task's images as its [`Admission`] admits them, and the
-//! controller's boot ([`boot`]).
+//! The controller's own side of the controller target, as `pumpkin controller --help` says: the
+//! job that the client starts in a unit of its own, and the controller's boot.
 //!
 //! What they read and write lies below the controller user's home: the trees the client sent,
 //! `trees/<repo>/<id>/`; each run's job in `jobs/<id>/`, and each build's in `builds/<id>/`,
@@ -111,11 +109,6 @@ const IMDS_SECONDS: u64 = 10;
 /// configuration ([`assemble`]), prunes, builds its task's images ([`build_first`]), then runs
 /// its command with it, a run to its end, which finds each image by its tag; returns the exit
 /// status of its command.
-///
-/// # Errors
-///
-/// Fails if the job's directory, its configuration or [`CURRENT`] can't be made, its task's
-/// images can't be built, or its command fails before it starts.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
@@ -181,10 +174,6 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
 /// The controller's boot: reaps what each run that has ended or is lost, but one that ended
 /// clean, may have left ([`crate::reap`], [`crate::Reaper::Boot`]), with the configuration of
 /// its job; returns the reap's exit status, 0 though a provider can't be reached.
-///
-/// # Errors
-///
-/// Fails if the reap can't begin, as without a runs directory.
 pub(crate) fn boot() -> Result<ExitCode, String> {
     // No prune, which each job's start makes: a client may start a job as soon as SSM sees the
     // controller, before the boot is done, and the boot, a unit of the system's, can't see that
@@ -200,10 +189,6 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
 
 /// Follows run `id` for a client, as `pumpkin wait` does, saying its milestones until it ends,
 /// but none of its ending; then exits [`ENDED`].
-///
-/// # Errors
-///
-/// Fails if the run's record can't be read.
 pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
     let runs = crate::default_runs()?;
     let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
@@ -221,10 +206,7 @@ pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
 
 /// Cancels the run that `flags` name for a client, as `pumpkin cancel` does, but says none of
 /// its ending; then exits [`ENDED`], or [`ENDED_UNREACHED`] if its provider couldn't be reached.
-///
-/// # Errors
-///
-/// As `pumpkin cancel` fails before the run's ending.
+/// Fails as `pumpkin cancel` does before the run's ending.
 pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     let (_, _, reached) = crate::cancelled(flags, crate::Reader::Follower)?;
     Ok(ExitCode::from(if reached {
@@ -235,11 +217,8 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
 }
 
 /// The directory of every job's directory of what the client sent with it,
-/// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id.
-///
-/// # Errors
-///
-/// Fails if `XDG_RUNTIME_DIR` is unset or empty, as outside a user's systemd unit.
+/// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset
+/// or empty, as outside a user's systemd unit.
 fn jobs() -> Result<PathBuf, String> {
     // Every job's: the user's systemd gives each job's unit the user's runtime directory, as
     // pam_systemd gives the session that makes the job's directory there.
@@ -340,10 +319,6 @@ struct Sent {
 /// port 0; each Modal provider as the client sent it, with the settings' `images`, `dials_from`
 /// at the controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if
 /// any; and the client's `[upstreams]`, each `key_file` a file in `sent`.
-///
-/// # Errors
-///
-/// Fails if the parameter or metadata can't be read, or what either holds is not as above.
 fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     let got: GotParameter =
         cli.json(&["ssm", "get-parameter", "--name", parameter], Bound::Call)?;
@@ -405,11 +380,8 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
 }
 
 /// Makes each Modal provider of the controller's settings, `tables`, the one that the client
-/// sent, `sent`, with the settings' `images`, or removes it if the client sent none.
-///
-/// # Errors
-///
-/// Fails, naming the settings as `named`, if the client sent one, but they name none.
+/// sent, `sent`, with the settings' `images`, or removes it if the client sent none. Fails,
+/// naming the settings as `named`, if the client sent one, but they name none.
 fn take_modal(
     tables: &mut toml::Table,
     sent: Option<&toml::Table>,
@@ -598,12 +570,9 @@ fn jobs_named(jobs: &Path) -> String {
 /// Builds the images of the task whose entry is `entry`, given `args`, for job `id`, on the
 /// engine of the configuration at `config`, each build as the job's [`Admission`] admits it, so
 /// that the job's command finds each by its tag; then, if it built one, lets go of the build
-/// slot that the admission took, and prunes. What the job holds, it holds until it ends.
-///
-/// # Errors
-///
-/// As `star::checked` and the engine's reach fail; and gives the task's problems, or each build
-/// that failed, said.
+/// slot that the admission took, and prunes. What the job holds, it holds until it ends. Fails as
+/// `star::checked` and the engine's reach do; gives the task's problems, or each build that
+/// failed, said.
 fn build_first(
     id: &RunTag,
     home: &Path,
@@ -650,7 +619,6 @@ struct Admission<'j> {
     id: &'j RunTag,
     home: &'j Path,
     jobs: &'j Path,
-    /// The directory of the build slots.
     slots: PathBuf,
     slot: Option<Slot>,
 }

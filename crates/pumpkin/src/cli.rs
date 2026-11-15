@@ -263,8 +263,8 @@ fn entry() -> impl TypedValueParser<Value = Entry> {
     utf8(NAMED_NEXT).try_map(Entry::parse)
 }
 
-/// What `pumpkin run` is asked for, as `pumpkin run --help` says. Its paths are UTF-8, so that
-/// a run's record keeps them, and a command that names them names the same files.
+/// Its paths are UTF-8, so that a run's record keeps them, and a command that names them names the
+/// same files.
 #[derive(Args)]
 pub(crate) struct Run {
     #[arg(value_name = "entry", value_parser = entry())]
@@ -317,20 +317,17 @@ impl Run {
     }
 }
 
-/// The help of the `<run>` operand.
 const RUN_HELP: &str = "\
 The run: its id; a prefix of its id, or of the 8 hexadecimal digits that
 end it, that no other run in --runs shares; or its record's path, which
 has a `/`.";
 
-/// The help of `--runs` for a command that takes a `<run>`.
 const RUNS_HELP: &str = "\
 The directory that <run> is looked up in.
 Default: runs/ in the .pumpkin directory that this pumpkin is in";
 
-/// What `pumpkin wait` is asked for, as `pumpkin wait --help` says. Its paths are UTF-8, as
-/// those of `ls`, `cancel` and `reap` are, so that a command that names them names the same
-/// files.
+/// Its paths are UTF-8, as those of `ls`, `cancel` and `reap` are, so that a command that names
+/// them names the same files.
 #[derive(Args)]
 pub(crate) struct Wait {
     #[arg(value_name = "run", value_parser = run_name(), help = RUN_HELP)]
@@ -339,7 +336,6 @@ pub(crate) struct Wait {
     pub(crate) runs: Option<String>,
 }
 
-/// What `pumpkin ls` is asked for, as `pumpkin ls --help` says.
 #[derive(Args)]
 pub(crate) struct Ls {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
@@ -355,7 +351,6 @@ Default: every run")]
     pub(crate) prefixes: Vec<String>,
 }
 
-/// What `pumpkin cancel` is asked for, as `pumpkin cancel --help` says.
 #[derive(Args)]
 pub(crate) struct Cancel {
     #[arg(value_name = "run", value_parser = run_name(), help = RUN_HELP)]
@@ -375,7 +370,6 @@ ended, which `pumpkin reap` removes."
     pub(crate) modal_config: Option<PathBuf>,
 }
 
-/// What `pumpkin reap` is asked for, as `pumpkin reap --help` says.
 #[derive(Args)]
 pub(crate) struct Reap {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
@@ -392,7 +386,6 @@ const MODAL_CONFIG_HELP: &str = "\
 Modal's configuration file, read for each provider of kind modal in place of
 the one that the configuration of the run names.";
 
-/// What `pumpkin check` is asked for, as `pumpkin check --help` says.
 #[derive(Args)]
 pub(crate) struct Check {
     #[arg(value_name = "entry", required = true, value_parser = entry(), help = "\
@@ -404,7 +397,6 @@ Each task is checked with the same args.")]
     pub(crate) args: TaskArgs,
 }
 
-/// What `pumpkin fmt` is asked for, as `pumpkin fmt --help` says.
 #[derive(Args)]
 pub(crate) struct Fmt {
     /// The files and directories to format, as given; none for the working directory.
@@ -423,13 +415,11 @@ isn't."
     pub(crate) check: bool,
 }
 
-/// The help of `--config` of a command that builds.
 const BUILD_CONFIG: &str = "\
 The machine's configuration, whose [docker] names the engine; see
 `pumpkin help config`.
 Default: $HOME/.config/pumpkin/pumpkin.toml";
 
-/// What `pumpkin build` is asked for, as `pumpkin build --help` says.
 #[derive(Args)]
 pub(crate) struct Build {
     #[arg(value_name = "entry", value_parser = entry())]
@@ -441,7 +431,6 @@ pub(crate) struct Build {
     pub(crate) config: Option<String>,
 }
 
-/// What `pumpkin lock` is asked for, as `pumpkin lock --help` says.
 #[derive(Args)]
 pub(crate) struct Lock {
     #[arg(value_name = "entry", value_parser = entry())]
@@ -460,7 +449,6 @@ the lock rewrites it in place.")]
     pub(crate) config: Option<String>,
 }
 
-/// What `pumpkin controller job` is asked for, as `pumpkin controller --help` says.
 pub(crate) struct Job {
     pub(crate) id: RunTag,
     pub(crate) region: Region,
@@ -997,11 +985,8 @@ pub(crate) struct Refusal {
     pub(crate) help: String,
 }
 
-/// What `args`, a command line without its program's name, asks for.
-///
-/// # Errors
-///
-/// Fails with the first usage problem of `args`, unless they ask for help or the version.
+/// What `args`, a command line without its program's name, asks for. Fails with the first usage
+/// problem of `args`, unless they ask for help or the version.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut cli = command();
@@ -1077,10 +1062,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
 }
 
 /// The command of a job, `command`, as `pumpkin` takes it on its own, if it is `run` or `build`.
-///
-/// # Errors
-///
-/// Fails with the usage problem of `command`, or that it is neither `run` nor `build`.
+/// Fails with the usage problem of `command`, or that it is neither.
 fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCommand, clap::Error> {
     match parse(command).map_err(|refusal| refusal.error)? {
         Command::Run(run) => Ok(JobCommand::Run(run)),

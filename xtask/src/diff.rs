@@ -1,5 +1,3 @@
-//! The working tree's changes since a revision, as one diff.
-
 use std::path::{Path, PathBuf};
 
 use xshell::{Shell, cmd};
