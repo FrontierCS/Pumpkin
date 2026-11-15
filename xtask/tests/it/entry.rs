@@ -11,7 +11,6 @@ use std::{env, fs};
 use expect_test::{Expect, expect};
 use xshell::{Cmd, Shell};
 
-/// The script, as the repository that holds it has it.
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/pumpkin");
 
 /// What the stand-in `curl` does: writes a file to where `--output` names.
@@ -161,7 +160,6 @@ fn listed(dir: &Path, commit: &str) -> String {
     names.join(" ")
 }
 
-/// Writes `script` as the executable `name` in `bin`.
 fn stand_in(bin: &Path, name: &str, script: &str) {
     fs::write(bin.join(name), script).unwrap();
     fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();

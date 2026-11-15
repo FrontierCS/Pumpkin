@@ -26,7 +26,6 @@ mod tidy;
 mod tools;
 mod wait;
 
-/// A task's result. `main` prints a failure, such as a command's, once, as `xtask: <error>`.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// The target the static `sandboxd` and `ec2-boot` are built for.
@@ -214,8 +213,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs the task the command line names. xflags exits by itself on `--help`, with 0, and on a
-/// command line it can't parse, with 2.
+/// xflags exits by itself on `--help`, with 0, and on a command line it can't parse, with 2.
 fn try_main() -> Result<()> {
     let flags = flags::Xtask::from_env_or_exit();
     let cargo = Cargo::new()?;
@@ -275,7 +273,6 @@ fn try_main() -> Result<()> {
 /// them.
 struct Cargo {
     sh: Shell,
-    /// The names of the package variables in xtask's environment.
     package_vars: Vec<OsString>,
 }
 
@@ -287,7 +284,6 @@ impl Cargo {
         Ok(Self { sh, package_vars })
     }
 
-    /// A `cargo` command with `args`.
     fn cmd(&self, args: &[&str]) -> Cmd<'_> {
         let cmd = self.sh.cmd("cargo").args(args);
         self.package_vars.iter().fold(cmd, Cmd::env_remove)
@@ -315,12 +311,10 @@ fn root() -> &'static Path {
     root
 }
 
-/// `tests`, a command that runs tests, with the environment that `ci`, `live docker` and
-/// `mutants` give every test: `PATH` with `xtask/poison` first, whose `aws` fails, so that none
-/// reaches AWS, then xtask's own; and `PUMPKIN_BUILDIFIER`, the pinned formatter
-/// ([`star::buildifier`]), which
-/// pumpkin's tests put beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check`
-/// find it.
+/// `tests`, a command that runs tests, with the environment they need: `PATH` with `xtask/poison`
+/// first, whose `aws` fails, so that none reaches AWS, then xtask's own; and
+/// `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which pumpkin's tests put
+/// beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check` find it.
 fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
     let path = env::var_os("PATH").unwrap_or_default();
     let poisoned = iter::once(root().join("xtask/poison")).chain(env::split_paths(&path));
@@ -328,10 +322,8 @@ fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
     Ok(tests.env("PUMPKIN_BUILDIFIER", star::buildifier(cargo)?))
 }
 
-/// Runs the checks every change must pass, in order, and stops at the first that fails: among
-/// them the check of the repository's `.star` files ([`star::check`]), with the formatter beside
-/// the tests' `pumpkin`, which runs it there, and the tests ([`tested`]) but those ignored, which
-/// `cargo xtask live docker` runs ([`live::docker`]).
+/// Runs the checks every change must pass, in order, and stops at the first that fails. The
+/// tests ([`tested`]) leave out those ignored, which [`live::docker`] runs.
 fn ci(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;

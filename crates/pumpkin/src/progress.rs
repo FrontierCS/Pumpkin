@@ -1,7 +1,7 @@
-//! What `ls` shows of runs ([`Listed`], [`lines`]): of a live run, its phase, how long it has
-//! been in it, and the bound at which Pumpkin ends it, which a run's log and the bounds of its
-//! workflow and classes give ([`runtime::Progress`]); of an ended run, how it ended and how long
-//! it ran; and a line of totals. And the summary of a run that its ending says ([`summary`]).
+//! What `ls` shows of runs: of a live run, its phase, how long it has been in it, and the bound at
+//! which Pumpkin ends it, which a run's log and the bounds of its workflow and classes give
+//! ([`runtime::Progress`]); of an ended run, how it ended and how long it ran; and a line of
+//! totals. And the summary of a run that its ending says.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -99,7 +99,6 @@ impl Listed {
         }
     }
 
-    /// The state that `ls` counts the run in.
     fn state(&self) -> State {
         match self {
             Self::Waiting { .. } => State::Waiting,
@@ -226,7 +225,6 @@ struct Totals {
 }
 
 impl Totals {
-    /// Counts `listed`.
     fn add(&mut self, listed: &Listed) {
         *self.states.entry(listed.state()).or_default() += 1;
         let Listed::Run(run) = listed else {
@@ -850,7 +848,6 @@ fn lease_name(lease: &LeaseSpan) -> String {
 /// end.
 const STOPPED: &str = "deleted as the run stopped";
 
-/// How a lease ended, or that it hasn't.
 fn lease_end(lease: &LeaseSpan) -> String {
     match (&lease.failed, lease.closed) {
         (Some(reason), _) => format!("failed: {}", crate::escaped(reason)),
@@ -920,7 +917,6 @@ fn clipped(text: &str, chars: usize) -> String {
     }
 }
 
-/// How a command ended, from its exit `status`.
 fn exited(status: ExitStatus) -> String {
     match status {
         ExitStatus::Code(code) => format!("exited {code}"),
@@ -928,7 +924,6 @@ fn exited(status: ExitStatus) -> String {
     }
 }
 
-/// The model requests' line of a summary.
 fn model(model: &runtime::ModelUse) -> String {
     let requests = crate::counted(
         usize::try_from(model.requests).unwrap_or(usize::MAX),
@@ -1059,8 +1054,9 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
     if let Some(started) = agent.started {
         milestones.push((started, format!("the agent started on {}", placed(agent))));
     }
-    // Before the calls, so that the final judge's, which its end, and its leases' ends, start,
-    // comes after them. Not before the agent's start: an agent that exits at once has its exit
+    // Before the leases and the calls, so that the stable sort keeps it ahead of what follows it
+    // at the same instant: the ends of the leases it closes, then the final judge's ask, which
+    // waits for them. Not before the agent's start: an agent that exits at once has its exit
     // stamped by its session's reader, which may be before the loop stamps the start.
     if let Some(work_end) = progress.work_end {
         let work_end = work_end.max(agent.started.unwrap_or_default());

@@ -2,12 +2,11 @@
 //! engine, by the context that reaches it, in `[docker]`; the providers that a run may place its
 //! roles on, each a table of its own, `[providers.<name>]`, which holds one table, named for the
 //! provider's kind, and holding that kind's own settings ([`Kind`]), whose classes of sandbox a
-//! run's roles are placed in ([`by_name`](Providers::by_name)); the addresses where the gateway
-//! meets the sandboxes that dial it over a network, in `[gateway]`; and the model upstreams that
-//! a workflow's model route may reach, each a table of its own, `[upstreams.<name>]`, of which
-//! [`serving`](Upstreams::serving) picks the one that serves each entry of a route. [`Config`]
-//! and the types it holds say what each key means; every key is required, but for `gateway`'s,
-//! `upstreams` and `docker.cpus`, and any other refused. A machine whose runs go to the person's controller has
+//! run's roles are placed in; the addresses where the gateway meets the sandboxes that dial it
+//! over a network, in `[gateway]`; and the model upstreams that a workflow's model route may
+//! reach, each a table of its own, `[upstreams.<name>]`. [`Config`] and the types it holds say
+//! what each key means; every key is required, but for `gateway`'s, `upstreams` and
+//! `docker.cpus`, and any other refused. A machine whose runs go to the person's controller has
 //! `[controller]` instead of `[docker]`, `[providers]` and `[gateway]`, beside its upstreams
 //! ([`Client`]), so where its runs go has one home.
 
@@ -42,18 +41,16 @@ pub(crate) struct Client {
     dir: PathBuf,
 }
 
-/// What a configuration file holds: a machine's, or a client's of its controller.
 enum Target {
     Machine(Config),
     Controller(Client),
 }
 
-/// The configuration as its file holds it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Tables {
     docker: Option<Docker>,
-    /// The providers, by name. TOML refuses two tables of one name.
+    /// TOML refuses two tables of one name.
     providers: Option<BTreeMap<Name, Kind>>,
     gateway: Option<Gateway>,
     /// Empty if absent.
@@ -106,13 +103,12 @@ pub(crate) struct Docker {
 pub(crate) enum Kind {
     /// The machine's Docker engine, [`Docker`], which takes no settings of its own.
     Docker(Empty),
-    /// An envelope on EC2, which its settings name, whose sandboxes pull what they run from it,
-    /// pushed there from the machine's Docker engine, and dial the gateway at
-    /// [`private`](Gateway::private).
+    /// An envelope on EC2, which its settings name, whose sandboxes pull what they run from it
+    /// and dial the gateway at [`private`](Gateway::private).
     Ec2(ec2::Settings),
     /// A Modal workspace, which its settings' profile reaches, whose sandboxes run images that
-    /// Modal imports from an ECR repository, pushed there from the machine's Docker engine, and
-    /// listen behind Modal's tunnels, which the gateway dials.
+    /// Modal imports from an ECR repository, and listen behind Modal's tunnels, which the
+    /// gateway dials.
     Modal(modal::Settings),
 }
 
@@ -172,12 +168,8 @@ struct Model {
 }
 
 impl Providers<Kind> {
-    /// The providers that `providers`, a configuration's tables, name.
-    ///
-    /// # Errors
-    ///
-    /// Fails, naming them, if more than one provider is of kind `docker`, or if one is beside a
-    /// provider of another kind.
+    /// The providers that `providers`, a configuration's tables, name. Fails, naming them, if
+    /// more than one provider is of kind `docker`, or one is beside a provider of another kind.
     fn new(providers: BTreeMap<Name, Kind>) -> Result<Self, String> {
         let (mut docker, mut remote) = (Vec::new(), Vec::new());
         for (name, kind) in &providers {
@@ -213,11 +205,7 @@ impl Providers<Kind> {
     }
 
     /// The providers, each made a `T` by `connect`, from its name and kind, in the order of their
-    /// names.
-    ///
-    /// # Errors
-    ///
-    /// Fails as the first `connect` that fails, making no more.
+    /// names. Fails as the first `connect` that fails, making no more.
     pub(crate) fn connect<T>(
         self,
         mut connect: impl FnMut(&Name, Kind) -> Result<T, String>,
@@ -229,12 +217,10 @@ impl Providers<Kind> {
 }
 
 impl<T> Providers<T> {
-    /// Each provider, by its name.
     pub(crate) fn by_name(&self) -> &BTreeMap<Name, T> {
         &self.0
     }
 
-    /// Provider `name`, if a table names it.
     pub(crate) fn get(&self, name: &Name) -> Option<&T> {
         self.0.get(name)
     }
@@ -242,11 +228,8 @@ impl<T> Providers<T> {
 
 impl Upstreams {
     /// How a run serves `route`: each of its entries, in its order, through the upstream that
-    /// serves every model the entry allows, with the key read from its file.
-    ///
-    /// # Errors
-    ///
-    /// Fails if no upstream serves every model of an entry, or if a key can't be read.
+    /// serves every model the entry allows, with the key read from its file. Fails if no upstream
+    /// serves every model of an entry.
     pub(crate) fn serving(&self, route: &ModelRoute) -> Result<Vec<Serving>, String> {
         route
             .as_slice()
@@ -340,12 +323,9 @@ fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayA
         .map_err(de::Error::custom)
 }
 
-/// The configuration in the file at `path`, a machine's.
-///
-/// # Errors
-///
-/// Fails if the file can't be read, or, naming the file, if it isn't a machine's configuration,
-/// as one that names `[controller]`. A TOML error is `toml`'s own, with the line it points at.
+/// The configuration in the file at `path`, a machine's. Fails, naming the file, if it isn't a
+/// machine's configuration, as one that names `[controller]`; a TOML error is `toml`'s own, with
+/// the line it points at.
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
     let text = fs::read_to_string(path).map_err(|error| {
         format!(
@@ -357,12 +337,9 @@ pub(crate) fn read(path: &Path) -> Result<Config, String> {
     parse(path, &text)
 }
 
-/// The configuration that `text`, the file at `path`, holds, a machine's.
-///
-/// # Errors
-///
-/// Fails, naming the file, if `text` isn't a machine's configuration, as one that names
-/// `[controller]`. A TOML error is `toml`'s own, with the line it points at.
+/// The configuration that `text`, the file at `path`, holds, a machine's. Fails, naming the file,
+/// if `text` isn't a machine's configuration, as one that names `[controller]`; a TOML error is
+/// `toml`'s own, with the line it points at.
 pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     match target(path, text)? {
         Target::Machine(config) => Ok(config),
@@ -376,11 +353,8 @@ pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
 
 /// The client's configuration at `config`, or the default one, if it parses as one that names
 /// `[controller]`; `None` if it can't be read, as when there is none, or names no
-/// `[controller]`.
-///
-/// # Errors
-///
-/// Fails, naming the file, if it names `[controller]` but isn't a client's configuration.
+/// `[controller]`. Fails, naming the file, if it names `[controller]` but isn't a client's
+/// configuration.
 pub(crate) fn client(config: Option<&str>) -> Result<Option<Client>, String> {
     let path = match config {
         Some(config) => PathBuf::from(config),
@@ -407,7 +381,6 @@ pub(crate) fn client(config: Option<&str>) -> Result<Option<Client>, String> {
     }
 }
 
-/// What `text`, the file at `path`, holds.
 fn target(path: &Path, text: &str) -> Result<Target, String> {
     // `toml` ends its message, which quotes the line, with a newline of its own.
     let parsed = toml::from_str(text);
@@ -515,8 +488,8 @@ impl Client {
         Ok((text, keys))
     }
 
-    /// What Modal's configuration file holds that a job, `cancel` and `reap` are sent, if one
-    /// is: with a Modal provider, its `config`, or `$HOME/.modal.toml` if it is there.
+    /// What the client sends of Modal's configuration file, if there is one: with a Modal
+    /// provider, its `config`, or `$HOME/.modal.toml` if it is there.
     pub(crate) fn modal_file(&self) -> Result<Option<Vec<u8>>, String> {
         let Some(modal) = &self.controller.modal else {
             return Ok(None);
@@ -543,7 +516,6 @@ impl Client {
     }
 }
 
-/// Checks that no model of `upstreams` is listed twice.
 fn unique(upstreams: &Upstreams) -> Result<(), String> {
     let mut models = BTreeSet::new();
     for upstream in upstreams.0.values() {

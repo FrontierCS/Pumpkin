@@ -5,7 +5,6 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-/// The provider of a smoke run on the controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Provider {
     Ec2,
@@ -15,7 +14,6 @@ pub(crate) enum Provider {
 /// The settings of a smoke run on `Provider`, as the configuration gives them.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
-    /// The controller's name.
     pub(crate) name: String,
     /// The controller's region, which its EC2 sandboxes and their timers are in.
     pub(crate) region: String,

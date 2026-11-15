@@ -1,7 +1,5 @@
 //! The checks of the repository's Rust files that `cargo xtask ci` runs, each for a rule of
-//! `docs/dev/writing.md` or `docs/dev/style.md`: a doc within its length cap, and none on a test;
-//! no marker of work left ([`MARKERS`]) in a comment, and no code in a `//` comment; an
-//! `unreachable!` with a message, and no `debug_assert!`.
+//! `docs/dev/writing.md` or `docs/dev/style.md`.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -91,8 +89,6 @@ pub(crate) fn files(sh: &Shell, extension: &str) -> Result<Vec<String>> {
     Ok(files.split('\0').filter(kept).map(str::to_owned).collect())
 }
 
-/// A doc over its cap: its first line's number, what it documents, the lines it spans and its
-/// cap.
 struct Doc {
     line: usize,
     what: &'static str,
@@ -180,7 +176,6 @@ impl Block {
         self.doc.get_or_insert((first, 0)).1 += lines;
     }
 
-    /// The block, as a doc of `what`, if it is longer than `cap`.
     fn over(&self, what: &'static str, cap: usize) -> Option<Doc> {
         let (LineColumn { line, .. }, lines) = self.doc?;
         (lines > cap).then_some(Doc {
@@ -200,7 +195,6 @@ impl Block {
     }
 }
 
-/// An attribute that a run of tokens starts with.
 struct Attribute {
     inner: bool,
     /// How many of the tokens it takes.
@@ -210,7 +204,6 @@ struct Attribute {
     test: bool,
 }
 
-/// The attribute that `tokens` start with, if any.
 fn attribute(tokens: &[TokenTree]) -> Option<Attribute> {
     let [TokenTree::Punct(hash), rest @ ..] = tokens else {
         return None;

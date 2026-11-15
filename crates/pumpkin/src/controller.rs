@@ -3,18 +3,17 @@
 //! `deploy/aws/` makes, and follows them, lists, stops and reaps its runs, there, with the same
 //! commands as it would run them itself.
 //!
-//! Each command reaches the controller ([`Reached::reach`]) over the connections that the
-//! workspace's commands share to it ([`Shared`]), master `ssh`es to the controller's user through
-//! SSM's `AWS-StartSSHSession`, each `ssh` ([`Reached::ssh`]) and `rsync` over one with a session
-//! free. With no master to share, it finds the controller by its tag, starts it if it is stopped,
-//! waits until SSM sees it, and opens one, with this machine's key ([`kept`]), which it enrols
-//! through EC2 Instance Connect once the controller refuses it. A follow of a run, a send and a
-//! copy whose connection ends go on over another, a few times ([`AGAIN`]). What runs there is the
-//! controller's own side ([`crate::job`]), whose layout below the user's home its module doc
-//! gives: a run or a build sends the files of its task's repository that the task reaches into a
-//! tree of its own, with the upstreams of this machine's configuration, their keys, its Modal
-//! provider and Modal's configuration file into its job's directory in tmpfs, by `tar` on the
-//! connection's standard input, never in an argument nor in a file of this machine's ([`archive`]);
+//! Each command reaches the controller over the connections that the workspace's commands share
+//! to it, master `ssh`es to the controller's user through SSM's `AWS-StartSSHSession`, each `ssh`
+//! and `rsync` over one with a session free. With no master to share, it finds the controller by
+//! its tag, starts it if it is stopped, waits until SSM sees it, and opens one, with this
+//! machine's key, which it enrols through EC2 Instance Connect once the controller refuses it. A
+//! follow of a run, a send and a copy whose connection ends go on over another, a few times. What
+//! runs there is the controller's own side ([`crate::job`]), whose layout below the user's home
+//! its module doc gives: a run or a build sends the files of its task's repository that the task
+//! reaches into a tree of its own, with the upstreams of this machine's configuration, their keys,
+//! its Modal provider and Modal's configuration file into its job's directory in tmpfs, by `tar`
+//! on the connection's standard input, never in an argument nor in a file of this machine's;
 //! then starts its job, `pumpkin controller job`, in a unit of the user's systemd, which outlives
 //! every connection. What the controller's commands say is forwarded as they say it, and the
 //! record of a run that has ended is copied into this machine's runs directory.
@@ -53,7 +52,6 @@ const TAG: &str = "pumpkin:controller";
 // more; past 10 minutes something else is wrong.
 const START_TIMEOUT: Duration = Duration::from_mins(10);
 
-/// How often a start is looked at.
 const START_POLL: Duration = Duration::from_secs(5);
 
 /// How long a send, or a copy, by `rsync` may move no byte before `rsync` gives up.
@@ -107,7 +105,6 @@ const SSH_FAILED: i32 = 255;
 /// input or output, or of its protocol's stream, and its `ssh`'s own failure, which it passes on.
 const RSYNC_ENDED: [i32; 3] = [10, 12, SSH_FAILED];
 
-/// How often a command that finds every master's sessions held looks for one again.
 const SESSION_POLL: Duration = Duration::from_millis(500);
 
 /// How long a listing of the controller's runs may take to arrive before `ls` says when it was
@@ -195,7 +192,7 @@ struct Seen {
 }
 
 /// A directory of this command's own, 0700, in the workspace's `tmp/` ([`Workspace::tmp`]),
-/// which dropping removes: for the records that `ls` reads.
+/// which dropping removes.
 fn scratch() -> Result<TempDir, String> {
     let tmp = Workspace::find()?.tmp();
     fs::create_dir_all(&tmp).context(tmp.display())?;
@@ -271,7 +268,6 @@ struct Lock {
 
 /// A session of a [`Shared`] master, held until it is dropped.
 struct Slot {
-    /// The master's index.
     master: usize,
     _file: File,
 }
@@ -374,7 +370,6 @@ impl Shared {
         bounded(&mut check, "ssh -O check", SHORT_TIMEOUT).is_ok()
     }
 
-    /// Whether any master answers, as [`answers`](Self::answers) finds it.
     fn any_answers(&self, host: &str) -> bool {
         (0..MASTERS).any(|master| self.answers(master, host))
     }
@@ -521,8 +516,8 @@ impl Reached {
     ///
     /// # Errors
     ///
-    /// Fails if the Session Manager plugin isn't on `PATH`, `aws` fails, the tag names no one
-    /// instance, SSM sees none by [`START_TIMEOUT`], or the connection or key can't be made.
+    /// Fails if the Session Manager plugin isn't on `PATH`, the tag names no one instance, or SSM
+    /// sees none by [`START_TIMEOUT`].
     pub(crate) fn reach(settings: &config::Controller) -> Result<Self, String> {
         let config::Controller {
             name,
@@ -570,7 +565,7 @@ impl Reached {
             kept,
             shared,
         };
-        // None answers, so the first is closed.
+        // No master answers, so the first, master 0, is closed, and can be opened.
         reached.open(&lock, 0)?;
         Ok(reached)
     }
@@ -724,7 +719,6 @@ impl Reached {
         }
     }
 
-    /// `slot`, once this has said how long it waited for it, if it did, since `waiting`.
     fn waited(&self, slot: Slot, waiting: Option<Instant>) -> Slot {
         if let Some(since) = waiting {
             say(format_args!(
@@ -843,8 +837,8 @@ impl Reached {
     }
 
     /// Runs the `rsync` that `make` makes, with `input`, if any, on its standard input, as
-    /// [`call`](Self::call) does, and again, carrying on from what it sent ([`rsync`](Self::rsync)),
-    /// each time its connection ended, as [`pause`](Self::pause) allows.
+    /// [`call`](Self::call) does, and again, carrying on from what it sent
+    /// ([`rsync`](Self::rsync)), each time its connection ended, as [`pause`](Self::pause) allows.
     fn sent(
         &self,
         make: impl Fn() -> Result<Session, String>,
@@ -1117,7 +1111,7 @@ struct Tree {
 ///
 /// # Errors
 ///
-/// Fails if the entry is in no git repository, or git fails, or the repository has no
+/// Fails if the entry is in no git repository, or the repository has no
 /// `./pumpkin`, the consumer entry, which the job builds Pumpkin with; or, saying them, if the
 /// task has problems.
 fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
@@ -1279,11 +1273,6 @@ fn pumpkin_version(top: &Path) -> Result<(String, PathBuf), String> {
 /// Sends `tree` to `reached` as job `id`'s, which runs `words`, `run` or `build` with their
 /// arguments, in its directory below `kind`, with what `client` sends with each job, then starts
 /// the job in a unit of its own.
-///
-/// # Errors
-///
-/// Fails if `rsync` or `ssh` fails, a key or Modal's configuration file can't be read, or
-/// `systemd-run` refuses the unit.
 fn send(
     reached: &Reached,
     client: &config::Client,
@@ -1919,8 +1908,8 @@ const LISTED_FILES: &str = "record.json ir.json provider.json log.jsonl outcome.
 /// `<id> building`, or `<id> unstarted` once it has ended; a line for each run, `<id> live`, or
 /// `<id> ended` unless its id is one of those its standard input lists; of a run that ended, or a
 /// job, before `since`, in seconds since the Unix epoch, as its `outcome.json`, or its log, was
-/// last written, `<id> old` instead; then `tar`, and an archive of the files of the records of the runs
-/// that are live or ended that `ls` reads ([`LISTED_FILES`]).
+/// last written, `<id> old` instead; then `tar`, and an archive of the files that `ls` reads
+/// ([`LISTED_FILES`]) of the records of the runs that are live or ended.
 // A run may write its log while GNU tar reads it, which tar says by its exit status 1 alone: the
 // log then ends in a torn line, which a reader skips.
 fn listing(prefixes: &[String], since: u64) -> String {
@@ -1995,8 +1984,8 @@ fn extract<'p>(printed: &'p [u8], sent: &Path) -> Result<&'p [u8], String> {
     Ok(&printed[..at])
 }
 
-/// The script of `cancel` or `reap` on the controller that `body` makes of the flag that names
-/// Modal's configuration file of `client`'s, if it has one ([`config::Client::modal_file`]), and
+/// The script of a command on the controller that `body` makes of the flag that names Modal's
+/// configuration file of `client`'s, if it has one ([`config::Client::modal_file`]), and
 /// what the script is fed: that file, which it takes first into a directory of its own in tmpfs,
 /// which its end removes, so that the command reaches the Modal providers of runs whose jobs,
 /// which held the file, have ended. Without one, the flag is empty, and nothing is fed.

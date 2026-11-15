@@ -1,6 +1,4 @@
-//! `controller`, the controller's own side of the controller target: a job, which writes its
-//! configuration from the controller's settings, the instance's metadata and what the client
-//! sent, runs its command, and prunes; and the boot, which reaps. Each runs as the
+//! `controller`, the controller's own side of the controller target, which runs as the
 //! controller's user would, with a home and a runtime directory of the scratch directory's, on
 //! a stand-in `aws` for the controller's settings ([`AWS`]), a stand-in `curl` for the instance
 //! metadata service, a stand-in `df`, and the stand-in `docker` ([`StandIn`]). And the client's
@@ -901,11 +899,8 @@ fn job_publish_wait() {
     );
 }
 
-// The controller's boot, as its unit runs it, with root's runtime directory: it records each
-// run whose driver ended without an outcome as failed, once it has removed what the run left on
-// a provider that it reaches, `local`, or said that what it left on one that it can't, `aws`,
-// ends by the run's hard end; leaves a run that ended clean; and prunes no image, as a job that
-// a client started as the controller came up may hold one that no IR names yet.
+// Root's runtime directory, as the boot's unit has it; no prune, as a job that a client started as
+// the controller came up may hold an image that no IR names yet.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1009,7 +1004,6 @@ fn boot() {
     );
 }
 
-/// The commit of Pumpkin that the client's repository pins.
 const PINNED: &str = "1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8";
 
 /// The controller's instance, which carries the tag of controller `alice`.
@@ -1162,9 +1156,6 @@ fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
     (client, id, ran)
 }
 
-// The client's keys reach the controller on standard input alone: no argument of a command that
-// the client runs, or that it runs on the controller, holds one, nor does a file in the
-// workspace, while the job's directory in tmpfs does.
 #[test]
 fn keys_on_standard_input() {
     let scratch = Scratch::new("controller-keys");
@@ -1216,9 +1207,7 @@ fn keys_on_standard_input() {
     );
 }
 
-// The modes of what the client keeps, of this machine's key and of the workspace's shared
-// connections, and of the job's directory in tmpfs, which holds what it was sent: none that
-// another user may read but a public key.
+// None that another user may read, but a public key.
 #[test]
 fn modes_of_what_the_client_keeps() {
     let scratch = Scratch::new("controller-modes");
@@ -1253,10 +1242,6 @@ fn modes_of_what_the_client_keeps() {
     );
 }
 
-// What the client refuses before it reaches its controller, and so makes no call for: a
-// configuration that names `[controller]` beside `[providers]`, `--runs`, a task whose root is
-// above its repository, a Pumpkin built without its bundle, and a machine without the Session
-// Manager plugin.
 #[test]
 #[expect(
     clippy::too_many_lines,

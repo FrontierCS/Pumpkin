@@ -16,11 +16,7 @@ pub(crate) struct Sandboxd(PathBuf);
 
 impl Sandboxd {
     /// The `sandboxd` at `named`, or, without one, beside the `pumpkin` executable that runs.
-    ///
-    /// # Errors
-    ///
-    /// Fails if that `pumpkin` can't be found, if the file isn't a `sandboxd` that a sandbox can
-    /// run, or if `named` is relative and the current directory can't be read.
+    /// Fails if the file isn't a `sandboxd` that a sandbox can run.
     pub(crate) fn find(named: Option<PathBuf>) -> Result<Self, String> {
         if let Some(path) = named {
             let replace = "name a static one, which `cargo xtask sandboxd` builds";
@@ -96,7 +92,6 @@ fn statically_linked(file: &File) -> Result<(), String> {
     Ok(())
 }
 
-/// The `N` bytes of `file` at offset `at`.
 fn read_at<const N: usize>(file: &File, at: u64) -> Result<[u8; N], String> {
     let mut bytes = [0; N];
     file.read_exact_at(&mut bytes, at).map_err(|error| {

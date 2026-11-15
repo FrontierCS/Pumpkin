@@ -35,7 +35,6 @@ use stdx::process::Environment;
 /// the driver gives its process, as `ps` shows it.
 pub(crate) const ARGV0: &CStr = c"pumpkin-driver";
 
-/// The line the driver sends once the run has started.
 const STARTED: &str = "started";
 
 /// A driver that `run` has started, and not yet heard from.
@@ -44,9 +43,7 @@ pub(crate) struct Driver {
     pipe: BufReader<PipeReader>,
 }
 
-/// How the driver's start ended, as `run` finds out.
 pub(crate) enum Handoff {
-    /// The run of this record has started.
     Started(Record),
     /// The driver ended, with this status, before the run started, and after it made this
     /// record, if it made one.
@@ -56,10 +53,6 @@ pub(crate) enum Handoff {
 impl Driver {
     /// Starts the driver of the run `id`, which takes this process's ID, `id` and `reader`, then
     /// parses `args` as `pumpkin run`'s.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the pipe can't be made, or the driver started.
     pub(crate) fn spawn(
         id: &RunTag,
         reader: crate::Reader,
@@ -87,11 +80,6 @@ impl Driver {
     }
 
     /// Waits until the driver has started the run, whose record it makes in `runs`, or ended.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the pipe can't be read, the driver can't be waited for, or the record it names
-    /// can't be opened.
     pub(crate) fn started(mut self, runs: &Path) -> Result<Handoff, String> {
         let id = self.line()?;
         if let Some(id) = &id
@@ -116,11 +104,7 @@ impl Driver {
 
 /// Asks the kernel to kill the driver, by SIGKILL, when `run`, whose process ID is `run_pid`,
 /// ends, until [`announce`] withdraws that. `run` spawns the driver from its main thread, which
-/// lasts as long as `run` does.
-///
-/// # Errors
-///
-/// Fails if the kernel refuses, or if `run` has ended already.
+/// lasts as long as `run` does. Fails if `run` has ended already.
 pub(crate) fn die_with_run(run_pid: u32) -> Result<(), String> {
     let asked = set_parent_process_death_signal(Some(Signal::KILL));
     asked.context("asking the kernel to end the driver with `run` failed")?;
@@ -132,22 +116,14 @@ pub(crate) fn die_with_run(run_pid: u32) -> Result<(), String> {
 }
 
 /// Tells `run` the id of the run whose record the driver has locked.
-///
-/// # Errors
-///
-/// Fails if the pipe to `run` can't be written.
 pub(crate) fn locked(id: &str) -> Result<(), String> {
     send(id).context("telling `run` the run's id failed")
 }
 
-/// Makes the driver outlive `run`, now that the run whose record is `record` has started: opens
-/// the record's `driver.log`, withdraws the kernel's signal, leaves `run`'s session, tells `run`
-/// that the run has started, and points its standard output and error at `driver.log`.
-///
-/// # Errors
-///
-/// Fails, before `run` is told, if `driver.log` can't be opened, the signal withdrawn or the
-/// session left; and after, if the output can't be pointed at `driver.log`.
+/// Makes the driver outlive `run`, now that the run whose record is `record` has started, tells
+/// `run` so, and points the driver's standard output and error at the record's `driver.log`.
+/// Fails before `run` is told if `driver.log` can't be opened, the kernel's signal withdrawn or
+/// `run`'s session left, and after it if the output can't be pointed at `driver.log`.
 pub(crate) fn announce(record: &Path) -> Result<(), String> {
     let path = record.join("driver.log");
     let log = OpenOptions::new().append(true).open(&path);

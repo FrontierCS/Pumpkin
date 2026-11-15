@@ -1,11 +1,8 @@
 //! The `pumpkin` command, run as an operator runs it: its exit status, what it says, and the
-//! record of its run, whose `outcome.json` it prints. A module for each command: `run`, which
-//! includes the model route of a workflow that has one reaching a stand-in model provider; `ls`,
-//! with a run's first steps, which it follows; `wait`; `cancel`; `reap`; `check`; `fmt`; `build`;
-//! `lock`; `controller`, the controller's own side; and `driver`, for the process that drives each
-//! run, which `run` starts. `fmt` runs the formatter beside `pumpkin`, which `cargo xtask ci` puts
-//! beside the tests' own. The tests on Docker are ignored, and write the context they reach
-//! ([`test_support::docker_context`]) into the configuration that they give `run` and `build`.
+//! record of its run, whose `outcome.json` it prints. `fmt` runs the formatter beside `pumpkin`,
+//! which `cargo xtask ci` puts beside the tests' own. The tests on Docker are ignored, and write
+//! the context they reach ([`test_support::docker_context`]) into the configuration that they
+//! give `run` and `build`.
 
 #![expect(
     clippy::unwrap_used,
@@ -50,7 +47,6 @@ mod reap;
 mod run;
 mod wait;
 
-/// The `pumpkin` that the tests run.
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
 /// What the final judge of the runs on Docker does: scores the payload by its size.
@@ -146,7 +142,6 @@ impl Scratch {
         self.program(self.0.join(".pumpkin/bin/pumpkin"), args)
     }
 
-    /// The `pumpkin` executable at `program` with `args`, to run in the directory.
     fn program(&self, program: impl AsRef<Path>, args: &[&str]) -> Command {
         let mut command = stdx::process::command(program.as_ref(), Environment::Inherited);
         command.args(args).current_dir(&self.0);
@@ -263,7 +258,6 @@ fn with_room(command: &mut Command) -> Output {
     }
 }
 
-/// What becomes of `command`, `pumpkin` in `dir`, as [`check`] shows it.
 fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
     let invoked = invocation(&command);
     let output = command.output().unwrap();
@@ -294,7 +288,6 @@ fn invocation(command: &Command) -> String {
     format!("$ {set}{}", args.join(" "))
 }
 
-/// What `output` shows of the command that `invocation` gave, as [`check`] shows it.
 fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String {
     let mut lines = vec![invoked];
     lines.push(match output.status.signal() {
@@ -416,8 +409,8 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
 /// The files of `record`, a run's, each sandbox's `sandbox.json` and console it holds, its run
 /// log's notes on the upstreams that served its model routes and its record of how each model
 /// request was answered, if it has a run log, what the agent's `out` and the first job's evidence
-/// held of a model's answer, if anything, what the driver wrote to `driver.log`, if anything, its `outcome.json`, and whether
-/// `stdout` is that.
+/// held of a model's answer, if anything, what the driver wrote to `driver.log`, if anything, its
+/// `outcome.json`, and whether `stdout` is that.
 fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
