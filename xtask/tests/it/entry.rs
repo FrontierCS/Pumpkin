@@ -1,9 +1,10 @@
 //! `deploy/pumpkin`'s refusals, against a local repository, with a stand-in `curl` that serves a
-//! file that is not rustup-init, on this machine and on another platform, with a stand-in
-//! `uname`, and `cargo xtask install --root`, which the script runs.
+//! file that is not rustup-init, on this machine, on one that lacks what building needs and on
+//! another platform, with a stand-in `uname`, and `cargo xtask install --root`, which the script
+//! runs.
 
 use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::{env, fs};
@@ -17,14 +18,28 @@ const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/pumpkin");
 const CURL: &str = "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n    [ \"$1\" = --output ] && out=$2\n    \
                     shift\ndone\necho not rustup-init > \"$out\"\n";
 
+/// Where the script runs.
+#[derive(Clone, Copy)]
+enum Machine<'a> {
+    This,
+    /// A stand-in `uname` names this system and machine.
+    Other(&'a str, &'a str),
+    /// The `PATH` holds only what the script runs before it checks for what building needs.
+    Lacking,
+    /// The repository that the script fetches from is not there.
+    Unreachable,
+    /// `curl` fails as it does with no network.
+    Offline,
+}
+
 /// Runs the script, as copied into a consumer's repository beside `.pumpkinversion`, which, if
 /// there is a `version`, holds it with `<commit>` replaced by the commit that tag `v1` names in a
-/// local repository, beside a lock on building that a process that has ended left, on the `PATH`
-/// that [`path`] makes of `uname`, with `cargo`, if given, as the script that stands in for the
-/// toolchain's `cargo`, beside a `rustup` that says what it installs; checks its exit code,
-/// output, the temporary files left behind, in the caller's temporary directory and in
-/// `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`.
-fn check(uname: Option<(&str, &str)>, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
+/// local repository, beside a lock on building and a build's scratch directory that a process
+/// that has ended left, on the `PATH` that [`path`] makes for `machine`, with `cargo`, if given,
+/// as the script that stands in for the toolchain's `cargo`, beside a `rustup` that says what it
+/// installs; checks its exit code, output, the temporary files left behind, in the caller's
+/// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`.
+fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
     let held = tempfile::Builder::new()
         .prefix("pumpkin-entry-")
         .tempdir()
@@ -81,9 +96,9 @@ fn check(uname: Option<(&str, &str)>, version: Option<&str>, cargo: Option<&str>
     if let Some(cargo) = cargo {
         toolchain(&state, cargo);
     }
-    let path = path(uname, &bin);
+    let path = path(machine, &bin);
     sh.change_dir(&consumer);
-    let repository = format!("--pumpkin-repository=file://{}", source.display());
+    let repository = repository(machine, &source);
     let script = sh.cmd("sh").arg("pumpkin").arg(repository);
     let output = script.env("PATH", path).env("TMPDIR", &tmp);
     // As a git hook runs it: the script's own git commands must ignore these, which would send
@@ -116,24 +131,54 @@ fn report(output: &Output, tmp: &Path, state: &Path, commit: &str) -> String {
     )
 }
 
-/// The `PATH` that the script runs on, with a stand-in `curl` in `bin` first, then this
-/// machine's; with `uname`, a system and machine, a stand-in `uname` in `bin` that says so.
-fn path(uname: Option<(&str, &str)>, bin: &Path) -> String {
-    stand_in(bin, "curl", CURL);
-    if let Some((system, machine)) = uname {
-        let uname = format!(
-            "#!/bin/sh\ncase \"$1\" in --kernel-name) echo {system} ;; --machine) echo {machine} ;; *) exit 2 ;; esac\n"
-        );
-        stand_in(bin, "uname", &uname);
+/// The script's option that names `source`, the local repository, as where it fetches from, but
+/// on a machine that can't reach it, a path beside it that holds nothing.
+fn repository(machine: Machine<'_>, source: &Path) -> String {
+    let source = match machine {
+        Machine::Unreachable => source.with_file_name("nonexistent"),
+        Machine::This | Machine::Other(..) | Machine::Lacking | Machine::Offline => {
+            source.to_owned()
+        }
+    };
+    format!("--pumpkin-repository=file://{}", source.display())
+}
+
+/// The `PATH` that the script runs on, on `machine`: `bin`, holding a stand-in `curl` and what
+/// `machine` asks for, then this machine's; on one that is lacking, `bin` alone.
+fn path(machine: Machine<'_>, bin: &Path) -> String {
+    let path = env::var("PATH").unwrap();
+    match machine {
+        Machine::Lacking => {
+            for tool in ["sh", "uname", "dirname"] {
+                let mut found = env::split_paths(&path).map(|dir| dir.join(tool));
+                let found = found.find(|tool| tool.is_file()).unwrap();
+                symlink(found, bin.join(tool)).unwrap();
+            }
+            return bin.display().to_string();
+        }
+        Machine::Other(system, machine) => {
+            let uname = format!(
+                "#!/bin/sh\ncase \"$1\" in --kernel-name) echo {system} ;; --machine) echo {machine} ;; *) exit 2 ;; esac\n"
+            );
+            stand_in(bin, "uname", &uname);
+        }
+        Machine::Offline => {
+            let curl = "#!/bin/sh\necho 'curl: (6) Could not resolve host: static.rust-lang.org' >&2\nexit 6\n";
+            stand_in(bin, "curl", curl);
+            return format!("{}:{path}", bin.display());
+        }
+        Machine::This | Machine::Unreachable => {}
     }
-    format!("{}:{}", bin.display(), env::var("PATH").unwrap())
+    stand_in(bin, "curl", CURL);
+    format!("{}:{path}", bin.display())
 }
 
 /// Leaves in the `.pumpkin/` of `consumer`, which it returns, a lock on building whose holder has
-/// ended.
+/// ended, and that holder's scratch directory.
 fn stale_lock(sh: &Shell, consumer: &Path) -> PathBuf {
     let state = consumer.join(".pumpkin");
     fs::create_dir_all(state.join("build.lock")).unwrap();
+    fs::create_dir_all(state.join("tmp/build.ended")).unwrap();
     // The shell's own ID, once it has ended.
     let ended = sh.cmd("sh").args(["-c", "echo $$"]).read().unwrap();
     fs::write(state.join("build.lock/pid"), ended).unwrap();
@@ -168,68 +213,80 @@ fn stand_in(bin: &Path, name: &str, script: &str) {
 #[test]
 fn refusals() {
     check(
-        None,
+        Machine::This,
         None,
         None,
         &expect![[r#"
             Some(1): pumpkin: there is no .pumpkinversion beside this script: write Pumpkin's tag, then its commit
-            left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: build.lock"#]],
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
     );
     check(
-        None,
+        Machine::This,
         Some(""),
         None,
         &expect![[r#"
             Some(1): pumpkin: .pumpkinversion does not start with a tag: write Pumpkin's tag, then its commit
-            left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: build.lock"#]],
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
     );
     check(
-        None,
+        Machine::This,
         Some("v1\n"),
         None,
         &expect![[r#"
             Some(1): pumpkin: .pumpkinversion does not name a commit after the tag: write the tag's full 40-digit hexadecimal commit
-            left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: build.lock"#]],
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
     );
     check(
-        None,
+        Machine::This,
         Some("v1 abc123\n"),
         None,
         &expect![[r#"
             Some(1): pumpkin: .pumpkinversion does not name a commit after the tag: write the tag's full 40-digit hexadecimal commit
-            left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: build.lock"#]],
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
     );
+}
+
+#[test]
+fn fetch_refusals() {
     check(
-        None,
+        Machine::This,
         Some("v1 0123456789012345678901234567890123456789\n"),
         None,
         &expect![[r#"
-            Some(1): pumpkin: building Pumpkin v1 (0123456789012345678901234567890123456789) from file://<scratch>/source ...
+            Some(1): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
+            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            pumpkin: building Pumpkin v1 (0123456789012345678901234567890123456789) from file://<scratch>/source ...
             pumpkin: tag v1 of file://<scratch>/source is commit <commit>, not 0123456789012345678901234567890123456789: fix .pumpkinversion, or the tag if it moved
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
             in .pumpkin: .gitignore tmp"#]],
     );
     check(
-        None,
+        Machine::This,
         Some("v2 <commit>\n"),
         None,
         &expect![[r#"
-            Some(128): pumpkin: building Pumpkin v2 (<commit>) from file://<scratch>/source ...
+            Some(128): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
+            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            pumpkin: building Pumpkin v2 (<commit>) from file://<scratch>/source ...
             warning: Could not find remote branch v2 to clone.
             fatal: Remote branch v2 not found in upstream origin
+            pumpkin: file://<scratch>/source has no tag v2: name one of its tags in .pumpkinversion; list them with
+                git ls-remote --tags file://<scratch>/source
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
             in .pumpkin: .gitignore tmp"#]],
     );
     check(
-        None,
+        Machine::This,
         Some("v1 <commit>\n"),
         None,
         &expect![[r#"
-            Some(1): pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...
+            Some(1): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
+            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...
             pumpkin: downloading rustup-init 1.29.2 ...
             pumpkin: https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init does not have the SHA-256 checksum 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4: the download is not rustup-init 1.29.2
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
@@ -240,13 +297,68 @@ fn refusals() {
 #[test]
 fn other_platform() {
     check(
-        Some(("Linux", "aarch64")),
+        Machine::Other("Linux", "aarch64"),
         Some("v1 <commit>\n"),
         None,
         &expect![[r#"
             Some(1): pumpkin: this is Linux aarch64: run it on Linux x86_64
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
+    );
+}
+
+#[test]
+fn lacking() {
+    check(
+        Machine::Lacking,
+        Some("v1 <commit>\n"),
+        None,
+        &expect![[r#"
+        Some(1): pumpkin: building Pumpkin needs git, curl, sha256sum, cc (a C linker), which this machine lacks; on Debian or Ubuntu, run
+            sudo apt-get install git curl coreutils gcc libc6-dev
+        left in the temporary directory: 0, and in .pumpkin/tmp: 1
+        in .pumpkin: build.lock tmp"#]],
+    );
+}
+
+#[test]
+fn unreachable() {
+    check(
+        Machine::Unreachable,
+        Some("v1 <commit>\n"),
+        None,
+        &expect![[r#"
+        Some(128): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
+        pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+        pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/nonexistent ...
+        fatal: '<scratch>/nonexistent' does not appear to be a git repository
+        fatal: Could not read from remote repository.
+
+        Please make sure you have the correct access rights
+        and the repository exists.
+        pumpkin: could not read the repository file://<scratch>/nonexistent: it needs the network, and access to it on GitHub; check both with
+            git ls-remote file://<scratch>/nonexistent
+        left in the temporary directory: 0, and in .pumpkin/tmp: 0
+        in .pumpkin: .gitignore tmp"#]],
+    );
+}
+
+#[test]
+fn offline() {
+    check(
+        Machine::Offline,
+        Some("v1 <commit>\n"),
+        None,
+        &expect![[r#"
+            Some(6): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
+            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...
+            pumpkin: downloading rustup-init 1.29.2 ...
+            curl: (6) Could not resolve host: static.rust-lang.org
+            pumpkin: the first run downloads from static.rust-lang.org, index.crates.io, static.crates.io, github.com and release-assets.githubusercontent.com; check that this machine reaches them with
+                curl --head https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: build.lock"#]],
+            in .pumpkin: .gitignore tmp"#]],
     );
 }
 
@@ -257,7 +369,7 @@ fn build_output() {
                  printf '#!/bin/sh\\necho ran pumpkin\\n' > \"$4/bin/pumpkin\"\n\
                  chmod +x \"$4/bin/pumpkin\"\necho \"$4/bin/pumpkin\"\n";
     check(
-        None,
+        Machine::This,
         Some("v1 <commit>\n"),
         Some(built),
         &expect![[r#"
@@ -269,7 +381,7 @@ fn build_output() {
     let broken =
         "#!/bin/sh\necho '   Compiling pumpkin' >&2\necho 'error: it broke' >&2\nexit 101\n";
     check(
-        None,
+        Machine::This,
         Some("v1 <commit>\n"),
         Some(broken),
         &expect![[r#"
