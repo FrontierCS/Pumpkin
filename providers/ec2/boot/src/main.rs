@@ -1,18 +1,9 @@
-//! `ec2-boot`, the boot of each sandbox's instance of the EC2 provider, which the instance's user
-//! data runs as `ec2-boot start`, once it has made [`GRANT_DIR`], started Docker, logged in to
-//! the registry and pulled `sandboxd`'s image, with a `schema::ec2_boot::Start` on its standard
-//! input.
-//!
-//! It drops whatever the container sends but to the gateway's address and port, refuses a Docker
-//! that can't confine the container or pull the role's image, pulls that image and logs out of
-//! the registry, then runs the role's container until it exits, under the confinement that the
-//! `ec2` crate states; whatever ends it, it powers the instance off, as the user data does
-//! however `ec2-boot` ends. Each command it runs is killed by the start's deadline, or at the
-//! hard end once the container starts.
-//!
-//! Each line it prints, on its standard output, which the user data sends to the serial console,
-//! begins with `schema::ec2_boot::CONSOLE_PREFIX`, and none holds the grant. Its files are at
-//! their paths below the directory it runs in, which the user data makes `/`.
+//! Boots a sandbox on its instance: reads the `Start` on standard input, locks the instance's
+//! network down, pulls the role's image and runs its container with `sandboxd` in it, until the
+//! container exits. Whatever happens, it reports on the serial console, each line behind
+//! [`CONSOLE_PREFIX`] and none holding the grant, and powers the instance off. Each command it
+//! runs is killed by the start's deadline, or at the hard end once the container starts. Its
+//! files are at their paths below the directory it runs in, which the user data makes `/`.
 
 #![expect(
     clippy::print_stdout,
@@ -36,12 +27,9 @@ use schema::sandbox::{RegistrationGrant, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBO
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-/// The name of the file, in [`GRANT_DIR`], that holds the grant for the container's
-/// environment, only until the container starts.
 const GRANT_FILE: &str = "grant.env";
 
-/// Where the instance keeps `sandboxd`, copied out of its image as `sandboxd`, to be mounted
-/// read-only.
+// Where the instance keeps `sandboxd`, copied out of its image, to be mounted read-only.
 const HOST_DIR: &str = "opt/pumpkin";
 
 const CONTAINER: &str = "pumpkin-sandbox";
@@ -49,16 +37,15 @@ const CONTAINER: &str = "pumpkin-sandbox";
 // The container's DNS server is its own loopback, where nothing answers: on Docker's default
 // bridge, the address goes into the container's `/etc/resolv.conf` with no resolver of Docker's
 // between, so no lookup leaves the container, and one fails at once rather than waiting on an
-// address the rules drop.
+// address the rules drop:
+// https://docs.docker.com/engine/network/drivers/bridge/
 const DNS: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
-/// How many of the container's last lines of output the boot's end copies to the console.
+// How many of the container's last lines the console gets.
 const LAST_LINES: &str = "20";
 
-/// How long each command of the boot's end, which reads the container's last lines and powers
-/// the instance off, runs before it is killed.
-// Each asks a local daemon one thing, in well under a second; the hard end's shutdown, which the
-// user data armed, follows whatever this bound cuts short.
+// Each command of the end asks a local daemon one thing, in well under a second; the hard end's
+// shutdown, which the user data armed, follows whatever this bound cuts short.
 const END_TIMEOUT: Duration = Duration::from_mins(1);
 
 fn main() -> ExitCode {
@@ -72,13 +59,13 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // `start` sets it as soon as the container runs, so `end` shows its last lines even if
+    // `start` fails afterwards.
     let mut container = None;
     let started = start(&mut container);
     end(container.as_deref(), &started)
 }
 
-/// Starts the sandbox that the start on standard input describes, and returns once its container
-/// has exited, having put the container's ID in `container` once it started.
 fn start(container: &mut Option<String>) -> Result<(), String> {
     let Start {
         hard_end_unix_seconds,
@@ -125,17 +112,14 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Says how the boot ended, `started`, then the container's last lines, if it started, then
-/// powers the instance off; returns the exit code that `started` gives.
 fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
     match started {
         Ok(()) => say("the boot ended"),
         Err(error) => say(format_args!("the boot failed: {error}")),
     }
+    // The container's last lines, which show why a boot failed.
     if let Some(container) = container {
         let logs = ["logs", "--tail", LAST_LINES, container];
-        // Every line `docker logs` prints, even as it fails, may be the container's own, so
-        // each carries the container's prefix, never the boot's alone.
         match ran("docker", &logs, b"", Deadline::after(END_TIMEOUT)) {
             Ok(Output {
                 status,
@@ -146,6 +130,8 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
                     String::from_utf8_lossy(&stdout),
                     String::from_utf8_lossy(&stderr),
                 );
+                // Every line `docker logs` prints, even as it fails, may be the container's own, so
+                // each carries the container's prefix, never the boot's alone.
                 for line in stdout.lines().chain(stderr.lines()) {
                     say(format_args!("sandboxd: {line}"));
                 }
@@ -158,6 +144,7 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
             )),
         }
     }
+    // However the boot ended, the instance goes off, and a launched one terminates on it.
     let off = command(
         "shutdown",
         &["--poweroff", "now"],
@@ -173,11 +160,12 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
     }
 }
 
-/// Drops whatever the container sends, but to `gateway`: to this instance and anything past it,
-/// its metadata included. A drop in any base chain is final, whatever Docker's own rules accept,
-/// and the `inet` family holds for IPv6 too.
 fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
     let (ip, port) = (gateway.ip(), gateway.port());
+    // Containers reach the gateway and nothing else, neither the instance, its metadata included,
+    // nor any other address. A drop in any base chain is final, whatever Docker's own rules accept,
+    // and the `inet` family holds for IPv6 too:
+    // https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains
     let rules = format!(
         "table inet pumpkin {{
     chain forward {{
@@ -195,9 +183,8 @@ fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
     command("nft", &["--file", "-"], rules.as_bytes(), by).map(drop)
 }
 
-/// Refuses a Docker that lacks a limit that the container's confinement sets, as the Docker
-/// provider refuses its own engine, since it would leave the role unbounded.
 fn check_docker(by: Deadline) -> Result<(), String> {
+    // A limit that Docker can't enforce would leave the role unbounded.
     let format = "{{.MemoryLimit}} {{.SwapLimit}} {{.CPUCfsQuota}} {{.PidsLimit}}";
     let limits = command("docker", &["info", "--format", format], b"", by)?;
     if limits != "true true true true" {
@@ -216,9 +203,6 @@ fn check_docker(by: Deadline) -> Result<(), String> {
     Ok(())
 }
 
-/// Pulls `role_image`, then says, for an audit of the console, Docker's own record of what it
-/// pulled of it and of `sandboxd_image`, then logs out of `registry`, so that the login lasts only
-/// while the images are pulled.
 fn pull(
     registry: &str,
     role_image: &str,
@@ -226,6 +210,7 @@ fn pull(
     by: Deadline,
 ) -> Result<(), String> {
     command("docker", &["pull", "--quiet", role_image], b"", by)?;
+    // Docker's own record of what it pulled goes to the console, for an audit.
     for image in [role_image, sandboxd_image] {
         let inspect = [
             "image",
@@ -237,10 +222,11 @@ fn pull(
         let pulled = command("docker", &inspect, b"", by)?;
         say(format_args!("pulled {image}: {pulled}"));
     }
+    // So that the login lasts only while the images are pulled.
     command("docker", &["logout", registry], b"", by).map(drop)
 }
 
-/// Copies `sandboxd` out of `sandboxd_image` to [`host_sandboxd`].
+// Puts `sandboxd` on the instance, to mount into the role's container, which holds none.
 fn copy_sandboxd(sandboxd_image: &str, by: Deadline) -> Result<(), String> {
     let made = DirBuilder::new()
         .recursive(true)
@@ -255,9 +241,6 @@ fn copy_sandboxd(sandboxd_image: &str, by: Deadline) -> Result<(), String> {
     command("docker", &["rm", &copied], b"", by).map(drop)
 }
 
-/// The options of `docker run` that give the container its place on the instance: its cgroup
-/// namespace, its network, its DNS, the grant's file for its environment, and its `sandboxd`, and
-/// `sandboxctl` too if `ops`, mounted read-only from [`host_sandboxd`], as its first process.
 fn instance_options(ops: bool) -> Result<Vec<String>, String> {
     let sandboxd = absolute(&host_sandboxd())?;
     let mount = |target: &str| {
@@ -267,11 +250,11 @@ fn instance_options(ops: bool) -> Result<Vec<String>, String> {
         )
     };
     let mut options = vec![
-        // Docker's default on cgroup v2, which the AMI has, pinned against the daemon's setting:
-        // the role reads its own limits at its cgroup's root.
+        // Docker's default on cgroup v2, pinned against the daemon's setting: the role reads its
+        // own limits at its cgroup's root.
         "--cgroupns=private".to_owned(),
         // Docker's default bridge, pinned against the daemon's setting: the instance's rules
-        // confine it, by its interface's name ([`lock_down`]).
+        // confine it, by its interface's name (`lock_down`).
         "--network=bridge".to_owned(),
         format!("--dns={DNS}"),
         // The instance's search domains would otherwise reach the container's resolver.
@@ -286,12 +269,11 @@ fn instance_options(ops: bool) -> Result<Vec<String>, String> {
     Ok(options)
 }
 
-/// Runs `docker` with `run`, with `grant` in a root-only file in memory, [`grant_file`], only
-/// until it returns, killed by `by`; returns what it printed, the container's ID.
-// Nothing else of the grant is mounted into the container. Its `sandboxd` is its first process,
-// and this starts nothing else in it, so nothing runs there as the role's user before the hello
-// that spends the grant.
 fn run_granted(run: &[String], grant: &RegistrationGrant, by: Deadline) -> Result<String, String> {
+    // The grant reaches the container by a file that only this user reads, not by an argument that
+    // `ps` shows, and the file lasts no longer than `docker run`. Nothing else of it is mounted
+    // into the container. Its `sandboxd` is its first process, and this starts nothing else in
+    // it, so nothing runs there as the role's user before the hello that spends the grant.
     let digits = grant.digits();
     let file = grant_file();
     let opened = (OpenOptions::new().write(true).create_new(true).mode(0o600)).open(&file);
@@ -299,30 +281,26 @@ fn run_granted(run: &[String], grant: &RegistrationGrant, by: Deadline) -> Resul
     let written = written.context(format_args!("writing {} failed", file.display()));
     let run: Vec<&str> = run.iter().map(String::as_str).collect();
     let started = written.and_then(|()| command("docker", &run, b"", by));
+    // Removed whether or not the container started.
     let removed =
         fs::remove_file(&file).context(format_args!("removing {} failed", file.display()));
     let started = started?;
     removed.map(|()| started)
 }
 
-/// Where the instance keeps `sandboxd`, in [`HOST_DIR`], below the directory this runs in.
 fn host_sandboxd() -> PathBuf {
     Path::new(HOST_DIR).join("sandboxd")
 }
 
-/// The grant's file, [`GRANT_FILE`] in [`GRANT_DIR`], which the user data made, below the
-/// directory this runs in.
 fn grant_file() -> PathBuf {
     Path::new(GRANT_DIR.trim_start_matches('/')).join(GRANT_FILE)
 }
 
-/// `path`, below the directory this runs in, as an absolute path, as Docker takes it.
+// Docker takes the source of a bind mount as an absolute path.
 fn absolute(path: &Path) -> Result<PathBuf, String> {
     path::absolute(path).context(format_args!("making {} absolute failed", path.display()))
 }
 
-/// Runs `program` with `args`, and `input` on its standard input, killed by `by`, and returns what
-/// it printed on its standard output, without the whitespace at its end.
 fn command(program: &str, args: &[&str], input: &[u8], by: Deadline) -> Result<String, String> {
     let Output {
         status,
@@ -339,7 +317,6 @@ fn command(program: &str, args: &[&str], input: &[u8], by: Deadline) -> Result<S
     Ok(String::from_utf8_lossy(&stdout).trim_end().to_owned())
 }
 
-/// Runs `program` as [`command`] does, and returns its output, whether it succeeded or not.
 fn ran(program: &str, args: &[&str], input: &[u8], by: Deadline) -> Result<Output, String> {
     let shown = shown(program, args);
     let mut command = stdx::process::command(program, Environment::Inherited);
@@ -348,13 +325,10 @@ fn ran(program: &str, args: &[&str], input: &[u8], by: Deadline) -> Result<Outpu
     ran.ok_or_else(|| format!("{shown} didn't end by its deadline, and was killed"))
 }
 
-/// `program` and its first argument, as an error names the command.
 fn shown(program: &str, args: &[&str]) -> String {
     format!("`{program} {}`", args.first().copied().unwrap_or_default())
 }
 
-/// Writes `text` to the console, each of its lines after [`CONSOLE_PREFIX`], so that no line of a
-/// command's output that it holds passes for one of the boot's own.
 fn say(text: impl fmt::Display) {
     for line in text.to_string().lines() {
         println!("{CONSOLE_PREFIX} {line}");

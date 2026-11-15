@@ -1,19 +1,3 @@
-//! A sandbox's instance: its launch, from the launch template of its class, and the boot that its
-//! user data runs ([`ENTRY`], then `ec2-boot`), which starts the role's container under the
-//! [confinement](#confinement); its timer, as `Timer` states it; then its run's list, which finds
-//! it, its termination, and its serial console.
-//!
-//! # Confinement
-//!
-//! A sandbox's container has the Docker provider's [`confinement`](engine::confinement), and
-//! `sandboxd`, and `sandboxctl` for a role that makes ops, mounted read-only from the instance.
-//! It reaches the gateway's address and port, and nothing else: neither its instance, nor the
-//! instance's metadata, nor any other address, over IPv4 or IPv6; its DNS server is its own
-//! loopback, where nothing answers. Only `sandboxd` gets the grant, in its environment, and
-//! nothing else runs in the container until `sandboxd` has presented it. The instance's Docker
-//! holds a login to the registry, by the instance profile's credentials, only while it pulls the
-//! images.
-
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -35,17 +19,16 @@ use stdx::{Context as _, Deadline, Utc};
 
 use crate::{Ec2, InstanceClass, Reached};
 
-/// The entry, which a sandbox's user data is once [`user_data`] fills in its values.
 const ENTRY: &str = include_str!("entry.sh");
 
-/// The tag that carries an instance's run, by which its run's list finds it.
+// The tag by which a run finds its instances, and a delete knows an instance is the run's.
 const RUN_TAG: &str = "pumpkin:run";
 
 const ROLE_TAG: &str = "pumpkin:role";
 
-// EC2's API is eventually consistent, so an instance just launched may be missing from a list
-// for a while; one still missing minutes later is lost, not late. This is the usual bound of a
-// wait for a new instance to be listed.
+// EC2's API is eventually consistent, so an instance just launched may be missing from a describe
+// for a while, and one still missing minutes later is lost, not late:
+// https://docs.aws.amazon.com/ec2/latest/devguide/eventual-consistency.html
 const LISTED_TIMEOUT: Duration = Duration::from_secs(200);
 
 // An instance ends some time after it is told to: its OS shuts down, then EC2 frees its volume
@@ -53,8 +36,6 @@ const LISTED_TIMEOUT: Duration = Duration::from_secs(200);
 // minutes for a slow shutdown; one still not terminated after 10 min is stuck, not slow.
 const TERMINATED_TIMEOUT: Duration = Duration::from_mins(10);
 
-/// How often instances are described again while a create waits for its run's list to find the
-/// instance it launched, or a delete for EC2 to describe those it terminated as terminated.
 const DESCRIBE_EVERY: Duration = Duration::from_secs(5);
 
 impl Ec2<'_> {
@@ -63,9 +44,8 @@ impl Ec2<'_> {
     ///
     /// # Errors
     ///
-    /// Fails before launching if `dial` isn't to IPv4 or the class isn't the envelope's; fails if
-    /// `create.by` passes first, or the list misses the instance for 200 s, leaving any instance
-    /// it launched, which carries the run's tag.
+    /// An instance that was launched when it fails is left, which the error names or the run's
+    /// list finds by its tag.
     pub(crate) fn create_instance(
         &self,
         create: &Create,
@@ -102,8 +82,7 @@ impl Ec2<'_> {
         let class = (self.classes.get(class))
             .ok_or_else(|| format!("class `{class}` is none of the envelope's"))?;
         let hard_end = HardEnd::of(*hard_end);
-        // Times in whole seconds, rounded down, so that neither comes after its own, as the hard
-        // end's own type has it.
+        // Whole seconds, rounded down, so that neither is later than the time it states.
         let start = Start {
             hard_end_unix_seconds: hard_end.0,
             // The create's own deadline: should the pull end too late for `sandboxd` to meet the
@@ -119,6 +98,8 @@ impl Ec2<'_> {
             model: *model,
         };
         let by = Deadline::at_unix(by.since_epoch());
+        // Each step has the one before it done: the timer bounds an instance as soon as it exists,
+        // and the create returns only an instance that its run's list finds, as a sweep needs.
         let tags = tag_specifications(run, name, role_name);
         let id = self.launch(
             class,
@@ -135,8 +116,6 @@ impl Ec2<'_> {
         })
     }
 
-    /// Launches one instance from `class`'s template, at its version, for sandbox `name` of run
-    /// `run`, with tags `tags` and user data `user_data`, by `by`, and returns its ID.
     fn launch(
         &self,
         class: &InstanceClass,
@@ -147,8 +126,8 @@ impl Ec2<'_> {
         by: Deadline,
     ) -> Result<InstanceId, String> {
         // The user data holds the grant, so it reaches `aws` in a file only this user can read,
-        // never on its command line, which every process can read. Neither a run's tag nor a
-        // name holds a `+`, so no other launch of this process names the file.
+        // never on its command line, which every process can read. Neither a run's tag nor a name
+        // holds a `+`, so no other launch of this process names the file.
         let file = self.dir.join(format!(
             "pumpkin-user-data-{}-{}+{name}",
             process::id(),
@@ -159,8 +138,9 @@ impl Ec2<'_> {
             "LaunchTemplateId={},Version={}",
             class.template.0, class.version
         );
-        // No client token: the run makes one create of each sandbox, and `aws` gives each call
-        // a token of its own, which keeps its own retries of the call from launching twice.
+        // No client token: the run makes one create of each sandbox, and `aws` gives each call a
+        // token of its own, which keeps its own retries of the call from launching twice:
+        // https://docs.aws.amazon.com/cli/latest/reference/ec2/run-instances.html
         let args = [
             "ec2",
             "run-instances",
@@ -177,8 +157,8 @@ impl Ec2<'_> {
         ];
         let launched = write_private(&self.dir, &file, user_data)
             .and_then(|()| self.reached.cli.json::<Launched>(&args, Bound::Create(by)));
-        // A file left behind holds a grant that only this user can read, and that expires with
-        // its registration.
+        // A file left behind holds a grant that only this user can read, and that expires with its
+        // registration.
         let _ = fs::remove_file(&file);
         let Launched {
             instances: [LaunchedInstance { instance_id }],
@@ -186,8 +166,6 @@ impl Ec2<'_> {
         Ok(instance_id)
     }
 
-    /// Makes the timer ([`Timer`](crate::Timer)) of instance `id`, of run `run`, which was just
-    /// launched, at `hard_end`, by `by`.
     fn set_timer(
         &self,
         run: &RunTag,
@@ -199,9 +177,10 @@ impl Ec2<'_> {
         let name = timer_name(run, id);
         // In UTC, as `--schedule-expression-timezone` says.
         let at = format!("at({})", Utc::from_unix(hard_end.timer()));
-        // EventBridge Scheduler's universal target, which makes the call that its ARN names, with
-        // the input as its parameters.
         let target = json!({
+            // EventBridge Scheduler's universal target, which makes the call that its ARN names,
+            // with the input as its parameters:
+            // https://docs.aws.amazon.com/scheduler/latest/UserGuide/managing-targets-universal.html
             "Arn": format!("arn:{}:scheduler:::aws-sdk:ec2:terminateInstances", role_arn.partition()),
             "RoleArn": role_arn.as_str(),
             "Input": json!({ "InstanceIds": [id.0] }).to_string(),
@@ -232,11 +211,9 @@ impl Ec2<'_> {
         ))
     }
 
-    /// Lists run `run` until its list finds instance `id`, in whatever state, for up to
-    /// [`LISTED_TIMEOUT`], and by `by`.
-    // A run's list must find each sandbox from when its create returns, and the run takes one
-    // that a list misses for ended (`Sweep::list`), so the create returns only once a list has
-    // found the instance; one that has ended already is found, and so seen to have ended.
+    // A run's list must find each sandbox from when its create returns, and the run takes one that
+    // a list misses for ended (`Sweep::list`), so the create returns only once a list has found
+    // the instance; one that has ended already is found, and so seen to have ended.
     fn listed(&self, run: &RunTag, id: &InstanceId, by: Deadline) -> Result<(), String> {
         let listing = Deadline::after(LISTED_TIMEOUT);
         let filters = [run_filter(run), ids_filter([id])];
@@ -258,11 +235,6 @@ impl Ec2<'_> {
         }
     }
 
-    /// Reads what instance `id` of run `run` has printed on its serial console, the latest that EC2
-    /// shows, of which it keeps the lines its boot wrote there, whose last say how the boot ended
-    /// and what its container printed last. EC2 may show a line only tens of seconds after it is
-    /// printed, and shows nothing of a terminated instance. It fails if `id` isn't an instance of
-    /// run `run` that EC2 describes, such as another run's.
     pub(crate) fn read_console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let not_ours = || {
             format!(
@@ -274,8 +246,8 @@ impl Ec2<'_> {
         let Ok(id) = InstanceId::try_from(id.as_str().to_owned()) else {
             return Err(not_ours());
         };
-        // By ID alone, so that one terminated, which the run's list leaves out, is found too,
-        // as a start that has ended reads its console; and kept to the run by its tag.
+        // By ID alone, so that one terminated, which the run's list leaves out, is found too, as a
+        // start that has ended reads its console; and kept to the run by its tag.
         let found = (self.reached).described(&[ids_filter([&id])], Bound::Call)?;
         if !(found.iter()).any(|found| found.instance_id == id && found.is_of(run)) {
             return Err(not_ours());
@@ -288,9 +260,9 @@ impl Ec2<'_> {
             "--latest",
         ];
         let ConsoleOutput { output } = self.reached.cli.json(&read, Bound::Call)?;
-        // The boot's own lines alone, which are all it writes there ([`ENTRY`]): the kernel's,
-        // cloud-init's and the shutdown's tell nothing of the sandbox.
         let output = output.unwrap_or_default();
+        // The boot's own lines alone, which tell of the sandbox: the kernel's, cloud-init's and the
+        // shutdown's don't.
         let boot = (output.lines()).filter(|line| line.starts_with(CONSOLE_PREFIX));
         let text = boot.flat_map(|line| [line, "\n"]).collect();
         Ok(Console { text })
@@ -298,10 +270,6 @@ impl Ec2<'_> {
 }
 
 impl Sweep for Reached {
-    /// Lists run `run`'s instances, as `provider::Sweep::list` asks: those its tag finds, but
-    /// those terminated, which EC2 has freed, as the [envelope](crate#the-envelope) asks; each
-    /// [ended](Listed::ended) unless it is pending or running. Its `aws` call is killed after
-    /// 10 min.
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
         let found = self.described(&[run_filter(run)], Bound::Call)?;
         let listed = found.into_iter().filter_map(|found| {
@@ -311,7 +279,8 @@ impl Sweep for Reached {
                 tags: _,
             } = found;
             // The boot runs once, and a later boot starts no container, so an instance that is
-            // ending, or has stopped, never serves its sandbox again.
+            // ending, or has stopped, never serves its sandbox again. One terminated is freed, and
+            // is no sandbox to list.
             let ended = match name {
                 State::Pending | State::Running => false,
                 State::ShuttingDown | State::Stopping | State::Stopped => true,
@@ -323,15 +292,6 @@ impl Sweep for Reached {
         Ok(listed.collect())
     }
 
-    /// Deletes run `run`'s instances that `ids` name, as `provider::Sweep::delete` asks: terminates
-    /// each that isn't terminated or shutting down already, waits until EC2 describes each as
-    /// terminated, or no more, then deletes each one's timer.
-    ///
-    /// # Errors
-    ///
-    /// Fails if AWS refuses to describe the instances, terminating none; or, naming each, if one
-    /// isn't the run's, which is left, if AWS refuses to terminate it, if it isn't terminated
-    /// within the wait, which may leave it running, or if AWS refuses its timer's delete.
     fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
         // An id that isn't an instance's names none, and the filter takes only IDs.
         let asked = ids
@@ -347,12 +307,12 @@ impl Sweep for Reached {
         );
         // By ID alone, so that another run's instance is found, and left, by its tag.
         let found = (self.described(&[ids_filter(&asked)], Bound::Call)).context(unfound)?;
-        // One that the describe doesn't find counts as deleted: EC2 describes an instance for
-        // about an hour after it is terminated, and each id a run deletes was found by a describe
-        // once already, its create's list or the run's own.
         let (mut ending, mut failures) = (BTreeSet::new(), Vec::new());
         // The instances whose timers are deleted: each terminated, and each that EC2 no longer
-        // describes. The timer of one that may still run is kept, to end it all the same.
+        // describes, which counts as deleted, as EC2 describes an instance only for a short while
+        // after it is terminated, and each id a run deletes was found by a describe once already.
+        // The timer of one that may still run is kept, to end it all the same:
+        // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html
         let mut ended: BTreeSet<&InstanceId> = (asked.iter())
             .filter(|id| !found.iter().any(|found| found.instance_id == **id))
             .collect();
@@ -373,9 +333,10 @@ impl Sweep for Reached {
                 State::ShuttingDown => {
                     ending.insert(id);
                 }
-                // Each on its own, as EC2 terminates none of a call's instances if it refuses
-                // one.
                 State::Pending | State::Running | State::Stopping | State::Stopped => {
+                    // Each on its own, as EC2 terminates none of a call's instances if it refuses
+                    // one:
+                    // https://docs.aws.amazon.com/cli/latest/reference/ec2/terminate-instances.html
                     match self.terminate(id, Bound::Call) {
                         Ok(()) => {
                             ending.insert(id);
@@ -400,8 +361,7 @@ impl Sweep for Reached {
 }
 
 impl Reached {
-    /// Deletes the timer of instance `id`, of run `run`, once the instance is terminated; one
-    /// gone already, as one that fired, counts as deleted.
+    // A timer gone already, as one that fired, counts as deleted.
     fn unset_timer(&self, run: &RunTag, id: &InstanceId) -> Result<(), String> {
         let group = &self.group.0;
         let name = timer_name(run, id);
@@ -418,8 +378,6 @@ impl Reached {
         ))
     }
 
-    /// Describes instances `ids`, every [`DESCRIBE_EVERY`], until EC2 describes each as
-    /// terminated, or no more, for up to [`TERMINATED_TIMEOUT`].
     fn terminated(&self, mut ids: BTreeSet<&InstanceId>) -> Result<(), String> {
         let by = Deadline::after(TERMINATED_TIMEOUT);
         while !ids.is_empty() {
@@ -449,8 +407,6 @@ impl Reached {
         Ok(())
     }
 
-    /// The instances that `filters` find, each a filter that `aws ec2 describe-instances
-    /// --filters` takes, with `aws` killed at `bound`.
     fn described(&self, filters: &[String], bound: Bound) -> Result<Vec<ListedInstance>, String> {
         let mut args = vec!["ec2", "describe-instances", "--filters"];
         args.extend(filters.iter().map(String::as_str));
@@ -459,8 +415,6 @@ impl Reached {
         Ok(instances.collect())
     }
 
-    /// Begins to terminate instance `id`, with `aws` killed at `bound`, after which the instance
-    /// never runs its sandbox again; or fails, saying that the instance is left.
     fn terminate(&self, id: &InstanceId, bound: Bound) -> Result<(), String> {
         let terminate = ["ec2", "terminate-instances", "--instance-ids", &id.0];
         (self.cli.run(&terminate, bound).map(drop)).context(format_args!(
@@ -469,15 +423,13 @@ impl Reached {
     }
 }
 
-/// The name of the timer of instance `id`, of run `run`: `<run>.<id>`, which only that
-/// instance's timer has, as EC2 never reuses an ID.
+// `<run>.<id>`, which only that instance's timer has, as EC2 never reuses an ID.
 fn timer_name(run: &RunTag, id: &InstanceId) -> String {
     format!("{}.{id}", run.as_str())
 }
 
-/// A run's hard end ([`Create::hard_end`]) in whole seconds since the Unix epoch, rounded down:
-/// when an instance's boot has it powered off by.
 #[derive(Clone, Copy)]
+// The run's hard end, in whole seconds since the epoch.
 struct HardEnd(u64);
 
 impl HardEnd {
@@ -485,37 +437,31 @@ impl HardEnd {
         Self(hard_end.since_epoch().as_secs())
     }
 
-    /// When the instance's timer is set for, in seconds since the Unix epoch: the hard end rounded
-    /// up to the minute.
-    // `EventBridge` Scheduler invokes a target within the minute its time is in, so a time on the
-    // minute after the hard end fires only past it, after the boot's own timer, which a healthy
-    // instance ends by first.
+    // The hard end rounded up to the minute. EventBridge Scheduler invokes a target within the
+    // minute its time is in, so a time on the minute after the hard end fires only past it, after
+    // the boot's own timer, which a healthy instance ends by first:
+    // https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html
     fn timer(self) -> u64 {
         self.0.div_ceil(60) * 60
     }
 }
 
-/// The filter of `aws ec2 describe-instances` that finds run `run`'s instances, by their
-/// [`RUN_TAG`].
 fn run_filter(run: &RunTag) -> String {
     format!("Name=tag:{RUN_TAG},Values={}", run.as_str())
 }
 
-/// The filter of `aws ec2 describe-instances` that finds the instances `ids` name, at least one;
-/// unlike `--instance-ids`, it doesn't fail on an ID of no instance.
+// Unlike `--instance-ids`, a filter doesn't fail on an ID of no instance.
 fn ids_filter<'a>(ids: impl IntoIterator<Item = &'a InstanceId>) -> String {
     let ids: Vec<&str> = ids.into_iter().map(|id| id.0.as_str()).collect();
     format!("Name=instance-id,Values={}", ids.join(","))
 }
 
-/// `ids`, as an error shows them.
 fn shown(ids: &BTreeSet<impl fmt::Display>) -> String {
     let shown: Vec<String> = ids.iter().map(|id| format!("`{id}`")).collect();
     shown.join(", ")
 }
 
-/// The ID of an EC2 instance: `i-` and 8 or 17 lowercase hexadecimal digits, as EC2 writes it,
-/// such as `i-0123456789abcdef0`.
+// Checked so that an ID can neither carry a `,` into a filter's values nor read as an option.
 #[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(try_from = "String")]
 struct InstanceId(String);
@@ -544,7 +490,6 @@ impl fmt::Display for InstanceId {
     }
 }
 
-/// What `aws ec2 run-instances` prints, of the one instance it launched.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Launched {
@@ -557,7 +502,6 @@ struct LaunchedInstance {
     instance_id: InstanceId,
 }
 
-/// What `aws ec2 describe-instances` prints.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Reservations {
@@ -575,13 +519,12 @@ struct Reservation {
 struct ListedInstance {
     instance_id: InstanceId,
     state: InstanceState,
-    /// Its tags, which EC2 leaves out of the description of an instance that has none.
+    // EC2 leaves it out of the description of an instance that has none.
     #[serde(default)]
     tags: Vec<Tag>,
 }
 
 impl ListedInstance {
-    /// Whether the instance is run `run`'s: its [`RUN_TAG`] holds the run's tag.
     fn is_of(&self, run: &RunTag) -> bool {
         (self.tags.iter()).any(|Tag { key, value }| key == RUN_TAG && value == run.as_str())
     }
@@ -611,16 +554,14 @@ enum State {
     Stopped,
 }
 
-/// What `aws ec2 get-console-output` prints: the console's output, which EC2 sends in base64
-/// and `aws` decodes, or none, if EC2 has none.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ConsoleOutput {
+    // EC2 sends it in base64 and `aws` decodes it; there is none if EC2 has none.
     output: Option<String>,
 }
 
-/// The user data that boots a sandbox's instance, in region `region`: [`ENTRY`], filled in from
-/// `start`, which it hands `ec2-boot`.
+// Fills the entry's placeholders with the start's values, quoted as the shell reads them.
 fn user_data(start: &Start, region: &str) -> String {
     let Ok(json) = serde_json::to_string(start) else {
         unreachable!(
@@ -645,11 +586,9 @@ fn user_data(start: &Start, region: &str) -> String {
     })
 }
 
-/// The tags of the instance that a create of sandbox `name`, for run `run`'s role `role`,
-/// launches, and of its volume, as `aws ec2 run-instances --tag-specifications` takes them.
 fn tag_specifications(run: &RunTag, name: &Name, role: &Name) -> String {
-    // `<run>.<name>`, what EC2's console shows of the instance: which sandbox of which run it
-    // is, read back as both, as a name holds no `.`.
+    // `<run>.<name>`, what EC2's console shows of the instance: which sandbox of which run it is,
+    // read back as both, as a name holds no `.`.
     let named = format!("{}.{name}", run.as_str());
     let tags = [
         (RUN_TAG, run.as_str()),
@@ -666,8 +605,6 @@ fn tag_specifications(run: &RunTag, name: &Name, role: &Name) -> String {
     specifications.to_string()
 }
 
-/// Writes `text` to a new file at `path`, in `dir`, which it makes if it is missing, that only
-/// this user can read.
 fn write_private(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
     let opened = fs::create_dir_all(dir)
         .and_then(|()| (OpenOptions::new().write(true).create_new(true).mode(0o600)).open(path));
@@ -681,8 +618,6 @@ fn write_private(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
     })
 }
 
-/// `word`, as one word of a shell's command line: as it is, if every byte is one the shell
-/// takes literally, or else in single quotes.
 fn quote(word: &str) -> String {
     let literal = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./:=,@+%".contains(&byte);
     if !word.is_empty() && word.bytes().all(literal) {
