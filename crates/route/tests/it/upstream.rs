@@ -3,7 +3,7 @@
 //! serves the harness's request from the fake sandbox with it, and shows what the stand-in
 //! received and what the sandbox heard.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener};
@@ -77,6 +77,62 @@ const ERROR_PARTS: Parts = [
     "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"An error occurred\",\"param\":null}\n\n",
 ];
 
+/// A stream whose first item added is reasoning, and whose second, a function call, begins its
+/// output.
+const CALL_PARTS: Parts = [
+    "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\"}}\n\n",
+    "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"exec\"}}\n\nevent: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n",
+];
+
+/// A stream of Chat Completions whose first chunk names its role with empty content, and whose
+/// second begins its output with a tool call.
+const CHAT_CALL_PARTS: Parts = [
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"exec\",\"arguments\":\"\"}}]}}]}\n\ndata: [DONE]\n\n",
+];
+
+/// A stream whose first item added is reasoning, as real streams' are, whose first delta is empty,
+/// and whose second begins its output.
+const REASONING_PARTS: Parts = [
+    "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"output\":[],\"status\":\"in_progress\"},\"sequence_number\":0,\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"item\":{\"content\":[],\"id\":\"rs_1\",\"status\":\"in_progress\",\"summary\":[],\"type\":\"reasoning\"},\"output_index\":0,\"sequence_number\":1,\"type\":\"response.output_item.added\"}\n\nevent: response.reasoning_text.delta\ndata: {\"content_index\":0,\"delta\":\"\",\"item_id\":\"rs_1\",\"output_index\":0,\"sequence_number\":2,\"type\":\"response.reasoning_text.delta\"}\n\n",
+    "event: response.reasoning_text.delta\ndata: {\"content_index\":0,\"delta\":\"Two\",\"item_id\":\"rs_1\",\"output_index\":0,\"sequence_number\":3,\"type\":\"response.reasoning_text.delta\"}\n\n",
+];
+
+/// A stream whose output begins with a delta of a call's arguments.
+const ARGUMENTS_PARTS: Parts = [
+    PARTS[0],
+    "event: response.function_call_arguments.delta\ndata: {\"delta\":\"{\\\"\",\"item_id\":\"fc_1\",\"output_index\":0,\"sequence_number\":1,\"type\":\"response.function_call_arguments.delta\"}\n\n",
+];
+
+/// A stream whose output begins with a custom tool call's item added, as Codex's `apply_patch`
+/// streams.
+const CUSTOM_CALL_PARTS: Parts = [
+    "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"input\":\"\",\"status\":\"in_progress\"}}\n\n",
+    "event: response.custom_tool_call_input.delta\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ctc_1\",\"call_id\":\"call_1\",\"delta\":\"*** Begin Patch\"}\n\n",
+];
+
+/// A stream whose output begins with a delta of a custom tool call's input.
+const CUSTOM_INPUT_PARTS: Parts = [PARTS[0], CUSTOM_CALL_PARTS[1]];
+
+/// A stream whose output begins with a delta of a refusal.
+const REFUSAL_PARTS: Parts = [
+    PARTS[0],
+    "event: response.refusal.delta\ndata: {\"type\":\"response.refusal.delta\",\"delta\":\"No\"}\n\n",
+];
+
+/// A stream of Chat Completions whose first chunk begins its output with reasoning, as real
+/// streams' do.
+const CHAT_REASONING_PARTS: Parts = [
+    "data: {\"id\":\"chatcmpl_1\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"m-large\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Two\"}}]}\n\n",
+    "data: [DONE]\n\n",
+];
+
+/// A stream of Chat Completions whose reasoning is named `reasoning`, empty in its first chunk.
+const CHAT_REASONED_PARTS: Parts = [
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"\"}}]}\n\n",
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"Two\"}}]}\n\ndata: [DONE]\n\n",
+];
+
 /// A stream of Chat Completions that fails after its first chunk.
 const CHAT_FAILED_PARTS: Parts = [
     CHAT_PARTS[0],
@@ -130,6 +186,15 @@ fn case(name: &'static str, answer: Answer) -> Case {
         key: Some(KEY),
         answer: Some(answer),
         then: None,
+    }
+}
+
+/// A case of Chat Completions, whose upstream is the stand-in with [`KEY`], never given up on.
+fn chat_case(name: &'static str, answer: Answer) -> Case {
+    Case {
+        api: Api::Chat,
+        url: "http://{stand-in}/v1/chat/completions",
+        ..case(name, answer)
     }
 }
 
@@ -288,12 +353,18 @@ fn serve_one(
 struct Kept {
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
+    /// How many of the response's bytes were kept as its output began, once it has.
+    first_output: Cell<Option<usize>>,
 }
 
 impl Kept {
     fn sizes(&self) -> String {
         let (request, response) = (self.request.borrow().len(), self.response.borrow().len());
-        format!("request {request} bytes, response {response} bytes")
+        let mut sizes = format!("request {request} bytes, response {response} bytes");
+        if let Some(bytes) = self.first_output.get() {
+            write!(sizes, ", its output begun by byte {bytes}").unwrap();
+        }
+        sizes
     }
 }
 
@@ -304,6 +375,14 @@ impl Keep for Kept {
 
     fn response(&self, bytes: &[u8]) {
         self.response.borrow_mut().extend_from_slice(bytes);
+    }
+
+    fn first_output(&self) {
+        let kept = self.response.borrow().len();
+        assert!(
+            self.first_output.replace(Some(kept)).is_none(),
+            "told twice"
+        );
     }
 }
 
@@ -494,11 +573,7 @@ fn forward() {
                 key: Some("sk-test 0123\n"),
                 ..unanswered("a key with a space")
             },
-            Case {
-                api: Api::Chat,
-                url: "http://{stand-in}/v1/chat/completions",
-                ..case("a stream of Chat Completions", Answer::Streams(CHAT_PARTS))
-            },
+            chat_case("a stream of Chat Completions", Answer::Streams(CHAT_PARTS)),
             case("a rate limit with a 200", Answer::Streams(LIMITED_PARTS)),
             case("a failure after output", Answer::Streams(FAILED_LATE_PARTS)),
             case("a failure without a code", Answer::Streams(UNCODED_PARTS)),
@@ -507,14 +582,31 @@ fn forward() {
                 Answer::Streams(MISCODED_PARTS),
             ),
             case("an error event", Answer::Streams(ERROR_PARTS)),
-            Case {
-                api: Api::Chat,
-                url: "http://{stand-in}/v1/chat/completions",
-                ..case(
-                    "a failure of Chat Completions",
-                    Answer::Streams(CHAT_FAILED_PARTS),
-                )
-            },
+            case("a function call", Answer::Streams(CALL_PARTS)),
+            case("reasoning", Answer::Streams(REASONING_PARTS)),
+            case("a call's arguments", Answer::Streams(ARGUMENTS_PARTS)),
+            case("a custom tool call", Answer::Streams(CUSTOM_CALL_PARTS)),
+            case(
+                "a custom tool call's input",
+                Answer::Streams(CUSTOM_INPUT_PARTS),
+            ),
+            case("a refusal", Answer::Streams(REFUSAL_PARTS)),
+            chat_case(
+                "a tool call of Chat Completions",
+                Answer::Streams(CHAT_CALL_PARTS),
+            ),
+            chat_case(
+                "reasoning content of Chat Completions",
+                Answer::Streams(CHAT_REASONING_PARTS),
+            ),
+            chat_case(
+                "reasoning of Chat Completions",
+                Answer::Streams(CHAT_REASONED_PARTS),
+            ),
+            chat_case(
+                "a failure of Chat Completions",
+                Answer::Streams(CHAT_FAILED_PARTS),
+            ),
         ],
         &expect![[r#"
             a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 5, cached_tokens: Some(8), reasoning_tokens: Some(3) }), failed: None }); kept: request 552 bytes, response 271 bytes; key refused: false
@@ -534,13 +626,22 @@ fn forward() {
             no key file: the key file <dir>/key-14 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
             an empty key file: the key file <dir>/key-15 holds no API key: write the key alone, on one line
             a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line
-            a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 1, cached_tokens: Some(16), reasoning_tokens: Some(0) }), failed: None }); kept: request 355 bytes, response 319 bytes; key refused: false
+            a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 1, cached_tokens: Some(16), reasoning_tokens: Some(0) }), failed: None }); kept: request 355 bytes, response 319 bytes, its output begun by byte 103; key refused: false
             a rate limit with a 200: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.failed\ndata: {"type":"response.failed","sequence_number":0,"response":{"id":"resp_1","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"output":[],"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null,"sequence_number":1}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); kept: request 552 bytes, response 367 bytes; key refused: false
-            a failure after output: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"The model failed"},"usage":{"input_tokens":12,"output_tokens":1}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 1, cached_tokens: None, reasoning_tokens: None }), failed: Some(Failure { code: Some("server_error") }) }); kept: request 552 bytes, response 347 bytes; key refused: false
+            a failure after output: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"The model failed"},"usage":{"input_tokens":12,"output_tokens":1}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 1, cached_tokens: None, reasoning_tokens: None }), failed: Some(Failure { code: Some("server_error") }) }); kept: request 552 bytes, response 347 bytes, its output begun by byte 152; key refused: false
             a failure without a code: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":null}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: None }) }); kept: request 552 bytes, response 160 bytes; key refused: false
             a code that is no identifier: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"Slow down: wait 3s","message":""}}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: None }) }); kept: request 552 bytes, response 198 bytes; key refused: false
             an error event: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: error\ndata: {"type":"error","code":"server_error","message":"An error occurred","param":null}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("server_error") }) }); kept: request 552 bytes, response 161 bytes; key refused: false
-            a failure of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"error":{"message":"Rate limit reached","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); kept: request 355 bytes, response 221 bytes; key refused: false"#]],
+            a function call: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"reasoning"}}\n\nevent: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"function_call","name":"exec"}}\n\nevent: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","delta":"{}"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 552 bytes, response 407 bytes, its output begun by byte 407; key refused: false
+            reasoning: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"response":{"id":"resp_1","object":"response","output":[],"status":"in_progress"},"sequence_number":0,"type":"response.created"}\n\nevent: response.output_item.added\ndata: {"item":{"content":[],"id":"rs_1","status":"in_progress","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":1,"type":"response.output_item.added"}\n\nevent: response.reasoning_text.delta\ndata: {"content_index":0,"delta":"","item_id":"rs_1","output_index":0,"sequence_number":2,"type":"response.reasoning_text.delta"}\n\nevent: response.reasoning_text.delta\ndata: {"content_index":0,"delta":"Two","item_id":"rs_1","output_index":0,"sequence_number":3,"type":"response.reasoning_text.delta"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 552 bytes, response 705 bytes, its output begun by byte 705; key refused: false
+            a call's arguments: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.function_call_arguments.delta\ndata: {"delta":"{\"","item_id":"fc_1","output_index":0,"sequence_number":1,"type":"response.function_call_arguments.delta"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 552 bytes, response 230 bytes, its output begun by byte 230; key refused: false
+            a custom tool call: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"apply_patch","input":"","status":"in_progress"}}\n\nevent: response.custom_tool_call_input.delta\ndata: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","call_id":"call_1","delta":"*** Begin Patch"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 552 bytes, response 424 bytes, its output begun by byte 260; key refused: false
+            a custom tool call's input: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.custom_tool_call_input.delta\ndata: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","call_id":"call_1","delta":"*** Begin Patch"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 552 bytes, response 223 bytes, its output begun by byte 223; key refused: false
+            a refusal: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.refusal.delta\ndata: {"type":"response.refusal.delta","delta":"No"}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 552 bytes, response 143 bytes, its output begun by byte 143; key refused: false
+            a tool call of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}\n\ndata: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"exec","arguments":""}}]}}]}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 355 bytes, response 281 bytes, its output begun by byte 281; key refused: false
+            reasoning content of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"id":"chatcmpl_1","created":1,"object":"chat.completion.chunk","model":"m-large","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Two"}}]}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 355 bytes, response 183 bytes, its output begun by byte 169; key refused: false
+            reasoning of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":""}}]}\n\ndata: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning":"Two"}}]}\n\ndata: [DONE]\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: None }); kept: request 355 bytes, response 231 bytes, its output begun by byte 231; key refused: false
+            a failure of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"error":{"message":"Rate limit reached","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}\n\n; told: Some(Forwarded { status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); kept: request 355 bytes, response 221 bytes, its output begun by byte 103; key refused: false"#]],
     );
 }
 

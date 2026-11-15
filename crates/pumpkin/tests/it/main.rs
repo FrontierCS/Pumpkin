@@ -342,7 +342,7 @@ fn steady(said: &[&str]) -> Vec<String> {
             .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
         let span = !word.is_empty()
             && word
-                .trim_end_matches(|c: char| c.is_ascii_digit() || "hms".contains(c))
+                .trim_end_matches(|c: char| c.is_ascii_digit() || "hms.".contains(c))
                 .is_empty()
             && word.ends_with(['h', 'm', 's'])
             && word.starts_with(|c: char| c.is_ascii_digit());
@@ -425,7 +425,13 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
             lines.push(format!("the run log notes: {note}"));
         }
         if logged["event"]["kind"] == "model_answered" {
-            lines.push(format!("the run log records: {}", logged["event"]));
+            let mut event = logged["event"].clone();
+            for time in ["first_byte_ns", "first_token_ns"] {
+                if let Some(ns) = event.get_mut(time) {
+                    *ns = json!("<ns>");
+                }
+            }
+            lines.push(format!("the run log records: {event}"));
         }
     }
     for (whose, path) in [
@@ -497,7 +503,8 @@ fn alive(pid: i64) -> bool {
 
 /// `ran`, what `ls` printed, with the times that turn on the clock as `<t>`: how long the phase
 /// of a live run, whose id starts with `ids`, and each of its sandboxes, on the lines under it,
-/// have gone on, since its last model answer, and when the live runs end.
+/// have gone on, since its last model answer, how long its model requests have been in flight,
+/// and when the live runs end.
 fn masked(ran: &str, ids: &str) -> String {
     let lines = ran.lines().map(|line| {
         let mut line = line.to_owned();
@@ -514,6 +521,13 @@ fn masked(ran: &str, ids: &str) -> String {
             {
                 line.replace_range(at + from.len()..at + end, "<t>");
             }
+        }
+        if let Some(at) = line.find(" in flight")
+            && let Some(span) = line[at..].find("for ")
+        {
+            let span = at + span + "for ".len();
+            let end = line[span..].find(';').map_or(line.len(), |end| span + end);
+            line.replace_range(span..end, "<t>");
         }
         line
     });
@@ -603,21 +617,27 @@ fn judged(score: f64, returned: Value) -> Value {
 }
 
 /// The log of a run of [`lease_task`] that went the whole way, but its start, by the second
-/// since the run started: the agent's three model requests, two reporting their tokens; four
-/// train judge calls, one scored, whose call leases a box that a file is put into and a script
-/// runs in, one never started, one stopped and one timed out, with no score; three leases of the
-/// agent's, a `gpu` runner whose sandbox sees the GPU its role needs, closed by the agent, a `cpu`
-/// runner whose command times out, closed as the work phase ends, and a `gpu` runner whose
-/// sandbox sees another GPU, which expires; and the final judge's score, 49.36.
+/// since the run started: the agent's three model requests, each from its start, two reporting
+/// their tokens and their first token's time; four train judge calls, one scored, whose call
+/// leases a box that a file is put into and a script runs in, one never started, one stopped and
+/// one timed out, with no score; three leases of the agent's, a `gpu` runner whose sandbox sees
+/// the GPU its role needs, closed by the agent, a `cpu` runner whose command times out, closed as
+/// the work phase ends, and a `gpu` runner whose sandbox sees another GPU, which expires; and the
+/// final judge's score, 49.36, after a model request whose stream begins and states a rate limit.
 #[expect(clippy::too_many_lines, reason = "one line for each record")]
 fn judged_log() -> Vec<Value> {
     let none = || json!([]);
     let tick = || json!({ "kind": "tick" });
-    let answered = |request: u64, usage: Value| {
-        json!({
+    let started = |request: u64| json!({ "kind": "model_request_started", "caller": "agent", "request": request });
+    let answered = |request: u64, usage: Value, first_token_ns: Option<&str>| {
+        let mut answered = json!({
             "kind": "model_answered", "caller": "agent", "request": request,
             "answer": { "kind": "forwarded" }, "upstream_status": 200, "usage": usage,
-        })
+        });
+        if let Some(first_token_ns) = first_token_ns {
+            answered["first_token_ns"] = json!(first_token_ns);
+        }
+        answered
     };
     let ask = |job: u64| {
         let request = json!({ "kind": "judge", "grant": "train" });
@@ -680,11 +700,24 @@ fn judged_log() -> Vec<Value> {
     let returned = json!({ "raw_score": 49.36 });
     let finish = json!([{ "kind": "finish", "outcome": judged(49.36, returned.clone()) }]);
     let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
+    let judge_started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
+    let judge_answered = json!({
+        "kind": "model_answered", "caller": "job-4", "request": 3, "answer": { "kind": "forwarded" },
+        "upstream_status": 200, "failed": { "code": "rate_limit_exceeded" },
+        "first_token_ns": "1013000000000",
+    });
     vec![
         logged(5, json!({ "kind": "agent_started" }), none()),
-        logged(10, answered(0, reasoned), none()),
-        logged(20, answered(1, tokens(2000, 200, 1800)), none()),
-        logged(30, answered(2, Value::Null), none()),
+        logged(8, started(0), none()),
+        logged(10, answered(0, reasoned, Some("9250000000")), none()),
+        logged(15, started(1), none()),
+        logged(
+            20,
+            answered(1, tokens(2000, 200, 1800), Some("16500000000")),
+            none(),
+        ),
+        logged(26, started(2), none()),
+        logged(31, answered(2, Value::Null, None), none()),
         logged(40, asked_0, start_0),
         logged(46, of_job("judge_started", 0), none()),
         logged(50, tick(), boxed),
@@ -734,6 +767,8 @@ fn judged_log() -> Vec<Value> {
         logged(1006, tick(), final_judge),
         logged(1010, saw("job-4", sxm), none()),
         logged(1010, of_job("judge_started", 4), none()),
+        logged(1012, judge_started, none()),
+        logged(1020, judge_answered, none()),
         logged(
             1100,
             collected(4, json!({ "score": 49.36, "returned": returned })),

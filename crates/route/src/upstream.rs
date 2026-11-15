@@ -283,11 +283,13 @@ impl Upstream {
     /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
     /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
     /// the key or the request is refused, and else the response, cut short if it breaks off.
-    /// Fails if the head is too long for a frame or the deadline passes.
+    /// It calls `forwarding` just before it sends the request. Fails if the head is too long for
+    /// a frame or the deadline passes.
     pub(crate) fn forward(
         &self,
         closed: &Closed,
         client: Client<'_>,
+        forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
         client
@@ -300,6 +302,7 @@ impl Upstream {
             .iter()
             .fold(call, |call, (name, value)| call.header(name, value));
         let call = call.header(AUTHORIZATION, &self.authorization);
+        forwarding();
         let response = match call.send(closed.body()) {
             Ok(response) => response,
             Err(error) => {
@@ -332,7 +335,7 @@ impl Upstream {
             }
         };
         let content_type = (response.headers().get("content-type")).and_then(|v| v.to_str().ok());
-        let mut scan = Scan::new(content_type, closed.usage());
+        let mut scan = Scan::new(content_type, closed.usage(), closed.output());
         let mut body = response.into_body().into_reader();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
         let (usage, failed) = scan.finish();
@@ -396,10 +399,7 @@ impl Upstream {
             route.close(&client.request.request)
         };
         let _ = match taken {
-            Ok(closed) => {
-                forwarding();
-                self.forward(&closed, client, answered)
-            }
+            Ok(closed) => self.forward(&closed, client, forwarding, answered),
             Err(refusal) => barred(refusal, client, answered),
         };
     }
@@ -431,9 +431,10 @@ impl Upstream {
 ///
 /// One that names none is refused with a 404 that names each. The entry's upstream refuses it
 /// unless `allowed`, or once it has shut down ([`Upstream::shutdown`]) or its key was refused,
-/// and else forwards it closed, giving up at `by` too. It calls `forwarding` first, gives `keep`
-/// the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`]) and through which
-/// entry's index, once `keep` has the whole answer and before the answer's end is written.
+/// and else forwards it closed, giving up at `by` too, calling `forwarding` just before it sends
+/// it. It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`])
+/// and through which entry's index, once `keep` has the whole answer and before the answer's end
+/// is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
 // too long for a frame, or as the sandbox's session ends, which the run log shows.
 pub fn serve(
@@ -529,8 +530,9 @@ enum Relayed {
     Unsent(io::Error),
 }
 
-/// Streams `body` to `client` as it arrives, showing it to `scan`, until it ends, without writing
-/// its end, and returns how it went.
+/// Streams `body` to `client` as it arrives, showing it to `scan` and giving it to `keep`, and
+/// telling `keep` where its output begins, until it ends, without writing its end, and returns
+/// how it went.
 fn relay(
     body: &mut impl Read,
     client: &mut ModelResponse,
@@ -543,8 +545,12 @@ fn relay(
         match body.read(&mut buffer) {
             Ok(0) => return Relayed::Whole,
             Ok(read) => {
-                scan.feed(&buffer[..read]);
+                let began = scan.feed(&buffer[..read]);
                 keep.response(&buffer[..read]);
+                // After the bytes, so that the first output is timed no earlier than they are.
+                if began {
+                    keep.first_output();
+                }
                 if let Err(error) = client.send(&buffer[..read]) {
                     return Relayed::Unsent(error);
                 }

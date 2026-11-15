@@ -28,7 +28,8 @@ use crate::sandbox::SandboxName;
 pub(super) struct Line {
     /// When the log wrote it.
     pub(super) at_ns: Duration,
-    /// When the core took its event, if the core decided on it.
+    /// When the runtime observed what it records, if the record says: when the core took its
+    /// event, if the core decided on it.
     pub(super) observed_ns: Option<Duration>,
     /// Its event, but for a note, or for an event that doesn't read.
     pub(super) event: Option<Event>,
@@ -92,8 +93,8 @@ impl Line {
         })
     }
 
-    /// When it happened, as the log's readers time it: when the core took its event, if it did,
-    /// and else when the log wrote it.
+    /// When it happened, as the log's readers time it: when the runtime observed it, if the record
+    /// says, and else when the log wrote it.
     pub(super) fn when(&self) -> Duration {
         self.observed_ns.unwrap_or(self.at_ns)
     }
@@ -159,9 +160,18 @@ pub(super) enum Event {
         reason: String,
     },
     Tick,
-    /// How a route answered a model request of `caller`'s, if the line names it.
+    /// A model request of `caller`'s, numbered `request` in the run, going upstream.
+    ModelRequestStarted {
+        caller: Caller,
+        request: u64,
+    },
+    /// How a route answered a model request of `caller`'s, if the line names it, numbered
+    /// `request` in the run, and when its stream's output began, if the line says.
     ModelAnswered {
         caller: Option<Caller>,
+        request: u64,
+        #[serde(default, deserialize_with = "optional_nanos")]
+        first_token_ns: Option<Duration>,
         upstream_status: Option<u16>,
         answer: Answer,
         failed: Option<Failed>,
@@ -201,6 +211,7 @@ impl Event {
             | Self::LeaseEnded { .. }
             | Self::LeaseFailed { .. }
             | Self::Tick
+            | Self::ModelRequestStarted { .. }
             | Self::ModelAnswered { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
@@ -228,6 +239,7 @@ impl Event {
             | Self::LeaseEnded { .. }
             | Self::LeaseFailed { .. }
             | Self::Tick
+            | Self::ModelRequestStarted { .. }
             | Self::ModelAnswered { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }

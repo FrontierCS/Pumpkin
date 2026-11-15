@@ -393,8 +393,10 @@ struct Phase {
     doing: String,
 }
 
-/// The phase of the run whose log says `progress`, at `at`, since the run started.
+/// The phase of the run whose log says `progress`, at `at`, since the run started, with the
+/// run's model requests in flight, whoever made them.
 fn phase(progress: &Progress, at: Duration) -> Phase {
+    let flying = in_flight(&progress.model, at);
     let Progress {
         hard_end,
         deadline,
@@ -413,7 +415,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
                 since: call.sandbox.asked,
                 // The core collects what the final judge left by the hard end at the latest.
                 bound: call_bound(call).map(|bound| bound.min(*hard_end)),
-                doing: on(call),
+                doing: on(call) + &flying,
             };
         }
         let agent = (agent.sandbox.gone.is_none()).then(|| "the agent's sandbox".to_owned());
@@ -431,7 +433,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
             name: "ending".to_owned(),
             since: work_end,
             bound: Some(*hard_end),
-            doing,
+            doing: doing + &flying,
         };
     }
     let on = placed(&agent.sandbox);
@@ -440,7 +442,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
             name: "starting".to_owned(),
             since: Duration::ZERO,
             bound: agent.sandbox.startup,
-            doing: format!("the agent on {on}"),
+            doing: format!("the agent on {on}") + &flying,
         };
     };
     let requests = crate::counted(model.requests, "model request");
@@ -465,7 +467,23 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
         name: "agent".to_owned(),
         since: started,
         bound: deadline.map(|deadline| started + deadline),
-        doing,
+        doing: doing + &flying,
+    }
+}
+
+/// Which of `model`'s requests are in flight at `at`, since the run started, and for how long, as
+/// `; model request 117 in flight for 42s`, or of several, `; 3 model requests in flight, the
+/// longest, 117, for 42s`; nothing if none is.
+fn in_flight(model: &runtime::ModelUse, at: Duration) -> String {
+    let Some((request, since)) = (model.in_flight.iter()).min_by_key(|(_, since)| **since) else {
+        return String::new();
+    };
+    let longest = span(at.saturating_sub(*since));
+    match model.in_flight.len() {
+        1 => format!("; model request {request} in flight for {longest}"),
+        count => {
+            format!("; {count} model requests in flight, the longest, {request}, for {longest}")
+        }
     }
 }
 
@@ -664,9 +682,9 @@ fn column_span(span: Duration) -> String {
 /// without a score, where the record holds its standard error and evidence, and each lease, with
 /// how long its runner lived and was charged for, and busy, its commands and how it ended, in the
 /// order the core began them, under a call its own model requests; the run's model requests, how
-/// they were answered and the tokens reported; and the sandboxes of each place, how long they
-/// lasted, and how many were deleted; and the parts of its log that can't be read ([`unread`]).
-/// Of a run whose log records no start, only those parts; `None` if there are none.
+/// they were answered, the tokens reported and how long the good ones took ([`timed`]); each
+/// place's sandboxes, how long they lasted, and how many were deleted; and the parts of its log
+/// that can't be read ([`unread`]), alone of a run whose log records no start; `None` if none.
 pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
     let Readout { progress, unread } = record.progress()?;
     let unread = self::unread(&unread);
@@ -947,6 +965,7 @@ fn model(model: &runtime::ModelUse) -> String {
         if model.requests > 0 {
             line.push_str("; no response reported its tokens");
         }
+        line.push_str(&timed(model));
         return line;
     }
     let _ = write!(line, "; tokens {input} in");
@@ -961,7 +980,55 @@ fn model(model: &runtime::ModelUse) -> String {
         let responses = crate::counted(*reported, "response");
         let _ = write!(line, ", as {responses} reported them");
     }
+    line.push_str(&timed(model));
     line
+}
+
+/// How long `model`'s good answers took, by the median of those whose start the log records,
+/// from going upstream to their ends, and to their streams' first output, of those that had one,
+/// each with its count, as `; of 250 good answers, by the median, 1.24s to the first token (of
+/// 240) and 3.80s to the end`; nothing if none is.
+fn timed(model: &runtime::ModelUse) -> String {
+    let Some(took) = median(&model.took) else {
+        return String::new();
+    };
+    let first_token = median(&model.first_tokens).map_or(String::new(), |first_token| {
+        let count = model.first_tokens.len();
+        format!(
+            "{} to the first token (of {count}) and ",
+            seconds(first_token)
+        )
+    });
+    let good = crate::counted(model.took.len(), "good answer");
+    format!(
+        "; of {good}, by the median, {first_token}{} to the end",
+        seconds(took)
+    )
+}
+
+/// The median of `spans`, the mean of the middle two of an even count; `None` of none.
+fn median(spans: &[Duration]) -> Option<Duration> {
+    if spans.is_empty() {
+        return None;
+    }
+    let mut sorted = spans.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    Some(if sorted.len().is_multiple_of(2) {
+        (sorted[middle - 1] + sorted[middle]) / 2
+    } else {
+        sorted[middle]
+    })
+}
+
+/// `span` to the hundredth of a second, as `0.85s`, below a minute, where a model's times fall,
+/// and else as [`span`] says it.
+fn seconds(span: Duration) -> String {
+    if span < Duration::from_mins(1) {
+        format!("{:.2}s", span.as_secs_f64())
+    } else {
+        self::span(span)
+    }
 }
 
 /// How `model`'s requests were answered, as `all answered 200` or `answered 30 200, 5 429`;

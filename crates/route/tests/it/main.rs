@@ -128,6 +128,8 @@ impl Keep for Ignored {
     fn request(&self, _: &[u8], _: Option<&'static str>) {}
 
     fn response(&self, _: &[u8]) {}
+
+    fn first_output(&self) {}
 }
 
 /// The next of `arrivals`, which must be a model request that arrives within [`HUNG`].

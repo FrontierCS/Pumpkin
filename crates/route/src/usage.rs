@@ -30,6 +30,60 @@ pub(crate) const CHAT_FIELDS: Fields = [
     "/completion_tokens_details/reasoning_tokens",
 ];
 
+/// Whether an event of an API's stream is the model's output: the first that is marks the
+/// stream's first token.
+// As deepseek-harness's `isTokenDelta` takes a chunk for the first token: a delta of text,
+// reasoning or a call's arguments that is not empty, or a call's delta that names it,
+// https://github.com/deepseek-ai/deepseek-harness/blob/39163dd30f703a79079e2d2446545cff3c453738/packages/llm/llm/src/assistant-stream.ts#L242-L258
+pub(crate) type Output = fn(&Value) -> bool;
+
+/// A Responses event that is output: a delta that is not empty, of text, a refusal, reasoning,
+/// or a call's arguments or input, or the item added of a call, which names it before its
+/// arguments come.
+// A custom tool call, such as Codex's `apply_patch`, streams as its item added and its input's
+// deltas, as Codex reads them:
+// https://github.com/openai/codex/blob/09db085f9456c608a7960fdd4c5c55a34c6a84ea/codex-rs/codex-api/src/sse/responses.rs#L399-L408
+pub(crate) fn responses_output(event: &Value) -> bool {
+    match event["type"].as_str() {
+        Some(
+            "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta",
+        ) => event["delta"]
+            .as_str()
+            .is_some_and(|delta| !delta.is_empty()),
+        Some("response.output_item.added") => {
+            matches!(
+                event["item"]["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            )
+        }
+        _ => false,
+    }
+}
+
+/// A Chat Completions chunk that is output: one whose choice's delta holds content or reasoning
+/// that is not empty, or a tool call that is named or has arguments; a delta that only names its
+/// role, or holds empty content, isn't.
+// Providers name the reasoning `reasoning_content` (DeepSeek, Z.ai) or `reasoning` (OpenRouter).
+pub(crate) fn chat_output(event: &Value) -> bool {
+    let said = |value: &Value| value.as_str().is_some_and(|text| !text.is_empty());
+    let choices = event["choices"].as_array().into_iter().flatten();
+    choices.map(|choice| &choice["delta"]).any(|delta| {
+        let calls = delta["tool_calls"].as_array().into_iter().flatten();
+        let call = |call: &Value| {
+            call["function"]["name"].is_string() || said(&call["function"]["arguments"])
+        };
+        ["content", "reasoning_content", "reasoning"]
+            .into_iter()
+            .any(|field| said(&delta[field]))
+            || calls.into_iter().any(call)
+    })
+}
+
 /// The tokens that a model response reports it used, as its provider counts them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
@@ -96,11 +150,14 @@ impl Failure {
 }
 
 /// Reads a response's usage from its body as the body goes by, from the last event of a stream
-/// that holds one, or from a response that is one JSON value, and the failure that a stream
-/// states ([`Failure`]).
+/// that holds one, or from a response that is one JSON value, the failure that a stream states
+/// ([`Failure`]), and where a stream's output begins ([`Output`]).
 pub(crate) struct Scan {
     fields: Fields,
+    output: Output,
     stream: bool,
+    /// Whether an event of the stream was output.
+    began: bool,
     // A stream's current line, or a plain body; `None` once it passed its bound: a stream's line
     // is skipped to its end, and a plain body is given up on.
     held: Option<Vec<u8>>,
@@ -109,28 +166,34 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    pub(crate) fn new(content_type: Option<&str>, fields: Fields) -> Self {
+    pub(crate) fn new(content_type: Option<&str>, fields: Fields, output: Output) -> Self {
         let stream = content_type.is_some_and(|value| value.contains("text/event-stream"));
         Self {
             fields,
+            output,
             stream,
+            began: false,
             held: Some(Vec::new()),
             usage: None,
             failed: None,
         }
     }
 
-    pub(crate) fn feed(&mut self, mut bytes: &[u8]) {
+    /// Reads `bytes`, the body's next, and returns whether the stream's output began in them:
+    /// whether a line they end holds its first event of output.
+    pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> bool {
         if !self.stream {
             self.hold(bytes);
-            return;
+            return false;
         }
+        let began = self.began;
         while let Some(end) = bytes.iter().position(|&byte| byte == b'\n') {
             self.hold(&bytes[..end]);
             self.line();
             bytes = &bytes[end + 1..];
         }
         self.hold(bytes);
+        !began && self.began
     }
 
     pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>) {
@@ -164,6 +227,7 @@ impl Scan {
             return;
         };
         self.usage = Usage::of(&event, self.fields).or(self.usage);
+        self.began |= (self.output)(&event);
         if let Some(failure) = Failure::of(&event) {
             let code = self.failed.take().and_then(|failed| failed.code);
             self.failed = Some(Failure {

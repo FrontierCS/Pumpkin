@@ -28,5 +28,10 @@ pub trait Keep {
     /// The next bytes of the answer's body: the upstream's, as each part arrives, even where the
     /// route answers its client with a refusal in its place, or, if none came, the refusal.
     fn response(&self, bytes: &[u8]);
+    /// The upstream's stream has just begun the model's output: of the bytes given
+    /// [`Keep::response`] so far, the last hold the end of the line of the stream's first event
+    /// that its API counts as output, such as a delta of its text. Called once at most, and
+    /// never for a body that is no stream.
+    fn first_output(&self);
 }
 pub use usage::{Failure, Usage};
