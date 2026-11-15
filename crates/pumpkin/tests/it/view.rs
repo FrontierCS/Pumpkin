@@ -418,18 +418,16 @@ fn follows_a_live_run() {
         "the first poll: {}",
         fields(&first["run"]["model"], &[])
     ));
-    // 250 lines at once, more than an answer holds, of which the first 150 are past what the
-    // view holds, and are read again.
+    // 250 lines at once, more than the view holds of a log's last lines, so that it reads the
+    // first 150 again.
     log.write_all(lines[1..251].concat().as_bytes()).unwrap();
-    for _ in 0..3 {
-        let answer = poll(&mut next, &mut taken);
-        said.push(format!(
-            "after 250 lines: {} records, next {}, end {}",
-            answer["records"].as_array().unwrap().len(),
-            answer["next"],
-            answer["end"]
-        ));
-    }
+    let answer = poll(&mut next, &mut taken);
+    said.push(format!(
+        "after 250 lines: {} records, next {}, end {}",
+        answer["records"].as_array().unwrap().len(),
+        answer["next"],
+        answer["end"]
+    ));
     // Then in 29 parts of at most 97 lines, each polled with the half of its last line written.
     for part in lines[251..].chunks(97) {
         let (whole, cut) = part.split_at(part.len() - 1);
@@ -487,9 +485,7 @@ fn follows_a_live_run() {
             tokens: {"cached":null,"input":0,"output":0}
             took: {"count":0,"median":null}
 
-            after 250 lines: 100 records, next 14054, end 35231
-            after 250 lines: 100 records, next 28106, end 35231
-            after 250 lines: 50 records, next 35231, end 35231
+            after 250 lines: 250 records, next 35231, end 35231
             after the last poll: dropped_headers: []
             failed: []
             first_token: {"count":0,"median":null}
@@ -710,6 +706,54 @@ fn starts_over_a_shortened_log() {
             then GET /api/runs/<id>: end 4269, log_epoch 1
             GET /api/runs/<id>/since?log=3003&log_epoch=1
             end 4269, log_epoch 1, 10 records"#]],
+    );
+}
+
+#[test]
+fn windows_a_log_by_its_bytes() {
+    let scratch = Scratch::new("windows-a-log");
+    let id = "20261110-190000-00000014";
+    let tick = logged(1, json!({ "kind": "tick" }), json!([]));
+    let mut padded = tick.clone();
+    padded["pad"] = json!("x".repeat(1024 * 1024));
+    let mut log = vec![tick; 20_000];
+    log.insert(10_000, padded);
+    log.extend(judged_log());
+    let outcome = Some(judged(49.36, json!({})));
+    write_run(
+        &scratch,
+        id,
+        asked(id, 30),
+        &log,
+        outcome,
+        &lease_places(true),
+    );
+    let served = Served::start(&scratch);
+    let (mut steps, mut at, mut records) = (Vec::new(), 0, 0);
+    loop {
+        let window = served.get(&format!("/api/runs/{id}/log?at={at}"));
+        let count = window["records"].as_array().unwrap().len();
+        records += count;
+        steps.push(format!(
+            "from byte {at}: {count} records, next {}",
+            window["next"]
+        ));
+        at = window["next"].as_u64().unwrap();
+        if window["next"] == window["end"] {
+            break;
+        }
+    }
+    // Each record once, the run's start too.
+    assert_eq!(records, log.len() + 1);
+    check(
+        &scratch,
+        steps.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            from byte 0: 10001 records, next 709044
+            from byte 709044: 1 records, next 1757701
+            from byte 1757701: 10055 records, next 2485945"#]],
     );
 }
 

@@ -56,8 +56,16 @@ use crate::{cli, next, say};
 /// The most runs that a page of the list holds.
 const LIST_PAGE_RUNS: usize = 100;
 
-/// The most records of a run's log that one answer holds.
-const LOG_WINDOW_RECORDS: usize = 100;
+/// The most bytes of a run's log whose records one answer holds ([`window`]).
+// A page reads a log one window at a time, asking for each once the last has arrived, so each
+// costs a round trip. A link of under 1 MB a second with round trips of a tenth of a second
+// carries under 100 KB in one; at ten times that the round trips add a tenth or less to the read,
+// and the JSON one answer builds stays a few MiB.
+const LOG_WINDOW_BYTES: u64 = 1024 * 1024;
+
+/// How many of a log's last lines a held run keeps, which a poll's answer sends without reading
+/// the log again: a live run's log gains a few between two polls.
+const RECENT_LINES: usize = 100;
 
 /// How many runs that have ended the view holds the folds of, those read last: a run's page is
 /// read again and again while it is open, and a person opens a few at a time.
@@ -143,8 +151,7 @@ struct Held {
     task: Option<String>,
     /// The byte at which each line taken starts, in the log's order.
     lines: Vec<u64>,
-    /// The last [`LOG_WINDOW_RECORDS`] lines taken, by the byte each starts at, without their
-    /// newlines.
+    /// The last [`RECENT_LINES`] lines taken, by the byte each starts at, without their newlines.
     recent: VecDeque<(u64, Vec<u8>)>,
     /// How the run ended, as of the last look; `None` while it is live.
     ending: Option<Ending>,
@@ -224,7 +231,7 @@ impl Held {
         } = self;
         let started_over = fold.take_each(|line| {
             lines.push(line.byte);
-            if recent.len() == LOG_WINDOW_RECORDS {
+            if recent.len() == RECENT_LINES {
                 recent.pop_front();
             }
             recent.push_back((line.byte, line.bytes.to_vec()));
@@ -690,7 +697,7 @@ impl View {
 
     /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave
     /// ([`line_at`]), as JSON: `{"end": e, "live": l}` if nothing; else with `"run"`, the run,
-    /// and `"records"`, the records from `log` on, at most [`LOG_WINDOW_RECORDS`], and `"next"`,
+    /// and `"records"`, the records from `log` on, a window as [`window`] bounds it, and `"next"`,
     /// the byte past the last of them, to ask from next.
     fn since_json(
         &mut self,
@@ -717,7 +724,7 @@ impl View {
     }
 
     /// The records of run `id`'s log from byte `at` on, a byte that a reply of `log_epoch` gave
-    /// ([`line_at`]), at most [`LOG_WINDOW_RECORDS`], as JSON: `{"records": [...], "next": n,
+    /// ([`line_at`]), a window as [`window`] bounds it, as JSON: `{"records": [...], "next": n,
     /// "end": e}`, where `n` is the byte past the last.
     fn log_json(&mut self, id: &RunTag, at: u64, log_epoch: Option<u64>) -> Result<Value, Failed> {
         let held = self.held(id)?;
@@ -792,9 +799,16 @@ struct Window {
     past: u64,
 }
 
-/// The at most [`LOG_WINDOW_RECORDS`] records of `held`'s log from its line `from` on.
+/// The records of `held`'s log from its line `from` on, those of its lines that end within
+/// [`LOG_WINDOW_BYTES`] of the start of line `from`, and that line at least.
 fn window(held: &Held, from: usize) -> Result<Window, String> {
-    let read = from..(from + LOG_WINDOW_RECORDS).min(held.lines.len());
+    let starts = &held.lines[from..];
+    let mut read = from..from;
+    if let Some(&start) = starts.first() {
+        let ends = starts[1..].iter().copied().chain([held.fold.taken()]);
+        let within = ends.take_while(|end| end - start <= LOG_WINDOW_BYTES);
+        read.end += within.count().max(1);
+    }
     Ok(Window {
         past: held
             .lines
