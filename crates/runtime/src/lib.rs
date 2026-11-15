@@ -781,7 +781,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                         first: exchange.timed(),
                         ended: clock.now(),
                     };
-                    let answered = Entry::ModelAnswered((caller, number), answered);
+                    let answered = Entry::ModelAnswered((caller, number), Box::new(answered));
                     let _ = reports.send(Input::Logged(answered));
                 };
                 served.serve(
