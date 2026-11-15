@@ -360,8 +360,9 @@ sandboxes left, or fails.
 The command line and the controller's own side. `cli` parses the command line, `config` reads the
 machine's configuration (`Config`, or `Client` for a machine whose runs go to a controller), `star`
 reads a task's source below its root (`Root`), and `driver` starts the driver process. `controller`
-reaches the controller over shared connections, `job` is the controller's side, with the prune and
-the slots that admit its builds and publishes (`Admission`), `progress` is what `ls` shows, `next`
+reaches the controller over shared connections, `manifest` is what it sends a task's tree as, by
+content, to the controller's store, `job` is the controller's side, with the prune and the slots
+that admit its builds and publishes (`Admission`), `progress` is what `ls` shows, `next`
 makes the commands to run next, `style` runs the formatter, and `Workspace` is the `.pumpkin`
 directory.
 
@@ -375,6 +376,13 @@ keep it there in name. `Root`, the one `Loader`, refuses a symbolic link on the 
 **Architecture Invariant:** a machine runs its roles either on its own engine or on other
 providers, so the class a role is placed in never turns on the machine's memory. A configuration
 that names a provider of kind `docker` names no other (`Providers::new`).
+
+**Architecture Invariant:** a file enters a controller's store only once its SHA-256 is its name,
+checked under a name that no send writes, so that sends of one file at once, from other
+workspaces or machines, can make a job's start refuse it, as part written, but never put it in the
+store so. A job's tree is links into the store, beside its `.pumpkin`, which links to the
+controller's one workspace and which no path of a manifest is below, so a tree's files are those
+its manifest names. A client sends only what the store lacks, and no secret of a job's goes there.
 
 **Architecture Invariant:** a controller's prune never removes an image that a running job holds,
 or that the IR of a running job's started run names. Each job names what it holds in its directory
@@ -587,9 +595,9 @@ is handed as it connects, and the connections that its commands share to a contr
 are only the configuration and the tools' credentials, which it reads; the files that `fmt` and
 `lock` rewrite, which their command lines name; the Docker engine's images and its ledger of CPUs,
 which every run on the engine shares; and the machine's key to its controllers, with the host keys
-it pinned, in `~/.config/pumpkin/ssh/`. On a controller, the jobs also keep the trees that clients
-sent, and each job's own directory, below the controller user's home, as the `job` module lays
-out.
+it pinned, in `~/.config/pumpkin/ssh/`. On a controller, the jobs also keep the store of the files
+that clients sent, the trees of links into it, and each job's own directory, below the controller
+user's home, as the `job` module lays out.
 
 ### Testing
 

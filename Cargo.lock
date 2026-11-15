@@ -408,6 +408,7 @@ dependencies = [
  "schema",
  "serde",
  "serde_json",
+ "sha2",
  "stdx",
  "tempfile",
  "test-support",

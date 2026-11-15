@@ -4,14 +4,17 @@
 //! metadata service, a stand-in `df`, and the stand-in `docker` ([`StandIn`]). And the client's
 //! side: what it refuses before it reaches a controller, and what it sends one, and where.
 
+use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
 use std::io::{BufRead as _, BufReader, Read};
-use std::os::unix::fs::{PermissionsExt as _, symlink};
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use expect_test::{Expect, expect};
+use schema::ir::Sha256Digest;
 use serde_json::json;
 use stdx::Utc;
 use stdx::process::Environment;
@@ -118,7 +121,13 @@ fn set_up(scratch: &Scratch) {
     write_parameter(scratch, &parameter());
     install(scratch, &format!("home/.pumpkin/{PINNED}/bin"));
     fs::create_dir_all(scratch.0.join("run")).unwrap();
+    let empty = format!("home/store/manifests/{EMPTY_TREE}");
+    scratch.write(&empty, "pumpkin-tree/1\n");
 }
+
+/// The SHA-256 of the manifest of a tree of no files, `pumpkin-tree/1` and a newline, which
+/// [`set_up`] keeps in the controller's store.
+const EMPTY_TREE: &str = "dff3cfced0b99bbac128797b268e1756972cb1285a305e2dc1b9d96e97e6eb5e";
 
 /// The `pumpkin` that [`set_up`] built on the controller.
 fn controllers(scratch: &Scratch) -> PathBuf {
@@ -182,6 +191,7 @@ fn noted(scratch: &Scratch) -> Vec<String> {
 /// Checks `text`, with the scratch directory as `<scratch>`, against `expect`.
 fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect) {
     let mut text = text.replace(scratch.0.to_str().unwrap(), "<scratch>");
+    text = text.replace(EMPTY_TREE, "<empty tree>");
     for (value, name) in shown {
         text = text.replace(value, name);
     }
@@ -243,7 +253,6 @@ fn job() {
     for tree in [&recent, &old, &".pumpkin".to_owned()] {
         scratch.write(&format!("home/trees/tasks/{tree}/pumpkin"), "");
     }
-    symlink(&recent, scratch.0.join("home/trees/tasks/latest")).unwrap();
     let mut job = on_controller(
         &scratch,
         &[
@@ -254,6 +263,8 @@ fn job() {
             "us-west-1",
             "--parameter",
             "/pumpkin-alice/settings",
+            "--tree",
+            EMPTY_TREE,
             "--",
             "build",
             "stand-in/task.star",
@@ -306,6 +317,8 @@ fn job() {
                 "us-west-1",
                 "--parameter",
                 "/pumpkin-alice/settings",
+                "--tree",
+                EMPTY_TREE,
                 "--",
                 "build",
                 "stand-in/task.star",
@@ -335,6 +348,8 @@ fn job() {
             "us-west-1",
             "--parameter",
             "/pumpkin-alice/settings",
+            "--tree",
+            EMPTY_TREE,
             "--",
             "build",
             "stand-in/task.star",
@@ -367,7 +382,7 @@ fn job() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             out names the image: true
@@ -438,10 +453,10 @@ fn job() {
             docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
             docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
             docker builder prune --force --min-free-space 400
-            trees: .pumpkin, <recent>, latest
+            trees: .pumpkin, <recent>
             jobs: <old>, <recent>, <fresh>
             another job's run started: true
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -449,7 +464,7 @@ fn job() {
             docker image rm --force sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
             docker builder prune --force --min-free-space 400
             another job's run started: false
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -457,7 +472,7 @@ fn job() {
             docker image rm --force sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             docker builder prune --force --min-free-space 400
             freed while the prune waited for the lock:
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
             df --block-size=1 --output=size,avail -- /
             df --block-size=1 --output=size,avail -- /
@@ -475,7 +490,7 @@ fn job_refusals() {
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let id = id_ago(0, "0b000004");
-    let job = |scratch: &Scratch| {
+    let job = |scratch: &Scratch, tree: &str| {
         on_controller(
             scratch,
             &[
@@ -486,6 +501,8 @@ fn job_refusals() {
                 "us-west-1",
                 "--parameter",
                 "/pumpkin-alice/settings",
+                "--tree",
+                tree,
                 "--",
                 "build",
                 "stand-in/task.star",
@@ -518,30 +535,57 @@ fn job_refusals() {
     for (case, parameter, sent) in cases {
         write_parameter(&scratch, &parameter);
         send(&scratch, &id, &sent, false);
-        let mut job = job(&scratch);
+        let mut job = job(&scratch, EMPTY_TREE);
         lines.push(format!("{case}:"));
         let invoked = invocation(&job);
         lines.push(report(invoked, &job.output().unwrap(), &scratch.0, false));
     }
-    let mut unset = job(&scratch);
+    let mut unset = job(&scratch, EMPTY_TREE);
     unset.env_remove("XDG_RUNTIME_DIR");
     let invoked = invocation(&unset);
     lines.push(report(invoked, &unset.output().unwrap(), &scratch.0, false));
+    // A tree with a file below its `.pumpkin`, the controller's workspace; one made in the
+    // scratch directory, which is no job's tree.
+    let planted = sha256(b"planted\n");
+    scratch.write(&format!("home/store/{planted}"), "planted\n");
+    let mut shown = vec![
+        (id.clone(), "<id>".to_owned()),
+        (planted.clone(), "<blob>".to_owned()),
+    ];
+    for path in [".pumpkin/runs/planted/record", "stand-in/notes"] {
+        let text = format!("pumpkin-tree/1\nf {planted} 8 {path}\n");
+        let tree = sha256(text.as_bytes());
+        scratch.write(&format!("home/store/manifests/{tree}"), &text);
+        let mut refused = job(&scratch, &tree);
+        let invoked = invocation(&refused);
+        lines.push(report(
+            invoked,
+            &refused.output().unwrap(),
+            &scratch.0,
+            false,
+        ));
+        shown.push((tree, format!("<tree of {path}>")));
+    }
+    let made = scratch.0.join("stand-in/notes").exists();
+    lines.push(format!("made the file outside a job's tree: {made}"));
+    let shown: Vec<(&str, &str)> = (shown.iter())
+        .map(|(value, name)| (value.as_str(), name.as_str()))
+        .collect();
     check(
         &scratch,
         &lines.join("\n"),
-        &[(id.as_str(), "<id>")],
+        &shown,
         &expect![[r#"
             a parameter with [gateway]:
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `[gateway]`, which each job sets: remove it from them
             a parameter with no Modal provider:
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, name no Modal provider, whose `images` the client's `[controller.modal]` needs: apply `deploy/aws`, whose settings name one
             a sent [docker]:
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: what the run sent, config.toml, is refused: TOML parse error at line 6, column 2
               |
@@ -549,12 +593,19 @@ fn job_refusals() {
               |  ^^^^^^
             unknown field `docker`, expected `upstreams` or `modal`
             a key_file that names a path:
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: what the run sent gives upstream `gateway` no `key_file` that names a file it sent: send each key as a file of its own
-            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings -- build stand-in/task.star
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
-            pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it"#]],
+            pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of .pumpkin/runs/planted/record> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: <scratch>/home/store/manifests/<tree of .pumpkin/runs/planted/record>: the manifest's line `f <blob> 8 .pumpkin/runs/planted/record` is refused: `.pumpkin/runs/planted/record` can't be sent to the controller, where a job's `.pumpkin` is the controller's own workspace: leave it out of the task
+            $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of stand-in/notes> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the job's working directory, <scratch>, isn't its tree, <scratch>/home/trees/<repository>/<id>, which its start makes: run the job there, as its unit does
+            made the file outside a job's tree: false"#]],
     );
 }
 
@@ -576,6 +627,8 @@ fn on_one_cpu(scratch: &Scratch, id: &str) -> Child {
             "us-west-1",
             "--parameter",
             "/pumpkin-alice/settings",
+            "--tree",
+            EMPTY_TREE,
             "--",
             "build",
             "built/task.star",
@@ -804,6 +857,8 @@ fn job_publish_wait() {
             "us-west-1",
             "--parameter",
             "/pumpkin-alice/settings",
+            "--tree",
+            EMPTY_TREE,
             "--",
             "run",
             "built/task.star",
@@ -849,6 +904,8 @@ fn job_publish_wait() {
             "us-west-1",
             "--parameter",
             "/pumpkin-alice/settings",
+            "--tree",
+            EMPTY_TREE,
             "--",
             "build",
             "stand-in/task.star",
@@ -1017,22 +1074,33 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 const KEY: &str = "sk-client-stand-in";
 
 /// The stand-in `ssh` to the controller, of a shared master that answers: `-O check` succeeds,
-/// and any other call notes its arguments in `argv`, a line each, then runs its command as the
-/// controller's user, in `home`, with runtime directory `run`.
+/// but once after a cut, and any other call notes its arguments in `argv`, a line each, and the
+/// first line of its command but a `set`, in `scripts`, runs `before-<n>` beside it once, if it
+/// is there, before the `<n>`th call that `scripts` notes, then runs its command as the
+/// controller's user, in `home`, with runtime directory `run`. A receive, if `cut` is there, is
+/// cut after as many bytes as it says, as a connection that ends.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
 while :; do
     case $1 in
-        -O) exit 0 ;;
+        -O) if [ -e "$dir/unanswered" ]; then rm "$dir/unanswered"; exit 255; fi; exit 0 ;;
         -F|-i|-o|-E|-l) shift 2 ;;
         -*) shift ;;
         *) break ;;
     esac
 done
 shift
+first=$(printf '%s\n' "$*" | sed --quiet '/^set /!{p;q;}')
+printf '%s\n' "$first" >> "$dir/scripts"
+calls=$(wc --lines < "$dir/scripts")
+if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
 cd "$dir/../home" || exit 255
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
+if [ -e "$dir/cut" ] && [ "$first" = 'cd "$HOME/store/incoming"' ]; then
+    head --bytes="$(cat "$dir/cut")" | sh -c "$*"
+    rm "$dir/cut"; touch "$dir/unanswered"; exit 255
+fi
 exec sh -c "$*"
 "#;
 
@@ -1140,20 +1208,40 @@ fn mode_and_modes(dir: &Path) -> String {
 /// task. Returns the client's environment, the job's id and how the run ended.
 fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
     let client = set_up_client(scratch);
-    let first = on_client(scratch, &client, &["ls"]).output().unwrap();
-    assert!(!first.status.success(), "{first:?}");
-    fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
-    // As `ssh` makes a master's socket, which only its user may reach.
+    let (id, ran) = start(scratch, &client);
+    (client, id, ran)
+}
+
+/// Has the client of `client`'s environment, which [`set_up_client`] set up, start a job of the
+/// task `stand-in`, as [`started_job`] says. Returns the job's id, if it started, and how the run
+/// ended, with the id as `<id>`.
+fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
     let socket = scratch.0.join(SHARED).join("0");
-    fs::write(&socket, "").unwrap();
-    fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
-    let mut run = on_client(scratch, &client, &["run", "stand-in/task.star"]);
+    if !socket.exists() {
+        let first = on_client(scratch, client, &["ls"]).output().unwrap();
+        assert!(!first.status.success(), "{first:?}");
+        fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
+        // As `ssh` makes a master's socket, which only its user may reach.
+        fs::write(&socket, "").unwrap();
+        fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut run = on_client(scratch, client, &["run", "stand-in/task.star"]);
     let invoked = invocation(&run);
     let ran = run.output().unwrap();
-    let id = String::from_utf8(ran.stdout.clone()).unwrap();
-    let id = id.trim().to_owned();
-    let ran = report(invoked, &ran, &scratch.0, false).replace(&id, "<id>");
-    (client, id, ran)
+    let said = String::from_utf8(ran.stderr.clone()).unwrap();
+    let id = said.lines().find_map(|line| {
+        let id = line
+            .strip_prefix("pumpkin: run ")?
+            .split_once(" goes to controller")?
+            .0;
+        Some(id.to_owned())
+    });
+    let id = id.unwrap_or_default();
+    let mut ran = report(invoked, &ran, &scratch.0, false);
+    if !id.is_empty() {
+        ran = ran.replace(&id, "<id>");
+    }
+    (id, ran)
 }
 
 #[test]
@@ -1191,19 +1279,19 @@ fn keys_on_standard_input() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: sending the task's tree, 1.9 KiB in 5 files, to controller `alice`
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>
-        an argument holds the key: false
-        ssh ran on the controller: true
-        the job's directory holds the key: true
-        files in the workspace that hold the key: none"#]],
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` lacks all 5 of the task's files and Pumpkin's bundle: sending 1.9 KiB
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            an argument holds the key: false
+            ssh ran on the controller: true
+            the job's directory holds the key: true
+            files in the workspace that hold the key: none"#]],
     );
 }
 
@@ -1235,10 +1323,10 @@ fn modes_of_what_the_client_keeps() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
-        this machine's key: 700: key 600, key.pub 644
-        the shared connections: 700: 0 600, 0-0 600, lock 600, send-repo-stand-in_task.star 600
-        the jobs' directories in tmpfs: 700: <id> 700
-        the job's directory in tmpfs: 700: config.toml 600, gateway.key 600"#]],
+            this machine's key: 700: key 600, key.pub 644
+            the shared connections: 700: 0 600, 0-0 600, lock 600, upload 600
+            the jobs' directories in tmpfs: 700: <id> 700
+            the job's directory in tmpfs: 700: config.toml 600, gateway.key 600"#]],
     );
 }
 
@@ -1339,5 +1427,624 @@ fn target_refusals() {
         exit status: Some(1)
         pumpkin: the Session Manager plugin, `session-manager-plugin`, isn't on PATH, and `aws ssm start-session` needs it to reach the controller: install it, as AWS's Session Manager docs say
         calls of aws and ssh: 0"#]],
+    );
+}
+
+/// The lowercase hexadecimal digits of the SHA-256 of `bytes`.
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let digest = <[u8; 32]>::from(sha2::Sha256::digest(bytes));
+    Sha256Digest::from(digest).hex().to_owned()
+}
+
+/// The paths below `dir`, of files and symbolic links, relative to it, sorted, but those below a
+/// directory named one of `skipped`.
+fn walked(dir: &Path, skipped: &[&str]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut dirs = vec![PathBuf::new()];
+    while let Some(below) = dirs.pop() {
+        for entry in fs::read_dir(dir.join(&below)).unwrap() {
+            let entry = entry.unwrap();
+            let path = below.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                if !skipped.iter().any(|name| entry.file_name() == *name) {
+                    dirs.push(path);
+                }
+            } else {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// The task's files, of the repository that [`set_up_client`] made, each by the SHA-256 of what it
+/// holds, a symbolic link's target for a link, named: as `named` names it, else by the files of
+/// the repository that hold the same; and Pumpkin's bundle, and the tree of no files.
+fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)> {
+    let repo = scratch.0.join("repo");
+    let mut holders: Vec<(String, String)> = (named.iter())
+        .map(|(hex, name)| (hex.clone(), (*name).to_owned()))
+        .collect();
+    holders.push((EMPTY_TREE.to_owned(), "a tree of no files".to_owned()));
+    let bundle = fs::read(repo.join(format!(".pumpkin/{PINNED}/pumpkin.bundle"))).unwrap();
+    holders.push((sha256(&bundle), "Pumpkin's bundle".to_owned()));
+    for path in walked(&repo, &[".git", ".pumpkin"]) {
+        let at = repo.join(&path);
+        let bytes = match fs::read_link(&at) {
+            Ok(target) => target.into_os_string().into_vec(),
+            Err(_) => fs::read(&at).unwrap(),
+        };
+        let hex = sha256(&bytes);
+        if !named.iter().any(|(named, _)| *named == hex) {
+            holders.push((hex, path.display().to_string()));
+        }
+    }
+    holders
+}
+
+/// What the controller's store holds, a line each: each blob by the files that `holders` gives
+/// it, with its mode and its count of links, a copy of one at 0555 as such; and its manifests,
+/// and the files of its `incoming/`. Asserts that each blob and manifest is named by its SHA-256.
+fn stored(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
+    let store = scratch.0.join("home/store");
+    let named = |hex: &str| {
+        let names: Vec<&str> = (holders.iter())
+            .filter(|(held, _)| held == hex)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        if names.is_empty() {
+            format!("unnamed {hex}")
+        } else {
+            names.join(", ")
+        }
+    };
+    let mut lines = Vec::new();
+    for path in walked(&store, &["manifests", "incoming"]) {
+        let name = path.to_str().unwrap();
+        if name == "lock" {
+            continue;
+        }
+        let (hex, copy) = match name.strip_suffix(".x") {
+            Some(hex) => (hex, ", to run"),
+            None => (name, ""),
+        };
+        assert_eq!(sha256(&fs::read(store.join(&path)).unwrap()), hex, "{name}");
+        let metadata = fs::metadata(store.join(&path)).unwrap();
+        let mode = metadata.permissions().mode() & 0o7777;
+        let linked = match metadata.nlink() {
+            1 => "1 link".to_owned(),
+            count => format!("{count} links"),
+        };
+        lines.push(format!("  {}{copy}: {mode:o}, {linked}", named(hex)));
+    }
+    lines.sort();
+    lines.insert(0, "the store:".to_owned());
+    for path in walked(&store.join("manifests"), &[]) {
+        let name = path.to_str().unwrap().to_owned();
+        let text = fs::read(store.join("manifests").join(&path)).unwrap();
+        assert_eq!(sha256(&text), name);
+        lines.push(format!("  a manifest: {}", named(&name)));
+    }
+    let incoming = walked(&store.join("incoming"), &[]);
+    if incoming.is_empty() {
+        lines.push("  incoming/: none".to_owned());
+    }
+    for path in incoming {
+        let name = path.to_str().unwrap();
+        let size_bytes = fs::metadata(store.join("incoming").join(&path))
+            .unwrap()
+            .len();
+        let (hex, index) = name.split_once('.').unwrap();
+        let piece = format!("piece {index} of {}", named(hex));
+        lines.push(format!("  incoming/: {piece}, {size_bytes} bytes"));
+    }
+    lines
+}
+
+/// The scripts that the stand-in `ssh` ran since this was last called, each by what it does, as
+/// its first line, which [`SSH`] notes, says.
+fn calls(scratch: &Scratch) -> String {
+    let path = scratch.0.join("bin/scripts");
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::remove_file(path);
+    let calls = text.lines().map(|line| match line {
+        r#"store="$HOME/store""# => "query",
+        r#"cd "$HOME/store/incoming""# => "receive",
+        line if line.starts_with("sent=") => "start",
+        line => line,
+    });
+    let calls: Vec<&str> = calls.collect();
+    if calls.is_empty() {
+        return "the calls: none".to_owned();
+    }
+    format!("the calls: {}", calls.join(", "))
+}
+
+/// The tree's SHA-256 that the last job that the stand-in `systemd-run` noted was started with.
+fn last_tree(scratch: &Scratch) -> String {
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    let lines: Vec<&str> = argv.lines().collect();
+    let at = lines.iter().rposition(|line| *line == "--tree").unwrap();
+    lines[at + 1].to_owned()
+}
+
+/// `controller job` of `id`, of tree `tree`, as its unit runs it, in its tree, building the task
+/// `stand-in`: its output.
+fn job_of(scratch: &Scratch, id: &str, tree: &str) -> std::process::Output {
+    let mut job = on_controller(
+        scratch,
+        &[
+            "controller",
+            "job",
+            id,
+            "--region",
+            "us-west-1",
+            "--parameter",
+            "/pumpkin-alice/settings",
+            "--tree",
+            tree,
+            "--",
+            "build",
+            "stand-in/task.star",
+        ],
+    );
+    job.current_dir(scratch.0.join(format!("home/trees/repo/{id}")));
+    job.output().unwrap()
+}
+
+/// Writes into the task `stand-in` of the client's repository a file its owner may execute, a
+/// symbolic link, a name with a space, an empty file, and one that git lists, as it is in its
+/// index, but that is gone.
+fn write_files(scratch: &Scratch) {
+    scratch.write_executable("repo/stand-in/run.sh", b"#!/bin/sh\necho run\n");
+    symlink("Dockerfile", scratch.0.join("repo/stand-in/CLAUDE.md")).unwrap();
+    scratch.write("repo/stand-in/with space.txt", "spaced\n");
+    scratch.write("repo/stand-in/empty", "");
+    scratch.write("repo/stand-in/gone", "");
+    let added = stdx::process::command("git", Environment::Only(&["HOME", "PATH"]))
+        .args(["-C", "repo", "add", "stand-in/gone"])
+        .current_dir(&scratch.0)
+        .status();
+    assert!(added.unwrap().success());
+    fs::remove_file(scratch.0.join("repo/stand-in/gone")).unwrap();
+}
+
+/// The files of the job's tree at `dir`, a line each: each as a link of its blob in the store,
+/// or of the blob's copy to run, with its mode, or a symbolic link with its target.
+fn tree_files(scratch: &Scratch, dir: &Path) -> Vec<String> {
+    let store = scratch.0.join("home/store");
+    let mut lines = vec!["the job's tree:".to_owned()];
+    for path in walked(dir, &[".pumpkin"]) {
+        let at = dir.join(&path);
+        let metadata = fs::symlink_metadata(&at).unwrap();
+        let line = if metadata.is_symlink() {
+            format!(
+                "a symbolic link to {}",
+                fs::read_link(&at).unwrap().display()
+            )
+        } else {
+            let hex = sha256(&fs::read(&at).unwrap());
+            let linked = |name: String| {
+                let blob = fs::metadata(store.join(name));
+                blob.is_ok_and(|blob| blob.ino() == metadata.ino())
+            };
+            let of = if linked(hex.clone()) {
+                "its blob"
+            } else if linked(format!("{hex}.x")) {
+                "its blob's copy to run"
+            } else {
+                "nothing of the store's"
+            };
+            let mode = metadata.permissions().mode() & 0o7777;
+            format!("a link of {of}, {mode:o}")
+        };
+        lines.push(format!("  {}: {line}", path.display()));
+    }
+    lines
+}
+
+// The job's build refuses the link in its context, once it has made the tree.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn send_by_content() {
+    let scratch = Scratch::new("controller-send");
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let client = set_up_client(&scratch);
+    write_files(&scratch);
+    let (id, first) = start(&scratch, &client);
+    let mut lines = vec![first, calls(&scratch)];
+    let tree = [(last_tree(&scratch), "the task's tree")];
+    lines.extend(stored(&scratch, &holders(&scratch, &tree)));
+    job_of(&scratch, &id, &last_tree(&scratch));
+    let dir = scratch.0.join(format!("home/trees/repo/{id}"));
+    lines.extend(tree_files(&scratch, &dir));
+    let (_, again) = start(&scratch, &client);
+    lines.extend([again, calls(&scratch)]);
+    scratch.write("repo/stand-in/with space.txt", "spaced again\n");
+    let (_, changed) = start(&scratch, &client);
+    lines.extend([changed, calls(&scratch)]);
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 2.0 KiB
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, start
+        the store:
+          .pumpkinversion: 444, 2 links
+          PUMPKIN.star: 444, 1 link
+          Pumpkin's bundle: 444, 2 links
+          pumpkin, to run: 555, 2 links
+          pumpkin: 444, 1 link
+          stand-in/CLAUDE.md: 444, 1 link
+          stand-in/Dockerfile: 444, 1 link
+          stand-in/empty: 444, 1 link
+          stand-in/run.sh: 444, 1 link
+          stand-in/task.star: 444, 1 link
+          stand-in/with space.txt: 444, 1 link
+          a manifest: the task's tree
+          a manifest: a tree of no files
+          incoming/: none
+        the job's tree:
+          .pumpkin: a symbolic link to <scratch>/home/.pumpkin
+          .pumpkinversion: a link of its blob, 444
+          PUMPKIN.star: a link of its blob, 444
+          pumpkin: a link of its blob's copy to run, 555
+          stand-in/CLAUDE.md: a symbolic link to Dockerfile
+          stand-in/Dockerfile: a link of its blob, 444
+          stand-in/empty: a link of its blob, 444
+          stand-in/run.sh: a link of its blob's copy to run, 555
+          stand-in/task.star: a link of its blob, 444
+          stand-in/with space.txt: a link of its blob, 444
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` holds all 9 of the task's files
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, start
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks 1 of the task's 9 files: sending 13 bytes
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, start"#]],
+    );
+}
+
+#[test]
+fn send_refused_piece() {
+    let scratch = Scratch::new("controller-send-refused");
+    let client = set_up_client(&scratch);
+    scratch.write("repo/stand-in/notes", "noted\n");
+    // A piece of it, whole as its size goes, left with other bytes, as by a file changed meanwhile.
+    let hex = sha256(b"noted\n");
+    scratch.write(&format!("home/store/incoming/{hex}.00000"), "Noted\n");
+    let (_, refused) = start(&scratch, &client);
+    let mut lines = vec![refused, calls(&scratch)];
+    let store = scratch.0.join("home/store");
+    lines.push(format!(
+        "the store holds it: {}; a piece of it: {}",
+        store.join(&hex).exists(),
+        store.join(format!("incoming/{hex}.00000")).exists()
+    ));
+    let (_, again) = start(&scratch, &client);
+    lines.extend([again, calls(&scratch)]);
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks 5 of the task's 6 files and Pumpkin's bundle: sending 1.9 KiB
+        pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
+        the calls: query, query, receive, start
+        the store holds it: false; a piece of it: false
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks 1 of the task's 6 files: sending 6 bytes
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, start"#]],
+    );
+}
+
+// The connection ends part way through the second piece of a file of 17 MiB.
+#[test]
+fn send_carries_on() {
+    let scratch = Scratch::new("controller-send-carries-on");
+    let client = set_up_client(&scratch);
+    let big: Vec<u8> = (0..17u32 << 20).map(|index| (index % 251) as u8).collect();
+    fs::write(scratch.0.join("repo/stand-in/big.bin"), &big).unwrap();
+    scratch.write("bin/cut", &((16 << 20) + (64 << 10)).to_string());
+    let (_, sent) = start(&scratch, &client);
+    let mut lines = vec![sent, calls(&scratch)];
+    let stored = stored(&scratch, &holders(&scratch, &[]));
+    let shown = ["big.bin", "incoming"];
+    lines.extend(
+        stored
+            .into_iter()
+            .filter(|line| shown.iter().any(|name| line.contains(name))),
+    );
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 17.0 MiB
+        tar: Unexpected EOF in archive
+        tar: Unexpected EOF in archive
+        tar: Error is not recoverable: exiting now
+        pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: asking again what it lacks, now, attempt 2 of 7
+        pumpkin: controller `alice` lacks 2 of the task's 6 files: sending 1.0 MiB
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, query, receive, start
+          stand-in/big.bin: 444, 1 link
+          incoming/: none"#]],
+    );
+}
+
+#[test]
+fn send_refusals() {
+    let scratch = Scratch::new("controller-send-refusals");
+    let client = set_up_client(&scratch);
+    let mut lines = Vec::new();
+    for name in [&b"repo/stand-in/a\nb"[..], b"repo/stand-in/\xff"] {
+        let path = scratch.0.join(OsStr::from_bytes(name));
+        fs::write(&path, "").unwrap();
+        let (_, refused) = start(&scratch, &client);
+        lines.extend([refused, calls(&scratch)]);
+        fs::remove_file(path).unwrap();
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: `stand-in/a\nb` can't be sent to the controller, whose tree names each file by a line: rename it with no newline or tab, and no empty, `.` or `..` component
+        the calls: none
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: `stand-in/�` isn't UTF-8, so it can't be sent to the controller, whose tree names each file by a line of text: rename it
+        the calls: none"#]],
+    );
+}
+
+#[test]
+fn send_changed_file() {
+    let scratch = Scratch::new("controller-send-changed");
+    let client = set_up_client(&scratch);
+    scratch.write("repo/stand-in/notes", "noted\n");
+    // Shortened once it is hashed, as the first call to the controller begins.
+    let notes = scratch.0.join("repo/stand-in/notes");
+    scratch.write(
+        "bin/before-1",
+        &format!("printf no > '{}'\n", notes.display()),
+    );
+    let (_, changed) = start(&scratch, &client);
+    let mut lines = vec![changed, calls(&scratch)];
+    let (_, again) = start(&scratch, &client);
+    lines.extend([again, calls(&scratch)]);
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 1.9 KiB
+        pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
+        the calls: query, query, receive
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks 2 of the task's 6 files: sending 1.7 KiB
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, start"#]],
+    );
+}
+
+// A new bundle of the same commit replaces the workspace's; then the prune, as it were, removes
+// a file and the bundle that the controller said it holds before the start takes them.
+#[test]
+fn send_bundle_and_gone() {
+    let scratch = Scratch::new("controller-send-gone");
+    let client = set_up_client(&scratch);
+    scratch.write("repo/stand-in/notes", "noted\n");
+    let (_, first) = start(&scratch, &client);
+    assert!(first.contains("exit status: Some(0)"), "{first}");
+    calls(&scratch);
+    let bundle = format!("repo/.pumpkin/{PINNED}/pumpkin.bundle");
+    scratch.write(&bundle, "another bundle of Pumpkin\n");
+    let (_, rebundled) = start(&scratch, &client);
+    let mut lines = vec![rebundled, calls(&scratch)];
+    let kept = fs::read_to_string(scratch.0.join(format!("home/.pumpkin/{PINNED}.bundle")));
+    lines.push(format!("the workspace's bundle: {:?}", kept.unwrap()));
+    let store = scratch.0.join("home/store");
+    let removed = [sha256(b"noted\n"), sha256(b"another bundle of Pumpkin\n")];
+    let removed = removed.map(|hex| format!("rm '{}'\n", store.join(hex).display()));
+    scratch.write("bin/before-2", &removed.concat());
+    let (_, gone) = start(&scratch, &client);
+    lines.extend([gone, calls(&scratch)]);
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks Pumpkin's bundle: sending 26 bytes
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: query, query, receive, start
+        the workspace's bundle: "another bundle of Pumpkin\n"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(1)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` holds all 6 of the task's files
+        pumpkin: 1 of the task's files and Pumpkin's bundle are no longer on the controller, as its prune removes what no tree holds: run it again
+        the calls: query, start"#]],
+    );
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn store_collection() {
+    let scratch = Scratch::new("controller-store-collection");
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let client = set_up_client(&scratch);
+    let mut named = Vec::new();
+    let mut trees = Vec::new();
+    for notes in ["first", "second", "third"] {
+        scratch.write("repo/stand-in/notes", notes);
+        let (id, ran) = start(&scratch, &client);
+        assert!(ran.contains("exit status: Some(0)"), "{ran}");
+        named.push((
+            sha256(notes.as_bytes()),
+            format!("stand-in/notes, as the {notes} sent it"),
+        ));
+        named.push((
+            last_tree(&scratch),
+            format!("the tree that the {notes} sent"),
+        ));
+        trees.push((id, last_tree(&scratch)));
+    }
+    // The first's job makes its tree, which links its files; the second's never starts.
+    let (first, tree) = &trees[0];
+    assert!(job_of(&scratch, first, tree).status.success());
+    let two_days_ago = SystemTime::now() - Duration::from_hours(48);
+    for (_, tree) in &trees[..2] {
+        let manifest = scratch.0.join(format!("home/store/manifests/{tree}"));
+        File::open(manifest)
+            .unwrap()
+            .set_modified(two_days_ago)
+            .unwrap();
+    }
+    for (bytes, when) in [
+        ("of two days ago", two_days_ago),
+        ("of now", SystemTime::now()),
+    ] {
+        let hex = sha256(bytes.as_bytes());
+        let piece = format!("home/store/incoming/{hex}.00000");
+        scratch.write(&piece, bytes);
+        File::open(scratch.0.join(piece))
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        named.push((hex, format!("a blob {bytes}")));
+    }
+    // Of a later Pumpkin's, say, which may name any blob.
+    let foreign = "pumpkin-tree/2\nwhat a later form holds\n";
+    let foreign_hex = sha256(foreign.as_bytes());
+    let planted = format!("home/store/manifests/{foreign_hex}");
+    scratch.write(&planted, foreign);
+    named.push((foreign_hex.clone(), "a manifest of another form".to_owned()));
+    let (third, tree) = &trees[2];
+    let built = job_of(&scratch, third, tree);
+    assert!(built.status.success(), "{built:?}");
+    let named: Vec<(String, &str)> = (named.iter())
+        .map(|(hex, name)| (hex.clone(), name.as_str()))
+        .collect();
+    let said = String::from_utf8(built.stderr).unwrap();
+    let mut lines: Vec<String> = (said.lines())
+        .filter(|line| line.contains("keeps every blob"))
+        .map(str::to_owned)
+        .collect();
+    let shown = ["second", "manifest", "incoming"];
+    lines.extend(
+        (stored(&scratch, &holders(&scratch, &named)).into_iter())
+            .filter(|line| shown.iter().any(|name| line.contains(name))),
+    );
+    // The third's again, once the manifest of another form is gone.
+    fs::remove_file(scratch.0.join(planted)).unwrap();
+    let (fourth, ran) = start(&scratch, &client);
+    assert!(ran.contains("exit status: Some(0)"), "{ran}");
+    let built = job_of(&scratch, &fourth, tree);
+    assert!(built.status.success(), "{built:?}");
+    lines.extend(stored(&scratch, &holders(&scratch, &named)));
+    let config = scratch.0.join(format!("home/builds/{fourth}/pumpkin.toml"));
+    let mut here = on_controller(
+        &scratch,
+        &[
+            "build",
+            "--config",
+            config.to_str().unwrap(),
+            "stand-in/task.star",
+        ],
+    );
+    let here = here.current_dir(scratch.0.join("repo")).output().unwrap();
+    assert!(here.status.success(), "{here:?}");
+    lines.push(format!(
+        "the job built the IR that the repository builds: {}",
+        built.stdout == here.stdout
+    ));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&foreign_hex, "<another form>")],
+        &expect![[r#"
+            pumpkin: <scratch>/home/store/manifests/<another form>: the manifest doesn't start with `pumpkin-tree/1`: expected a manifest of this Pumpkin's form; so the prune keeps every blob of the store, which it may name
+              stand-in/notes, as the second sent it: 444, 1 link
+              a manifest: the tree that the third sent
+              a manifest: a tree of no files
+              a manifest: a manifest of another form
+              incoming/: piece 00000 of a blob of now, 6 bytes
+            the store:
+              .pumpkinversion: 444, 5 links
+              PUMPKIN.star: 444, 4 links
+              Pumpkin's bundle: 444, 2 links
+              pumpkin, to run: 555, 5 links
+              pumpkin: 444, 1 link
+              stand-in/Dockerfile: 444, 4 links
+              stand-in/notes, as the first sent it: 444, 2 links
+              stand-in/notes, as the third sent it: 444, 3 links
+              stand-in/task.star: 444, 4 links
+              a manifest: the tree that the third sent
+              a manifest: a tree of no files
+              incoming/: piece 00000 of a blob of now, 6 bytes
+            the job built the IR that the repository builds: true"#]],
     );
 }

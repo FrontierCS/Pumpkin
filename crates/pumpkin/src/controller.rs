@@ -11,35 +11,42 @@
 //! follow of a run, a send and a copy whose connection ends go on over another, a few times. What
 //! runs there is the controller's own side ([`crate::job`]), whose layout below the user's home
 //! its module doc gives: a run or a build sends the files of its task's repository that the task
-//! reaches into a tree of its own, with the upstreams of this machine's configuration, their keys,
-//! its Modal provider and Modal's configuration file into its job's directory in tmpfs, by `tar`
-//! on the connection's standard input, never in an argument nor in a file of this machine's;
-//! then starts its job, `pumpkin controller job`, in a unit of the user's systemd, which outlives
-//! every connection. What the controller's commands say is forwarded as they say it, and the
-//! record of a run that has ended is copied into this machine's runs directory.
+//! reaches, and the bundle of the Pumpkin it pins, by content, to the controller's store, which
+//! keeps each for every later send, so that only what the store lacks goes ([`crate::manifest`]);
+//! then the job's start sends the upstreams of this machine's configuration, their keys, its
+//! Modal provider and Modal's configuration file into its job's directory in tmpfs, by `tar` on
+//! the connection's standard input, never in an argument nor in a file of this machine's, takes
+//! what arrived into the store, and starts the job, `pumpkin controller job`, which makes its tree
+//! of links into the store, in a unit of the user's systemd, which outlives every connection.
+//! What the controller's commands say is forwarded as they say it, and the record of a run that
+//! has ended is copied into this machine's runs directory.
 
+use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::{self, Read as _, Write as _};
 use std::ops::{Deref, DerefMut};
-use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{
     DirBuilderExt as _, FileExt as _, OpenOptionsExt as _, PermissionsExt as _,
 };
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus, Output, Stdio};
+use std::process::{ChildStdin, Command, ExitCode, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fmt, thread};
 
 use aws::{Bound, Cli};
 use provider::RunTag;
+use rustix::event::{self, PollFd, PollFlags, Timespec};
+use rustix::io::Errno;
+use schema::ir::Sha256Digest;
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 use tempfile::TempDir;
 
-use crate::job::{BUILDS, JOBS, SENT_CONFIG, SENT_MODAL, TREES, WAITING};
+use crate::job::{BUILDS, JOBS, SENT_CONFIG, SENT_MODAL, STARTED, STORE, TREES, WAITING};
+use crate::manifest::INCOMING;
 use crate::workspace::{self, Workspace};
-use crate::{cli, config, next, say};
+use crate::{cli, config, manifest, next, say};
 
 /// The controller's user, which runs every Pumpkin process there.
 const USER: &str = "pumpkin";
@@ -54,11 +61,11 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 
 const START_POLL: Duration = Duration::from_secs(5);
 
-/// How long a send, or a copy, by `rsync` may move no byte before `rsync` gives up.
-// There is no bound on a send's whole time: SSM carries well under 1 MB a second, so a task's
-// datasets of a GB or more take as long as they take. A dead connection ends by itself, as
-// `ServerAliveInterval` gives `ssh` 90 s, so this is a little beyond that, to ride out an SSM
-// session that pauses.
+/// How long a copy by `rsync`, or a send of a task's files, may move no byte before it gives up.
+// There is no bound on a copy's or a send's whole time: SSM carries well under 1 MB a second,
+// so a record or a dataset of a GB or more takes as long as it takes. A dead connection ends by
+// itself, as `ServerAliveInterval` gives `ssh` 90 s, so this is a little beyond that, to ride out
+// an SSM session that pauses.
 const STALL_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// The deadline of a command that has no bound on its time, only on how long it may stall.
@@ -249,7 +256,7 @@ fn kept() -> Result<PathBuf, String> {
 /// which a command holds while its `ssh` or `rsync` goes over the master, and its log,
 /// `<index>.log`, which says why it ended, kept until the master opens again; the lock on opening
 /// one, `lock` ([`Lock`]), so that a batch of commands that start at once open them one at a time;
-/// the lock on sending each task's tree, `send-<repository>-<entry>` ([`Shared::sending`]); and
+/// the lock on sending the controller what its store lacks, `upload` ([`Shared::upload`]); and
 /// what `ls` was sent of each record that ended there, `ended/<id>/` ([`Shared::ended`]).
 // Each `ssh` runs in that directory, and names a socket by its name alone: so its path, with the
 // suffix that `ssh` adds while it binds it, fits a socket's address however deep the workspace
@@ -309,12 +316,15 @@ impl Shared {
         self.dir.join(format!("{master}.log"))
     }
 
-    /// Takes the lock on sending `tree`, of its repository and its task's entry, which the job's
-    /// start then links as the repository's latest, so that commands of one task that start at
-    /// once send its files once, and the others link to what the first sent, while each task's
-    /// own files go at once with every other's; says, once, that it waits while another holds it.
-    fn sending(&self, name: &Name, tree: &Tree) -> Result<File, String> {
-        let path = (self.dir).join(format!("send-{}-{}", tree.repo, plain(&tree.entry)));
+    /// Takes the lock on sending the controller what its store lacks, saying, once, that it waits
+    /// while another command holds it: a command that holds it asks again what the store lacks,
+    /// so that of the commands that start at once, each sends only what the others haven't.
+    // One send at a time: GNU tar replaces a file by removing it, then writing a new one, so of a
+    // piece that two sends wrote at once, a start could take one part written, and so refuse its
+    // blob, which it checks under a name of its own. A send from another workspace, which this
+    // lock doesn't hold back, can still fail a start so, never the store: sent again, it is whole.
+    fn upload(&self, name: &Name) -> Result<File, String> {
+        let path = self.dir.join("upload");
         let file = private(&path)?;
         match file.try_lock() {
             Ok(()) => return Ok(file),
@@ -322,34 +332,11 @@ impl Shared {
             Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
         }
         say(format_args!(
-            "waiting for another command's send of `{}` to controller `{name}`, which this one \
-             links to",
-            tree.entry
+            "waiting for another command's send to controller `{name}`, which may send some of \
+             what this one would"
         ));
         file.lock().context(path.display())?;
         Ok(file)
-    }
-
-    /// How many sends of a task's tree from this workspace are under way: the locks on sending
-    /// ([`sending`](Self::sending)) that a command holds.
-    // A look takes the lock for an instant, in which a send that starts would say that it waits
-    // for another, then go on as the look lets go.
-    fn sends(&self) -> Result<usize, String> {
-        let mut held = 0;
-        for entry in fs::read_dir(&self.dir).context(self.dir.display())? {
-            let path = entry.context(self.dir.display())?.path();
-            let named = path.file_name().and_then(|name| name.to_str());
-            if !named.is_some_and(|name| name.starts_with("send-")) {
-                continue;
-            }
-            let file = File::open(&path).context(path.display())?;
-            match file.try_lock_shared() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => held += 1,
-                Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
-            }
-        }
-        Ok(held)
     }
 
     /// `program`, as [`Cli::proxied`] makes it, run in the connections' directory.
@@ -836,25 +823,28 @@ impl Reached {
         finished(output, shown, timeout).map_err(|error| self.lost(master, error))
     }
 
-    /// Runs the `rsync` that `make` makes, with `input`, if any, on its standard input, as
-    /// [`call`](Self::call) does, and again, carrying on from what it sent
-    /// ([`rsync`](Self::rsync)), each time its connection ended, as [`pause`](Self::pause) allows.
-    fn sent(
+    /// Runs the session that `make` makes, `shown`, with `input`, if any, on its standard input,
+    /// as [`call`](Self::call) does, killed after `timeout`; and again, saying it does `what`,
+    /// each time it exited with one of `ended`, as its connection ended, as
+    /// [`pause`](Self::pause) allows.
+    fn again(
         &self,
         make: impl Fn() -> Result<Session, String>,
         input: Option<&[u8]>,
+        shown: &str,
+        ended: &[i32],
+        timeout: Duration,
         what: &str,
     ) -> Result<Vec<u8>, String> {
         let mut attempt = 0;
         loop {
-            let mut rsync = make()?;
-            let output = rsync.output(input, Deadline::after(UNBOUNDED));
-            let master = rsync.slot.master;
-            drop(rsync);
-            let ended = matches!(&output, Ok(Some(output)) if self.ended_connection(output.status, &RSYNC_ENDED, master));
-            if !(ended && self.pause(attempt, master, &format!("{what} again, carrying on"))) {
-                return finished(output, "rsync", UNBOUNDED)
-                    .map_err(|error| self.lost(master, error));
+            let mut session = make()?;
+            let output = session.output(input, Deadline::after(timeout));
+            let master = session.slot.master;
+            drop(session);
+            let cut = matches!(&output, Ok(Some(output)) if self.ended_connection(output.status, ended, master));
+            if !(cut && self.pause(attempt, master, what)) {
+                return finished(output, shown, timeout).map_err(|error| self.lost(master, error));
             }
             attempt += 1;
         }
@@ -1078,7 +1068,8 @@ impl Reached {
             rsync.arg(runs.join(id));
             Ok(rsync)
         };
-        self.sent(copying, None, &format!("copying run {id}'s record"))?;
+        let what = format!("copying run {id}'s record again, carrying on");
+        self.again(copying, None, "rsync", &RSYNC_ENDED, UNBOUNDED, &what)?;
         Ok(())
     }
 }
@@ -1091,23 +1082,17 @@ fn parameter(name: &Name) -> String {
 
 /// A task's repository, as this machine sends it to the controller.
 struct Tree {
-    /// Its top, as git finds it from the entry's directory.
-    top: PathBuf,
-    /// The files git lists there, tracked, or untracked but not ignored, each ended by a NUL.
-    files: Vec<u8>,
-    /// How many files there are, and what they hold in all, in bytes, as this machine has them.
-    files_count: usize,
-    size_bytes: u64,
-    /// The entry's path below the top.
+    /// Of the files git lists there, tracked, or untracked but not ignored, those it sends, and
+    /// the git bundle of the Pumpkin that its `.pumpkinversion` names, which `./pumpkin` keeps
+    /// once it has built it, from which the controller builds the same Pumpkin.
+    hashed: manifest::Hashed,
+    /// The entry's path below the repository's top.
     entry: String,
     /// The repository's name, the top's own as [`plain`] gives it, which its trees on the
     /// controller are below.
     repo: String,
     /// The commit of Pumpkin that its `.pumpkinversion` names.
     commit: String,
-    /// The git bundle of that commit that `./pumpkin` keeps once it has built it, from which the
-    /// controller builds the same Pumpkin.
-    bundle: PathBuf,
 }
 
 /// The repository of the task whose entry is `entry`, given `args`, as the controller is sent it:
@@ -1117,8 +1102,8 @@ struct Tree {
 /// # Errors
 ///
 /// Fails if the entry is in no git repository, or the repository has no
-/// `./pumpkin`, the consumer entry, which the job builds Pumpkin with; or, saying them, if the
-/// task has problems.
+/// `./pumpkin`, the consumer entry, which the job builds Pumpkin with, or a file to send can't be
+/// sent ([`manifest::hash`]); or, saying them, if the task has problems.
 fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
     let path = fs::canonicalize(entry.path()).context(entry.path())?;
     let dir = path.parent().unwrap_or(Path::new("/"));
@@ -1151,17 +1136,7 @@ fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
         ],
     )?;
     let files = needed(entry, args, &top, &files)?;
-    let mut files_count = 0;
-    let mut size_bytes = 0;
-    for file in files
-        .split(|byte| *byte == 0)
-        .filter(|file| !file.is_empty())
-    {
-        files_count += 1;
-        // As `rsync --archive` sends it: a link as a link; one gone since git listed it, not.
-        let file = top.join(std::ffi::OsStr::from_bytes(file));
-        size_bytes += fs::symlink_metadata(&file).map_or(0, |metadata| metadata.len());
-    }
+    let hashed = manifest::hash(&top, &files, &commit, &bundle)?;
     let below = path.strip_prefix(&top).ok().and_then(Path::to_str);
     let Some(below) = below else {
         unreachable!(
@@ -1176,14 +1151,10 @@ fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
         .unwrap_or_default();
     let repo = plain(&name);
     Ok(Tree {
-        top,
-        files,
-        files_count,
-        size_bytes,
+        hashed,
         entry: below.to_owned(),
         repo,
         commit,
-        bundle,
     })
 }
 
@@ -1277,7 +1248,7 @@ fn pumpkin_version(top: &Path) -> Result<(String, PathBuf), String> {
 
 /// Sends `tree` to `reached` as job `id`'s, which runs `words`, `run` or `build` with their
 /// arguments, in its directory below `kind`, with what `client` sends with each job, then starts
-/// the job in a unit of its own.
+/// the job in a unit of its own, once the controller has taken in what it lacked of the tree.
 fn send(
     reached: &Reached,
     client: &config::Client,
@@ -1287,9 +1258,7 @@ fn send(
     words: &[String],
 ) -> Result<(), String> {
     let id = id.as_str();
-    // Until the job's start has linked the tree as the repository's latest.
-    let _sending = reached.shared.sending(&reached.name, tree)?;
-    send_tree(reached, id, tree)?;
+    send_tree(reached, tree)?;
     let (config, keys) = client.sent()?;
     let mut files = vec![(SENT_CONFIG.to_owned(), config.into_bytes())];
     for (file, key) in keys {
@@ -1307,52 +1276,40 @@ fn send(
     let archive = archive(&files);
     let script = starting(&client.controller, id, kind, tree, words);
     let mut ssh = reached.ssh(&script)?;
-    reached
-        .call(&mut ssh, Some(&archive), "ssh", SHORT_TIMEOUT)
+    let output = ssh.output(Some(&archive), Deadline::after(SHORT_TIMEOUT));
+    if let Ok(Some(output)) = &output
+        && output.status.code() == Some(manifest::UNADMITTED)
+    {
+        return Err(manifest::unadmitted(&tree.hashed, &output.stdout));
+    }
+    let master = ssh.slot.master;
+    finished(output, "ssh", SHORT_TIMEOUT)
         .map(|_| ())
+        .map_err(|error| reached.lost(master, error))
 }
 
 /// A `tar` archive, in POSIX's ustar format, of `files`, each a name and what the file holds,
 /// each file 0600: what [`send`] sends a job, made in memory, so that what it holds of keys is
 /// never written on this machine but in the files that hold them.
 fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
-    const BLOCK: usize = 512;
     let mut archive = Vec::new();
     for (name, holds) in files {
-        let mut header = [0; BLOCK];
         // The name, `config.toml`, `modal.toml` or an upstream's name of at most 64 bytes with
         // `.key`, fits its field's 100 bytes.
-        header[..name.len()].copy_from_slice(name.as_bytes());
-        // Its mode, owner, group, size and time, each a field of octal digits that a NUL ends.
-        let numbers = [
-            (100, format!("{:07o}", 0o600)),
-            (108, format!("{:07o}", 0)),
-            (116, format!("{:07o}", 0)),
-            (124, format!("{:011o}", holds.len())),
-            (136, format!("{:011o}", 0)),
-        ];
-        for (at, number) in numbers {
-            header[at..at + number.len()].copy_from_slice(number.as_bytes());
-        }
-        // A regular file, of the ustar format, whose checksum is the sum of the header's bytes,
-        // its own counted as spaces.
-        header[156] = b'0';
-        header[257..265].copy_from_slice(b"ustar\x0000");
-        header[148..156].fill(b' ');
-        let sum: u32 = header.iter().copied().map(u32::from).sum();
-        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
-        archive.extend_from_slice(&header);
+        archive.extend_from_slice(&manifest::header(name, 0o600, holds.len() as u64));
         archive.extend_from_slice(holds);
-        archive.resize(archive.len().next_multiple_of(BLOCK), 0);
+        archive.resize(archive.len().next_multiple_of(manifest::BLOCK), 0);
     }
     // Two blocks of zeros end it.
-    archive.resize(archive.len() + 2 * BLOCK, 0);
+    archive.resize(archive.len() + 2 * manifest::BLOCK, 0);
     archive
 }
 
 /// What a command on `controller` runs to start job `id`, below `kind`, which runs `words` in
-/// its copy of `tree`, building the Pumpkin it pins from the bundle that [`send_tree`] sent, with
-/// what the job is sent on its standard input, as `tar`.
+/// its tree, of `tree`'s manifest, building the Pumpkin it pins from its bundle, with what the job
+/// is sent on its standard input, as `tar`: once it has taken in what the store lacked
+/// ([`manifest::admit`]), it links into the tree what the job's unit runs ([`STARTED`]), and the
+/// bundle into the controller's one workspace, as `<commit>.bundle`, in place of any there.
 fn starting(
     controller: &config::Controller,
     id: &str,
@@ -1368,69 +1325,232 @@ fn starting(
     } = controller;
     let words: Vec<String> = words.iter().map(|word| next::quoted(word)).collect();
     let (parameter, region) = (next::quoted(&parameter(name)), region.as_str());
+    let manifest = &tree.hashed.manifest;
+    let mut links = String::new();
+    for entry in manifest.entries() {
+        let manifest::Entry {
+            kind,
+            digest,
+            size_bytes: _,
+            path,
+        } = entry;
+        let (blob, to) = (format!("\"$store\"/{}", digest.hex()), next::quoted(path));
+        let link = match kind {
+            manifest::Kind::Bundle => {
+                let bundle = format!("\"$HOME\"/{}/{path}.bundle", workspace::DIR);
+                // The store's, in place of any other, as of one cut short by an earlier send;
+                // linked aside and moved over it, as another job's start may link it at once,
+                // and a job that reads it keeps what it opened.
+                format!(
+                    "if ! [ {bundle} -ef {blob} ]; then\n  ln --force {blob} {bundle}.$$\n  \
+                     mv --force {bundle}.$$ {bundle}\nfi\n"
+                )
+            }
+            _ if !STARTED.contains(&path.as_str()) => continue,
+            manifest::Kind::File => format!("ln {blob} \"$tree\"/{to}\n"),
+            // A link shares its file's mode, so an executable links to a copy of its own, 0555,
+            // which another job's start may make at once, so it is made aside and moved in.
+            manifest::Kind::Executable => format!(
+                "[ -e {blob}.x ] || {{ copy=$(mktemp --tmpdir=\"$store\"/{INCOMING} \
+                 executable.XXXXXX) && cp {blob} \"$copy\" && chmod 0555 \"$copy\" && \
+                 mv \"$copy\" {blob}.x; }}\nln {blob}.x \"$tree\"/{to}\n"
+            ),
+            // With a `.` after it, so that `$(…)` keeps the target's own trailing newlines.
+            manifest::Kind::Link => format!(
+                "target=$(cat {blob} && echo .)\nln --symbolic -- \"${{target%.}}\" \"$tree\"/{to}\n"
+            ),
+        };
+        links.push_str(&link);
+    }
     format!(
         r#"set -o errexit -o nounset
 sent="$XDG_RUNTIME_DIR/pumpkin/{id}"
 tree="$HOME/{TREES}/{repo}/{id}"
+store="$HOME/{STORE}"
 mkdir --parents --mode=0700 "$XDG_RUNTIME_DIR/pumpkin" "$sent"
 # Until the unit takes the keys, whose end removes them, a failure here does.
 trap 'rm --recursive --force "$sent"' EXIT
 tar --extract --directory="$sent"
-mkdir --parents "$HOME/{kind}/{id}" "$HOME/{WORKSPACE}"
+(
+{admit})
+mkdir --parents "$tree" "$HOME/{kind}/{id}" "$HOME/{WORKSPACE}"
 ln --symbolic "$HOME/{WORKSPACE}" "$tree/.pumpkin"
-ln --symbolic --force --no-dereference {id} "$HOME/{TREES}/{repo}/latest"
-systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-{id} \
+{links}systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-{id} \
     --working-directory="$tree" --property=ExitType=cgroup \
     --property="ExecStopPost=/usr/bin/rm --recursive --force $sent" \
     --property="StandardOutput=append:$HOME/{kind}/{id}/out" \
     --property="StandardError=append:$HOME/{kind}/{id}/log" \
     -- "$tree/pumpkin" --pumpkin-repository="$HOME/{WORKSPACE}/{commit}.bundle" \
-    controller job {id} --region {region} --parameter {parameter} -- {}
+    controller job {id} --region {region} --parameter {parameter} --tree {tree} -- {}
 trap - EXIT
 "#,
         words.join(" "),
+        admit = manifest::admit(&manifest.name()),
+        tree = manifest.name().hex(),
         WORKSPACE = workspace::DIR
     )
 }
 
-/// Sends `tree` as job `id`'s, once it has said how much it holds, and the bundle of the Pumpkin
-/// it pins into the controller's one workspace, as `<commit>.bundle`, which a later send of the
-/// same commit skips; each carries on over another connection if its own ends ([`Reached::sent`]).
-fn send_tree(reached: &Reached, id: &str, tree: &Tree) -> Result<(), String> {
-    let repo = &tree.repo;
-    say(format_args!(
-        "sending the task's tree, {} in {}, to controller `{}`",
-        size(tree.size_bytes),
-        crate::counted(tree.files_count, "file"),
-        reached.name
-    ));
-    let sending = || {
-        let mut rsync = reached.rsync()?;
-        // Each job's tree is of its own, and shares with the repository's last one each file
-        // that hasn't changed since, which `--link-dest` links rather than sends.
-        rsync.args([
-            "--archive",
-            "--from0",
-            "--files-from=-",
-            "--ignore-missing-args",
-            "--mkpath",
-            "--link-dest=../latest",
-        ]);
-        rsync.arg(format!("{}/", tree.top.display()));
-        rsync.arg(reached.remote(&format!("{TREES}/{repo}/{id}/")));
-        Ok(rsync)
+/// Sends `reached` what its store lacks of `tree`, saying what that is, or that it lacks
+/// nothing: if it lacks anything, with the lock on sending it ([`Shared::upload`]), it asks again,
+/// and sends what it still lacks; and once more, if the connection that went over ends, as
+/// [`Reached::pause`] allows, as what has arrived stays there.
+fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
+    let manifest::Hashed { manifest, sources } = &tree.hashed;
+    if manifest::pieces(&lacked(reached, manifest)?).is_empty() {
+        say(holds(&reached.name, manifest, &[]));
+        return Ok(());
+    }
+    let _upload = reached.shared.upload(&reached.name)?;
+    let mut attempt = 0;
+    loop {
+        let pieces = manifest::pieces(&lacked(reached, manifest)?);
+        say(holds(&reached.name, manifest, &pieces));
+        if pieces.is_empty() {
+            return Ok(());
+        }
+        let mut ssh = reached.ssh(&manifest::receive())?;
+        let master = ssh.slot.master;
+        let (status, written) =
+            streamed(&mut ssh, |stdin| manifest::stream(&pieces, sources, stdin))?;
+        drop(ssh);
+        let again = "asking again what it lacks";
+        if reached.ended_connection(status, &[SSH_FAILED], master)
+            && reached.pause(attempt, master, again)
+        {
+            attempt += 1;
+            continue;
+        }
+        return match written {
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                let stalled = format!(
+                    "sending the task's files to controller `{}` stalled: {error}, so it was \
+                     stopped: run it again",
+                    reached.name
+                );
+                Err(reached.lost(master, stalled))
+            }
+            Ok(Err(changed)) => Err(changed),
+            _ if !status.success() => {
+                let failed = format!(
+                    "sending the task's files to controller `{}` failed ({status}), as said above",
+                    reached.name
+                );
+                Err(reached.lost(master, failed))
+            }
+            Ok(Ok(())) => Ok(()),
+            Err(error) => Err(format!("writing to `ssh` failed: {error}")),
+        };
+    }
+}
+
+/// What the store of `reached` lacks of the blobs that `manifest` names, as it answers
+/// [`manifest::query`], asked again if the connection that went over ends.
+fn lacked(
+    reached: &Reached,
+    manifest: &manifest::Manifest,
+) -> Result<Vec<manifest::Missing>, String> {
+    let (query, text) = (manifest::query(&manifest.name()), manifest.text());
+    let asking = || reached.ssh(&query);
+    let again = "asking again what it lacks";
+    let answer = reached.again(
+        asking,
+        Some(&text),
+        "ssh",
+        &[SSH_FAILED],
+        SHORT_TIMEOUT,
+        again,
+    )?;
+    manifest::missing(&answer)
+}
+
+/// Runs `session` with this machine's standard output and error, and its standard input written
+/// by `write`, until it ends, or `write` fails as [`Pipe`] does once the session stalls, which
+/// kills it; gives its exit status, and what `write` gave.
+fn streamed<T>(
+    session: &mut Session,
+    write: impl FnOnce(&mut Pipe) -> io::Result<T>,
+) -> Result<(ExitStatus, io::Result<T>), String> {
+    let child = session.stdin(Stdio::piped()).spawn();
+    let mut child = child.context("running `ssh` failed")?;
+    let Some(stdin) = child.stdin.take() else {
+        unreachable!("the child's standard input is missing, though it is piped just above")
     };
-    reached.sent(sending, Some(&tree.files), "sending the task's tree")?;
-    let bundle = format!("{}/{}.bundle", workspace::DIR, tree.commit);
-    let bundling = || {
-        let mut rsync = reached.rsync()?;
-        rsync.args(["--archive", "--mkpath"]).arg(&tree.bundle);
-        rsync.arg(reached.remote(&bundle));
-        Ok(rsync)
-    };
-    reached
-        .sent(bundling, None, "sending Pumpkin's bundle")
-        .map(|_| ())
+    let mut pipe = Pipe(stdin);
+    let written = write(&mut pipe);
+    // Then dropped, so that the script reads its end.
+    drop(pipe);
+    if matches!(&written, Err(error) if error.kind() == io::ErrorKind::TimedOut) {
+        child.kill().context("stopping `ssh` failed")?;
+    }
+    let status = child.wait().context("running `ssh` failed")?;
+    Ok((status, written))
+}
+
+/// A command's standard input, which fails, as [`io::ErrorKind::TimedOut`], once it has taken no
+/// byte for [`STALL_TIMEOUT`].
+struct Pipe(ChildStdin);
+
+impl io::Write for Pipe {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Ok(timeout) = Timespec::try_from(STALL_TIMEOUT) else {
+            unreachable!("{STALL_TIMEOUT:?} fits a `timespec`")
+        };
+        loop {
+            let mut polled = [PollFd::new(&self.0, PollFlags::OUT)];
+            match event::poll(&mut polled, Some(&timeout)) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("it took no byte for {} s", STALL_TIMEOUT.as_secs()),
+                    ));
+                }
+                Ok(_) => break,
+                Err(Errno::INTR) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // No more than a pipe that polls as writable takes at once, so that the write never waits.
+        self.0.write(&bytes[..bytes.len().min(libc::PIPE_BUF)])
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// What controller `name` lacks of `manifest`'s blobs, for a person to read, as `pieces` of them
+/// are to be sent: how many of the task's files, and whether Pumpkin's bundle; or that it holds
+/// them all.
+fn holds(name: &Name, manifest: &manifest::Manifest, pieces: &[manifest::Piece]) -> String {
+    let lacked: BTreeSet<&Sha256Digest> = pieces.iter().map(|piece| &piece.digest).collect();
+    let (bundles, files): (Vec<&manifest::Entry>, Vec<&manifest::Entry>) = (manifest.entries())
+        .iter()
+        .partition(|entry| entry.kind == manifest::Kind::Bundle);
+    // A task's files are never one, as `./pumpkin` and `.pumpkinversion` go with its own.
+    let files_count = files.len();
+    if lacked.is_empty() {
+        return format!("controller `{name}` holds all {files_count} of the task's files");
+    }
+    let lacked_count = files
+        .iter()
+        .filter(|file| lacked.contains(&file.digest))
+        .count();
+    let mut lacks = Vec::new();
+    if lacked_count == files_count {
+        lacks.push(format!("all {files_count} of the task's files"));
+    } else if lacked_count > 0 {
+        lacks.push(format!("{lacked_count} of the task's {files_count} files"));
+    }
+    if bundles.iter().any(|bundle| lacked.contains(&bundle.digest)) {
+        lacks.push("Pumpkin's bundle".to_owned());
+    }
+    let size_bytes = pieces.iter().map(|piece| piece.size_bytes).sum();
+    format!(
+        "controller `{name}` lacks {}: sending {}",
+        lacks.join(" and "),
+        size(size_bytes)
+    )
 }
 
 /// `bytes` for a glance, to a tenth of the largest unit of 1024 that it reaches, as `3.4 MiB`.
@@ -1673,7 +1793,6 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
 /// they have ended, beside the copies in this machine's default runs directory, by id, the
 /// controller's of a run that both hold. Each run is read here, from the files of its record that
 /// `ls` reads, which the controller sends once the record has ended unless its copy here has.
-/// Then says how many tasks this workspace is sending the controller ([`said_sends`]), if any.
 ///
 /// [`progress::listed_since`]: crate::progress::listed_since
 pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCode, String> {
@@ -1738,7 +1857,6 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     // As of when the controller began the listing, which is when it read what each run does.
     let lines = crate::progress::lines(&listing, now, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
-    said_sends(&reached)?;
     said_when(now.since_epoch());
     if unlisted > 0 {
         return Err("a run can't be listed, as said above".to_owned());
@@ -1765,21 +1883,6 @@ fn listed_here(
     let older: Vec<String> = older.filter(|id| !listing.runs.contains_key(id)).collect();
     listing.older.extend(older);
     Ok((listing, unlisted + ended_unlisted))
-}
-
-/// Says how many tasks this workspace is sending to `reached` ([`Shared::sends`]), if any: a
-/// run's job, which `ls` lists, starts only once its task's tree is sent.
-fn said_sends(reached: &Reached) -> Result<(), String> {
-    let sends = reached.shared.sends()?;
-    if sends > 0 {
-        let is = if sends == 1 { "is" } else { "are" };
-        say(format_args!(
-            "{} {is} being sent to controller `{}` from this workspace",
-            crate::counted(sends, "task"),
-            reached.name
-        ));
-    }
-    Ok(())
 }
 
 /// Says when the controller began a listing, at `began`, since the Unix epoch, if it took

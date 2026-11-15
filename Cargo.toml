@@ -61,6 +61,10 @@ use_self = "warn"
 [profile.dev.package."*"]
 debug = "line-tables-only"
 
+# Optimized, as tests hash files of tens of MiB, which unoptimized SHA-256 takes seconds over.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # A panic is a bug, so it ends the whole process: under unwinding, one in a thread would end only
 # that thread. Dev builds unwind, which Cargo forces on tests anyway, so that `cargo test` builds
 # each library once for both the tests and the binaries they run; the binaries abort from a panic

@@ -27,9 +27,10 @@ stdx = { path = "../stdx" }
 tls = { path = "../tls" }
 clap.workspace = true
 libc.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "stdio", "thread"] }
+rustix = { workspace = true, features = ["event", "fs", "process", "stdio", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 

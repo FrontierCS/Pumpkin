@@ -70,7 +70,7 @@ concurrent `plan` or `apply` of the same state waits on its lock.
   `~/.config/pumpkin/pumpkin.toml`, beside its `[upstreams]` and, for runs on Modal,
   `[controller.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
   config` says what each does. The person's machine, Linux on x86-64, needs AWS CLI v2, the
-  Session Manager plugin, `ssh`, `rsync` 3.2.3 or later, `tar` and `git`. A Modal provider,
+  Session Manager plugin, `ssh`, `rsync`, `tar` and `git`. A Modal provider,
   whose profile is in `~/.modal.toml`:
 
   ```toml

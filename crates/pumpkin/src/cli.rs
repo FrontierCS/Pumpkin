@@ -18,6 +18,7 @@ use clap::{
 };
 use provider::RunTag;
 use recipe::Stage;
+use schema::ir::Sha256Digest;
 
 use crate::star::Entry;
 
@@ -145,6 +146,13 @@ enum Action {
         #[arg(value_parser = utf8(", as every SSM parameter's name is: name one that is"))]
         #[arg(help = "The SSM parameter that holds the controller's settings.")]
         parameter: String,
+        #[arg(long, value_name = "sha256")]
+        #[arg(value_parser = tree)]
+        #[arg(help = "\
+The SHA-256 of the manifest of the job's tree, in the controller's store, from
+which the job makes the tree in its working directory, which is to be the tree's
+directory, trees/<repository>/<id> in the home, that the job's start made.")]
+        tree: Sha256Digest,
         #[arg(last = true, required = true, value_name = "command")]
         #[arg(help = "\
 `run` or `build` and their arguments, but `--config`, which the job
@@ -453,6 +461,7 @@ pub(crate) struct Job {
     pub(crate) id: RunTag,
     pub(crate) region: Region,
     pub(crate) parameter: String,
+    pub(crate) tree: Sha256Digest,
     pub(crate) command: JobCommand,
 }
 
@@ -469,6 +478,12 @@ pub(crate) enum RunName {
     Record(String),
     /// By its id, or a prefix of its id or of its random digits, among the runs in `--runs`.
     Prefix(String),
+}
+
+/// The digest that `hex`, a `--tree`, names.
+fn tree(hex: &str) -> Result<Sha256Digest, &'static str> {
+    crate::manifest::digest(hex)
+        .ok_or("it isn't 64 lowercase hexadecimal digits: give the SHA-256 of the tree's manifest")
 }
 
 /// The run that a `<run>` names, which is UTF-8, as every id is, and as the commands that
@@ -660,8 +675,7 @@ controller's runs, a job yet to start its run as `waiting` while it waits for a
 build slot, else as `building`, or as `unstarted` once it has ended without one,
 beside the copies in the default runs directory; and says first how long the
 controller has been up, its jobs, how full its disk is, and whether its boot
-failed, and last how many tasks this workspace is still sending it, if any: a
-run's job starts once its task is sent.";
+failed.";
 
 const CANCEL_NOTES: &str = "\
 Examples:
@@ -795,7 +809,7 @@ machine's Modal configuration file, which the boot lacks.";
 
 const CONTROLLER_NOTES: &str = "\
 Examples:
-  pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 --parameter /pumpkin-alice/settings -- run tasks/bench/task.star --arg model=model-a
+  cd ~/trees/tasks/20261108-000905-126a21e9 && pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 --parameter /pumpkin-alice/settings --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 -- run tasks/bench/task.star --arg model=model-a
   pumpkin controller boot
 
 Exit status:
@@ -961,7 +975,7 @@ every model it allows.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file, into a directory of its own in the
 controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
-Session Manager plugin, and `ssh`, `rsync` 3.2.3 or later, `tar`, `ssh-keygen`
+Session Manager plugin, and `ssh`, `rsync`, `tar`, `ssh-keygen`
 and `git`, from PATH; the controller's settings are the module's, but for
 [controller.modal]. This machine's key to it, which the first command makes
 and enrols through EC2 Instance Connect, and the host key it pins, are in
@@ -1049,12 +1063,14 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
                     id,
                     region,
                     parameter,
+                    tree,
                     command,
                 },
         } => Command::Job(Job {
             id,
             region,
             parameter,
+            tree,
             command: job_command(&mut cli, command).map_err(refusal)?,
         }),
         Parsed::Help { topic } => return help_of(&mut cli, topic.as_deref()).map_err(refusal),
