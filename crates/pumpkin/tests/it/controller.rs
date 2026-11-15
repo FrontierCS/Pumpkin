@@ -1075,13 +1075,13 @@ const KEY: &str = "sk-client-stand-in";
 
 /// The stand-in `ssh` to the controller, of shared masters that answer: one that `-N` opens makes
 /// its socket, unless `refused-<m>` is there for master `<m>`, which then fails as one whose
-/// connection closes; `-O check` of one succeeds, but once after a cut over it; and any other
-/// call notes its arguments in `argv`, a line each, and the first line of its command but a
-/// `set`, in `scripts`, runs `before-<n>` beside it once, if it is there, before the `<n>`th call
-/// that `scripts` notes, then runs its command as the controller's user, in `home`, with runtime
-/// directory `run`. A receive over master `<m>` adds what it is sent to `received-<m>`, and is cut,
-/// if `cut-<m>` is there, after as many bytes as it says, as a connection that ends; any other
-/// call over it is cut so after as many bytes of its output as `cut-out-<m>` says.
+/// connection closes; `-O check` of one succeeds, but once after a cut over it; and any other call
+/// notes its arguments in `argv` and the first line of its command but a `set` in `scripts`, runs
+/// `before-<n>` once, if there, before the `<n>`th call that `scripts` notes, then runs its command
+/// as the controller's user, in `home`, with runtime directory `run`. A receive over master `<m>`
+/// adds what it is sent to `received-<m>`, and is cut, if `cut-<m>` is there, after as many bytes
+/// as it says, as a connection that ends; any other call is cut so by `cut-out-<m>`, its output
+/// counted in `counted` while `count-out` is there, or its output, once, `answer`'s, if there.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -1106,9 +1106,14 @@ if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$c
 cd "$dir/../home" || exit 255
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
 if [ "$first" != 'cd "$HOME/store/incoming"' ]; then
-    [ -e "$dir/cut-out-$master" ] || exec sh -c "$*"
-    sh -c "$*" | head --bytes="$(cat "$dir/cut-out-$master")"
-    rm "$dir/cut-out-$master"; touch "$dir/unanswered-$master"; exit 255
+    if [ -e "$dir/answer" ]; then cat "$dir/answer"; rm "$dir/answer"; exit 0; fi
+    if [ -e "$dir/cut-out-$master" ]; then
+        sh -c "$*" | head --bytes="$(cat "$dir/cut-out-$master")"
+        rm "$dir/cut-out-$master"; touch "$dir/unanswered-$master"; exit 255
+    fi
+    [ -e "$dir/count-out" ] || exec sh -c "$*"
+    sh -c "$*" > "$dir/out-$$"; status=$?
+    cat "$dir/out-$$"; wc --bytes < "$dir/out-$$" >> "$dir/counted"; exit "$status"
 fi
 if [ -e "$dir/cut-$master" ]; then
     head --bytes="$(cat "$dir/cut-$master")" | sh -c "$*"
@@ -1230,19 +1235,26 @@ fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
     (client, id, ran)
 }
 
+/// Has the client of `client`'s environment, which [`set_up_client`] set up, find its controller
+/// over a shared master that answers, as [`started_job`] says, unless it has.
+fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
+    let socket = scratch.0.join(SHARED).join("0");
+    if socket.exists() {
+        return;
+    }
+    let first = on_client(scratch, client, &["ls"]).output().unwrap();
+    assert!(!first.status.success(), "{first:?}");
+    fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
+    // As `ssh` makes a master's socket, which only its user may reach.
+    fs::write(&socket, "").unwrap();
+    fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
+}
+
 /// Has the client of `client`'s environment, which [`set_up_client`] set up, start a job of the
 /// task `stand-in`, as [`started_job`] says. Returns the job's id, if it started, and how the run
 /// ended, with the id as `<id>`.
 fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
-    let socket = scratch.0.join(SHARED).join("0");
-    if !socket.exists() {
-        let first = on_client(scratch, client, &["ls"]).output().unwrap();
-        assert!(!first.status.success(), "{first:?}");
-        fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
-        // As `ssh` makes a master's socket, which only its user may reach.
-        fs::write(&socket, "").unwrap();
-        fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
-    }
+    connect(scratch, client);
     let mut run = on_client(scratch, client, &["run", "stand-in/task.star"]);
     let invoked = invocation(&run);
     let ran = run.output().unwrap();
@@ -2509,5 +2521,382 @@ fn follow_cut_before_a_line() {
         &expect![[r#"
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, in 5 s, attempt 3 of 7"#]],
+    );
+}
+
+/// Plants run `id` in the controller's runs, live as long as the lock it returns is held, as its
+/// driver holds it, with a log of `lines_count` lines of 100 bytes ([`grow`]).
+fn live_run(scratch: &Scratch, id: &str, lines_count: usize) -> File {
+    let record = format!("home/.pumpkin/runs/{id}");
+    let args = ["stand-in/task.star"];
+    scratch.write(
+        &format!("{record}/record.json"),
+        &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+    );
+    let ir = json!({ "name": "stand-in", "roles": [] });
+    scratch.write(&format!("{record}/ir.json"), &ir);
+    scratch.write(&format!("{record}/driver.pid"), "4242\n");
+    grow(scratch, id, lines_count, "");
+    let driver = File::open(scratch.0.join(format!("{record}/driver.pid"))).unwrap();
+    driver.lock().unwrap();
+    driver
+}
+
+/// Appends to run `id`'s log on the controller `lines_count` lines of 100 bytes, then `part`: JSON
+/// records that no reader of a log reads, which `ls` says of each run ([`say_listed`]).
+fn grow(scratch: &Scratch, id: &str, lines_count: usize, part: &str) {
+    let path = scratch.0.join(format!("home/.pumpkin/runs/{id}/log.jsonl"));
+    let mut text = String::new();
+    for index in 0..lines_count {
+        let padding = format!("{index:0>85}");
+        text.extend(["{\"padding\":\"", &padding, "\"}\n"]);
+    }
+    text.push_str(part);
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .unwrap();
+    std::io::Write::write_all(&mut log, text.as_bytes()).unwrap();
+}
+
+/// Runs `pumpkin ls` on the client, and says how it ended, how many bytes the listing carried,
+/// and, of each of `ids`, where `ls` keeps its copy and whether that copy's log is the
+/// controller's, to the end of its last line.
+fn listed(scratch: &Scratch, client: &[(String, String); 2], ids: &[&str]) -> Vec<String> {
+    let ls = on_client(scratch, client, &["ls"]).output().unwrap();
+    let mut lines = vec![say_listed(scratch, &ls)];
+    lines.extend(kept(scratch, ids));
+    lines
+}
+
+/// How `ls` ended, as [`listed`] says it.
+fn say_listed(scratch: &Scratch, ls: &std::process::Output) -> String {
+    let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
+    let _ = fs::remove_file(scratch.0.join("bin/counted"));
+    let said = String::from_utf8_lossy(&ls.stderr);
+    let mut lines = vec![format!(
+        "ls: {}, {} rows, {} bytes",
+        ls.status,
+        String::from_utf8_lossy(&ls.stdout).lines().count(),
+        counted.trim()
+    )];
+    let said = (said.lines())
+        .filter(|line| !line.starts_with("pumpkin: controller `alice`: up"))
+        .filter(|line| !line.contains("of its log can't be read by this pumpkin"));
+    lines.extend(said.map(|line| format!("  {line}")));
+    lines.join("\n")
+}
+
+/// Where `ls` keeps the copy of each of `ids`, or `wait` its copy (`runs`), as [`listed`] says.
+fn kept(scratch: &Scratch, ids: &[&str]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for id in ids {
+        let log = fs::read(scratch.0.join(format!("home/.pumpkin/runs/{id}/log.jsonl"))).unwrap();
+        let end = log
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |at| at + 1);
+        let place = ["live", "ended", "runs"].into_iter().find_map(|place| {
+            let copy = match place {
+                "runs" => scratch.0.join(format!("repo/.pumpkin/runs/{id}")),
+                _ => scratch.0.join(format!("{SHARED}/{place}/{id}")),
+            };
+            copy.exists().then_some(())?;
+            let held = fs::read(copy.join("log.jsonl")).unwrap_or_default();
+            let files = modes(&copy);
+            let files = files
+                .replace(" 644", "")
+                .replace(" 600", "")
+                .replace(" 664", "");
+            Some(format!(
+                "{place}, its log {} bytes, the controller's to its last newline: {}; {files}",
+                held.len(),
+                held == log[..end]
+            ))
+        });
+        lines.push(format!(
+            "  {id}: {}",
+            place.unwrap_or_else(|| "none".to_owned())
+        ));
+    }
+    lines
+}
+
+// Three live runs of 100 lines each, listed again and again as they grow, are replaced, end,
+// as two `ls` list them at once, and once `wait` copied one.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn ls_by_offsets() {
+    let scratch = Scratch::new("controller-ls-offsets");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    scratch.write("bin/count-out", "");
+    let ids = [
+        id_ago(0, "0e000001"),
+        id_ago(0, "0e000002"),
+        id_ago(0, "0e000003"),
+    ];
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let ids = &ids[..];
+    let mut drivers: Vec<File> = (ids.iter()).map(|id| live_run(&scratch, id, 100)).collect();
+    let mut lines = vec!["first, with no copies:".to_owned()];
+    lines.extend(listed(&scratch, &client, ids));
+    lines.push("again, with nothing new:".to_owned());
+    lines.extend(listed(&scratch, &client, ids));
+    grow(&scratch, ids[0], 2, "{\"padding\":\"part");
+    lines.push("run 0 grown by 2 lines and part of a third:".to_owned());
+    lines.extend(listed(&scratch, &client, ids));
+    let log = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{}/log.jsonl", ids[1]));
+    fs::remove_file(&log).unwrap();
+    grow(&scratch, ids[1], 3, "");
+    let copy = scratch
+        .0
+        .join(format!("{SHARED}/live/{}/log.jsonl", ids[2]));
+    let held = fs::read(&copy).unwrap();
+    fs::write(&copy, &held[..held.len() - 30]).unwrap();
+    lines.push("run 1's log replaced by a shorter one, run 2's copy cut inside a line:".to_owned());
+    lines.extend(listed(&scratch, &client, ids));
+    grow(&scratch, ids[0], 1, "");
+    scratch.write(
+        &format!("home/.pumpkin/runs/{}/outcome.json", ids[0]),
+        r#"{"state": "finished"}"#,
+    );
+    drop(drivers.remove(0));
+    lines.push("run 0 ended:".to_owned());
+    lines.extend(listed(&scratch, &client, ids));
+    let mut copy = fs::OpenOptions::new().append(true).open(&copy).unwrap();
+    std::io::Write::write_all(&mut copy, &[b'x'; 5000]).unwrap();
+    lines.push("again, run 2's copy ending in a part of a line longer than a read:".to_owned());
+    lines.extend(listed(&scratch, &client, ids));
+    grow(&scratch, ids[1], 100, "");
+    grow(&scratch, ids[2], 100, "");
+    let both: Vec<Child> = (0..2)
+        .map(|_| {
+            let mut ls = on_client(&scratch, &client, &["ls"]);
+            ls.stdout(Stdio::null()).stderr(Stdio::null());
+            ls.spawn().unwrap()
+        })
+        .collect();
+    let ended: Vec<String> = (both.into_iter())
+        .map(|child| child.wait_with_output().unwrap().status.to_string())
+        .collect();
+    let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
+    let mut counted: Vec<&str> = counted.lines().collect();
+    counted.sort_unstable();
+    lines.push(format!(
+        "runs 1 and 2 grown by 100 lines, then two ls at once: {}; bytes {}",
+        ended.join(", "),
+        counted.join(" and ")
+    ));
+    lines.extend(kept(&scratch, ids));
+    fs::remove_file(scratch.0.join("bin/counted")).unwrap();
+    let log = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{}/log.jsonl", ids[1]));
+    let aside = log.with_extension("aside");
+    fs::rename(&log, &aside).unwrap();
+    fs::create_dir(&log).unwrap();
+    let ls = on_client(&scratch, &client, &["ls"]).output().unwrap();
+    lines.push("run 1's log unreadable, as a directory:".to_owned());
+    lines.push(say_listed(&scratch, &ls));
+    fs::remove_dir(&log).unwrap();
+    fs::rename(&aside, &log).unwrap();
+    let (job, record) = (
+        format!("home/jobs/{}", ids[2]),
+        format!("home/.pumpkin/runs/{}", ids[2]),
+    );
+    scratch.write(&format!("{job}/log"), "");
+    scratch.write(&format!("{job}/out"), &format!("{}\n", ids[2]));
+    // The job's own `pumpkin`, whose follower says that the run has ended.
+    scratch.write_executable(&format!("{job}/pumpkin"), b"#!/bin/sh\nexit 102\n");
+    scratch.write(
+        &format!("{record}/outcome.json"),
+        r#"{"state": "finished"}"#,
+    );
+    drop(drivers.remove(1));
+    // Uncounted: the stand-in counts a call's output once it ends, which `rsync`'s would wait on.
+    fs::remove_file(scratch.0.join("bin/count-out")).unwrap();
+    let waited = on_client(&scratch, &client, &["wait", ids[2]])
+        .output()
+        .unwrap();
+    scratch.write("bin/count-out", "");
+    lines.push(format!(
+        "run 2 ended, and `wait` copied it ({}):",
+        waited.status
+    ));
+    lines.extend(listed(&scratch, &client, ids));
+    let shown: Vec<(&str, String)> = (ids.iter().enumerate())
+        .map(|(index, id)| (*id, format!("<run {index}>")))
+        .collect();
+    let shown: Vec<(&str, &str)> = (shown.iter())
+        .map(|(id, name)| (*id, name.as_str()))
+        .collect();
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &shown,
+        &expect![[r#"
+            first, with no copies:
+            ls: exit status: 0, 4 rows, 44156 bytes
+              <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            again, with nothing new:
+            ls: exit status: 0, 4 rows, 1160 bytes
+              <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            run 0 grown by 2 lines and part of a third:
+            ls: exit status: 0, 4 rows, 2696 bytes
+              <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            run 1's log replaced by a shorter one, run 2's copy cut inside a line:
+            ls: exit status: 0, 4 rows, 7299 bytes
+              <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            run 0 ended:
+            ls: exit status: 0, 4 rows, 3719 bytes
+              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
+              <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            again, run 2's copy ending in a part of a line longer than a read:
+            ls: exit status: 0, 4 rows, 1122 bytes
+              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
+              <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            runs 1 and 2 grown by 100 lines, then two ls at once: exit status: 0, exit status: 0; bytes 1124 and 23650
+              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
+              <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: live, its log 20000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            run 1's log unreadable, as a directory:
+            ls: exit status: 1, 0 rows, 56 bytes
+              tail: error reading '.pumpkin/runs/<run 1>/log.jsonl': Is a directory
+              reading the log of run <run 1> for the listing failed, as said above: run the command again
+              pumpkin: listing the runs on controller `alice` failed (exit status: 1), as said above
+            run 2 ended, and `wait` copied it (exit status: 3):
+            ls: exit status: 0, 4 rows, 1088 bytes
+              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
+              <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+              <run 2>: runs, its log 20000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json"#]],
+    );
+}
+
+// A live run whose log holds no whole line yet, listed three times, and once its line is whole,
+// twice.
+#[test]
+fn ls_before_a_line() {
+    let scratch = Scratch::new("controller-ls-before-a-line");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    scratch.write("bin/count-out", "");
+    let id = id_ago(0, "0e000004");
+    let ids = [id.as_str()];
+    let _driver = live_run(&scratch, &id, 0);
+    grow(&scratch, &id, 0, "{\"padding\":\"part");
+    let mut lines = vec!["no line yet, listed three times:".to_owned()];
+    for _ in 0..3 {
+        lines.extend(listed(&scratch, &client, &ids));
+    }
+    grow(&scratch, &id, 0, "\"}\n");
+    lines.push("its line finished, twice:".to_owned());
+    for _ in 0..2 {
+        lines.extend(listed(&scratch, &client, &ids));
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(id.as_str(), "<run>")],
+        &expect![[r#"
+            no line yet, listed three times:
+            ls: exit status: 0, 2 rows, 4668 bytes
+              <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
+            ls: exit status: 0, 2 rows, 4668 bytes
+              <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
+            ls: exit status: 0, 2 rows, 4668 bytes
+              <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
+            its line finished, twice:
+            ls: exit status: 0, 2 rows, 5692 bytes
+              <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
+            ls: exit status: 0, 2 rows, 1085 bytes
+              <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json"#]],
+    );
+}
+
+// A listing that names runs by `../x` and by an absolute path, and sends one run's log, and
+// another run, as symbolic links out of the copies' directory, listed twice.
+#[test]
+fn ls_refusals() {
+    let scratch = Scratch::new("controller-ls-refusals");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let (linked, link) = (id_ago(0, "0e000001"), id_ago(0, "0e000002"));
+    let outside = scratch.0.join("outside");
+    scratch.write("outside/log.jsonl", "kept, with no newline");
+    // Where `live/../x` and the absolute path lead.
+    scratch.write(&format!("{SHARED}/x/kept"), "kept\n");
+    scratch.write("outside-abs/kept", "kept\n");
+    let archive = scratch.0.join("archive");
+    scratch.write(&format!("archive/{linked}/record.json"), "{}");
+    symlink(
+        outside.join("log.jsonl"),
+        archive.join(format!("{linked}/log.jsonl")),
+    )
+    .unwrap();
+    symlink(&outside, archive.join(&link)).unwrap();
+    let tar = stdx::process::command("tar", Environment::Only(&["PATH"]))
+        .args(["--create", "--file=-", "--directory"])
+        .arg(&archive)
+        .args([&linked, &link])
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "{tar:?}");
+    let absolute = scratch.0.join("outside-abs");
+    let states = format!(
+        "../x live 0\n{} live 0\n{linked} live 0\n{link} live 0\ntar\n",
+        absolute.display()
+    );
+    let mut answer = states.into_bytes();
+    answer.extend(tar.stdout);
+    fs::write(scratch.0.join("bin/answer"), answer).unwrap();
+    let mut lines = Vec::new();
+    for _ in 0..2 {
+        let ls = on_client(&scratch, &client, &["ls"]).output().unwrap();
+        lines.push(format!("ls: {}", ls.status));
+        let said = String::from_utf8_lossy(&ls.stderr);
+        let said = said.lines().filter(|line| !line.contains("`alice`: up"));
+        lines.extend(said.map(|line| format!("  {line}")));
+    }
+    let live = scratch.0.join(format!("{SHARED}/live"));
+    lines.push(format!("live: {}", modes(&live)));
+    for kept in [
+        format!("{SHARED}/x/kept"),
+        "outside-abs/kept".to_owned(),
+        "outside/log.jsonl".to_owned(),
+    ] {
+        let text = fs::read_to_string(scratch.0.join(&kept)).unwrap();
+        lines.push(format!("{kept}: {text:?}"));
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(linked.as_str(), "<linked>"), (link.as_str(), "<link>")],
+        &expect![[r#"
+            ls: exit status: 1
+              pumpkin: controller `alice` listed `../x` as a run, which is no run's id, so `ls` keeps nothing of it: see what `~/.pumpkin/runs` holds there, and run `ls` again
+              pumpkin: controller `alice` listed `<scratch>/outside-abs` as a run, which is no run's id, so `ls` keeps nothing of it: see what `~/.pumpkin/runs` holds there, and run `ls` again
+              pumpkin: the controller sent `<linked>/log.jsonl` as no regular file, which a run's record never holds, so `ls` keeps nothing of it: see what `~/.pumpkin/runs/<linked>` holds there, and run `ls` again
+              pumpkin: the controller sent `<link>` as no directory, which a run's record never holds, so `ls` keeps nothing of it: see what `~/.pumpkin/runs/<link>` holds there, and run `ls` again
+              pumpkin: controller `alice`: 0 jobs
+              pumpkin: a run can't be listed, as said above
+            ls: exit status: 0
+            live: gone
+            repo/.pumpkin/controller/alice.us-west-1/x/kept: "kept\n"
+            outside-abs/kept: "kept\n"
+            outside/log.jsonl: "kept, with no newline""#]],
     );
 }

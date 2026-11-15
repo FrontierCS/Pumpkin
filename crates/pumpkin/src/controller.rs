@@ -235,7 +235,7 @@ fn kept() -> Result<PathBuf, String> {
 /// `<index>.log`, which says why it ended, kept until the master opens again; the lock on opening
 /// one, `lock` ([`Lock`]), so that a batch of commands that start at once open them one at a time;
 /// the lock on sending the controller what its store lacks, `upload` ([`Shared::upload`]); and
-/// what `ls` was sent of each record that ended there, `ended/<id>/` ([`Shared::ended`]).
+/// what `ls` keeps of its records, `ended/`, `live/` and their lock `listed` ([`Shared::listing`]).
 // Each `ssh` runs in that directory, and names a socket by its name alone: so its path, with the
 // suffix that `ssh` adds while it binds it, fits a socket's address however deep the workspace
 // is.
@@ -287,6 +287,31 @@ impl Shared {
     /// which never change, so that the controller sends them once.
     fn ended(&self) -> PathBuf {
         self.dir.join("ended")
+    }
+
+    /// The directory of the copies of what `ls` reads of each record that was live on the
+    /// controller as it was last listed, which the next listing grows.
+    fn live(&self) -> PathBuf {
+        self.dir.join("live")
+    }
+
+    /// Takes the lock on changing what `ls` keeps of the controller's records ([`Self::ended`],
+    /// [`Self::live`]), saying, once, that it waits while another `ls` holds it, so that two at
+    /// once take turns, and neither grows a copy that the other has grown since it read the copy's
+    /// length.
+    fn listing(&self, name: &Name) -> Result<File, String> {
+        let path = self.dir.join("listed");
+        let file = private(&path)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
+        }
+        say(format_args!(
+            "waiting for another `ls` of controller `{name}`, which grows the same copies of its runs"
+        ));
+        file.lock().context(path.display())?;
+        Ok(file)
     }
 
     /// The log of `master`, as `ssh` and its proxy write it.
