@@ -4,10 +4,10 @@ model.
 
 Qwen Code works in its workspace, and keeps its home (`HOME`), with its settings, its sessions and
 its other state (`QWEN_HOME`), and its temporary files (`TMPDIR`) in a directory of its own there.
-Its record of the run is the events it writes to its standard output as JSON lines, which the
-teardown collects. It reaches the model only at the endpoint `sandboxd` serves, `MODEL_URL`, on the
-Chat Completions API, through the one provider its settings name, with a stand-in key: the host
-holds the key, and the route passes no client's.
+It writes its last message to its standard output and an error to its standard error. It reaches
+the model only at the endpoint `sandboxd` serves, `MODEL_URL`, on the Chat Completions API,
+through the one provider its settings name, with a stand-in key: the host holds the key, and the
+route passes no client's.
 """
 
 load("@pumpkin//harness/node/node.star", "NODE", "node")
@@ -121,11 +121,12 @@ def qwen_code(
         "runtime": {"agent": {
             "command": {
                 # Qwen Code on `node`, started directly (`node.star` says why). `--prompt` runs
-                # one turn, unattended, on the prompt, which the
-                # option takes whole, whatever it begins with, given as `--prompt=<text>`; and
-                # `stream-json` writes its events to its standard output as JSON lines, which the
-                # run's record keeps. It asks no one for permission (`--approval-mode yolo`), for
-                # the agent's sandbox confines it.
+                # one turn, unattended, on the prompt, which the option takes whole, whatever it
+                # begins with, given as `--prompt=<text>`; and `text` writes only its last message
+                # to its standard output, and an error to its standard error
+                # (https://github.com/QwenLM/qwen-code/blob/6788c035698a0ada471c958d1e789e96c6cddd9b/packages/cli/src/nonInteractive/io/JsonOutputAdapter.ts#L123-L128).
+                # It asks no one for permission (`--approval-mode yolo`), for the agent's sandbox
+                # confines it.
                 "argv": [
                     NODE,
                     _ROOT + "/cli-entry.js",
@@ -136,7 +137,7 @@ def qwen_code(
                     "--approval-mode",
                     "yolo",
                     "--output-format",
-                    "stream-json",
+                    "text",
                     "--prompt=" + prompt,
                 ],
                 "env": [

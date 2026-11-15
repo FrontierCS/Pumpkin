@@ -88,7 +88,7 @@ fn roles() {
         &shown,
         &expect![[r#"
             gemini-4-argon high /workspace 1048576 65536:
-            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --mode json --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
+            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
             env: HOME=/workspace/.pi-home TMPDIR=/workspace/.pi-home/tmp PI_TELEMETRY=0
             cwd: /workspace
             dir 0700 /workspace/.pi-home
@@ -114,7 +114,7 @@ fn roles() {
               COPY --link --from=node --chown=0:0 /out/ /
               COPY --link --from=pi-1.2.0 --chown=0:0 /layer/ /
             vendor/"quoted"\model medium /srv/my "work" dir 1 1:
-            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --mode json --offline --no-approve --provider pumpkin --model vendor/"quoted"\model --thinking medium --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "-leading dash\nsecond line, \"quoted\"\n"
+            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model vendor/"quoted"\model --thinking medium --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "-leading dash\nsecond line, \"quoted\"\n"
             env: "HOME=/srv/my \"work\" dir/.pi-home" "TMPDIR=/srv/my \"work\" dir/.pi-home/tmp" PI_TELEMETRY=0
             cwd: /srv/my "work" dir
             dir 0700 /srv/my "work" dir/.pi-home
@@ -127,7 +127,7 @@ fn roles() {
             {"httpIdleTimeoutMs":3600000,"retry":{"maxRetries":16}}
             route: chat vendor/"quoted"\model
             model-small low / 200000 32000:
-            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --mode json --offline --no-approve --provider pumpkin --model model-small --thinking low --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- Go.
+            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model model-small --thinking low --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- Go.
             env: HOME=/.pi-home TMPDIR=/.pi-home/tmp PI_TELEMETRY=0
             cwd: /
             dir 0700 /.pi-home
