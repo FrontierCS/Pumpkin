@@ -325,7 +325,7 @@ function inspectEntry(node, e, ctx) {
       ? rawBytes("Item, as kept", ctx.base + "/item/" + e.digest, null)
       : rawBytes("The step's response, as kept", ctx.base + "/exchange/" + e.request + "/response", ctx.steps.cols.back_bytes[ctx.steps.row(e.request) ?? -1]);
   const head = [
-    h("h3", {}, h("span", { class: "kind k-" + e.kind }, e.kind), h("span", {}, (e.side === "added" ? "Added to" : "Answered by") + " request " + e.request), h("span", { class: "id dim" }, e.at)),
+    h("h3", {}, h("span", { class: "kind k-" + e.kind + (e.error ? " error" : ""), title: e.error ? "The tool reported a failure" : null }, e.kind), h("span", {}, (e.side === "added" ? "Added to" : "Answered by") + " request " + e.request), h("span", { class: "id dim" }, e.at)),
     h("p", { class: "links" }, h("button", { onclick: () => ctx.go(String(e.request)) }, "Go to its step")),
   ];
   // The step's reasoning, beside its message.

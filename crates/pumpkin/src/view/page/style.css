@@ -332,6 +332,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .kind.k-assistant { color: var(--model-ink); }
 .kind.k-reasoning { color: var(--model-ink); }
 .kind.k-call, .kind.k-output { color: var(--runner-ink); }
+.kind.k-output.error { color: var(--fail); }
 .kind.k-unread { color: var(--fail); }
 .kind.k-other { color: var(--dim); }
 

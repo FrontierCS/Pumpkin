@@ -49,6 +49,9 @@ pub enum Item {
     Output {
         call_id: Option<String>,
         text: String,
+        /// Whether the client marked the call as failed, as only the Messages API's
+        /// `is_error` does.
+        error: bool,
     },
     /// Of a form the reader doesn't know: the provider's JSON of it, as sent or as a stream added
     /// it.
@@ -79,6 +82,8 @@ pub struct Reply {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub model: Option<String>,
+    /// The reasoning's effort, or, of a Messages request that names no effort, its thinking's
+    /// budget in tokens.
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f64>,
     /// The most tokens that the answer may hold, its reasoning's included.

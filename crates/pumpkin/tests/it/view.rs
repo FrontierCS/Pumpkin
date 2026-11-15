@@ -1824,15 +1824,17 @@ fn traces_a_messages_exchange() {
     let call = json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "call_1",
         "name": "Bash", "input": { "command": "ls -la" } }] });
     let result = json!({ "role": "user", "content": [{ "type": "tool_result",
-        "tool_use_id": "call_1", "content": "a.txt", "is_error": false }] });
+        "tool_use_id": "call_1", "content": "ls: cannot access 'x'", "is_error": true }] });
     // Claude Code puts its own environment updates into the conversation as `system` messages.
     let update = json!({ "role": "system", "content": [{ "type": "text",
         "text": "# Environment update\n - Primary working directory: /workspace" }] });
     let answer = |text: &str| {
+        let start = json!({ "type": "content_block_start", "index": 0,
+            "content_block": { "type": "text", "text": "" } });
         let delta = json!({ "type": "content_block_delta", "index": 0,
             "delta": { "type": "text_delta", "text": text } });
         format!(
-            "event: content_block_delta\ndata: {delta}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+            "event: content_block_start\ndata: {start}\n\nevent: content_block_delta\ndata: {delta}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
         )
     };
     let mut log = vec![started(1, "agent", 0)];
@@ -1877,6 +1879,11 @@ fn traces_a_messages_exchange() {
         "the agent's steps:\n{}",
         columns_text(&steps, "steps")
     ));
+    entries_counted(&served, &format!("{run}/trace/agent"), &steps);
+    let entries = served.get(&format!("{run}/trace/agent/entries?from=0&to=1"));
+    said.push(format!("its entries:\n{}", entries_text(&entries)));
+    let found = served.get(&format!("{run}/trace/agent/search?q=CANNOT"));
+    said.push(format!("found: {found}"));
     let folded = served.get(&format!("{run}/trace/agent/stats?by=step"));
     said.push(format!("by step:\n{}", columns_text(&folded, "rows")));
     let exchange = served.get(&format!("{run}/exchange/0"));
@@ -1886,10 +1893,10 @@ fn traces_a_messages_exchange() {
         said.into_iter().map(Step::Ran),
         false,
         &[(id, "<id>")],
-        &expect![[r#"
+        &expect![[r##"
             the agent's steps:
-            added=1 added_entries=1 answer="forwarded" answers=0 api="messages" back_bytes=1376 cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls=[] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=36838 items=1 kept_bytes=335 model_ns=1000000001 output=83 request=0 sent_bytes=100 start_ns="999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=false
-            added=3 added_entries=3 answer="forwarded" answers=0 api="messages" back_bytes=180 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=false
+            added=1 added_entries=2 answer="forwarded" answers=2 api="messages" back_bytes=1376 cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls=["Bash"] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=36838 items=1 kept_bytes=335 model_ns=1000000001 output=83 request=0 sent_bytes=100 start_ns="999999999" status=200 stop="tool_use" thread=0 tools=0 turn=0 upstream="zai" whole=true
+            added=3 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=297 cache_hit=0.5 cached=50 calls=[] differs=["system"] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=true
             caller: "agent"
             end: 1484
             live: false
@@ -1898,12 +1905,22 @@ fn traces_a_messages_exchange() {
             threads: 1
             tool_lists: [{"digest":"0000000000000000000000000000000000000000000000000000000000000002","names":["Bash"]}]
 
+            its entries:
+            {"at":"0/head/system/0","digest":"0000000000000000000000000000000000000000000000000000000000000001","index":0,"kind":"system","request":0,"side":"added","text":"You are a Claude agent.\nAssist with the task."}
+            {"at":"0/in/0/0","digest":"0000000000000000000000000000000000000000000000000000000000000000","index":1,"kind":"user","request":0,"side":"added","text":"list the files"}
+            {"at":"0/out/0","digest":null,"index":2,"kind":"reasoning","request":0,"side":"answer","text":"Tars built."}
+            {"at":"0/out/1","call_id":"call_1","digest":null,"index":3,"kind":"call","name":"Bash","output":"1/in/2/0","request":0,"side":"answer","text":"{\"command\":\"ls -la\"}"}
+            {"at":"1/in/2/0","call":"0/out/1","call_id":"call_1","digest":"0000000000000000000000000000000000000000000000000000000000000004","error":true,"index":0,"kind":"output","request":1,"side":"added","text":"ls: cannot access 'x'"}
+            {"at":"1/in/3/0","digest":"0000000000000000000000000000000000000000000000000000000000000005","index":1,"kind":"system","request":1,"side":"added","text":"# Environment update\n - Primary working directory: /workspace"}
+            {"at":"1/out/0","digest":null,"index":2,"kind":"assistant","request":1,"side":"answer","text":"a.txt is there"}
+            next: null
+            found: {"count":1,"hits":[{"at":"1/in/2/0","byte":4,"context":["ls: ","cannot"," access 'x'"],"index":0,"kind":"output","request":1}]}
             by step:
-            cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0
+            cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={"Bash":1} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0
             cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0
             by: "step"
             caller: "agent"
-            totals: {"cache_hit":0.9906870972981753,"cache_write":120,"cache_write_unknown":1,"cached":36594,"cached_unknown":0,"calls":{},"decode_ns":800000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":36938,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":2000000002,"model_ns_unknown":0,"output":93,"output_unknown":0,"queue_ns":999999999,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":2,"refusals":0,"repeats":0,"retries":0,"span_ns":3000000001,"steps":2,"threads":1,"tok_s":116.25,"turns":1}
+            totals: {"cache_hit":0.9906870972981753,"cache_write":120,"cache_write_unknown":1,"cached":36594,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":800000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":36938,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":2000000002,"model_ns_unknown":0,"output":93,"output_unknown":0,"queue_ns":999999999,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":2,"refusals":0,"repeats":0,"retries":0,"span_ns":3000000001,"steps":2,"threads":1,"tok_s":116.25,"turns":1}
 
             exchange 0:
             answer: {"kind":"forwarded"}
@@ -1914,12 +1931,12 @@ fn traces_a_messages_exchange() {
             kept: {"request":{"body_bytes":100,"bytes":335,"items":{"count":1,"field":"messages"},"path":"model/0.request","whole":["system","tools"]},"response":{"bytes":1376,"path":"model/0.response"}}
             request: 0
             request_id: null
-            stats: {"cache_hit":0.9920191107009066,"cache_write":120,"cached":36544,"calls":{},"decode_ns":400000000,"input":36838,"model_ns":1000000001,"outcome":"ok","output":83,"queue_ns":null,"reasoning":null,"repeat_of":null,"request":0,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":207.5,"turn":0}
+            stats: {"cache_hit":0.9920191107009066,"cache_write":120,"cached":36544,"calls":{"Bash":1},"decode_ns":400000000,"input":36838,"model_ns":1000000001,"outcome":"ok","output":83,"queue_ns":null,"reasoning":null,"repeat_of":null,"request":0,"retry_of":null,"status":200,"thread":0,"to_first_byte_ns":999999501,"to_first_token_ns":600000001,"tok_s":207.5,"turn":0}
             status: 200
             times: {"end_ns":"2000000000","first_byte_ns":"1999999500","first_token_ns":"1600000000","start_ns":"999999999"}
             upstream: "zai"
             usage: {"cache_write_tokens":120,"cached_tokens":36544,"input_tokens":36838,"output_tokens":83}
-        "#]],
+        "##]],
     );
 }
 #[test]

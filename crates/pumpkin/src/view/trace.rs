@@ -9,7 +9,7 @@
 //! earlier one sent is a retry of it if that one failed, and a repeat of it if it was answered.
 //! The forest is that of the requests in their order, whatever the order of their answers. A step
 //! shows what its request added past its parent's list, less what only sends back its parent's
-//! answer, and its answer, as `route::read` reads either API's; a turn starts at a step that adds
+//! answer, and its answer, as `route::read` reads any API's; a turn starts at a step that adds
 //! a user's item. A tool call of an answer is paired with each of its outputs, in later steps of
 //! the thread, by the call's id, and names the first.
 //!

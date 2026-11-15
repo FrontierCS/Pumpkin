@@ -208,3 +208,20 @@ event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}
 
 "##;
+
+/// A request of the Messages API: a system prompt in blocks, two custom tools, a user's text and
+/// image, an assistant's thinking, text and tool call, the call's result, which failed, and two
+/// messages of the system's, a text and, as Claude Code sends them, a block marked for caching.
+pub(crate) const MESSAGES_REQUEST: &str = r##"{"max_tokens":32000,"messages":[{"content":[{"text":"Solve the task","type":"text"},{"source":{"data":"AAAA","media_type":"image/png","type":"base64"},"type":"image"}],"role":"user"},{"content":[{"signature":"EqQBCgIYAhIM","thinking":"I should list the files","type":"thinking"},{"text":"Listing the files.","type":"text"},{"id":"toolu_01A","input":{"command":"ls"},"name":"Bash","type":"tool_use"}],"role":"assistant"},{"content":[{"content":[{"text":"ls: cannot open","type":"text"}],"is_error":true,"tool_use_id":"toolu_01A","type":"tool_result"},{"text":"Go on","type":"text"}],"role":"user"},{"content":"Finish soon","role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"Primary working directory: /workspace","type":"text"}],"role":"system"},{"content":"Done.","role":"assistant"}],"model":"m-large","output_config":{"effort":"high"},"stop_sequences":["</done>"],"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"You are Claude Code","type":"text"},{"text":"Work in /workspace","type":"text"}],"temperature":1,"thinking":{"type":"adaptive"},"tool_choice":{"type":"auto"},"tools":[{"description":"Runs a command","input_schema":{"properties":{"command":{"type":"string"}},"type":"object"},"name":"Bash"},{"input_schema":{"type":"object"},"name":"Read","type":"custom"}]}"##;
+
+/// A stream of the Messages API that failed as its upstream was overloaded.
+pub(crate) const MESSAGES_FAILED: &str = r##"event: message_start
+data: {"type":"message_start","message":{"id":"msg_01Z","type":"message","role":"assistant","content":[],"model":"m-large","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":40,"output_tokens":1}}}
+
+event: error
+data: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+
+"##;
+
+/// An answer of the Messages API that is no stream: text and a tool call.
+pub(crate) const MESSAGES_ANSWER: &str = r##"{"content":[{"text":"I'll read it.","type":"text"},{"id":"toolu_01D","input":{"path":"README.md"},"name":"Read","type":"tool_use"}],"id":"msg_01W","model":"m-large","role":"assistant","stop_reason":"tool_use","stop_sequence":null,"type":"message","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":1500,"input_tokens":20,"output_tokens":30}}"##;
