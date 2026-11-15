@@ -1,3 +1,5 @@
+//! Stopping runs, and removing what a run that ended or was lost left on its providers.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,12 +22,7 @@ use crate::{
     print, runs_dir, say,
 };
 
-/// Stops the run that `flags` name, in their runs directory or [`default_runs`], unless it has
-/// ended: by SIGTERM to its driver, or by SIGKILL with `force`. Then waits until it has ended,
-/// removes what it left ([`Record::reap`]), and prints its outcome; returns the exit status that
-/// `cancel`'s help gives.
-///
-/// [`default_runs`]: crate::default_runs
+/// Stops the run, waits for it to end, and reaps it, as `pumpkin cancel` does.
 pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     if let (cli::RunName::Prefix(prefix), None) = (&flags.run, &flags.runs)
         && let Some(client) = config::client(None)?
@@ -47,10 +44,9 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Stops the run that `flags` name, here, as `cancel` does, saying so to `reader`, with where it
-/// is recorded to the operator ([`Reader`]), and reaps what it left once it has ended; returns
-/// its record, its runs directory as commands name it ([`found`]), and whether its provider was
-/// reached.
+/// Signals the run's driver, if it has one, waits for the run to end and reaps it. Returns the
+/// record, its runs directory as [`crate::runs_dir`]'s second names it, and whether every
+/// provider that the run used could be reached.
 pub(crate) fn cancelled(
     flags: cli::Cancel,
     reader: Reader,
@@ -102,8 +98,7 @@ pub(crate) fn cancelled(
     Ok((record, named, reached))
 }
 
-/// The exit status of `cancel` and `reap` once a run's provider couldn't be reached, as their
-/// help says.
+/// The exit code of a command that could not reach a provider to remove what a run left on it.
 pub(crate) const UNREACHED: u8 = 3;
 
 struct Swept {
@@ -117,8 +112,9 @@ struct Swept {
 /// theirs that it can't reach.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reaper {
-    /// `pumpkin reap` or `pumpkin cancel`: every run that has ended or is lost; a provider
-    /// that can't be reached fails the reap, which says how to reap again once it can be.
+    /// `pumpkin reap` or `pumpkin cancel`: every run that has ended or is lost; a provider that
+    /// can't be reached makes the exit status [`UNREACHED`], and the reap says how to reap again
+    /// once it can be.
     Command,
     /// The controller's boot: only the runs that may have left something, not one that ended
     /// clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
@@ -127,12 +123,10 @@ pub(crate) enum Reaper {
     Boot,
 }
 
-/// Removes what each run in the runs directory that `flags` name, or [`default_runs`], left
-/// once it ended or was lost ([`Record::reap`]), of the runs that `reaper` takes, printing each
-/// such run's id; leaves each live run to its driver. Returns the exit status that `reap`'s
-/// help gives, but of `reaper` [`Reaper::Boot`], 0 though a provider can't be reached.
-///
-/// [`default_runs`]: crate::default_runs
+/// Removes what each run in the runs directory that `flags` name left once it ended or was lost
+/// ([`Record::reap`]), of the runs that `reaper` takes, printing the id of each that had left
+/// something; leaves each live run to its driver. The exit status is `reap`'s, but 0 for
+/// [`Reaper::Boot`] though a provider can't be reached.
 pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String> {
     let cli::Reap { runs, modal_config } = flags;
     if runs.is_none()
@@ -218,13 +212,13 @@ impl Reaching {
         }
     }
 
-    /// How provider `name` of the run of `record`, which reported `report` of itself, is
-    /// reached, once it has been tried: a provider whose report names a Docker context by the
-    /// engine of that context, as `Docker::reach` reaches it; any other by its table in the
-    /// configuration that ran the run ([`run_config`]), of kind `ec2` or `modal`. Fails, saying
-    /// why, if it can't be named so, as when that configuration can't be read, or names no such
-    /// provider; or, in the outer error, if the record is wrong, as when its report names no
-    /// context but the configuration names the provider of kind `docker`.
+    /// How provider `name` of the run of `record`, which reported `report` of itself, is reached,
+    /// once it has been tried: a provider whose report names a Docker context by the engine of
+    /// that context; any other by its table in the configuration that ran the run
+    /// ([`run_config`]). Fails, saying why, if it can't be named so, as when that configuration
+    /// can't be read or names no such provider; or, in the outer error, if the record is wrong,
+    /// as when its report names no context but the configuration names a provider of kind
+    /// `docker`.
     fn reach(
         &mut self,
         record: &Record,
@@ -297,8 +291,8 @@ impl Reaching {
     }
 }
 
-/// The configuration that the run of `record` read: the one that its `--config` named, as its
-/// record keeps the arguments that started it ([`Record::args`]), or the default one.
+/// The configuration that the run ran with: the file that its record's `--config` names, or the
+/// default one.
 fn run_config(record: &Record) -> Result<PathBuf, String> {
     let flags = record.args();
     let at = flags.iter().position(|flag| flag == "--config");
@@ -316,8 +310,8 @@ fn run_config(record: &Record) -> Result<PathBuf, String> {
 /// Reaps the run of `record`, which has ended or is lost, on each provider that its
 /// `provider.json` names, as `reaching` reaches it ([`Record::reap`]), and says what was left.
 /// Of a provider that can't be reached, it says so, and, as `reaper` has it, how to reap `runs`
-/// again, as commands name it ([`end`]), or that what the run left there ends by its hard end;
-/// and removes the rest.
+/// again, as commands name it, or that what the run left there ends by its hard end; and removes
+/// the rest.
 fn reaped(
     record: &Record,
     reaching: &mut Reaching,
@@ -360,8 +354,8 @@ fn reaped(
     reap_rest(record, &providers).map(|left| Swept { left, reached })
 }
 
-/// Reaps the run of `record` on `providers`, each by its name ([`Record::reap`]), and says what
-/// was left, now removed; returns whether anything was left.
+/// Reaps the run of `record` on `providers`, each by its name, and says what was left, now
+/// removed; returns whether anything was left.
 fn reap_rest(record: &Record, providers: &[(&Name, &dyn Sweep)]) -> Result<bool, String> {
     let id = record.id();
     let failed = |error| format!("run {id} can't be reaped: {error}");

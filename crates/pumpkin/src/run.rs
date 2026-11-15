@@ -1,3 +1,7 @@
+//! Starting a run, and the driver that drives it: `pumpkin run`'s part, which starts the driver
+//! and says that the run has started, and the driver's, which builds the task, connects the
+//! providers, places the roles and executes the run.
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -27,8 +31,6 @@ use crate::{
     task_problems,
 };
 
-/// Starts the run that `flags` ask for, with an id of its own, as [`start`] does, or on the
-/// controller that the configuration names ([`controller::run`]).
 pub(crate) fn run(flags: cli::Run) -> Result<ExitCode, String> {
     if let Some(client) = config::client(flags.config.as_deref())? {
         return controller::run(&client, flags);
@@ -40,10 +42,9 @@ pub(crate) fn run(flags: cli::Run) -> Result<ExitCode, String> {
     )
 }
 
-/// Starts the driver of run `id`, which `flags` ask for, recorded in their runs directory
-/// ([`runs_dir`]). Once the run has started, prints its id, or with `wait` follows it and prints
-/// its outcome; returns the exit status that `run`'s help gives. Of how to follow the run, it says
-/// nothing to a follower ([`Reader`]), nor does its driver say this machine's engine.
+/// Starts run `id` in a driver of its own, and returns once the run has started, or with
+/// `flags.wait` once it has ended. It says nothing of how to follow the run to a follower
+/// ([`Reader`]).
 pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<ExitCode, String> {
     // Absolute, so that the record's path, which the driver says and `run` opens, names it from
     // any directory. A runs directory not given is left for the driver to find as `run` does,
@@ -88,10 +89,6 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
     }
 }
 
-/// The exit status of `run` when its driver ended with `status` before the run started, after
-/// making `record`, if it did, in `runs`, as commands name it ([`end`]). A driver that exited
-/// said why; `run` then prints the record's `outcome.json`, if it has one. One that a signal
-/// ended said nothing, so `run` says so, and follows `record` to say how it was left.
 fn unstarted(
     status: ExitStatus,
     record: Option<&Record>,
@@ -116,8 +113,8 @@ fn unstarted(
     }
 }
 
-/// The arguments of the `pumpkin run` that `run` asks for, paths made absolute, which the run's
-/// record keeps, so that every ending can say how to run it again: its flags, then its entry.
+/// The arguments of `run` as its record keeps them, paths made absolute, so that every ending can
+/// say how to run it again: its flags, then its entry.
 fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     for (flag, path) in run.given() {
@@ -129,13 +126,8 @@ fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// The driver: runs the run that `args`, `run`'s process ID, the id that `run` minted, then the
-/// arguments of `pumpkin run` without `--wait`, ask for. Asks to end with `run` until the start
-/// ([`driver::die_with_run`]), names its process [`ARGV0`], checks the task, reaches the engine
-/// and the providers and builds the task's images ([`prepared`]), places the roles, listens where
-/// private sandboxes dial ([`listen`]), has signals interrupt the run (`stdx::signal::catch`),
-/// makes the record and tells `run` its id, starts the run and tells `run` so, then drives it to
-/// its end. Fails, before the start, if `run` has ended or anything above fails or is refused.
+/// The driver of the run that `args` name, until the run ends; `args` are those that
+/// [`Driver::spawn`] gives it. A run that stops short of its outcome is a failure.
 pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let (id, reader, run) = driver_started(args)?;
     let words = recorded_args(&run)?;
@@ -216,8 +208,8 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
 }
 
 /// Says to `reader` that run `id` is begun: to the operator, where it is recorded, `dir`, before
-/// `run` hears of it, so that whatever ends both later, the record is named; and that it is
-/// published on the providers `pushing` names, if any, as a push may take minutes, which the
+/// `run` hears of it, so that whatever ends both later, the record is named; and that its images
+/// are published on the providers `pushing` names, if any, as a push may take minutes, which the
 /// run's start waits for. A follower is sent the record as the run ends, which names it there.
 fn begun(id: &str, dir: &Path, pushing: &[String], reader: Reader) {
     if reader == Reader::Operator {
@@ -237,9 +229,6 @@ fn begun(id: &str, dir: &Path, pushing: &[String], reader: Reader) {
     ));
 }
 
-/// The run that the driver's `args` ask for, by its id, and who reads what it says, once the
-/// driver has asked to end with `run` ([`driver::die_with_run`]) and named its process [`ARGV0`].
-/// Fails if `args` aren't what `run` gives the driver, or `run` has ended.
 fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), String> {
     // Only `run` starts the driver, with its process ID and the run's id, but an `argv[0]` of
     // the driver's name can come from anyone.
@@ -262,25 +251,14 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), Str
     }
 }
 
-/// What a run starts from: its task's workflow, built, and what it reads of the machine's
-/// configuration, its providers connected.
 struct Prepared<'e> {
     workflow: Workflow,
     providers: config::Providers<Connected<'e>>,
     gateway: config::Gateway,
-    /// How each role's model route is served, an entry at a time.
     servings: ByRole<Vec<route::Serving>>,
     prices: BTreeMap<ModelName, TokenPrices>,
 }
 
-/// What a run of `task`, checked, starts from, on the machine that the configuration at `config`
-/// names, each step refused before the next begins: the configuration read, and an upstream found
-/// to serve each role's model route; the engine reached, said to `reader` ([`engine()`]), and kept
-/// in `engine`; each provider connected to it ([`Connected::new`]), so that an engine that can't
-/// run sandboxes is refused before any image is built; then the task's images built on it. Fails
-/// as each step does; gives each build that failed, at its place.
-///
-/// [`engine()`]: crate::engine()
 fn prepared<'e>(
     task: star::Task<'_>,
     config: &Path,
@@ -302,6 +280,8 @@ fn prepared<'e>(
         })?;
     let prices = upstreams.prices();
     let engine = &*engine.insert(crate::engine(context, reader)?);
+    // Each provider is connected before any image is built, so that an engine that can't run
+    // sandboxes is refused first.
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
     Ok(task.build(engine, &mut ()).map(|(workflow, _)| Prepared {
@@ -313,22 +293,13 @@ fn prepared<'e>(
     }))
 }
 
-/// A provider of the machine's configuration, connected as its kind says.
 enum Connected<'e> {
-    /// The machine's Docker engine, as a provider.
     Docker(Docker<'e>),
-    /// An EC2 envelope, which pushes what its sandboxes pull from the machine's Docker engine.
     Ec2(Ec2<'e>),
-    /// A Modal workspace, which imports what its sandboxes run, pushed from the machine's Docker
-    /// engine.
     Modal(Modal<'e>),
 }
 
 impl<'e> Connected<'e> {
-    /// Provider `name`, of `kind`, connected, with `engine`, the machine's Docker engine, whose
-    /// sandboxes, if it is one, are given the CPUs of `cpus`. Fails, naming the provider, if the
-    /// engine can't run sandboxes, or push what the provider's sandboxes pull, or the provider
-    /// can't be reached, as one whose helper isn't beside this `pumpkin`.
     fn new(
         name: &Name,
         kind: config::Kind,
@@ -370,10 +341,6 @@ impl<'e> Connected<'e> {
     }
 }
 
-/// `workflow`, of the task whose entry is `path`, placed in the classes that `providers`, read
-/// from the configuration at `config`, offer ([`Workflow::place`]), with each provider that it
-/// places a role on. Of one that can't be, says each problem on a line of its own, as cargo does,
-/// then fails with how many, as [`refused`] does with `again`.
 fn place<'p, 'e>(
     path: &Path,
     workflow: Workflow,
@@ -407,14 +374,8 @@ fn refused(error: String, again: Option<&str>) -> String {
     format!("to run it again: {again}")
 }
 
-/// The grant listener that the sandboxes of the private providers of `placed_on`, those that a
-/// run places roles on, dial, bound at the `private` address of `gateway`, read from the
-/// configuration at `config`; or `None`, binding nothing, if none is private.
-///
-/// # Errors
-///
-/// Fails, naming each private provider that roles are placed on, if `gateway` names no `private`
-/// address; or if it can't be bound, as one not of this machine's, or where another run listens.
+/// The listener that the sandboxes of the providers in `placed_on` dial, for those that dial over
+/// a private network, and `None` if none does.
 fn listen(
     placed_on: &ByProvider<&Connected<'_>>,
     gateway: &config::Gateway,

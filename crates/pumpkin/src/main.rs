@@ -1,7 +1,9 @@
-//! `pumpkin`, the operator's command line, which [`cli`] parses and describes, as
-//! `pumpkin --help` prints it. What a command says of an ending or a refusal ends with the
-//! commands to run next, as [`next`] makes them. All that it writes on this machine, but what a
-//! command names, as `--runs` does, goes in the workspace's directory of it ([`Workspace`]).
+//! The `pumpkin` command: `main` hands each parsed command to its module, and this file holds the
+//! small commands and what the modules share to speak to the person at the terminal.
+//!
+//! What a command says about itself goes to the standard error as lines that start `pumpkin: `
+//! ([`say`]); what it prints for a person or a program to read, such as a run's id or outcome,
+//! goes to the standard output ([`print()`]).
 
 use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
@@ -42,19 +44,15 @@ use ending::{end, follow, followed};
 use reaping::{Reaper, UNREACHED, cancel, cancelled, reap};
 use run::{driver_run, run, start};
 
-/// The file name of the Modal provider's helper, which `cargo xtask install` installs beside
-/// `pumpkin`, with its lock, of this name and `.lock`.
 const MODAL_HELPER: &str = "pumpkin-modal.py";
 
 fn main() -> ExitCode {
-    // A run's judge calls, each session's reader, and the evaluation of `check` and `build` run
-    // on threads of their own.
     stdx::abort_on_panic();
     // A run reads back what its record holds, such as a payload or a judge's result, and the
-    // operator trusts the outcome that it, `cancel` or `reap` writes there; a umask such as 002
-    // would leave all of it writable by a group that may have other members. So every `pumpkin`
-    // process, and each program it starts, makes nothing that another user may write, as a
-    // service does under systemd's default `UMask=0022`.
+    // operator trusts the outcome there; a umask such as 002 would leave all of it writable by a
+    // group that may have other members. So every `pumpkin` process, and each program it starts,
+    // makes nothing that another user may write, as a service does under systemd's default
+    // `UMask=0022`.
     let shared_write = Mode::from_raw_mode(0o022);
     let started = umask(shared_write);
     umask(started | shared_write);
@@ -97,7 +95,6 @@ fn usage_error(refusal: cli::Refusal) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// The exit status of a command that ended with `done`: its own, or 1 with the error said.
 fn finish(done: Result<ExitCode, String>) -> ExitCode {
     match done {
         Ok(exit) => exit,
@@ -118,7 +115,6 @@ pub(crate) enum Reader {
 }
 
 impl Reader {
-    /// The word that names it among the driver's arguments.
     pub(crate) fn word(self) -> &'static str {
         match self {
             Self::Operator => "operator",
@@ -133,9 +129,9 @@ impl Reader {
     }
 }
 
-/// The runs directory that `given`, a command's `--runs`, names, or without it [`default_runs`];
-/// and how the commands that `pumpkin` says to run next name it: `given` made absolute
-/// ([`absolute_utf8`]), or nothing, for the default.
+/// The runs directory as a string, and `given` made absolute if one was given.
+///
+/// The second is what the commands to run next name; with the default directory they name none.
 fn runs_dir(given: Option<String>) -> Result<(String, Option<String>), String> {
     match given {
         Some(runs) => {
@@ -146,8 +142,6 @@ fn runs_dir(given: Option<String>) -> Result<(String, Option<String>), String> {
     }
 }
 
-/// `path`, `what` the operator named, such as `the runs directory`, made absolute, which a
-/// record keeps, and so UTF-8.
 fn absolute_utf8(path: &str, what: &str) -> Result<String, String> {
     let absolute = std::path::absolute(path).map_err(|error| {
         format!("{what} `{path}` can't be made absolute ({error}): name it by its absolute path")
@@ -158,8 +152,6 @@ fn absolute_utf8(path: &str, what: &str) -> Result<String, String> {
         .map_err(|absolute| not_utf8(what, path, Path::new(&absolute)))
 }
 
-/// Why `what`, which the operator named as `path`, can't be named by the commands that `pumpkin`
-/// says to run next: `absolute`, as it is made absolute, isn't UTF-8.
 fn not_utf8(what: &str, path: &str, absolute: &Path) -> String {
     format!(
         "{what} `{path}` made absolute is {}, which isn't UTF-8, as the current directory's \
@@ -168,14 +160,12 @@ fn not_utf8(what: &str, path: &str, absolute: &Path) -> String {
     )
 }
 
-/// Waits until the run that `flags` name, in their runs directory or [`default_runs`], has
-/// ended, and prints its outcome; returns the exit status that `wait`'s help gives.
 fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
     let cli::Wait { run, runs } = flags;
     if let (cli::RunName::Prefix(prefix), None) = (&run, &runs)
         && let Some(client) = config::client(None)?
     {
-        // A run that has ended, whose record is copied here, needs no controller.
+        // A run that has ended is copied here, and is read here; any other is waited for there.
         if let Ok(record) = Record::find(Path::new(&default_runs()?), prefix)
             && let Some(ending) = record.ending()?
         {
@@ -187,10 +177,6 @@ fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
     follow(&record, "wait", named.as_deref())
 }
 
-/// Lists the runs in the runs directory that `flags` name, or [`default_runs`], whose ids start
-/// with one of their prefixes, oldest first, a line for each, and their totals
-/// ([`progress::lines`]); returns the exit status that `ls`'s help gives. The default directory
-/// not being there yet is no runs.
 fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     let cli::Ls { runs, prefixes } = flags;
     if runs.is_none()
@@ -211,15 +197,13 @@ fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The time now, or the Unix epoch itself on a clock that reads before it.
 fn unix_now() -> UnixTime {
     UnixTime::of(SystemTime::now()).unwrap_or(UnixTime::after_epoch(std::time::Duration::ZERO))
 }
 
-/// Each run in `runs` whose id starts with one of `prefixes`, or every run without any, as `ls`
-/// lists it, but those that ended before `since`, if given, since the Unix epoch, which it leaves
-/// out; and how many can't be listed, each of which is said; none if `runs` is the `default`
-/// directory, and not there yet.
+/// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
+/// how many can't be listed, each said as it is found. A run that ended before `since` is named
+/// only in the listing's `older`. A `runs` that is missing is an empty listing if it is `default`.
 fn listed_in(
     runs: &Path,
     default: bool,
@@ -262,8 +246,6 @@ fn listed_in(
     Ok((listing, unlisted))
 }
 
-/// When the run recorded in `dir` ended, as it wrote its `outcome.json`, since the Unix epoch;
-/// `None` while it has none, as it is live, or lost.
 fn ended(dir: &Path) -> Result<Option<std::time::Duration>, String> {
     let outcome = dir.join("outcome.json");
     let modified = fs::metadata(&outcome).and_then(|metadata| metadata.modified());
@@ -276,7 +258,6 @@ fn ended(dir: &Path) -> Result<Option<std::time::Duration>, String> {
     }
 }
 
-/// Whether the run `id` is one that `prefixes` pick: one of them starts it, or there are none.
 fn picked(prefixes: &[String], id: &str) -> bool {
     prefixes.is_empty()
         || prefixes
@@ -284,9 +265,8 @@ fn picked(prefixes: &[String], id: &str) -> bool {
             .any(|prefix| id.starts_with(prefix.as_str()))
 }
 
-/// The record of the run that `run` names, in `runs` ([`runs_dir`]), and the runs directory that
-/// a command run next names it in: the record's own, absolute, unless it was found in the default
-/// one. Fails if the record's directory, made absolute, isn't UTF-8.
+/// The record that `run` names, and the runs directory that the commands to run next name for it
+/// ([`runs_dir`]'s second).
 fn found(run: cli::RunName, runs: Option<String>) -> Result<(Record, Option<String>), String> {
     let path = match run {
         cli::RunName::Record(path) => path,
@@ -308,8 +288,6 @@ fn found(run: cli::RunName, runs: Option<String>) -> Result<(Record, Option<Stri
     }
 }
 
-/// Checks each task that `flags` name, as `pumpkin check --help` says, saying each of their
-/// problems, if they have any; returns 0 if they have none.
 fn check(flags: cli::Check) -> Result<ExitCode, String> {
     let cli::Check {
         entries,
@@ -334,9 +312,6 @@ fn check(flags: cli::Check) -> Result<ExitCode, String> {
     Err(format!("to check {them} again: {again}"))
 }
 
-/// Builds the task that `flags` name, as `pumpkin build --help` says, on the engine that the
-/// configuration names, saying each of its problems if it has any, and else printing its IR;
-/// returns 0 once the IR is printed. It says the engine to `reader` ([`engine()`]).
 fn build(flags: cli::Build, reader: Reader) -> Result<ExitCode, String> {
     if let Some(client) = config::client(flags.config.as_deref())? {
         return controller::build(&client, flags);
@@ -356,8 +331,6 @@ fn build(flags: cli::Build, reader: Reader) -> Result<ExitCode, String> {
     }
 }
 
-/// What [`build`] does, but for the command that ends a failure; with `config`, the
-/// configuration's path, if given ([`config_path`]).
 fn built(
     entry: &star::Entry,
     args: &lang::Args,
@@ -373,9 +346,6 @@ fn built(
     print(ir.as_bytes()).context("printing the IR failed")
 }
 
-/// The command that runs `pumpkin <command>`, `check` or `build`, again on the tasks whose
-/// entries are `entries`, given `args`, and for `build`, the configuration at `config`, if given;
-/// its paths absolute ([`absolute_utf8`]).
 fn source_again(
     command: &str,
     entries: &[&star::Entry],
@@ -393,7 +363,6 @@ fn source_again(
     Ok(next::again(command, &flags, &entries?))
 }
 
-/// The words of the flags that give `args`, as `--arg <name>=<value>` each.
 fn arg_flags(args: &lang::Args) -> impl Iterator<Item = String> {
     let flags = args
         .iter()
@@ -401,8 +370,6 @@ fn arg_flags(args: &lang::Args) -> impl Iterator<Item = String> {
     flags.flatten()
 }
 
-/// Says `problems`, those of the task whose entry is `entry`, and returns the line that closes
-/// them.
 fn task_problems(entry: &star::Entry, problems: &lang::Problems) -> String {
     // Each problem reads as its first line names its place and those after show it, so only the
     // line that closes them is said as `pumpkin`'s.
@@ -425,8 +392,6 @@ fn escaped(text: &str) -> String {
     shown
 }
 
-/// The workspace's runs directory ([`Workspace::runs`]); failing if it isn't UTF-8, as the
-/// commands that `pumpkin` says to run next name it.
 fn default_runs() -> Result<String, String> {
     let runs = Workspace::find()?.runs();
     runs.into_os_string().into_string().map_err(|runs| {
@@ -439,12 +404,10 @@ fn default_runs() -> Result<String, String> {
     })
 }
 
-/// The configuration's path: `given`, by `--config`, or else [`default_config`].
 fn config_path(given: Option<String>) -> Result<PathBuf, String> {
     given.map_or_else(default_config, |config| Ok(PathBuf::from(config)))
 }
 
-/// The Docker engine that the configuration at `path` names, said to `reader` ([`engine()`]).
 fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
     let config::Config {
         docker: config::Docker { context, cpus: _ },
@@ -456,7 +419,6 @@ fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
     engine(context, reader)
 }
 
-/// `$HOME/.config/pumpkin/pumpkin.toml`.
 fn default_config() -> Result<PathBuf, String> {
     Ok(home("name the configuration with `--config`")?.join(".config/pumpkin/pumpkin.toml"))
 }
@@ -471,9 +433,6 @@ fn home(instead: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("HOME is unset or empty: set it, or {instead}"))
 }
 
-/// The Modal provider's helper, `pumpkin-modal.py`, beside the `pumpkin` executable that runs, as
-/// `cargo xtask install` installs it, with its lock beside it. Fails if the helper or its lock
-/// isn't beside it.
 fn modal_helper() -> Result<PathBuf, String> {
     let pumpkin = workspace::exe("expected Modal's helper beside it")?;
     let helper = pumpkin.with_file_name(MODAL_HELPER);
@@ -490,8 +449,6 @@ fn modal_helper() -> Result<PathBuf, String> {
     Ok(helper)
 }
 
-/// The line that closes a list of `count` problems, which says that `has` them, and how many.
-/// The command that runs again follows it.
 fn closing_problems(has: fmt::Arguments<'_>, count: usize) -> String {
     let problems = counted(count, "problem");
     format!("{has} {problems}")
@@ -503,7 +460,6 @@ fn counted<C: Copy + fmt::Display + PartialEq + From<u8>>(count: C, noun: &str) 
     if count == C::from(1) {
         return format!("{count} {noun}");
     }
-    // English's plural of each noun that Pumpkin counts.
     let consonant_y = noun
         .strip_suffix('y')
         .filter(|stem| !stem.ends_with(['a', 'e', 'o', 'u']));
@@ -516,12 +472,10 @@ fn counted<C: Copy + fmt::Display + PartialEq + From<u8>>(count: C, noun: &str) 
     }
 }
 
-/// The Docker engine that `context` reaches, reported, which writes in the workspace's directory
-/// of it ([`Workspace::docker`]). A rootful engine is announced to the operator, since its
-/// `docker` group is root-equivalent; a follower can't change it ([`Reader`]).
 fn engine(context: ContextName, reader: Reader) -> Result<Engine, String> {
     let engine = Engine::connect(context, &Workspace::find()?.docker())?;
     let report = engine.report();
+    // A rootful engine's `docker` group is root-equivalent; a follower can't change the engine.
     if reader == Reader::Operator && !report.security.rootless {
         say(format_args!(
             "the Docker engine that context `{}` reaches runs as root, so its `docker` group is \
@@ -532,39 +486,32 @@ fn engine(context: ContextName, reader: Reader) -> Result<Engine, String> {
     Ok(engine)
 }
 
-/// Prints the run's `outcome.json`, from its record in `dir`, on the standard output.
 fn print_outcome(dir: &Path) -> Result<(), String> {
     let recorded = dir.join("outcome.json");
     let printed = fs::read(&recorded).context(recorded.display())?;
     print(&printed).context("printing the outcome failed")
 }
 
-/// Writes `bytes` to the standard output, and flushes it.
 fn print(bytes: &[u8]) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(bytes)?;
     stdout.flush()
 }
 
-/// Says the `command` to run next, to do what `to` says, as `pumpkin: to <to>: <command>`, the
-/// command last, so that it can be copied whole.
 fn advise(to: &str, command: &str) {
     say(format_args!("to {to}: {command}"));
 }
 
-/// Writes `message` to standard error, as [`tell`] does, but drops the error of a write that
-/// fails, as [`to_stderr`] does.
+/// Writes `message` as a line on the standard error, and ignores a failure to write it.
 fn say(message: impl fmt::Display) {
     let _ = tell(message);
 }
 
-/// Writes `message` to standard error, as `pumpkin: <message>`, and returns the error of a write
-/// that fails.
+/// [`say`], but returns the failure to write.
 fn tell(message: impl fmt::Display) -> io::Result<()> {
     io::stderr().write_all(format!("pumpkin: {message}\n").as_bytes())
 }
 
-/// Writes `bytes` to standard error.
 fn to_stderr(bytes: &[u8]) {
     // Writing to a terminal that has hung up fails, and `eprintln!` would panic; the exit
     // status and the run's record still say how it ended.
