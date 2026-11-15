@@ -16,8 +16,7 @@ use crate::problem::{Fault, refusal};
 use crate::value::{FileId, Span};
 use crate::{Label, MAX_NESTING};
 
-/// The module that `text`, the text of `file`, holds, or the first place where the text is no
-/// module of the language.
+/// The module that `text` is, or the fault at its first refused token.
 pub(crate) fn parse(file: FileId, text: &str) -> Result<Module, Fault> {
     let tokens = lex(file, text);
     let mut parser = Parser {
@@ -30,8 +29,8 @@ pub(crate) fn parse(file: FileId, text: &str) -> Result<Module, Fault> {
     parser.module()
 }
 
-/// The precedences of the binary operators, and of `not` among them, loosest first (spec.md,
-/// "Binary operators").
+// The binding of each level of binary operator, from the loosest. `not` binds between `and` and
+// the comparisons, as in the specification's grammar.
 const OR: u8 = 0;
 const AND: u8 = 1;
 const NOT: u8 = 2;
@@ -40,28 +39,25 @@ const UNION: u8 = 4;
 const SUM: u8 = 5;
 const PRODUCT: u8 = 6;
 
-/// A binary operator: `and` and `or`, which choose an operand, or one that makes a value of
-/// two.
 #[derive(Clone, Copy)]
 enum Infix {
     Logic(Logic),
     Value(Operator),
 }
 
-/// What to write instead of a `for` statement.
 const COMPREHEND: &str = "build the list with a comprehension, as `[f(x) for x in xs]`";
 
 const TRAILING: &str = "a tuple without parentheses can't end with `,`: drop the `,`, or put the \
                         tuple in parentheses";
 
-/// Where a statement stands: at a file's top level, or in a function's body.
+// Where a statement stands: a file's top level, or a function's body.
 #[derive(Clone, Copy)]
 enum Level {
     Top,
     Body,
 }
 
-/// Where the parser meets a token, as [`left_out`] tells it.
+// What `left_out` checks a token against: where in a line or an expression it stands.
 #[derive(Clone, Copy)]
 enum At {
     /// The start of a line's first statement.
@@ -78,10 +74,10 @@ enum At {
 
 struct Parser<'t> {
     text: &'t str,
-    /// Never empty: the last is the end of the file, or an error.
+    /// Never empty: the last token is the end of the file, or an error.
     tokens: Vec<Token>,
     pos: usize,
-    /// How deep the parser is in nested expressions and blocks.
+    /// How deep the parts being read nest in the file, as `MAX_NESTING` counts.
     depth: usize,
     /// The deepest `depth` has been in the body of the `def` being read.
     deepest: usize,
@@ -116,8 +112,7 @@ impl Parser<'_> {
         Ok(module)
     }
 
-    /// Reads small statements, the first `at` its place, each with `small`, separated by `;`,
-    /// then the line's end.
+    // A line of statements that `small` reads, separated by `;`, and its line break.
     fn line(
         &mut self,
         mut at: At,
@@ -185,7 +180,6 @@ impl Parser<'_> {
         Ok(Step::Return { keyword, value })
     }
 
-    /// Reads `def <name>(<parameters>): <body>` (spec.md, "Function definitions").
     fn def(&mut self) -> Result<Def, Fault> {
         let keyword = self.advance();
         let name = self.name("the function's name")?;
@@ -196,6 +190,8 @@ impl Parser<'_> {
         {
             return Err(annotation(self.peek().span, "->"));
         }
+        // The parameters' defaults run where the `def` does, so only the body's depth is what a
+        // call of the function adds.
         self.deepest = 0;
         let body = self.suite(keyword)?;
         let locals = locals(&params, &body);
@@ -210,12 +206,10 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads a `def`'s parameters, after its `(`, and its `)`: each one, and how many of them
-    /// may be given by position.
     fn params(&mut self) -> Result<(Vec<Param>, usize), Fault> {
         let mut params: Vec<Param> = Vec::new();
         let mut named: BTreeMap<String, Span> = BTreeMap::new();
-        // The bare `*`, and how many parameters are before it.
+        // The bare `*`, and how many parameters came before it.
         let mut star: Option<(Span, usize)> = None;
         // The first parameter before any `*` that has a default.
         let mut defaulted: Option<String> = None;
@@ -230,6 +224,7 @@ impl Parser<'_> {
                     let fault = Fault::new(*span, message);
                     return Err(fault.note("it is first named at", Some(first)));
                 }
+                // Past the `*` each parameter is keyword-only, so defaults may come in any order.
                 if star.is_none() {
                     match (&param.default, &defaulted) {
                         (Some(_), None) => defaulted = Some(text.clone()),
@@ -262,8 +257,6 @@ impl Parser<'_> {
         Ok((params, positional))
     }
 
-    /// Reads a `*` among a `def`'s parameters, which is next, and returns its span, refusing
-    /// `**kwargs`, `*args`, and a second `*`, where `again` says one is before it.
     fn star(&mut self, again: bool) -> Result<Span, Fault> {
         if self.at_punct(Punct::StarStar) {
             let message = refusal(
@@ -296,8 +289,8 @@ impl Parser<'_> {
         Ok(Param { name, default })
     }
 
-    /// Reads a block's `:`, then its statements, one level deeper than its header, whose
-    /// keyword is at `header`: an indented block, or statements on the header's own line.
+    // A block's `:`, then its statements one level deeper than the header at `header`: an indented
+    // block, or statements on the header's own line.
     fn suite(&mut self, header: Span) -> Result<Vec<Step>, Fault> {
         self.expect_punct(Punct::Colon, "`:`")?;
         self.nested(header, |parser| {
@@ -323,8 +316,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads `if`, then each `elif`, then an `else`, each with its block (spec.md, "If
-    /// statements").
     fn if_statement(&mut self) -> Result<Step, Fault> {
         let mut branches = Vec::new();
         loop {
@@ -348,8 +339,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads `load(<label>, <names>…)` (spec.md, "Load statements"), whose label names a `.star`
-    /// file.
     fn load(&mut self) -> Result<Load, Fault> {
         let keyword = self.advance();
         self.expect_punct(Punct::LeftParen, "`(`")?;
@@ -395,8 +384,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads expressions separated by commas: a tuple, unless there is one without a comma. A
-    /// last comma is an error, as the specification has it of a tuple without parentheses.
     fn expressions(&mut self) -> Result<Expr, Fault> {
         let first = self.test()?;
         if !self.at_punct(Punct::Comma) {
@@ -430,8 +417,6 @@ impl Parser<'_> {
         }
     }
 
-    /// Reads the rest of a conditional expression whose value when true is `then`, from its
-    /// `if`, which is next: the condition, and what follows, one level deeper.
     fn conditional(&mut self, then: Expr) -> Result<Expr, Fault> {
         let at = self.advance();
         let (condition, otherwise) = self.nested(at, |parser| {
@@ -455,8 +440,8 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads operands separated by the binary operators whose precedence is `min` or more, each
-    /// run of operators of one precedence as one chain, and `not` where `min` takes it.
+    // Operators that bind at least as tight as `min`, each taking its right operand one level
+    // tighter than itself, so that equal ones group from the left.
     fn binary(&mut self, min: u8) -> Result<Expr, Fault> {
         let mut left = if min <= NOT && self.at_keyword(Keyword::Not) {
             self.not()?
@@ -474,8 +459,6 @@ impl Parser<'_> {
         Ok(left)
     }
 
-    /// Reads `not` and its operand, one level deeper: what binds more tightly than `not`, or
-    /// another `not`.
     fn not(&mut self) -> Result<Expr, Fault> {
         let at = self.advance();
         let operand = self.nested(at, |parser| parser.binary(NOT))?;
@@ -490,8 +473,9 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads the operands that `logic`'s keyword, next, joins to `first`, of `precedence`.
     fn logic(&mut self, first: Expr, logic: Logic, precedence: u8) -> Result<Expr, Fault> {
+        // Every `and` or `or` of a run is one node, whatever its length, so that the run does not
+        // nest in the tree.
         let mut rest = Vec::new();
         while self.at_keyword(logic.keyword()) {
             self.advance();
@@ -508,8 +492,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads the operands that `operator`, next, and the operators of its `precedence` after it
-    /// join to `first`; comparisons, which don't associate, make chains of one.
     fn chain(&mut self, first: Expr, operator: Operator, precedence: u8) -> Result<Expr, Fault> {
         let mut rest = Vec::new();
         let mut operator = operator;
@@ -537,8 +519,8 @@ impl Parser<'_> {
         })
     }
 
-    /// The binary operator at the next token, and its precedence, if one is there. An operator
-    /// the subset leaves out is refused wherever it is.
+    // The binary operator at the next token, and its precedence. An operator that the subset leaves
+    // out is refused wherever it is, not passed over.
     fn infix(&self) -> Result<Option<(Infix, u8)>, Fault> {
         let infix = match self.peek().kind {
             TokenKind::Keyword(Keyword::Or) => (Infix::Logic(Logic::Or), OR),
@@ -551,8 +533,6 @@ impl Parser<'_> {
         Ok(Some(infix))
     }
 
-    /// The binary operator, but `and` and `or`, at the next token, and its precedence, if one
-    /// is there. Punctuation that the subset leaves out is refused wherever it is.
     fn operator(&self) -> Result<Option<(Operator, u8)>, Fault> {
         let Token { kind, span } = self.peek();
         let arithmetic = |arithmetic, precedence| (Operator::Arithmetic(arithmetic), precedence);
@@ -585,7 +565,6 @@ impl Parser<'_> {
         Ok(Some(operator))
     }
 
-    /// Moves past `operator`, whose first token is next, and returns its span.
     fn advance_operator(&mut self, operator: Operator) -> Span {
         let first = self.advance();
         match operator {
@@ -622,10 +601,13 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads an operand and what follows it: calls, indexes and methods, each a level deeper.
     fn primary(&mut self) -> Result<Expr, Fault> {
         let mut expr = self.operand()?;
+        // Each call, index or method nests the expression before it in the tree, so a chain counts
+        // as deep as it is long, and the depth is its start's again once it ends.
         let depth = self.depth;
+        // Each suffix is read by a function of its own, so that the frames on the deepest paths
+        // hold only the one being read.
         loop {
             expr = if self.at_punct(Punct::LeftParen) {
                 self.call(expr)?
@@ -641,10 +623,6 @@ impl Parser<'_> {
         Ok(expr)
     }
 
-    // Each suffix has a function of its own, so that the deepest paths through the parser hold
-    // only the one they take.
-
-    /// Reads the call of `callee`, from its `(`, which is next.
     fn call(&mut self, callee: Expr) -> Result<Expr, Fault> {
         let open = self.advance();
         self.nest(open)?;
@@ -659,7 +637,6 @@ impl Parser<'_> {
         Ok(Expr { kind, span })
     }
 
-    /// Reads the index of `object`, from its `[`, which is next.
     fn indexed(&mut self, object: Expr) -> Result<Expr, Fault> {
         let open = self.advance();
         self.nest(open)?;
@@ -672,7 +649,6 @@ impl Parser<'_> {
         Ok(Expr { kind, span })
     }
 
-    /// Reads the call of a method of `receiver`, from its `.`, which is next.
     fn method(&mut self, receiver: Expr) -> Result<Expr, Fault> {
         self.advance();
         let name = self.name("a method's name")?;
@@ -695,7 +671,6 @@ impl Parser<'_> {
         Ok(Expr { kind, span })
     }
 
-    /// Reads an index, after its `[`, and its `]`, and returns it and the `]`'s span.
     fn index(&mut self) -> Result<(Expr, Span), Fault> {
         let slice = |at: Span| {
             let message = refusal("a slice", "index the elements one by one");
@@ -716,8 +691,6 @@ impl Parser<'_> {
         Ok((index, close))
     }
 
-    /// Reads a call's arguments, after its `(`, and its `)`: positional ones, then keyword ones,
-    /// each keyword given once. Returns them and the `)`'s span.
     fn arguments(&mut self) -> Result<(Args, Span), Fault> {
         let (arguments, close) = self.sequence(Punct::RightParen, Self::argument)?;
         let mut positional = Vec::new();
@@ -788,7 +761,6 @@ impl Parser<'_> {
         Ok(Expr { kind, span })
     }
 
-    /// Reads an opening bracket, then what `inner` reads to its closing one, one level deeper.
     fn bracketed(
         &mut self,
         inner: fn(&mut Self, Span) -> Result<Expr, Fault>,
@@ -797,7 +769,6 @@ impl Parser<'_> {
         self.nested(open, |parser| inner(parser, open))
     }
 
-    /// Reads a list's elements, or a list comprehension, after its `[`, at `open`.
     fn list(&mut self, open: Span) -> Result<Expr, Fault> {
         if self.at_punct(Punct::RightBracket) {
             let close = self.advance();
@@ -817,8 +788,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads a list comprehension, whose `[` is at `open`, from its first `for`, which is next,
-    /// and its body, `body`.
     fn list_comprehension(&mut self, open: Span, body: Expr) -> Result<Expr, Fault> {
         let comprehension = Box::new(self.comprehension()?);
         let close = self.expect_punct(Punct::RightBracket, "`]`")?;
@@ -831,7 +800,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads a dict's entries, or a dict comprehension, after its `{`, at `open`.
     fn dict(&mut self, open: Span) -> Result<Expr, Fault> {
         if self.at_punct(Punct::RightBrace) {
             let close = self.advance();
@@ -870,8 +838,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads what follows a `(`, at `open`: a tuple, unless it holds one expression without a
-    /// comma, which it reads as that expression.
     fn parenthesized(&mut self, open: Span) -> Result<Expr, Fault> {
         let mut items = Vec::new();
         if !self.at_punct(Punct::RightParen) {
@@ -896,16 +862,15 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads a dict's entry after its first.
     fn entry(&mut self) -> Result<(Expr, Expr), Fault> {
         let key = self.test()?;
         self.expect_punct(Punct::Colon, "`:`")?;
         Ok((key, self.test()?))
     }
 
-    /// Reads a comprehension's clauses, from its first `for`, each one level deeper than the one
-    /// before (spec.md, "Comprehensions").
     fn comprehension(&mut self) -> Result<Comprehension, Fault> {
+        // Each clause nests the ones after it, and the depth is the comprehension's start again
+        // once they end.
         let depth = self.depth;
         let (target, iterable) = self.for_clause()?;
         let mut clauses = Vec::new();
@@ -931,11 +896,12 @@ impl Parser<'_> {
         })
     }
 
-    /// Reads `for <variables> in <iterable>`, whose iterable is no conditional expression and no
-    /// tuple without parentheses.
     fn for_clause(&mut self) -> Result<(Target, Expr), Fault> {
         let keyword = self.advance();
         self.nest(keyword)?;
+        // The targets are read as primary expressions, as a full one would take `in` for an
+        // operator, and the iterable is read as no conditional expression, which would take the
+        // next clause's `if` for its own.
         let first = self.primary()?;
         let variables = if self.at_punct(Punct::Comma) {
             let mut items = Vec::from([first]);
@@ -961,7 +927,6 @@ impl Parser<'_> {
         Ok((target(variables)?, self.binary(OR)?))
     }
 
-    /// Reads, after `first`, the items of `item` that follow it, as [`Self::sequence`] does.
     fn after<T>(
         &mut self,
         first: T,
@@ -978,8 +943,6 @@ impl Parser<'_> {
         Ok((items, close))
     }
 
-    /// Reads items of `item`, separated by commas, with an optional last comma, to `close`, and
-    /// returns them and `close`'s span.
     fn sequence<T>(
         &mut self,
         close: Punct,
@@ -996,7 +959,7 @@ impl Parser<'_> {
         Ok((items, close))
     }
 
-    /// What `inner` reads one level deeper into nested expressions and blocks, at `at`.
+    // Reads `inner` one level deeper, and restores the depth.
     fn nested<T>(
         &mut self,
         at: Span,
@@ -1009,7 +972,7 @@ impl Parser<'_> {
         read
     }
 
-    /// Goes one level deeper into nested expressions and blocks, at `at`.
+    // Goes one level deeper, refused past `MAX_NESTING`. The caller restores the depth.
     fn nest(&mut self, at: Span) -> Result<(), Fault> {
         self.depth += 1;
         self.deepest = self.deepest.max(self.depth);
@@ -1047,9 +1010,9 @@ impl Parser<'_> {
         &self.tokens[self.pos]
     }
 
-    /// Moves past the next token, unless it is the last, and returns its span.
     fn advance(&mut self) -> Span {
         let span = self.peek().span;
+        // Stays on `Eof`, the last token, which a failed read can then name.
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
         }
@@ -1084,11 +1047,10 @@ impl Parser<'_> {
         }
     }
 
-    /// The error at the next token, where the parser expected `expected`: the token's own
-    /// refusal, if it writes what the subset leaves out.
     fn unexpected(&self, expected: &str) -> Fault {
         let Token { kind, span } = self.peek();
         let found = match kind {
+            // The lexer's refusal ends the tokens, so it is the first fault.
             TokenKind::Error(message) => return Fault::new(*span, message.clone()),
             TokenKind::Name(_)
             | TokenKind::Int(_)
@@ -1106,11 +1068,10 @@ impl Parser<'_> {
     }
 }
 
-/// The problem with `kind`, a token met `at` a place where the parser takes no token of its
-/// kind, if it has one there: a refusal where Starlark's grammar takes the token and the subset
-/// leaves it out, or Starlark's own error of a statement that stands elsewhere. Anywhere else
-/// such a token is only unexpected (`unexpected`), so that a file that is no Starlark is never
-/// told that it is only outside the subset.
+// The problem with a token met at `at`, where the parser takes no token of its kind, if it has
+// one: a refusal where Starlark's grammar takes the token and the subset leaves it out, or
+// Starlark's own error of a statement that stands elsewhere. Any other such token is only
+// unexpected, so that a file that is no Starlark is never told that it is only outside the subset.
 #[expect(clippy::too_many_lines, reason = "one table of the parser's places")]
 fn left_out(kind: &TokenKind, at: At) -> Option<String> {
     let message = match (kind, at) {
@@ -1143,7 +1104,6 @@ fn left_out(kind: &TokenKind, at: At) -> Option<String> {
                  there",
             )
         }
-        // No loop holds one, as the subset has no `for` statement.
         (
             TokenKind::Keyword(keyword @ (Keyword::Break | Keyword::Continue)),
             At::Line(_) | At::Small(_),
@@ -1197,14 +1157,11 @@ fn left_out(kind: &TokenKind, at: At) -> Option<String> {
     Some(message)
 }
 
-/// The refusal of a type annotation, whose `mark`, `:` or `->`, is at `at`.
 fn annotation(at: Span, mark: &str) -> Fault {
     let message = format!("type annotations are not in Starlark: drop the `{mark}` and the type");
     Fault::new(at, message)
 }
 
-/// Each name a function with `params` and `body` binds, once: the parameters, then the names
-/// the body assigns, in order.
 fn locals(params: &[Param], body: &[Step]) -> Vec<String> {
     fn assigned<'s>(steps: &'s [Step], names: &mut Vec<&'s Name>) {
         for step in steps {
@@ -1233,7 +1190,7 @@ fn locals(params: &[Param], body: &[Step]) -> Vec<String> {
         .collect()
 }
 
-/// What `expr`, the left side of an assignment or a `for`'s variables, binds.
+// An assignment's left side is read as an expression, before its `=` shows that it is one.
 fn target(expr: Expr) -> Result<Target, Fault> {
     let Expr { kind, span } = expr;
     let what = match kind {

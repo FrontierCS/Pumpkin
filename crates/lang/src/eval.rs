@@ -1,17 +1,21 @@
-//! The evaluator: runs modules and calls as spec.md's "Module execution" and "Functions" say,
-//! with at most `MAX_CALLS` functions running at once.
+//! The evaluator: runs modules and calls as spec.md's "Module execution" and "Functions" say.
 //!
 //! A module runs once per evaluation, the first time a file loads it, and every file that loads
 //! it shares its globals; a load of a module that is still loading is an error, with the chain of
-//! loads. The specification leaves both to the application ("Load statements").
+//! loads. The specification leaves both to the application ("Load statements"). A module's globals
+//! exist, unbound, before its first statement runs, so that a function may name a global bound
+//! after its `def`; a use that runs before the binding is an error.
+//!
+//! A function sees its parameters and the names it assigns, then its module's globals and loads,
+//! and never its caller's names. At most `MAX_CALLS` functions run at once.
 //!
 //! Evaluation always ends: every loop is a comprehension over a list, a tuple or a dict that
 //! exists already and never changes, no function runs while it is running, each module runs
-//! once, and loads make no cycle. It keeps to its [`Bounds`](crate::Bounds), its values' bytes
-//! as `Budget` counts them, and fits in [`STACK_BYTES`](crate::STACK_BYTES): nesting is at most
+//! once, and loads make no cycle. It keeps to its [`Bounds`](crate::Bounds), its values' bytes as
+//! `Budget` counts them, and fits in [`STACK_BYTES`](crate::STACK_BYTES): nesting is at most
 //! `MAX_NESTING` deep, as the parser counts it, through calls, each running its function's body as
-//! deep as its arguments nest. The first error ends it, as Starlark handles none (spec.md, "Module
-//! execution"), noting calls.
+//! deep as its arguments nest. The first error ends it, as Starlark handles none (spec.md,
+//! "Module execution"), noting calls.
 
 mod call;
 mod operators;
@@ -35,12 +39,14 @@ use crate::value::{Budget, Builtin, Dict, Entry, FileId, Key, Kind, Nested, Span
 use crate::{Label, Loader, Root};
 
 // Two fewer than the 50 frames that starlark-rust's evaluator holds by default: its top level
-// takes one, and so does a builtin or a method that the innermost function calls, so that every
-// file the subset accepts, it evaluates too.
+// takes one, and so does a builtin or a method that the innermost function calls, so that it
+// evaluates every file the subset accepts:
+// https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/eval/runtime/evaluator.rs#L133
 const MAX_CALLS: usize = 48;
 
 pub(crate) struct Evaluation<'l, L> {
     loader: &'l mut L,
+    /// Each file read so far.
     pub(crate) sources: Sources,
     pub(crate) planned: Planned<'l>,
     modules: BTreeMap<Label, State>,
@@ -50,7 +56,7 @@ pub(crate) struct Evaluation<'l, L> {
     tops: Vec<Top>,
     /// The module whose statements run: the entry, before any does.
     running: FileId,
-    /// The functions that run, outermost first, each by its `def`, with the call that runs it.
+    /// The functions running now, outermost first, each with its call.
     calls: Vec<(Rc<Def>, Span)>,
     /// How many expressions it has evaluated, its files' and the functions' they call.
     steps: u64,
@@ -68,28 +74,28 @@ enum State {
     Ran(FileId),
 }
 
-/// A module that is loading: it runs once each of its loads has.
+// A module that is loading: it runs once each of its loads has.
 struct Loading {
     label: Label,
     /// The `load` that loads it; `None` for the entry.
     at: Option<Span>,
     file: FileId,
     module: Module,
+    /// How many of the module's loads are bound.
     ran: usize,
 }
 
-/// A module's top level: its globals, each `None` until its statement has run, and the names
-/// its loads bind.
 #[derive(Default)]
 struct Top {
+    /// `None` until the global is bound.
     globals: BTreeMap<String, Option<Value>>,
     loaded: BTreeMap<String, Value>,
 }
 
-/// Names bound in a local block, each `None` until bound.
+/// `None` until the name is bound.
 type Locals<'a> = BTreeMap<&'a str, Option<Value>>;
 
-/// Where an expression's names resolve, innermost first.
+// Where an expression is evaluated, which decides the names it sees.
 #[derive(Clone, Copy)]
 enum Scope<'s> {
     /// A module's top level, then its loads.
@@ -129,8 +135,9 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         }
     }
 
+    // Runs the file at `label` and, before it, each file it loads. A file's syntax and name errors
+    // come all together, any other problem first.
     pub(crate) fn entry(&mut self, label: &Label) -> Result<(), Vec<Problem>> {
-        // An entry's package, which `.` names in `image()`, is a directory below the task's root.
         if label.root() == Root::Library {
             let message = "a file of the standard library can't be an entry, whose directory is \
                            below the task's root: evaluate a `//` file";
@@ -143,7 +150,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         // loads may be as long as there are files.
         while let Some(mut top) = self.loading.pop() {
             let Some(load) = top.module.loads.get(top.ran) else {
-                // Each of its loads has run, so the module runs.
                 self.run(top)?;
                 continue;
             };
@@ -169,8 +175,8 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(())
     }
 
-    /// The error of `load`, the next of `top`'s, whose module is at `first` on `loading`; `top`,
-    /// popped off `loading`, ends the chain.
+    // The error of `load`, the next of `top`'s, whose module is at `first` on `loading`; `top`,
+    // popped off `loading`, ends the chain.
     fn cycle(&self, first: usize, top: &Loading, load: &Load) -> Fault {
         let chain: Vec<&Loading> = self.loading.iter().chain([top]).collect();
         let message = format!(
@@ -224,8 +230,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(())
     }
 
-    /// Binds the names `load` loads into `into`'s top level, from that of `from`, the module it
-    /// loads, which has run.
     fn bind_loaded(&mut self, load: &Load, from: FileId, into: FileId) -> Result<(), Fault> {
         for name in &load.names {
             let globals = &self.tops[from.0].globals;
@@ -256,7 +260,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(())
     }
 
-    /// Runs `loading`'s statements, each of its loads having run.
     fn run(&mut self, loading: Loading) -> Result<(), Vec<Problem>> {
         let Loading {
             label,
@@ -291,6 +294,8 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(())
     }
 
+    // A comprehension's names, then, in a function, its locals; then the module's globals and
+    // loads, and the predeclared names.
     fn lookup(&self, scope: &Scope<'_>, name: &str, span: Span) -> Result<Value, Fault> {
         let mut scope = scope;
         let module = loop {
@@ -329,6 +334,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
 
     fn eval(&mut self, scope: &Scope<'_>, expr: &Expr) -> Result<Value, Fault> {
         let span = expr.span;
+        // So that no file runs past `max_steps`, whatever it computes.
         self.steps += 1;
         if self.steps > self.max_steps {
             let message = format!(
@@ -402,8 +408,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Nested::new(items, at, self.budget)
     }
 
-    /// The dict `entries` make, made at `at`, each key a string or an int and none given twice
-    /// (spec.md, "Dictionary expressions").
     fn dict(
         &mut self,
         scope: &Scope<'_>,
@@ -438,8 +442,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Dict::new(made, at, self.budget)
     }
 
-    /// What `comprehension`, made at `at`, adds to `made`, which holds its body (spec.md,
-    /// "Comprehensions").
     fn comprehension<'e>(
         &mut self,
         scope: &Scope<'_>,
@@ -452,14 +454,15 @@ impl<'l, L: Loader> Evaluation<'l, L> {
             iterable,
             clauses,
         } = comprehension;
+        // The `for` clauses' names are one block, unbound until a clause binds them.
         let mut names: Locals<'e> = (comprehension.names().into_iter())
             .map(|name| (name.text.as_str(), None))
             .collect();
         let items = operators::elements(&self.eval(scope, iterable)?, target.span())?;
         // Each `for` that runs, outermost first: what it binds, the clauses after it, and the
-        // elements it has yet to bind. They run in a loop, rather than each inside the one
-        // before, so that the body, and the calls in it, run under none of the clauses on the
-        // stack, as the parser counts none of them around the body.
+        // elements it has yet to bind. They run in a loop, rather than each inside the one before,
+        // so that the body, and the calls in it, run under none of the clauses on the stack, as the
+        // parser counts none of them around the body.
         let mut fors = Vec::from([(target, clauses.as_slice(), items.into_iter())]);
         while let Some((target, rest, items)) = fors.last_mut() {
             let Some(item) = items.next() else {
@@ -558,8 +561,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(value)
     }
 
-    /// What calling `function`, which the expression at `callee` gives, with `args`, the call at
-    /// `at`, whose arguments nest `depth` deep, gives.
     fn call(
         &mut self,
         scope: &Scope<'_>,
@@ -615,8 +616,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         }
     }
 
-    /// The operand that decides `first`, then each of `rest`, joined by `operator`: the first
-    /// that is false for `and`, or true for `or`, or else the last (spec.md, "`or` and `and`").
     fn logic(
         &mut self,
         scope: &Scope<'_>,
@@ -624,6 +623,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         first: &Expr,
         rest: &[Expr],
     ) -> Result<Value, Fault> {
+        // The operand that decides is the result, as it is, not as a bool.
         let mut value = self.eval(scope, first)?;
         for operand in rest {
             let decides = match operator {
@@ -680,7 +680,8 @@ fn key(value: &Value, at: Span) -> Result<Key, Fault> {
     Key::of(value).map_err(|message| origin(Fault::new(at, message), "the key", value))
 }
 
-/// Binds what `target` names, with `bind`, to `value`, or to its elements.
+// Binds each name of `target` to its part of `value`: a target of several names takes a list or a
+// tuple of as many.
 fn assign<'t>(
     target: &'t Target,
     value: Value,
@@ -695,7 +696,6 @@ fn assign<'t>(
     };
     let items = match &value.kind {
         Kind::List(items) | Kind::Tuple(items) => items,
-        // Starlark unpacks a dict's keys.
         Kind::Dict(_) => {
             let message = refusal("unpacking a dict", "unpack the list of its `keys()`");
             return Err(origin(Fault::new(span, message), "the value", &value));
@@ -732,11 +732,12 @@ fn assign<'t>(
     Ok(())
 }
 
+// One call, method or index of a chain, with the spans that its faults point at.
 enum Suffix<'e> {
-    /// A call, whose callee's expression is at `callee`, of the parser's `depth`.
     Call {
         callee: Span,
         args: &'e Args,
+        /// As the parser counts the call's depth.
         depth: usize,
         at: Span,
     },
@@ -750,7 +751,6 @@ enum Suffix<'e> {
 }
 
 impl<'e> Suffix<'e> {
-    /// The suffix that `expr` ends with, if it ends with one, and the expression before it.
     fn of(expr: &'e Expr) -> Option<(Self, &'e Expr)> {
         let at = expr.span;
         let suffix = match &expr.kind {
@@ -798,7 +798,7 @@ impl<'e> Suffix<'e> {
     }
 }
 
-/// A comprehension's body, and what it has made so far.
+// What a comprehension makes: its body, or its key and value, and what it has made so far.
 enum Made<'e> {
     List {
         body: &'e Expr,
@@ -836,8 +836,7 @@ impl Made<'_> {
         Ok(())
     }
 
-    /// The list, or the dict, made at `at`, in which a key given again replaces its value,
-    /// counted in `budget`.
+    // Unlike a dict literal, a comprehension may make a key again: the last value stays.
     fn finish(self, at: Span, budget: &Budget) -> Result<Kind, Fault> {
         match self {
             Self::List { values, .. } => Ok(Kind::List(Nested::new(values, at, budget)?)),
