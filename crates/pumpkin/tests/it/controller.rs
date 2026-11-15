@@ -118,7 +118,7 @@ fn set_up(scratch: &Scratch) {
     scratch.write_executable("bin/df", DF.as_bytes());
     scratch.write("bin/disk", "1000 500\n");
     write_parameter(scratch, &parameter());
-    install(scratch, &format!("home/.pumpkin/{PINNED}/bin"), &[]);
+    install(scratch, &format!("home/.pumpkin/{PINNED}/bin"));
     fs::create_dir_all(scratch.0.join("run")).unwrap();
 }
 
@@ -1065,7 +1065,7 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
     for dir in ["home", "run"] {
         fs::create_dir_all(scratch.0.join(dir)).unwrap();
     }
-    install(scratch, &format!("repo/.pumpkin/{PINNED}/bin"), &[]);
+    install(scratch, &format!("repo/.pumpkin/{PINNED}/bin"));
     let config = format!(
         "[controller]\nname = \"alice\"\nregion = \"us-west-1\"\n\n{}",
         UPSTREAMS.replace("\"gateway.key\"", "\"gateway-key\"")

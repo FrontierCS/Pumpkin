@@ -1011,10 +1011,11 @@ fn exits() {
     // A deadline far later than the exit, so that an exit the run misses ends the work phase.
     let mut ir = workflow(&["exit", "3"]);
     ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30);
+    // Its class priced, so that `outcome.json` prices its sandbox.
     check(
         &System,
         "exits",
-        &[(PROVIDER, &Sim::new())],
+        &[(PROVIDER, &Sim::new().priced(0.25))],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -1023,7 +1024,7 @@ fn exits() {
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"sim-1","provider":"simulated","report":null}
             payloads hold: []
             provider.json is what the provider declared: true
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
+            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","usd":"<usd>","usd_per_hour":0.25}],"tokens":{"input":0,"output":0,"responses":0},"usd":"<usd>"},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}

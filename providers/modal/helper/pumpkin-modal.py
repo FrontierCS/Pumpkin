@@ -147,15 +147,9 @@ def create(modal, request: dict) -> dict:
         inbound_cidr_allowlist=[request["source"]],
         encrypted_ports=[PORT],
     )
-    try:
-        tunnel = sandbox.tunnels()[PORT]
-        while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
-            time.sleep(LISTED_EVERY)
-    except modal.exception.Error as error:
-        raise Refused(
-            f"Modal made sandbox {sandbox.object_id}, then failed: {type(error).__name__}: "
-            f"{error}; {terminated(modal, sandbox)}"
-        ) from error
+    tunnel = sandbox.tunnels()[PORT]
+    while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
+        time.sleep(LISTED_EVERY)
     return {"id": sandbox.object_id, "app": app.name, "host": tunnel.host, "port": tunnel.port}
 
 
@@ -168,16 +162,6 @@ def cores(millis: int) -> float:
 
 def ids(modal, app, run: str) -> list[str]:
     return [box.object_id for box in modal.Sandbox.list(app_id=app.app_id, tags={RUN_TAG: run})]
-
-
-def terminated(modal, sandbox) -> str:
-    """What is left of `sandbox`, whose create failed once Modal held it: nothing, once this has
-    terminated it, or what failed to."""
-    try:
-        sandbox.terminate()
-    except modal.exception.Error as error:
-        return f"it is left, as terminating it failed: {type(error).__name__}: {error}"
-    return "it was terminated"
 
 
 def listed(modal, request: dict) -> list[dict]:

@@ -40,7 +40,7 @@ use schema::sandbox::{
     RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, TcpDial,
     ToSandbox, dir_mode, file_mode, frame, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::{Class, Offers};
+use schema::workflow::{Class, Offers, UsdPerHour};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::suite::{Locals, Subject};
@@ -340,6 +340,14 @@ impl Sim {
             })),
             journal: None,
         }
+    }
+
+    /// This provider, whose class `sim` costs `usd_per_hour` an hour.
+    pub(crate) fn priced(mut self, usd_per_hour: f64) -> Self {
+        let sim = Name::try_from("sim".to_owned()).unwrap();
+        let class = self.ready.classes.get_mut(&sim).unwrap();
+        class.usd_per_hour = Some(UsdPerHour::try_from(usd_per_hour).unwrap());
+        self
     }
 
     /// This provider, which tells `journal` each create once it has made its sandbox, as
