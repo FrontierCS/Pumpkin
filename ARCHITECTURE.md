@@ -373,11 +373,13 @@ sandboxes left, or fails.
 The command line and the controller's own side. `cli` parses the command line, `config` reads the
 machine's configuration (`Config`, or `Client` for a machine whose runs go to a controller), `star`
 reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
-starts the driver process. `controller` reaches the controller over shared connections, `manifest`
-is what it sends a task's tree as, by content, to the controller's store, `job` is the controller's
-side, with the prune and the slots that admit its builds and publishes (`Admission`), `progress` is
-what `ls` shows, `next` makes the commands to run next, `style` runs the formatter, and `Workspace`
-is the `.pumpkin` directory.
+starts the driver process. `controller` reaches the controller over the connections that a
+workspace's commands share (`Reached`), over which its `send` sends a run's or a build's job, its
+`listing` lists the runs there for `ls`, and its `commands` follow, stop and reap them; `manifest`
+is what `send` sends a task's tree as, by content, to the controller's store, `job` is the
+controller's side, with the prune and the slots that admit its builds and publishes (`Admission`),
+`progress` is what `ls` shows, `next` makes the commands to run next, `style` runs the formatter,
+and `Workspace` is the `.pumpkin` directory.
 
 **Architecture Invariant:** only `style` runs the formatter, buildifier, and none of its flags or
 forms is Pumpkin's interface: each file's text goes to it on its standard input, and `style` reads
