@@ -52,7 +52,7 @@ use self::http::{Method, Request, Response};
 use self::json::{listed_json, live_row, record_json, run_json, scored, tokens_json};
 use self::talk::Talk;
 use crate::progress::{self, Listed};
-use crate::{cli, next, say};
+use crate::{cli, config, controller, next, say};
 
 /// The most runs that a page of the list holds.
 const LIST_PAGE_RUNS: usize = 100;
@@ -72,10 +72,23 @@ const RECENT_LINES: usize = 100;
 /// read again and again while it is open, and a person opens a few at a time.
 const HELD_ENDED_RUNS: usize = 8;
 
-/// Serves the runs in the directory `flags` name, until the process is stopped.
+/// Serves the runs in the directory `flags` name, or else, with `[controller]` in the
+/// configuration, the controller's runs, until the process is stopped.
 pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     let cli::View { runs, port } = flags;
-    let (runs, named) = crate::runs_dir(runs)?;
+    let (source, serving) = if runs.is_none()
+        && let Some(client) = config::client(None)?
+    {
+        let viewing = controller::Viewing::reach(&client)?;
+        let serving = format!("controller `{}`'s runs", viewing.name());
+        (Source::Controller(viewing), serving)
+    } else {
+        let (runs, named) = crate::runs_dir(runs)?;
+        let serving = format!("the runs in {runs}");
+        let view = View::new(PathBuf::from(&runs), named);
+        let runs_given = runs;
+        (Source::Here { view, runs_given }, serving)
+    };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))
         .context("binding the view's port on 127.0.0.1 failed")?;
     let port = listener.local_addr().context("the view's port")?.port();
@@ -84,12 +97,11 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     // double-click takes it whole, as Jupyter's server prints its own:
     // https://github.com/jupyter-server/jupyter_server/blob/0d1a13b2f5212a9f9da0122a9e7dbaf23f6cfcb7/jupyter_server/serverapp.py#L3202-L3206
     say(format_args!(
-        "serving the runs in {runs} to this machine alone, until stopped, at\n    \
+        "serving {serving} to this machine alone, until stopped, at\n    \
          http://127.0.0.1:{port}/?t={token}"
     ));
     let mut local = Local {
-        view: View::new(PathBuf::from(&runs), named),
-        runs_given: runs,
+        source,
         token,
         port,
         cancels: cancel::Cancels::default(),
@@ -112,17 +124,25 @@ pub(crate) fn over_pipe() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// What `pumpkin view` holds beside the runs' data ([`View`]).
+/// What `pumpkin view` holds between requests: where the runs' data comes from ([`Source`]), and
+/// what it answers itself.
 struct Local {
-    view: View,
-    /// The runs directory as it was given, or found by default, which a cancel names.
-    runs_given: String,
+    source: Source,
     /// What each request of the view's data carries ([`token`]).
     token: String,
     /// The port that the view is served at, which its page's `Origin` names.
     port: u16,
     cancels: cancel::Cancels,
     page: page::Page,
+}
+
+/// Where `pumpkin view` gets the runs' data.
+enum Source {
+    /// The runs in a directory here, which a cancel names as `runs_given`, as it was given, or
+    /// found by default.
+    Here { view: View, runs_given: String },
+    /// The controller's runs, which its `pumpkin controller view` answers requests for.
+    Controller(controller::Viewing),
 }
 
 /// What the view holds of the runs' data between requests.
@@ -363,8 +383,10 @@ fn answer(stream: TcpStream, local: &mut Local) -> std::io::Result<()> {
     // A request sent in part holds back every other connection until `STALL` after its first
     // byte; a browser sends each request whole.
     let read = http::read(&stream, Instant::now() + http::STALL)?;
-    // Making the answer has no deadline: it is made of this machine's records, which no client
-    // can slow, and one cut off while it was made would waste its cost.
+    // No deadline: the answer is made of this machine's records, which no client can slow, or
+    // relayed from the view on the controller, over an `ssh` whose `ServerAliveInterval` ends a
+    // dead connection; and one cut off would be thrown away once its cost was paid. The other
+    // connections wait while it is made, as the view answers one at a time.
     let (response, deflate) = match read {
         Ok(request) => (route(&request, local), request.deflate),
         Err(refused) => (refused, false),
@@ -442,13 +464,21 @@ fn route(request: &Request, local: &mut Local) -> Response {
         Ok(asked) => asked,
         Err(refused) => return refused,
     };
-    if let Err(refused) = allowed(&asked, request, local.port, local.view.named.as_deref()) {
+    let named = match &local.source {
+        Source::Here { view, .. } => view.named.as_deref(),
+        Source::Controller(_) => None,
+    };
+    if let Err(refused) = allowed(&asked, request, local.port, named) {
         return refused;
     }
-    match asked {
-        Asked::Cancel { id } => local.cancel(&id),
-        Asked::Cancelling { id } => local.cancels.said(&id),
-        asked => answered(asked, &mut local.view),
+    match (asked, &mut local.source) {
+        (Asked::Cancel { id }, _) => local.cancel(&id),
+        (Asked::Cancelling { id }, _) => local.cancels.said(&id),
+        (asked, Source::Here { view, .. }) => answered(asked, view),
+        (_, Source::Controller(viewing)) => {
+            let asked = viewing.ask(|to, from| frame::ask(request, to, from));
+            asked.unwrap_or_else(|error| Response::refused("502 Bad Gateway", &error))
+        }
     }
 }
 
@@ -815,12 +845,17 @@ impl View {
 
 impl Local {
     /// Starts `pumpkin cancel` of run `id` ([`cancel::Cancels::start`]); not found if the runs
-    /// directory holds no record of it.
+    /// directory here holds no record of it.
     fn cancel(&mut self, id: &RunTag) -> Response {
-        if let Err(error) = Record::open(&self.view.runs.join(id.as_str())) {
-            return Response::refused("404 Not Found", &error);
+        match &self.source {
+            Source::Here { view, runs_given } => {
+                if let Err(error) = Record::open(&view.runs.join(id.as_str())) {
+                    return Response::refused("404 Not Found", &error);
+                }
+                self.cancels.start(id, Some(runs_given))
+            }
+            Source::Controller(_) => self.cancels.start(id, None),
         }
-        self.cancels.start(id, &self.runs_given)
     }
 }
 

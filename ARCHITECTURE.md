@@ -44,11 +44,12 @@ driver is the one to read first.
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
-there over `ssh` through SSM, and follows, lists, stops and reaps the runs there. On the
-controller, `controller job` runs each run or build in a systemd unit of its own, and
-`controller boot` reaps what lost runs left.
+there over `ssh` through SSM, and follows, lists, stops, reaps and views the runs there. On the
+controller, `controller job` runs each run or build in a systemd unit of its own,
+`controller boot` reaps what lost runs left, and `controller view` answers `view`'s requests for
+the runs' data.
 
-![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it.](docs/figures/controller-data.svg)
+![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](docs/figures/controller-data.svg)
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Run under the
 name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -382,13 +383,15 @@ machine's configuration (`Config`, or `Client` for a machine whose runs go to a 
 reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
 starts the driver process. `controller` reaches the controller over the connections that a
 workspace's commands share (`Reached`), over which its `send` sends a run's or a build's job, its
-`copy` copies an ended run's record back, its `listing` lists the runs there for `ls`, and its
-`commands` follow, stop and reap them; `manifest`
+`copy` copies an ended run's record back, its `listing` lists the runs there for `ls`, its
+`viewing` carries `view`'s requests to the view there (`Viewing`), and its `commands` follow,
+stop and reap them; `manifest`
 is what `send` sends a task's tree as, by content, to the controller's store, `job` is the
 controller's side, with the prune and the slots that admit its builds and publishes (`Admission`),
 `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs the formatter,
 `view` serves the runs' records to a browser, its `json` the JSON forms of what it answers with,
-and `Workspace` is the `.pumpkin` directory.
+its `frame` the frames in which it asks the view on a controller, and `Workspace` is the
+`.pumpkin` directory.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
 readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone, and a path
@@ -397,6 +400,10 @@ that a log names is read only below its record; and it says of a run what the CL
 
 **Architecture Invariant:** `view` serves the person who started it alone, and changes a run only
 by running `pumpkin cancel`, as `pumpkin view --help` says.
+
+**Architecture Invariant:** `view` reads a controller's records where they are, by the `pumpkin`
+of its own commit there; the page's files, the token, the `Origin` check and the cancel stay on
+the person's machine.
 
 **Architecture Invariant:** the page is plain modules that the browser runs as they are, with no
 library, and puts the text of a record into the document only as text, under the content security

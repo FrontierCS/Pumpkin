@@ -47,10 +47,10 @@ enum Said {
 const SAID: &str = "said";
 
 impl Cancels {
-    /// Starts `pumpkin cancel` of run `id`, in the runs directory `runs`, and answers `202
-    /// Accepted` with what it has said so far; or refuses, with `409 Conflict`, while the page's
-    /// last cancel of it goes on.
-    pub(super) fn start(&mut self, id: &RunTag, runs: &str) -> Response {
+    /// Starts `pumpkin cancel` of run `id`, in the runs directory `runs` if given, or else on the
+    /// controller, and answers `202 Accepted` with what it has said so far; or refuses,
+    /// with `409 Conflict`, while the page's last cancel of it goes on.
+    pub(super) fn start(&mut self, id: &RunTag, runs: Option<&str>) -> Response {
         let under_way = match self.by_run.get_mut(id.as_str()) {
             Some(cancel) => cancel.reaped().map(|ended| ended.is_none()),
             None => Ok(false),
@@ -102,16 +102,20 @@ impl Cancels {
     }
 
     /// Starts `pumpkin cancel` of run `id`, as [`start`](Self::start) does.
-    fn started(&mut self, id: &RunTag, runs: &str) -> Result<(), String> {
+    fn started(&mut self, id: &RunTag, runs: Option<&str>) -> Result<(), String> {
         let scratch = crate::controller::scratch()?;
         let path = scratch.path().join(SAID);
         let said = File::create(&path).context(path.display())?;
         let also = said.try_clone().context(path.display())?;
         let exe = workspace::exe("expected it to run `pumpkin cancel`")?;
         let mut command = stdx::process::command(exe, Environment::Inherited);
-        // Named always, as a machine whose runs go to a controller cancels there a run that its
-        // runs directory doesn't name.
-        command.args(["cancel", "--runs", runs, id.as_str()]);
+        // Named when the runs are here, as without `--runs` a machine whose runs go to a controller
+        // cancels the run there.
+        command.arg("cancel");
+        if let Some(runs) = runs {
+            command.args(["--runs", runs]);
+        }
+        command.arg(id.as_str());
         let child = (command.stdin(Stdio::null()).stdout(said).stderr(also)).spawn();
         let child = child.context("running `pumpkin cancel` failed")?;
         let cancel = Cancel {

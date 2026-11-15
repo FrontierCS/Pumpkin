@@ -18,12 +18,12 @@ use super::{
 };
 
 /// A `pumpkin view` of `scratch`'s `runs`, killed as it is dropped.
-struct Served {
+pub(super) struct Served {
     child: Child,
-    port: u16,
+    pub(super) port: u16,
     token: String,
     /// What the view printed as it started, its port and token as `<port>` and `<token>`.
-    said: String,
+    pub(super) said: String,
 }
 
 impl Served {
@@ -32,7 +32,7 @@ impl Served {
     }
 
     /// The view that `command`, a `pumpkin view`, serves.
-    fn of(mut command: Command) -> Self {
+    pub(super) fn of(mut command: Command) -> Self {
         command.stdout(Stdio::null()).stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let mut said = String::new();
@@ -58,7 +58,12 @@ impl Served {
 
     /// The status line and the body of a request of `path` by `method` with `headers`, as
     /// [`Self::exchange`] sends them.
-    fn ask(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> (String, String) {
+    pub(super) fn ask(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> (String, String) {
         let (head, body) = self.exchange(method, path, headers);
         (head.lines().next().unwrap().to_owned(), body)
     }

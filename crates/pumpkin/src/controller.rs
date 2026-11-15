@@ -14,12 +14,14 @@
 //!
 //! What each command does over the connections is a module's of its own: a run's or a build's
 //! send of its job ([`send`]), the copy of an ended run's record ([`copy`]), `ls`'s listing of the
-//! runs ([`listing`]), and the other commands ([`commands`]).
+//! runs ([`listing`]), `view`'s channel to the view there ([`viewing`]), and the other commands
+//! ([`commands`]).
 
 mod commands;
 mod copy;
 mod listing;
 mod send;
+mod viewing;
 
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, TryLockError};
@@ -39,6 +41,7 @@ pub(crate) use listing::{ls, scratch};
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
+pub(crate) use viewing::Viewing;
 
 use crate::job::JOBS;
 use crate::workspace::Workspace;
@@ -658,11 +661,13 @@ fn finished(
 ) -> Result<Vec<u8>, String> {
     match output {
         Ok(Some(output)) if output.status.success() => Ok(output.stdout),
-        Ok(Some(output)) => Err(format!(
-            "`{shown}` failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
+        Ok(Some(output)) => {
+            let said = String::from_utf8_lossy(&output.stderr);
+            match said.trim() {
+                "" => Err(format!("`{shown}` failed with {}", output.status)),
+                said => Err(format!("`{shown}` failed with {}: {said}", output.status)),
+            }
+        }
         Ok(None) => Err(format!(
             "`{shown}` was still running after {} s, so it was killed",
             timeout.as_secs()

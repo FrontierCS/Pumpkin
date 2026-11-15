@@ -2,7 +2,7 @@
 //! query, or a `POST` with no body, answered whole, with its length, deflated if the request
 //! accepts it and that is shorter, and the connection closed, one at a time.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::io::{self, BufRead as _, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -43,6 +43,8 @@ pub(super) const TOKEN_HEADER: &str = "X-Pumpkin-Token";
 /// encodes it, and the headers that the view's checks read.
 pub(super) struct Request {
     pub(super) method: Method,
+    /// Its path and query, as its line gives them.
+    pub(super) target: String,
     pub(super) path: String,
     query: Vec<(String, String)>,
     /// The site of the page that sent it, as a browser names it in `Origin`.
@@ -68,6 +70,7 @@ impl Request {
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         Ok(Self {
             method: Method::Get,
+            target: target.to_owned(),
             path: path.to_owned(),
             query: pairs(query)?,
             origin: None,
@@ -100,8 +103,8 @@ impl Request {
 /// An answer: its status line's code and reason, its type (with its charset, if text), its body,
 /// and whether a browser may keep it ([`Response::immutable`]).
 pub(super) struct Response {
-    status: &'static str,
-    content_type: &'static str,
+    status: Cow<'static, str>,
+    content_type: Cow<'static, str>,
     body: Body,
     immutable: bool,
 }
@@ -115,13 +118,15 @@ enum Body {
         plain: Vec<u8>,
         deflated: Option<Vec<u8>>,
     },
+    /// As another view sent it, deflated if `deflated`, which the request accepted.
+    Relayed { body: Vec<u8>, deflated: bool },
 }
 
 impl Response {
     pub(super) fn json(value: &serde_json::Value) -> Self {
         Self {
-            status: "200 OK",
-            content_type: "application/json; charset=utf-8",
+            status: Cow::Borrowed("200 OK"),
+            content_type: Cow::Borrowed("application/json; charset=utf-8"),
             body: Body::Made(value.to_string().into_bytes()),
             immutable: false,
         }
@@ -129,14 +134,33 @@ impl Response {
 
     /// This answer with the status `status`, such as `202 Accepted`.
     pub(super) fn with_status(self, status: &'static str) -> Self {
-        Self { status, ..self }
+        Self {
+            status: Cow::Borrowed(status),
+            ..self
+        }
+    }
+
+    /// A reply that another view sent to the request that this one relays: its status, such as
+    /// `200 OK`, and type, as its head gave them, and its body, deflated if `deflated`.
+    pub(super) fn relayed(
+        status: String,
+        content_type: String,
+        body: Vec<u8>,
+        deflated: bool,
+    ) -> Self {
+        Self {
+            status: Cow::Owned(status),
+            content_type: Cow::Owned(content_type),
+            body: Body::Relayed { body, deflated },
+            immutable: false,
+        }
     }
 
     /// The bytes `body`, of the type `content_type`, as a record keeps them.
     pub(super) fn bytes(content_type: &'static str, body: Vec<u8>) -> Self {
         Self {
-            status: "200 OK",
-            content_type,
+            status: Cow::Borrowed("200 OK"),
+            content_type: Cow::Borrowed(content_type),
             body: Body::Made(body),
             immutable: false,
         }
@@ -150,8 +174,8 @@ impl Response {
         deflated: Option<Vec<u8>>,
     ) -> Self {
         Self {
-            status: "200 OK",
-            content_type,
+            status: Cow::Borrowed("200 OK"),
+            content_type: Cow::Borrowed(content_type),
             body: Body::Held {
                 plain: body,
                 deflated,
@@ -174,8 +198,8 @@ impl Response {
     pub(super) fn refused(status: &'static str, message: &str) -> Self {
         let body = serde_json::json!({ "error": message }).to_string();
         Self {
-            status,
-            content_type: "application/json; charset=utf-8",
+            status: Cow::Borrowed(status),
+            content_type: Cow::Borrowed("application/json; charset=utf-8"),
             body: Body::Made(body.into_bytes()),
             immutable: false,
         }
@@ -184,8 +208,8 @@ impl Response {
 
 /// What an answer sends, its body deflated as the module's doc says if the request accepts it.
 pub(super) struct Sent {
-    pub(super) status: &'static str,
-    pub(super) content_type: &'static str,
+    pub(super) status: Cow<'static, str>,
+    pub(super) content_type: Cow<'static, str>,
     pub(super) body: Vec<u8>,
     pub(super) deflated: bool,
     /// Whether a browser may keep it ([`Response::immutable`]).
@@ -201,16 +225,17 @@ impl Response {
             body,
             immutable,
         } = self;
-        let (plain, deflated) = match body {
-            Body::Made(plain) => {
-                let deflated = deflate.then(|| deflated(&plain, CompressionLevel::BestSpeed));
-                (plain, deflated.flatten())
-            }
-            Body::Held { plain, deflated } => (plain, deflated.filter(|_| deflate)),
-        };
-        let (body, deflated) = match deflated {
+        let either = |plain, deflated: Option<Vec<u8>>| match deflated {
             Some(deflated) => (deflated, true),
             None => (plain, false),
+        };
+        let (body, deflated) = match body {
+            Body::Made(plain) => {
+                let deflated = deflate.then(|| deflated(&plain, CompressionLevel::BestSpeed));
+                either(plain, deflated.flatten())
+            }
+            Body::Held { plain, deflated } => either(plain, deflated.filter(|_| deflate)),
+            Body::Relayed { body, deflated } => (body, deflated),
         };
         Sent {
             status,
