@@ -420,10 +420,14 @@ fn usage() {
                         copy of the page reads, with the page, and a robots.txt that asks
                         search engines to stay out. Each file that holds a reply that the page
                         reads, as `pumpkin controller view` answers it, is deflated: a host
-                        serves it with `Content-Encoding: deflate`. A file is written only if
-                        its bytes changed, one whose reply can't change only once, and a run
-                        that had ended at the last export is read no further. Says how many
-                        files it wrote.
+                        serves it with `Content-Encoding: deflate`. In each reply, a stand-in
+                        replaces each sandbox's id, as `<sandbox of job-3>`; the home and user
+                        of this machine and of the run's arguments, as `~` and `<user>`; and
+                        each string of a provider's report but its Docker engine's and its
+                        processors', as `<aws.account>`; a home, user or report's string only if
+                        8 bytes or more. A file is written only if its bytes changed, one whose
+                        reply can't change only once, and a run that had ended at the last
+                        export is read no further. Says how many files it wrote.
                         Default: serve the runs
 
                 -h, --help

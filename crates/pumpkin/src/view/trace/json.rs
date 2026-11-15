@@ -463,7 +463,7 @@ impl Trace {
 /// The form of `text` that a search matches in, and of the query that it matches: its ASCII
 /// letters lower-cased, so that a query matches letters of either case, each byte where it is in
 /// `text`.
-fn searchable(text: &str) -> String {
+pub(in crate::view) fn searchable(text: &str) -> String {
     text.to_ascii_lowercase()
 }
 

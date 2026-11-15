@@ -32,11 +32,13 @@ use std::process::ExitCode;
 use miniz_oxide::deflate::{CompressionLevel, compress_to_vec_zlib};
 use miniz_oxide::inflate::decompress_to_vec_zlib;
 use provider::RunTag;
+use runtime::Record;
 use serde_json::{Value, json};
 use stdx::Context;
 
 use super::http::{Request, Response};
 use super::json::was_cut;
+use super::scrub::Scrub;
 use super::{Asked, View, answered, api, page, trace};
 use crate::say;
 
@@ -46,9 +48,10 @@ use crate::say;
 const ROBOTS: &str = "User-agent: *\nDisallow: /\n";
 
 /// Writes the runs in the directory `runs` names, or the default one, into `to`, as the module's
-/// doc says, and reports each run it left out, with why, and the counts of what it exported,
-/// left out and wrote.
-pub(super) fn export(runs: Option<String>, to: &Path) -> Result<ExitCode, String> {
+/// doc says, each reply with what `scrub` and each run's record name replaced
+/// ([`Scrub::of_run`]), and reports each run it left out, with why, and the counts of what it
+/// exported, left out and wrote.
+pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<ExitCode, String> {
     let (runs, _) = crate::runs_dir(runs)?;
     let view = View::new(PathBuf::from(&runs), None);
     // As the controller's view answers: the command that runs a run again names this machine.
@@ -61,6 +64,9 @@ pub(super) fn export(runs: Option<String>, to: &Path) -> Result<ExitCode, String
         written: 0,
         files: BTreeSet::new(),
         refused: Vec::new(),
+        scrub: scrub.clone(),
+        every: scrub.clone(),
+        given: scrub,
     };
     for (key, body, once) in page::Page::new().exported() {
         if !once || !out.has(&key)? {
@@ -79,6 +85,7 @@ pub(super) fn export(runs: Option<String>, to: &Path) -> Result<ExitCode, String
             Err(why) => left_out.push(format!("run {}: {why}", id.as_str())),
         }
     }
+    out.scrub = out.every.clone();
     let list = json!({ "runs": listed, "next": null });
     out.put_deflated("runs.json", list.to_string().as_bytes())?;
     let Out {
@@ -89,7 +96,7 @@ pub(super) fn export(runs: Option<String>, to: &Path) -> Result<ExitCode, String
     }
     if let Some(first) = refused.first() {
         say(format_args!(
-            "{} replies were refused, and have no file; the first: {first}",
+            "replies refused, which have no file: {}; the first: {first}",
             refused.len()
         ));
     }
@@ -137,6 +144,12 @@ struct Out {
     /// The key of each file it found or wrote, which it then knows to be there.
     files: BTreeSet<String>,
     refused: Vec<String>,
+    /// What the export was given to replace.
+    given: Scrub,
+    /// What the next reply written has replaced: its run's, and, for `runs.json`, every run's.
+    scrub: Scrub,
+    /// What every run's record names, and what it was given.
+    every: Scrub,
 }
 
 impl Out {
@@ -176,10 +189,27 @@ impl Out {
         Ok(())
     }
 
-    /// Writes `body`, deflated, at `key`, as [`Self::put`] does.
+    /// Writes `body`, scrubbed ([`Self::scrub`]) and deflated, at `key`, as [`Self::put`] does.
     fn put_deflated(&mut self, key: &str, body: &[u8]) -> Result<(), String> {
-        let deflated = compress_to_vec_zlib(body, CompressionLevel::DefaultLevel as u8);
+        let body = self.scrub.scrubbed(body);
+        let deflated = compress_to_vec_zlib(&body, CompressionLevel::DefaultLevel as u8);
         self.put(key, &deflated)
+    }
+
+    /// The reply to `target`, a `GET` of the view's data, of `view`, or `None`, its refusal
+    /// noted.
+    fn get(&mut self, view: &mut View, target: &str) -> Result<Option<Vec<u8>>, String> {
+        let request = Request::get(target, false).map_err(|refused| {
+            let body = refused.sent(false).body;
+            format!("{target}: {}", String::from_utf8_lossy(&body))
+        })?;
+        match reply(api(&request, view)) {
+            Ok(body) => Ok(Some(body)),
+            Err(refused) => {
+                self.refused.push(format!("{target}: {refused}"));
+                Ok(None)
+            }
+        }
     }
 
     /// Writes at `key` the reply to `target`, a `GET` of the view's data, of `view`, deflated, or
@@ -190,11 +220,11 @@ impl Out {
         key: &str,
         target: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let request = Request::get(target, false).map_err(|refused| {
-            let body = refused.sent(false).body;
-            format!("{target}: {}", String::from_utf8_lossy(&body))
-        })?;
-        self.put_answered(key, target, api(&request, view))
+        let body = self.get(view, target)?;
+        if let Some(body) = &body {
+            self.put_deflated(key, body)?;
+        }
+        Ok(body)
     }
 
     /// Writes at `key` the body of `response`, the answer to `asked`, deflated, or notes its
@@ -264,6 +294,12 @@ impl Out {
         let base = format!("runs/{}", id.as_str());
         let api = format!("/api/runs/{}", id.as_str());
         if self.ended(&format!("{base}/run.json"))? {
+            // `runs.json`, which lists the run, replaces what the run's record names too.
+            let record = Record::open(&view.runs.join(id.as_str()))?;
+            match self.given.of_run(&record, []) {
+                Ok(scrub) => self.every = std::mem::take(&mut self.every).with(&scrub),
+                Err(error) => self.refused.push(format!("run {}: {error}", id.as_str())),
+            }
             return Ok(Ok(()));
         }
         let run_body = match reply(answered(Asked::Run { id: id.clone() }, view)) {
@@ -271,17 +307,27 @@ impl Out {
             Err(refused) => return Ok(Err(format!("{api}: {refused}"))),
         };
         let run: Value = serde_json::from_slice(&run_body).unwrap_or_default();
+        let mut windows = Vec::new();
         let mut at = 0;
-        loop {
-            let key = format!("{base}/log/{at}.json");
-            let Some(window) = self.put_reply(view, &key, &format!("{api}/log?at={at}"))? else {
-                break;
-            };
-            let window: Value = serde_json::from_slice(&window).unwrap_or_default();
-            match (window["next"].as_u64(), window["end"].as_u64()) {
+        while let Some(window) = self.get(view, &format!("{api}/log?at={at}"))? {
+            let read: Value = serde_json::from_slice(&window).unwrap_or_default();
+            let (next, end) = (read["next"].as_u64(), read["end"].as_u64());
+            windows.push((format!("{base}/log/{at}.json"), window, read));
+            match (next, end) {
                 (Some(next), Some(end)) if next < end && next > at => at = next,
                 _ => break,
             }
+        }
+        let record = Record::open(&view.runs.join(id.as_str()))?;
+        let logged = (windows.iter())
+            .flat_map(|(.., read)| read["records"].as_array().into_iter().flatten());
+        self.scrub = match self.given.of_run(&record, logged) {
+            Ok(scrub) => scrub,
+            Err(error) => return Ok(Err(error)),
+        };
+        self.every = std::mem::take(&mut self.every).with(&self.scrub);
+        for (key, window, _) in &windows {
+            self.put_deflated(key, window)?;
         }
         let callers: BTreeSet<&str> = (run["lanes"].as_array().into_iter().flatten())
             .filter_map(|lane| lane["caller"].as_str())

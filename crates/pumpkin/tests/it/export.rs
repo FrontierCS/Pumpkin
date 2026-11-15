@@ -13,7 +13,7 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::view::{Model, Piped, answered, said, started, user};
-use super::{Scratch, Step, check, judged, judged_log, lease_places, write_run};
+use super::{Scratch, Step, check, judged, judged_log, lease_places, logged, write_run};
 
 /// The run that [`write_exported`] writes.
 const EXPORTED: &str = "20261110-170000-00000012";
@@ -25,12 +25,13 @@ const UNREADABLE: &str = "20261110-180000-00000013";
 /// Writes into `scratch`'s default runs directory run [`EXPORTED`], of [`judged_log`] and then
 /// the agent's requests 10 to 12, which call a tool whose output is longer than an entry's text
 /// in a window, and change the instructions at the last, and a judge's request 13; it ended if
-/// `ended`, else it is live, and the lock of its driver is returned held.
+/// `ended`, else it is live, and the lock of its driver is returned held; the agent's first
+/// message says `asked`, and each provider reports `reports`.
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the record's exchanges"
 )]
-fn write_exported(scratch: &Scratch, ended: bool) -> Option<File> {
+fn write_exported(scratch: &Scratch, ended: bool, asked: &str, reports: &Value) -> Option<File> {
     let mut model = Model::new(&scratch.0.join("runs").join(EXPORTED));
     let rest = || json!({ "model": "glm-5.3", "stream": false });
     let tools = ("tools", json!([{ "type": "function", "name": "exec" }]));
@@ -39,8 +40,8 @@ fn write_exported(scratch: &Scratch, ended: bool) -> Option<File> {
     let listing = format!("a.txt\n{}", "b.txt\n".repeat(2000));
     let output = json!({ "type": "function_call_output", "call_id": "c1", "output": listing });
     let answer = |items: Value| json!({ "status": "completed", "output": items }).to_string();
-    let first = [user("list the files")];
-    let second = [user("list the files"), call.clone(), output];
+    let first = [user(asked)];
+    let second = [user(asked), call.clone(), output];
     let mut third = second.to_vec();
     third.extend([said("A.TXT is there"), user("and now?")]);
     let mut log = judged_log();
@@ -75,26 +76,30 @@ fn write_exported(scratch: &Scratch, ended: bool) -> Option<File> {
         Some(&answer(json!([]))),
     );
     log.push(answered(1006, "agent", 12, 200, kept, Some("responses")));
-    let asked = [
+    let judging = [
         json!({ "role": "system", "content": "judge it" }),
         json!({ "role": "user", "content": "is a.txt right?" }),
     ];
     let yes = json!({ "choices": [{ "index": 0, "finish_reason": "stop",
         "message": { "role": "assistant", "content": "yes" } }] });
-    let kept = model.keep(13, "messages", &asked, &[], rest(), Some(&yes.to_string()));
+    let kept = model.keep(
+        13,
+        "messages",
+        &judging,
+        &[],
+        rest(),
+        Some(&yes.to_string()),
+    );
     log.push(started(1007, "job-0", 13));
     log.push(answered(1008, "job-0", 13, 200, kept, Some("chat")));
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let outcome = ended.then(|| judged(49.36, json!({ "raw_score": 49.36 })));
     let started = since.checked_sub(Duration::from_secs(1100)).unwrap();
-    write_run(
-        scratch,
-        EXPORTED,
-        started,
-        &log,
-        outcome,
-        &lease_places(true),
-    );
+    let mut places = lease_places(true);
+    for (provider, report) in reports.as_object().unwrap() {
+        places["providers"][provider]["report"] = report.clone();
+    }
+    write_run(scratch, EXPORTED, started, &log, outcome, &places);
     let runs = scratch.0.join(".pumpkin/runs");
     fs::rename(scratch.0.join("runs"), &runs).unwrap();
     let driver = File::open(runs.join(EXPORTED).join("driver.pid")).unwrap();
@@ -104,19 +109,25 @@ fn write_exported(scratch: &Scratch, ended: bool) -> Option<File> {
     })
 }
 
-/// What `pumpkin view --export public` of `scratch` said.
+/// Two providers' reports that name no account.
+fn reports() -> Value {
+    json!({ "aws": {}, "modal": {} })
+}
+
+/// What `pumpkin view --export public` of `scratch` said, as user `exporter-user`, at home in
+/// `/home/exporter`.
 fn export(scratch: &Scratch) -> String {
-    let output = scratch
-        .pumpkin(&["view", "--export", "public"])
-        .output()
-        .unwrap();
+    let mut export = scratch.pumpkin(&["view", "--export", "public"]);
+    export
+        .env("HOME", "/home/exporter")
+        .env("USER", "exporter-user");
+    let output = export.output().unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stderr).unwrap()
 }
 
-/// Each file of the export in `dir`, by its key, as it holds it: the page's and `robots.txt`
-/// as they are, every other inflated.
-fn exported(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+/// Each file below `dir`, by its path there, as it holds it.
+fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     let mut dirs = vec![dir.to_owned()];
     while let Some(at) = dirs.pop() {
@@ -124,16 +135,22 @@ fn exported(dir: &Path) -> BTreeMap<String, Vec<u8>> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 dirs.push(path);
-                continue;
-            }
-            let key = path.strip_prefix(dir).unwrap().to_str().unwrap().to_owned();
-            let bytes = fs::read(&path).unwrap();
-            let bytes = if key.starts_with("runs") {
-                miniz_oxide::inflate::decompress_to_vec_zlib(&bytes).unwrap()
             } else {
-                bytes
-            };
-            files.insert(key, bytes);
+                let key = path.strip_prefix(dir).unwrap().to_str().unwrap().to_owned();
+                files.insert(key, fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// Each file of the export in `dir`, by its key, as it holds it: the page's and `robots.txt`
+/// as they are, every other inflated.
+fn exported(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = files(dir);
+    for (key, bytes) in &mut files {
+        if key.starts_with("runs") {
+            *bytes = miniz_oxide::inflate::decompress_to_vec_zlib(bytes).unwrap();
         }
     }
     files
@@ -210,7 +227,7 @@ fn chunks_found(files: &BTreeMap<String, Vec<u8>>, caller: &str, query: &str) ->
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn exports_what_the_view_answers() {
     let scratch = Scratch::new("exports-what-the-view-answers");
-    write_exported(&scratch, true);
+    write_exported(&scratch, true, "list the files", &reports());
     let mut said = vec![export(&scratch)];
     let files = exported(&scratch.0.join("public"));
     let mut piped = Piped::start(&scratch);
@@ -391,7 +408,7 @@ fn rewrites_what_a_live_run_changed() {
         None,
         &unreadable,
     );
-    let driver = write_exported(&scratch, false);
+    let driver = write_exported(&scratch, false, "list the files", &reports());
     let mut said = vec![export(&scratch)];
     let before = exported(&scratch.0.join("public"));
     let list: Value = serde_json::from_slice(&before["runs.json"]).unwrap();
@@ -460,5 +477,107 @@ fn rewrites_what_a_live_run_changed() {
               runs/<id>/trace/job-3/steps.json
               runs/<id>/trace/job-4/steps.json
         "#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the record's values and the snapshot"
+)]
+fn replaces_what_names_the_machines() {
+    let scratch = Scratch::new("replaces-what-names-the-machines");
+    let (ec2, modal) = ("i-0aaaabbbbccccdddd", "sb-AbCdEfGhIjKlMnOpQrStUv");
+    let asked = format!(
+        "list the files of {ec2} and {modal}, dialled from 3.101.18.71 in account 311100000000, \
+         in /home/exporter/work and /home/pumpkin/trees, as exporter-user and pumpkin, on \
+         Ubuntu 24.04.5 LTS; i-0123456789abcdef0 is no sandbox of the run's"
+    );
+    let reports = json!({
+        "aws": { "account": "311100000000", "docker": { "os": "Ubuntu 24.04.5 LTS" } },
+        "modal": { "dials_from": "3.101.18.71", "workspace": "own" },
+    });
+    write_exported(&scratch, true, &asked, &reports);
+    let dir = scratch.0.join(format!(".pumpkin/runs/{EXPORTED}"));
+    let sandbox = json!({ "id": ec2, "provider": "aws", "delete": { "state": "deleted" } });
+    fs::write(dir.join("agent/sandbox.json"), sandbox.to_string()).unwrap();
+    let record = dir.join("record.json");
+    let mut made: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    made["args"] = json!(["/home/pumpkin/trees/task.star"]);
+    fs::write(&record, made.to_string()).unwrap();
+    let log = dir.join("log.jsonl");
+    let lines = fs::read_to_string(&log).unwrap().lines().count();
+    let deleted =
+        json!({ "kind": "sandbox_deleted", "id": modal, "provider": "modal", "sandbox": "job-0" });
+    let mut deleted = logged(1009, deleted, json!([]));
+    deleted["seq"] = json!(lines);
+    writeln!(
+        OpenOptions::new().append(true).open(&log).unwrap(),
+        "{deleted}"
+    )
+    .unwrap();
+    let kept = files(&dir);
+    let mut said = vec![export(&scratch)];
+    assert!(files(&dir) == kept, "the export changed the record");
+    let exported = exported(&scratch.0.join("public"));
+    let holding = |text: &str| -> Vec<&str> {
+        let held = exported.iter().filter(|(key, body)| {
+            if !key.starts_with("runs") {
+                return false;
+            }
+            let body = String::from_utf8_lossy(body);
+            body.contains(text) || body.contains(&text.to_ascii_lowercase())
+        });
+        held.map(|(key, _)| key.as_str()).collect()
+    };
+    for (text, why) in [
+        (ec2, "the agent's sandbox"),
+        (modal, "a judge's sandbox, as the log names it"),
+        ("3.101.18.71", "an address that a provider reported"),
+        ("311100000000", "an account that a provider reported"),
+        ("/home/exporter", "this machine's home"),
+        ("/home/pumpkin", "the home that the run's arguments name"),
+        ("exporter-user", "this machine's user"),
+    ] {
+        let held = holding(text);
+        assert!(held.is_empty(), "{why}, {text}, is in {held:?}");
+    }
+    for text in [
+        "<sandbox of agent>",
+        "<sandbox of job-0>",
+        "<modal.dials_from>",
+        "<aws.account>",
+        "~/work",
+        "~/trees",
+        "<user>",
+        "pumpkin,",
+        "Ubuntu 24.04.5 LTS",
+        "i-0123456789abcdef0",
+    ] {
+        let held = holding(text);
+        said.push(format!(
+            "{text}: in {} files, {}",
+            held.len(),
+            held.join(" ")
+        ));
+    }
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[(EXPORTED, "<id>")],
+        &expect![[r#"
+            pumpkin: exported 1 run into public, and left out 0: wrote 95 files
+
+            <sandbox of agent>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            <sandbox of job-0>: in 4 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/log/0.json runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            <modal.dials_from>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            <aws.account>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            ~/work: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            ~/trees: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            <user>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            pumpkin,: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            Ubuntu 24.04.5 LTS: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
+            i-0123456789abcdef0: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json"#]],
     );
 }
