@@ -1,7 +1,16 @@
-//! The conformance suites of three Starlark projects, vendored under `tests/conformance` as their
-//! READMEs say, run chunk by chunk through `lang::evaluate`, each chunk in the runs that `runs`
-//! makes of it: no run may be WRONG, as `Outcome` has it, and the snapshot pins how many of each
-//! suite's runs have each outcome, and the problems they end with.
+//! The vendored Starlark suites of `tests/conformance`, run through `lang::evaluate` for what the
+//! subset does with each program: it runs it, refuses it, or means something other than the
+//! suite says, by running where an error is expected or by failing an assertion. That last is
+//! `Wrong`, the one failure, since the subset only refuses; the snapshot pins that none is left,
+//! how many runs of each suite have each outcome, and by how many runs each problem is met.
+//!
+//! A file is split into chunks at its lines of `---`, each a program. A line with `###` marks
+//! an error that the program must give; in `spec`, the tags `go:`, `java:` and `rust:` after it
+//! say which implementations give it, and the rest of the suites take every `###` as an error.
+//! Each `assert.fails(…)` statement of a chunk is a run of its own, that must err, and the run of
+//! the whole chunk leaves those statements out. The suites call `assert.eq` and the like, which
+//! the language has no module for, so each call is renamed to the function of `ASSERT`, a file
+//! loaded in place of the suites' own.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,12 +20,12 @@ use lang::{Args, Bounds};
 
 use crate::{Case, files, on_stack};
 
-/// What an assertion of `ASSERT` gives `fail` when it fails, which no problem holds otherwise.
+// What `fail` says in `ASSERT`. A run whose error holds it ended in a failed assertion, not in a
+// refusal.
 const FAILED: &str = "the conformance assertion fails";
 
-/// The assertions that the suites' chunks call, each by the name a chunk calls it by once
-/// `runs` has rewritten it, in the language: each fails with `FAILED`, bound to a name, so that
-/// no source line that a problem shows holds it but the binding's.
+// Each assertion fails with `_FAILED`, bound to a name, so that no source line that a problem
+// shows holds `FAILED` but the binding's.
 const ASSERT: &str = r#"
 _FAILED = "the conformance assertion fails"
 
@@ -56,42 +65,30 @@ def freeze(x):
     return x
 "#;
 
-/// The entry that loads a chunk, `//case.star`, then gives a whole workflow, so that its
-/// evaluation succeeds unless the chunk's problem ends it.
+// Loads a chunk, `//case.star`, then gives a whole workflow, so that its evaluation succeeds
+// unless the chunk's problem ends it.
 const ENTRY: &str = r#"load("//case.star", "conformance_done")
 load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
 
 workflow(name = "conformance/chunk", roles = [AGENT, JUDGE], score = SCORE)
 "#;
 
-/// What a run of a chunk expects its evaluation to give.
 #[derive(Clone, Copy)]
 enum Expected {
-    /// No line has `###`: the chunk runs.
     Runs,
-    /// A line has `###`: an error.
     Errs,
-    /// Only Go's or Rust's implementation errs, as a `### go:` or `### rust:` line of the
-    /// specification's suite says, where no line names Java's, Bazel's: either.
     Either,
 }
 
-/// A chunk whose one assertion fails, so that its run must be WRONG: if a change to how `fail`
-/// shows its message hid the assertions' failures, the snapshot would show it here.
+// A chunk whose one assertion fails, so that its run must be `Wrong`: if a change to how `fail`
+// shows its message hid the assertions' failures, the snapshot would show it here.
 const CANARY: &str = "assert.eq(1, 2)\n";
 
-/// How a run went, against what it expects.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Outcome {
-    /// It ran, and no error is expected.
     Runs,
-    /// It gave problems, and an error is expected.
     Errs,
-    /// It gave problems, and none is expected: the chunk is refused, or errs where only some
-    /// implementations do.
     Refused,
-    /// It ran where an error is expected, or one of its assertions failed: it means something
-    /// other than what the specification says.
     Wrong,
 }
 
@@ -106,9 +103,7 @@ impl Outcome {
     }
 }
 
-/// Checks the runs of each suite's chunks, those of the files below `tests/conformance/<dir>`
-/// for each `(name, dir)` of `suites`, against `expect`: the outcome of `CANARY`, then how many
-/// have each outcome, the WRONG ones, and how many end with each problem.
+// Each suite is named, and the directory of `tests/conformance` it runs.
 fn check(suites: &[(&str, &str)], expect: &Expect) {
     let fixtures = files();
     let shown = on_stack(|| {
@@ -169,8 +164,6 @@ fn check(suites: &[(&str, &str)], expect: &Expect) {
     expect.assert_eq(&shown);
 }
 
-/// The outcome of `run`, as the entry's load over `fixtures`, and the problems it ends with, if
-/// it does.
 fn evaluate(
     run: &Run,
     fixtures: &BTreeMap<String, String>,
@@ -198,8 +191,7 @@ fn evaluate(
     (outcome, evaluated)
 }
 
-/// Each chunk of a suite's file, with the line it starts at: the parts that the lines `---`
-/// separate.
+// Each chunk with the line it starts at, counting from 1.
 fn chunks(text: &str) -> Vec<(usize, &str)> {
     let mut chunks = Vec::new();
     let (mut start, mut first) = (0, 1);
@@ -216,28 +208,18 @@ fn chunks(text: &str) -> Vec<(usize, &str)> {
     chunks
 }
 
-/// A run of a chunk, or of a part of it: what it expects, the line of the chunk it is named by,
-/// counted from 0, and the file that runs it.
 struct Run {
     expected: Expected,
+    /// The line of the chunk that names the run, counted from 0.
     line: usize,
     case: String,
 }
 
-/// The runs of `chunk`, of the suite in `dir`: the chunk without its top-level `assert.fails`
-/// statements, expecting what its `###` lines say, and in starlark-go's and Bazel's suites
-/// ending with the top-level statement of the first `###` line, if one holds it; then, for each
-/// such statement, the chunk up to its end, the others above it left out, expecting an error.
-/// A `###` line in a `def`, or in the specification's suite, whose lines may stand above the
-/// code they expect an error of, still lets the run go on to the chunk's end. Each run's file
-/// has the chunk's loads of the suite's `assert.star` blanked, each `assert.<name>` called
-/// `assert_<name>`, and a load of what it calls of `ASSERT` above it, and below it the name the
-/// entry loads.
-// An `assert.fails` statement ends the evaluation when it passes, as the language can't catch
-// the error that `f()` raises, so each gets a run of its own. Statements are told apart line by
+// An `assert.fails` statement ends the evaluation when it passes, as the language can't catch the
+// error that `f()` raises, so each gets a run of its own. Statements are told apart line by
 // line, by `depths`, which reads no string across lines: a triple-quoted string or a `\` that
 // joins lines at the top level could cut a statement, and its run would err however the whole
-// reads. No vendored chunk has one.
+// reads.
 fn runs(dir: &str, chunk: &str) -> Vec<Run> {
     // Whether a line expects an error of every implementation, and which implementations a
     // tagged line expects one of.
@@ -253,7 +235,8 @@ fn runs(dir: &str, chunk: &str) -> Vec<Run> {
                 None => every = true,
             }
         }
-        // A load that `###` marks is a case of its own, of a load's errors.
+        // `case` loads the assertion functions itself, so the suite's own load of them goes. A
+        // load that `###` marks is a case of its own, of a load's errors.
         let assert_load = ["load(\"assert.star\"", "load('assert.star'"]
             .iter()
             .any(|load| line.starts_with(load));
@@ -263,8 +246,8 @@ fn runs(dir: &str, chunk: &str) -> Vec<Run> {
             lines.push(line);
         }
     }
-    // Bazel's Starlark is the standard: an error it expects is expected.
     let [go, java, rust] = tagged;
+    // Bazel's Starlark, which is Java's, is the standard: an error it expects is expected.
     let expected = if every || java {
         Expected::Errs
     } else if go || rust {
@@ -288,7 +271,8 @@ fn runs(dir: &str, chunk: &str) -> Vec<Run> {
             .collect()
     };
     // Where starlark-go's and Bazel's suites expect an error at a top-level statement, nothing
-    // after it runs upstream, so the run ends there, and the error must be that statement's.
+    // after it runs upstream, so the run ends there, and the error must be that statement's. In
+    // `spec`, a `###` line may stand above the code it expects an error of, so the run goes on.
     let first_error = (dir != "spec")
         .then(|| lines.iter().position(|line| line.contains("###")))
         .flatten();
@@ -308,8 +292,8 @@ fn runs(dir: &str, chunk: &str) -> Vec<Run> {
     runs
 }
 
-/// How many brackets are open at the start of each of `lines`, a string's and a comment's
-/// skipped, then at the end of the last.
+// The bracket depth at the start of each line, and after the last, outside strings and comments:
+// a statement starts at a line whose depth is 0 and that isn't indented.
 fn depths(lines: &[&str]) -> Vec<usize> {
     let mut depths = Vec::with_capacity(lines.len() + 1);
     let mut depth = 0_usize;
@@ -339,8 +323,8 @@ fn starts_statement(lines: &[&str], depths: &[usize], at: usize) -> bool {
     depths[at] == 0 && lines[at].starts_with(|char: char| !char.is_whitespace())
 }
 
-/// The end of the top-level statement that the line at `at` of `lines` is in, given their
-/// `depths`, if it is in one: where the next one starts, or the end of the lines.
+// The end of the top-level statement that the line at `at` is in, if it is in one: where the next
+// one starts, or the end of the lines.
 fn statement_end(lines: &[&str], depths: &[usize], at: usize) -> Option<usize> {
     let start = (0..=at).rev().find(|&line| depths[line] == 0)?;
     if !starts_statement(lines, depths, start) {
@@ -400,7 +384,7 @@ fn names_used(text: &str, name: &str) -> bool {
     })
 }
 
-/// The message of the first problem that `shown` shows, without its place.
+// A problem without its file and position, so that the same problem counts as one.
 fn message(shown: &str) -> String {
     let first = shown.lines().next().unwrap_or_default();
     let (_, rest) = first.split_once(".star").unwrap_or(("", first));

@@ -13,10 +13,10 @@
 //!   named, indexing, `a if c else b`, `or`, `and`, `not`, comparisons, which don't chain, `in`,
 //!   `not in`, `|`, `+`, `-`, `*`, `//`, `%` and unary `-`.
 //!
-//! Each place where the subset is narrower than the specification is refused at its token, most
-//! saying what to write instead, and the refusal's rule is written where it is checked: the
-//! lexical ones in `lex`, the grammar's in `parse` (with the nesting cap, `MAX_NESTING`), and the
-//! names' in `resolve`.
+//! Each place where the subset is narrower than the specification is refused at its token, and
+//! the rule of the refusal is written where it is checked: the lexical ones in `lex`, the
+//! grammar's in `parse`, with the nesting cap, `MAX_NESTING`, and the names' in `resolve`. Each
+//! node that a message can point at holds its [`Span`].
 
 mod lex;
 mod parse;
@@ -72,7 +72,6 @@ impl Statement {
     }
 }
 
-/// A statement that may stand at a file's top level and in a function's body.
 pub(crate) enum Simple {
     Assign { target: Target, value: Expr },
     Expr(Expr),
@@ -89,16 +88,13 @@ impl Simple {
     }
 }
 
-/// A statement of a function's body.
 pub(crate) enum Step {
     Simple(Simple),
-    /// `return`, at its keyword, with what it gives, if anything.
     Return {
         keyword: Span,
         value: Option<Expr>,
     },
-    /// `if`, then each `elif`: the steps of the first branch whose condition is true run, or
-    /// else those of `otherwise`, the `else`'s.
+    /// The `if` and each `elif` in order, and the `else`'s steps, none without an `else`.
     If {
         branches: Vec<Branch>,
         otherwise: Vec<Self>,
@@ -110,9 +106,7 @@ pub(crate) struct Branch {
     pub(crate) steps: Vec<Step>,
 }
 
-/// `def <name>(<params>): <body>`.
 pub(crate) struct Def {
-    /// The `def` keyword.
     pub(crate) keyword: Span,
     pub(crate) name: Name,
     /// No two named alike.
@@ -131,9 +125,7 @@ pub(crate) struct Param {
     pub(crate) default: Option<Expr>,
 }
 
-/// `load(<label>, <names>…)`: binds names of the module at `label` in this file.
 pub(crate) struct Load {
-    /// The `load` keyword.
     pub(crate) keyword: Span,
     pub(crate) label: Label,
     /// The label's string literal.
@@ -141,14 +133,14 @@ pub(crate) struct Load {
     pub(crate) names: Vec<LoadName>,
 }
 
-/// A name a `load` binds: `local` in this file, to the global `remote` of the loaded module.
+/// A name that a `load` binds: `local` is the name in this file, and `remote` the global it
+/// takes from the loaded file; one name when the `load` gives no alias.
 pub(crate) struct LoadName {
     pub(crate) local: Name,
     /// The string literal that names the global, which may name no valid one.
     pub(crate) remote: Name,
 }
 
-/// A name, or a string that names one, as written.
 pub(crate) struct Name {
     pub(crate) text: String,
     pub(crate) span: Span,
@@ -172,7 +164,6 @@ impl Target {
         }
     }
 
-    /// Each name the target binds, in order.
     pub(crate) fn names<'t>(&'t self, names: &mut Vec<&'t Name>) {
         match self {
             Self::Name(name) => names.push(name),
@@ -199,12 +190,10 @@ pub(crate) enum ExprKind {
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
-    /// `[<body> <comprehension>]`.
     ListComp {
         body: Box<Expr>,
         comprehension: Box<Comprehension>,
     },
-    /// `{<key>: <value> <comprehension>}`.
     DictComp {
         key: Box<Expr>,
         value: Box<Expr>,
@@ -216,7 +205,6 @@ pub(crate) enum ExprKind {
         /// How deep the call's arguments nest in its file, its `(` counted.
         depth: usize,
     },
-    /// `<receiver>.<name>(<args>)`: a method, called where it is named.
     Method {
         receiver: Box<Expr>,
         name: Box<Name>,
@@ -231,19 +219,19 @@ pub(crate) enum ExprKind {
         at: Span,
         operand: Box<Expr>,
     },
-    /// Operands joined by one of `and` and `or`: `first`, then the rest.
+    /// `first` joined to each of `rest` by `operator`, which is the same all along.
     Logic {
         operator: Logic,
         first: Box<Expr>,
         rest: Vec<Expr>,
     },
-    /// Operators of one precedence, applied from the left: `first`, then each operator with its
-    /// right operand.
+    /// A chain of binary operators of one precedence, each with its span and its right operand.
+    /// A comparison, which doesn't associate, is a chain of one.
     Binary {
         first: Box<Expr>,
         rest: Vec<(Operator, Span, Expr)>,
     },
-    /// `<then> if <condition> else <otherwise>`.
+    /// `then if condition else otherwise`.
     Conditional {
         then: Box<Expr>,
         condition: Box<Expr>,
@@ -251,7 +239,6 @@ pub(crate) enum ExprKind {
     },
 }
 
-/// A call's arguments: positional ones, then keyword ones, each keyword given once.
 pub(crate) struct Args {
     pub(crate) positional: Vec<Expr>,
     pub(crate) keyword: Vec<(Name, Expr)>,
@@ -266,7 +253,6 @@ pub(crate) struct Comprehension {
 }
 
 impl Comprehension {
-    /// Each name the comprehension's `for` clauses bind, in order.
     pub(crate) fn names(&self) -> Vec<&Name> {
         let mut names = Vec::new();
         self.target.names(&mut names);
@@ -320,7 +306,6 @@ pub(crate) enum Operator {
     Arithmetic(Arithmetic),
 }
 
-/// The operators of arithmetic, and of joining sequences.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Arithmetic {
     Add,

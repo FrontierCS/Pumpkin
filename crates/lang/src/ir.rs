@@ -6,7 +6,7 @@
 //! that key's value (`{"judge": {…}}`); a list or a tuple to a sequence; a string to a string,
 //! which the IR's types check; an int to an integer, which they range-check; a bool to a bool;
 //! `None` to an absent option; and an image to the string of its ID. A function is no data.
-//! Messages say what serde names in the language's words: an int type, for one, by the ints it
+//! Messages say what `serde` names in the language's words: an int type, for one, by the ints it
 //! holds.
 //!
 //! An error is at the value read when it happened, even where the value's own type refuses it
@@ -30,10 +30,11 @@ use serde::{Deserialize, forward_to_deserialize_any};
 use crate::problem::{Fault, list};
 use crate::value::{Entry, Key, Kind, Span, Value, escape, quote};
 
-/// The IR of the workflow whose fields a `workflow()` call gives as `fields`, each image named by
-/// its ID in `images`, refused at the first value the IR's types refuse.
+/// The IR's workflow that `fields`, the dict of the keyword arguments of `workflow()`, gives. An
+/// image in it is the ID at its place in `images`. A fault is at the value that is wrong, and
+/// notes where in the IR it is.
 pub(crate) fn workflow(fields: &Value, images: &[ir::Image]) -> Result<ir::Workflow, Fault> {
-    /// The fields of `ir::Workflow` that a workflow's writer gives.
+    // The fields of `ir::Workflow` that a workflow's writer gives.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Fields {
@@ -67,10 +68,10 @@ pub(crate) fn workflow(fields: &Value, images: &[ir::Image]) -> Result<ir::Workf
     })
 }
 
-/// The faults that `errors`, errors of the IR whose fields are `fields`, describe, each at the
-/// value its pointer reaches: the deepest, where the pointer goes on into what the values leave
-/// out, such as an absent option. Errors of one message at one value make one fault, with a note
-/// for each one's place.
+/// The faults of `errors`, which `schema` gives for the IR that `fields` made, each at the span of
+/// the value its pointer reaches, or of the deepest one that exists, when the value lacks what
+/// the pointer names. Errors with one message at one span make one fault, which notes each of
+/// their pointers.
 pub(crate) fn locate(fields: &Value, errors: &[ParseError]) -> Vec<Fault> {
     let mut located: Vec<(Span, &str, Vec<String>)> = Vec::new();
     for ParseError { at, message } in errors {
@@ -120,13 +121,13 @@ fn place(pointer: &JsonPointer) -> String {
     }
 }
 
-/// An error while reading values into the IR, which knows its place once it has passed the
-/// value it happened at.
 #[derive(Debug)]
 struct Error {
     message: Message,
+    /// The span of the innermost value or key at fault, if the error has met one.
     at: Option<Span>,
-    /// The reference tokens to the place, innermost first.
+    /// The path to the value at fault, innermost first, as the error is passed up: the reverse
+    /// of the order `Message::read` takes.
     tokens: Vec<Token>,
 }
 
@@ -138,7 +139,6 @@ enum Token {
 
 #[derive(Debug)]
 enum Message {
-    /// A whole message, as an IR type's check writes it.
     Whole(String),
     Invalid {
         found: String,
@@ -156,7 +156,6 @@ enum Message {
         kind: String,
         expected: &'static [&'static str],
     },
-    /// An enum's dict whose keys aren't one.
     Kinds {
         len: usize,
         expected: &'static [&'static str],
@@ -165,7 +164,7 @@ enum Message {
 }
 
 impl Message {
-    /// The message, for a value at `tokens`, outermost first.
+    /// The message, naming the value at fault by `tokens`, its path from the top.
     fn read(&self, tokens: &[Token]) -> String {
         let place = match tokens {
             [] => String::from("the workflow"),
@@ -209,14 +208,14 @@ impl Error {
         }
     }
 
-    /// The error, at `at` unless it has a place already, below `token`.
+    /// Notes that the error is in the value at `token` of the one it was passed up from.
     fn at(mut self, at: Span, token: Token) -> Self {
         self.at.get_or_insert(at);
         self.tokens.push(token);
         self
     }
 
-    /// The error, at the key at `at` unless it has a place already.
+    /// Notes that the error is in a key, which has no token of its own.
     fn at_key(mut self, at: Span) -> Self {
         self.at.get_or_insert(at);
         self
@@ -286,8 +285,8 @@ impl de::Error for Error {
     }
 }
 
-/// What `expected` says, in the language's words: serde names the IR's int types as Rust does,
-/// as `u32` or `a nonzero u64`, which become the ints that the type holds.
+// `serde` names the IR's int types as Rust does, as `u32` or `a nonzero u64`, which the language
+// has none of: they become the ints that the type holds.
 fn words(expected: &dyn de::Expected) -> String {
     let expected = expected.to_string();
     let (least, rust) = match expected.strip_prefix("a nonzero ") {
@@ -304,7 +303,7 @@ fn words(expected: &dyn de::Expected) -> String {
     format!("an int from {least} to {most}")
 }
 
-/// Reads a value as the type that asks for it, each image named by its ID in `images`.
+/// A [`Value`] that `serde` reads as the IR's JSON would be read: an image is its ID, a string.
 #[derive(Clone, Copy)]
 struct De<'v> {
     value: &'v Value,
@@ -323,7 +322,6 @@ impl<'v> De<'v> {
     }
 }
 
-/// Defines each `$method`, which reads a value as `$to` does.
 macro_rules! forward {
     ($to:ident: $($method:ident)*) => {
         $(
@@ -462,7 +460,9 @@ impl<'de> de::Deserializer<'de> for De<'_> {
         visitor: V,
     ) -> Result<V::Value, Error> {
         match &self.value.kind {
+            // A string names a kind that holds no value.
             Kind::Str(text) => visitor.visit_enum(Named(text)),
+            // A dict of one key names a kind by it, and gives the kind's value.
             Kind::Dict(entries) => match &**entries {
                 [entry] => visitor.visit_enum(Variant {
                     de: self,
@@ -487,12 +487,11 @@ impl<'de> de::Deserializer<'de> for De<'_> {
     }
 }
 
-/// Visits `items`, the elements of what `de` reads, as a sequence, all of which the visitor must
-/// take.
 fn seq<'de, V: Visitor<'de>>(de: De<'_>, items: &[Value], visitor: V) -> Result<V::Value, Error> {
     let mut access = Seq(de, items.iter().enumerate());
     let value = visitor.visit_seq(&mut access)?;
     let left = access.1.len();
+    // The visitor must take every element: a tuple of fewer than the list holds is refused.
     if left > 0 {
         let expected = format!("{}", items.len() - left);
         return Err(Error::new(Message::Length {
@@ -526,7 +525,6 @@ impl<'de> SeqAccess<'de> for &mut Seq<'_> {
     }
 }
 
-/// A dict's entries, each key a field's name.
 struct Map<'v> {
     de: De<'v>,
     entries: core::slice::Iter<'v, Entry>,
@@ -576,7 +574,6 @@ impl<'de> MapAccess<'de> for Map<'_> {
     }
 }
 
-/// The name that `entry`'s key gives a `what`, a field or a kind, which must be a string.
 fn name<'v>(entry: &'v Entry, what: &str) -> Result<&'v str, Error> {
     match &entry.key {
         Key::Str(key) => Ok(key),
@@ -587,7 +584,7 @@ fn name<'v>(entry: &'v Entry, what: &str) -> Result<&'v str, Error> {
     }
 }
 
-/// An enum given as a string, which names a kind and gives it no value.
+/// A kind that a string names, which the kinds that hold a value can't be.
 struct Named<'v>(&'v str);
 
 impl<'de> EnumAccess<'de> for Named<'_> {
@@ -601,7 +598,6 @@ impl<'de> EnumAccess<'de> for Named<'_> {
 }
 
 impl Named<'_> {
-    /// The error of a kind that takes a value, which this string gives none.
     fn valueless(&self) -> Error {
         let kind = quote(self.0);
         let found = format!("`{kind}`");
@@ -634,7 +630,7 @@ impl<'de> VariantAccess<'de> for Named<'_> {
     }
 }
 
-/// An enum's dict of one entry, read by `de`: its key, the kind, and the kind's value.
+/// A kind that the key of a one-key dict names, and the value that the dict gives it.
 struct Variant<'v> {
     de: De<'v>,
     kind: &'v str,
@@ -653,7 +649,6 @@ impl<'de> EnumAccess<'de> for Variant<'_> {
 }
 
 impl<'v> Variant<'v> {
-    /// The error, below the kind's key, at its value unless it has a place already.
     fn below(&self, error: Error) -> Error {
         error.at(self.entry.value.span, Token::Key(String::from(self.kind)))
     }
