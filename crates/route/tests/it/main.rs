@@ -26,6 +26,8 @@ use stdx::Deadline;
 use test_support::HUNG;
 use test_support::http::read_request;
 
+mod kept;
+mod read;
 mod upstream;
 
 /// A request as its client sends it: method, path, headers and body.

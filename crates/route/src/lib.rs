@@ -12,8 +12,11 @@
 //!
 //! [`serve`] sends an admitted request upstream ([`Upstream`]), streams back its response, and
 //! says how it answered ([`Answer`]). A run serves each entry as a [`Serving`] says.
+//!
+//! [`read`] reads an exchange as it was kept, whatever its API.
 
 mod closure;
+pub mod read;
 mod upstream;
 mod usage;
 

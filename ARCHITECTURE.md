@@ -206,7 +206,8 @@ control socket, and each provider mounts `sandboxctl` only for a role that makes
 The model route. `serve` answers each model request through the entry for its API, whose `Route`
 admits it in a closed form (`closure`), sends it upstream (`Upstream`), streams the response back,
 and says how it answered (`Answer`). `Serving` is the upstream that serves an entry, and `Keep` is
-where an exchange is kept as it passes.
+where an exchange is kept as it passes. `read` reads a kept exchange of any API as the same kinds of
+items (`Item`), and takes a stream's first output where `serve` does, by the same rule.
 
 **Architecture Invariant:** the route stays closed. A request reaches the models that its workflow
 allows and nothing else of the model provider's: none of the state it keeps, the tools it runs or
