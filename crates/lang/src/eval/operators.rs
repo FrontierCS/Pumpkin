@@ -27,7 +27,6 @@ use crate::problem::{Fault, refusal};
 use crate::syntax::{Arithmetic, Operator};
 use crate::value::{Budget, Entry, Key, Kind, Span, Text, Value};
 
-/// What `operator`, at `at`, makes of `left` and `right`, counted in `budget`.
 pub(super) fn binary(
     operator: Operator,
     at: Span,
@@ -51,8 +50,6 @@ pub(super) fn binary(
     }
 }
 
-/// The error of `symbol`, at `at`, of `operands`, which takes `takes`, with where each operand
-/// was made.
 fn rejected(symbol: &str, at: Span, operands: (&Value, &Value), takes: &str) -> Fault {
     let (left, right) = operands;
     let message = format!(
@@ -64,7 +61,6 @@ fn rejected(symbol: &str, at: Span, operands: (&Value, &Value), takes: &str) -> 
     origin(fault, "the right operand", right)
 }
 
-/// Whether `test` holds of how two ints, or two strings, `operands`, order.
 fn order(
     symbol: &str,
     at: Span,
@@ -131,7 +127,6 @@ fn contains(symbol: &str, at: Span, operands: (&Value, &Value)) -> Result<bool, 
     }
 }
 
-/// The dict that `|` makes of two dicts, `operands`, counted in `budget`.
 fn union(at: Span, operands: (&Value, &Value), budget: &Budget) -> Result<Kind, Fault> {
     match (&operands.0.kind, &operands.1.kind) {
         (Kind::Dict(left), Kind::Dict(right)) => Ok(Kind::Dict(left.union(right, at, budget)?)),
@@ -143,7 +138,6 @@ fn union(at: Span, operands: (&Value, &Value), budget: &Budget) -> Result<Kind, 
     }
 }
 
-/// What `operator`, at `at`, makes of `operands`, counted in `budget`.
 fn arithmetic(
     operator: Arithmetic,
     at: Span,
@@ -219,7 +213,6 @@ fn int(operator: Arithmetic, at: Span, left: i64, right: i64) -> Result<i64, Fau
     result.ok_or_else(|| overflow(at, &format!("{left} {symbol} {right}")))
 }
 
-/// What unary `-`, at `at`, makes of `operand`.
 pub(super) fn negate(at: Span, operand: &Value) -> Result<Kind, Fault> {
     let Kind::Int(int) = operand.kind else {
         let message = format!("`-` can't take {}: give it an int", operand.kind.describe());
@@ -239,7 +232,6 @@ fn overflow(at: Span, operation: &str) -> Fault {
     Fault::new(at, message)
 }
 
-/// The element of `object` that `key`, the index written at `at`, gives.
 pub(super) fn index(object: &Value, key: &Value, at: Span) -> Result<Value, Fault> {
     let message = match &object.kind {
         Kind::List(items) | Kind::Tuple(items) => {
@@ -305,7 +297,6 @@ pub(super) fn index(object: &Value, key: &Value, at: Span) -> Result<Value, Faul
     Err(origin(Fault::new(at, message), "the indexed value", object))
 }
 
-/// The elements a comprehension's `for`, whose variables are at `at`, iterates over in `items`.
 pub(super) fn elements(items: &Value, at: Span) -> Result<Vec<Value>, Fault> {
     let message = match &items.kind {
         Kind::List(items) | Kind::Tuple(items) => return Ok(items.to_vec()),

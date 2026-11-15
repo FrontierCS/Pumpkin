@@ -1,28 +1,17 @@
-//! The evaluator: runs each module's statements in order, from the entry file down through its
-//! loads (spec.md, "Module execution"), and the functions they call.
+//! The evaluator: runs modules and calls as spec.md's "Module execution" and "Functions" say,
+//! with at most `MAX_CALLS` functions running at once.
 //!
-//! - A module runs once per evaluation, the first time a file loads it, and every file that
-//!   loads it shares its globals. A load of a module that is still loading is an error, with the
-//!   chain of loads.
-//! - A module's loads run before its other statements, which `resolve` holds them to come
-//!   before, each binding its names once its module has run.
-//! - A name is used only once its statement has bound it, as the specification has it of a
-//!   global, a local or a comprehension's variable used before its binding; a function's names
-//!   resolve in its own module's top level, whichever module calls it.
-//! - A call binds its arguments as the specification has it ("Functions"): positional ones to
-//!   the parameters before a bare `*`, keyword ones by name, and defaults, made once, when the
-//!   `def` ran, to the rest. It runs no function that is running already ("Functions": no
-//!   recursion, even through other functions), and at most `MAX_CALLS` at once.
-//! - Operators take the values that `operators` says, and builtins those that `builtins` and
-//!   `pumpkin` say.
+//! A module runs once per evaluation, the first time a file loads it, and every file that loads
+//! it shares its globals; a load of a module that is still loading is an error, with the chain of
+//! loads. The specification leaves both to the application ("Load statements").
 //!
-//! Evaluation always ends, as every loop is a comprehension over a list, a tuple or a dict that
+//! Evaluation always ends: every loop is a comprehension over a list, a tuple or a dict that
 //! exists already and never changes, no function runs while it is running, each module runs
-//! once, loads make no cycle, and it keeps to its [`Bounds`](crate::Bounds), as `Budget` counts
-//! its values; and it fits in [`STACK_BYTES`](crate::STACK_BYTES), nesting at most `MAX_NESTING`
-//! deep, as the parser counts nesting, through its calls, each running its function's body as
-//! deep as its arguments nest.
-//! The first error ends it, as Starlark handles none (spec.md, "Module execution"), noting calls.
+//! once, and loads make no cycle. It keeps to its [`Bounds`](crate::Bounds), its values' bytes
+//! as `Budget` counts them, and fits in [`STACK_BYTES`](crate::STACK_BYTES): nesting is at most
+//! `MAX_NESTING` deep, as the parser counts it, through calls, each running its function's body as
+//! deep as its arguments nest. The first error ends it, as Starlark handles none (spec.md, "Module
+//! execution"), noting calls.
 
 mod call;
 mod operators;
@@ -45,19 +34,15 @@ use crate::syntax::{
 use crate::value::{Budget, Builtin, Dict, Entry, FileId, Key, Kind, Nested, Span, Text, Value};
 use crate::{Label, Loader};
 
-/// How many functions may run at once, each called by the one before it.
 // Two fewer than the 50 frames that starlark-rust's evaluator holds by default: its top level
 // takes one, and so does a builtin or a method that the innermost function calls, so that every
 // file the subset accepts, it evaluates too.
 const MAX_CALLS: usize = 48;
 
-/// An evaluation's state: what it has read, run and made so far.
 pub(crate) struct Evaluation<'l, L> {
     loader: &'l mut L,
     pub(crate) sources: Sources,
-    /// What Pumpkin's builtins have planned.
     pub(crate) planned: Planned<'l>,
-    /// Each module it has read.
     modules: BTreeMap<Label, State>,
     /// The modules that are loading, the entry first, each loaded by the one before it.
     loading: Vec<Loading>,
@@ -69,20 +54,17 @@ pub(crate) struct Evaluation<'l, L> {
     calls: Vec<(Rc<Def>, Span)>,
     /// How many expressions it has evaluated, its files' and the functions' they call.
     steps: u64,
-    /// How many it may evaluate.
     max_steps: u64,
-    /// What the values it has made take.
     budget: &'l Budget,
     /// How deep the running function's body starts: the sum of the `depth`s of the calls that
     /// run, each as the parser counts it in its file; 0 at a module's top level.
     depth: usize,
 }
 
-/// What an evaluation knows of a module it has read.
 enum State {
-    /// It is loading, at this place on `loading`.
+    /// Its place on `loading`.
     Loading(usize),
-    /// It has run, binding every global of its file's [`Top`].
+    /// Its file, whose [`Top`] its globals are bound in.
     Ran(FileId),
 }
 
@@ -93,7 +75,6 @@ struct Loading {
     at: Option<Span>,
     file: FileId,
     module: Module,
-    /// How many of its loads have run.
     ran: usize,
 }
 
@@ -126,8 +107,6 @@ enum Scope<'s> {
 }
 
 impl<'l, L: Loader> Evaluation<'l, L> {
-    /// The evaluation that reads through `loader`, in which Pumpkin's builtins add to `planned`,
-    /// evaluating at most `max_steps` expressions, and counting the values it makes in `budget`.
     pub(crate) fn new(
         loader: &'l mut L,
         planned: Planned<'l>,
@@ -150,7 +129,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         }
     }
 
-    /// Runs the entry file, at `label`, and the modules it loads.
     pub(crate) fn entry(&mut self, label: &Label) -> Result<(), Vec<Problem>> {
         let text = (self.loader.load(label))
             .map_err(|message| Vec::from([Problem::file(label, message)]))?;
@@ -185,8 +163,8 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(())
     }
 
-    /// The error of `load`, the next of `top`'s, which loads the module that is `first` on
-    /// `loading`, `top` being the last.
+    /// The error of `load`, the next of `top`'s, whose module is at `first` on `loading`; `top`,
+    /// popped off `loading`, ends the chain.
     fn cycle(&self, first: usize, top: &Loading, load: &Load) -> Fault {
         let chain: Vec<&Loading> = self.loading.iter().chain([top]).collect();
         let message = format!(
@@ -201,8 +179,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         fault
     }
 
-    /// Reads and checks the module at `label`, whose text is `text`, for the `load` at `at`, if
-    /// any, and puts it on `loading`.
     fn open(&mut self, label: &Label, at: Option<Span>, text: String) -> Result<(), Vec<Problem>> {
         let file = self.sources.add(label.clone(), text);
         // `sources` numbers the files in the order they are added, as `tops` holds their top
@@ -292,7 +268,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(())
     }
 
-    /// The value `name`, used at `span` in `scope`, names.
     fn lookup(&self, scope: &Scope<'_>, name: &str, span: Span) -> Result<Value, Fault> {
         let mut scope = scope;
         let module = loop {
@@ -392,7 +367,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(Value { kind, span })
     }
 
-    /// The elements `items` make, of the list or the tuple made at `at`.
     fn elements(
         &mut self,
         scope: &Scope<'_>,
@@ -442,8 +416,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
     }
 
     /// What `comprehension`, made at `at`, adds to `made`, which holds its body (spec.md,
-    /// "Comprehensions"): its first iterable is evaluated in `scope`, and its other clauses and
-    /// its body with its variables, for each element that each `for` binds, in order.
+    /// "Comprehensions").
     fn comprehension<'e>(
         &mut self,
         scope: &Scope<'_>,
@@ -502,7 +475,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         made.finish(at, self.budget)
     }
 
-    /// The arguments `args` give, of the call made at `at`.
     fn arguments<'a>(
         &mut self,
         scope: &Scope<'_>,
@@ -526,8 +498,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         })
     }
 
-    /// What `expr`, an operand and the calls, methods and indexes that follow it, gives: each of
-    /// them applied in turn to what the operand, or the one before, gives.
     fn suffixed(&mut self, scope: &Scope<'_>, expr: &Expr) -> Result<Value, Fault> {
         // They apply in turn, rather than each evaluating the one before it first, so that a
         // suffix's arguments, and the calls in them, run under no more of the chain on the stack
@@ -607,7 +577,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         }
     }
 
-    /// What `operator`, at `at`, makes of `operand`.
     fn unary(
         &mut self,
         scope: &Scope<'_>,
@@ -661,7 +630,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         Ok(left)
     }
 
-    /// `then` if `condition` is true, or else `otherwise`.
     fn conditional(
         &mut self,
         scope: &Scope<'_>,
@@ -677,7 +645,6 @@ impl<'l, L: Loader> Evaluation<'l, L> {
     }
 }
 
-/// `value`, a name's, used at `span`, once its statement has bound it.
 fn bound(value: Option<&Value>, name: &str, span: Span) -> Result<Value, Fault> {
     value.cloned().ok_or_else(|| {
         let message = format!("`{name}` is used before it is bound: bind it above this use");
@@ -685,7 +652,6 @@ fn bound(value: Option<&Value>, name: &str, span: Span) -> Result<Value, Fault> 
     })
 }
 
-/// The key that `value`, written at `at`, makes in a dict.
 fn key(value: &Value, at: Span) -> Result<Key, Fault> {
     Key::of(value).map_err(|message| origin(Fault::new(at, message), "the key", value))
 }
@@ -741,7 +707,6 @@ fn assign<'t>(
     Ok(())
 }
 
-/// A call, a method's call or an index, which applies to what the expression before it gives.
 enum Suffix<'e> {
     /// A call, whose callee's expression is at `callee`, of the parser's `depth`.
     Call {
@@ -750,7 +715,6 @@ enum Suffix<'e> {
         depth: usize,
         at: Span,
     },
-    /// A method's call, whose receiver's expression is at `receiver`.
     Method {
         receiver: Span,
         name: &'e Name,
@@ -823,7 +787,6 @@ enum Made<'e> {
 }
 
 impl Made<'_> {
-    /// Adds what the body makes in `scope`.
     fn add<L: Loader>(
         &mut self,
         evaluation: &mut Evaluation<'_, L>,

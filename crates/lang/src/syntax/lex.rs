@@ -119,18 +119,15 @@ pub(crate) fn lex(file: FileId, text: &str) -> Vec<Token> {
     lexer.tokens
 }
 
-/// Whether `text` is a name, as a keyword argument's is.
 pub(crate) fn is_name(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(starts_name) && chars.all(in_name)
 }
 
-/// Whether a name may start with `char`: an ASCII letter or `_`.
 fn starts_name(char: char) -> bool {
     char.is_ascii_alphabetic() || char == '_'
 }
 
-/// Whether a name may hold `char`: an ASCII letter, a digit or `_`.
 fn in_name(char: char) -> bool {
     char.is_ascii_alphanumeric() || char == '_'
 }
@@ -260,7 +257,6 @@ impl Lexer<'_> {
         self.skip(|char| !matches!(char, '\n' | '\r'));
     }
 
-    /// Reads a line's end: `\n`, or `\r\n`.
     fn line_end(&mut self) -> Result<(), LexError> {
         if self.text[self.pos..].starts_with("\r\n") {
             self.pos += 2;
@@ -387,13 +383,11 @@ impl Lexer<'_> {
         Ok(())
     }
 
-    /// Skips the characters for which `skipped` holds.
     fn skip(&mut self, skipped: impl Fn(char) -> bool) {
         let rest = &self.text[self.pos..];
         self.pos += rest.find(|char| !skipped(char)).unwrap_or(rest.len());
     }
 
-    /// Skips the digits of `radix`.
     fn digits(&mut self, radix: u32) {
         self.skip(|char| char.is_digit(radix));
     }

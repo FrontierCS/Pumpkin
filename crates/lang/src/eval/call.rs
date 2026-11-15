@@ -86,8 +86,6 @@ impl<L: Loader> Evaluation<'_, L> {
         }))
     }
 
-    /// Runs `steps`, a body of the function in `module`, whose names are `locals`, and gives
-    /// what a `return` among them gives, if one runs.
     fn steps<'d>(
         &mut self,
         module: FileId,

@@ -3,20 +3,18 @@
 //!
 //! The subset only refuses: a program it accepts means what the Starlark specification
 //! (<https://github.com/bazelbuild/starlark/blob/master/spec.md>) says it does, so every file it
-//! accepts is valid Starlark. The language is `syntax`'s grammar, refusals included, run as
-//! `eval` says, with the predeclared names of `builtins`, Pumpkin's among them; the workflow is
-//! what the entry file's `workflow()` call gives, read into the IR as `ir` says. `eval` runs
-//! `pumpkin`'s functions, which record what an evaluation gives in `plan`'s types, and `plan`
-//! reads it through `ir`: none uses one before it.
+//! accepts is valid Starlark. The workflow is what the entry file's `workflow()` call gives.
+//! `eval` runs `pumpkin`'s functions, which record what an evaluation gives in `plan`'s types,
+//! and `plan` reads it through `ir`: none uses one before it.
 //!
 //! An evaluation is hermetic: it reads source only through its [`Loader`], by [`Label`]s, which
 //! stay below the root, and its `--arg`s ([`Args`]); and the crate is `no_std`, as `harness` is,
 //! whose adapter `codex()` runs, so that their own code can name no file, clock, environment,
 //! process or randomly seeded hash, though `schema`'s I/O items stay reachable through it. An
 //! image is only declared, for its caller to build. The same sources and args always give the
-//! same plan. An evaluation always ends, within [`STACK_BYTES`] of stack and its [`Bounds`], as
-//! `eval` says; how its problems read is [`Problems`]' doc's, and a linter's findings in the
-//! files it read read so too ([`Plan::lint`]).
+//! same plan. An evaluation always ends, within [`STACK_BYTES`] of stack and its [`Bounds`]; how
+//! its problems read is [`Problems`]' doc's, and a linter's findings in the files it read read so
+//! too ([`Plan::lint`]).
 
 #![no_std]
 
@@ -67,11 +65,10 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    /// A workflow's: so that a file that would run for minutes or never end, as nested
-    /// comprehensions can, or would ask for gigabytes, as doubling a string or a list can, ends
-    /// at once.
-    // About 1,000 times the steps the heaviest workflow of the task repository takes, 837, and
-    // 2,400 times the bytes it makes, 113,229.
+    // So that a file that would run for minutes or never end, as nested comprehensions can, or
+    // would ask for gigabytes, as doubling a string or a list can, ends at once: about 1,000
+    // times the steps the heaviest workflow of the task repository takes, 837, and 2,400 times
+    // the bytes it makes, 113,229.
     pub const WORKFLOW: Self = Self {
         steps: 1_000_000,
         bytes: 256 << 20,
@@ -104,12 +101,8 @@ pub fn evaluate(
 
 /// Where an evaluation reads its source.
 pub trait Loader {
-    /// The text of the file at `label`.
-    ///
-    /// # Errors
-    ///
-    /// Why the file can't be read, which the evaluation reports at the `load` that names it, or
-    /// as the entry's problem.
+    /// The text of the file at `label`, or why it can't be read, which the evaluation reports at
+    /// the `load` that names it, or as the entry's problem.
     fn load(&mut self, label: &Label) -> Result<String, String>;
 }
 
@@ -163,10 +156,6 @@ pub struct Label(String);
 
 impl Label {
     /// Parses a label, such as `//lib/bench.star`.
-    ///
-    /// # Errors
-    ///
-    /// The text is no label.
     pub fn parse(text: &str) -> Result<Self, String> {
         let Some(path) = text.strip_prefix("//") else {
             return Err(format!(
@@ -183,7 +172,6 @@ impl Label {
         })
     }
 
-    /// The label of `path`, below the root, if it is a label's path.
     pub(crate) fn below(path: String) -> Option<Self> {
         path.split('/').all(is_component).then_some(Self(path))
     }
@@ -200,7 +188,6 @@ impl fmt::Display for Label {
     }
 }
 
-/// Whether `component` can be a component of a [`Label`]'s path, as its doc says.
 fn is_component(component: &str) -> bool {
     !matches!(component, "" | "." | "..")
         && (component.chars())
