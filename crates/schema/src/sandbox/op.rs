@@ -21,8 +21,8 @@
 //!
 //! A reply is an object whose `kind` is `ops`, `judge`, `submit`, `status`, `lease`, `lease_status`
 //! or `refused`, which may answer any op ([`OpReply::Refused`]). Its fields are its type's, under
-//! the same names; a limit or a quota that doesn't exist is `null`. A status has `returned` and
-//! `scored` once its job has given a result, scored or not, and `failure` only if it gave none.
+//! the same names; a limit or a quota that doesn't exist is `null`. A status has `returned` once
+//! its job has given a result, and `failure` only if it gave none.
 
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -263,14 +263,14 @@ pub struct StatusReply {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Where a job is, with what came of it once it has ended. Its JSON form is the status's `state`,
-/// with `returned` and `scored`, or `failure`, beside it.
+/// with `returned`, or `failure`, beside it.
 pub enum JobState {
     /// Accepted; its judge hasn't started.
     Queued,
     /// Its judge is running, or has ended and is being cleaned up.
     Running,
-    /// The judge gave a result, which has a score if `scored`.
-    Completed { returned: Returned, scored: bool },
+    /// The judge gave a result.
+    Completed { returned: Returned },
     /// The judge gave no result.
     Errored { failure: Failure },
 }
@@ -445,8 +445,6 @@ struct StatusJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     returned: Option<Returned>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    scored: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     remaining: Remaining,
 }
@@ -468,32 +466,23 @@ impl TryFrom<StatusJson> for StatusReply {
             job,
             state,
             returned,
-            scored,
             failure,
             remaining,
         } = json;
-        let state = match (state, returned, scored, failure) {
-            (StateName::Queued, None, None, None) => JobState::Queued,
-            (StateName::Running, None, None, None) => JobState::Running,
-            (StateName::Completed, Some(returned), Some(scored), None) => {
-                JobState::Completed { returned, scored }
+        let state = match (state, returned, failure) {
+            (StateName::Queued, None, None) => JobState::Queued,
+            (StateName::Running, None, None) => JobState::Running,
+            (StateName::Completed, Some(returned), None) => JobState::Completed { returned },
+            (StateName::Errored, None, Some(failure)) => JobState::Errored { failure },
+            (StateName::Queued | StateName::Running, _, _) => {
+                return Err("a job that hasn't ended has no result: give it neither \
+                            `returned` nor `failure`");
             }
-            (StateName::Errored, None, None, Some(failure)) => JobState::Errored { failure },
-            (StateName::Queued | StateName::Running, _, _, _) => {
-                return Err("a job that hasn't ended has no result: give it none of \
-                            `returned`, `scored` and `failure`");
+            (StateName::Completed, _, _) => {
+                return Err("a completed job has a result: give it `returned`, and no `failure`");
             }
-            (StateName::Completed, _, _, _) => {
-                return Err(
-                    "a completed job has a result: give it `returned` and `scored`, \
-                            and no `failure`",
-                );
-            }
-            (StateName::Errored, _, _, _) => {
-                return Err(
-                    "an errored job has no result: give it `failure`, and neither \
-                            `returned` nor `scored`",
-                );
+            (StateName::Errored, _, _) => {
+                return Err("an errored job has no result: give it `failure`, and no `returned`");
             }
         };
         Ok(Self {
@@ -511,19 +500,16 @@ impl From<StatusReply> for StatusJson {
             state,
             remaining,
         } = reply;
-        let (state, returned, scored, failure) = match state {
-            JobState::Queued => (StateName::Queued, None, None, None),
-            JobState::Running => (StateName::Running, None, None, None),
-            JobState::Completed { returned, scored } => {
-                (StateName::Completed, Some(returned), Some(scored), None)
-            }
-            JobState::Errored { failure } => (StateName::Errored, None, None, Some(failure)),
+        let (state, returned, failure) = match state {
+            JobState::Queued => (StateName::Queued, None, None),
+            JobState::Running => (StateName::Running, None, None),
+            JobState::Completed { returned } => (StateName::Completed, Some(returned), None),
+            JobState::Errored { failure } => (StateName::Errored, None, Some(failure)),
         };
         Self {
             job,
             state,
             returned,
-            scored,
             failure,
             remaining,
         }

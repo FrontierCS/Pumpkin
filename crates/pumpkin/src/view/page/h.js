@@ -415,9 +415,9 @@ export function usd(usd) {
 /** @param {number} count @param {string} noun */
 export const plural = (count, noun) => count.toLocaleString("en-US") + " " + noun + (count === 1 ? "" : "s");
 
-// The state a run's mark takes its colour from: a finish without a score is a warning, not an ok.
-/** @param {{ live: boolean, state: string, scored: boolean }} run */
-export const tone = (run) => (run.live ? "live" : run.state === "finished" && !run.scored ? "warn" : run.state);
+// The state a run's mark takes its colour from: a finish without a result is a warning, not an ok.
+/** @param {{ live: boolean, state: string, has_result: boolean }} run */
+export const tone = (run) => (run.live ? "live" : run.state === "finished" && !run.has_result ? "warn" : run.state);
 
 // `text` with its first letter a capital, for a phrase that starts with a name from the records,
 // such as a run's state.

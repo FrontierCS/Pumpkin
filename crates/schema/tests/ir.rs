@@ -456,10 +456,10 @@ fn op_replies() {
                 r#"{"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":1,"state":"completed","returned":{"metrics":{"solved":3},"raw_score":3},"scored":true,"remaining":{"calls":99,"seconds":11993}}"#,
+                r#"{"kind":"status","job":1,"state":"completed","returned":{"metrics":{"solved":3},"raw_score":3},"remaining":{"calls":99,"seconds":11993}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":2,"state":"completed","returned":{"failure":"wrong answer","raw_score":null},"scored":false,"remaining":{"calls":98,"seconds":11990}}"#,
+                r#"{"kind":"status","job":2,"state":"completed","returned":{"failure":"wrong answer","raw_score":null},"remaining":{"calls":98,"seconds":11990}}"#,
             ),
             Reply(
                 r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
@@ -509,8 +509,8 @@ fn op_replies() {
             Judge(JudgeReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
-            Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}), scored: true }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
-            Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}), scored: false }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
+            Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}) }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
+            Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
             Status(StatusReply { job: 3, state: Errored { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
             Status(StatusReply { job: 4, state: Errored { failure: Failure { code: InvalidResult, message: "the score at `/raw_score` is not a number: write a number there, or null" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
             Submit(SubmitReply { state: Stored, remaining_seconds: 120 })
@@ -524,9 +524,9 @@ fn op_replies() {
             LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 42, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 1, end: Some(Moved { entries: 12, bytes: 40960 }) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 897, cumulative_seconds: Some(1197), commands: Some(30) } })
             LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 43, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 2, end: Some(Failed("putting the tree at /work/repo in the runner failed: /work/repo: File exists (os error 17): the tree's root becomes /work/repo, which must not exist")) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 896, cumulative_seconds: Some(1196), commands: Some(29) } })
             LeaseStatus(LeaseStatusReply { lease: 2, state: Failed, elapsed_seconds: 61, busy_seconds: 0, idle_seconds: 0, failure: Some("the runner's sandbox didn't start: ResourceExhaustedError"), last: None, remaining: LeaseRemaining { instances: 2, instance_seconds: 0, cumulative_seconds: None, commands: None } })
-            a job that hasn't ended has no result: give it none of `returned`, `scored` and `failure`
-            a completed job has a result: give it `returned` and `scored`, and no `failure`
-            an errored job has no result: give it `failure`, and neither `returned` nor `scored`"#]],
+            a job that hasn't ended has no result: give it neither `returned` nor `failure`
+            a completed job has a result: give it `returned`, and no `failure`
+            an errored job has no result: give it `failure`, and no `returned`"#]],
     );
 }
 

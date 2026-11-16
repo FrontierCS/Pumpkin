@@ -20,8 +20,8 @@ const KEY = [
     pages: ["list", "run", "trace"],
     swatches: [
       { token: "--live", look: "box", words: "Live, or in flight" },
-      { token: "--ok-bar", look: "box", words: "Finished with a score, or answered" },
-      { token: "--warn-bar", look: "box", words: "Finished without a score, refused or not forwarded" },
+      { token: "--ok-bar", look: "box", words: "Finished with a result, or answered" },
+      { token: "--warn-bar", look: "box", words: "Finished without a result, refused or not forwarded" },
       { token: "--fail-bar", look: "box", words: "Failed, lost or interrupted" },
       { token: "--edge", look: "box", words: "Not known yet" },
     ],

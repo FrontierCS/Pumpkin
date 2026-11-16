@@ -44,8 +44,8 @@ mod flags {
 
         /// Makes an op through the sandbox's sandboxd, and prints the reply as one line of
         /// JSON, whose `kind` names it: `ops`, `judge`, `submit`, `status`, `lease`,
-        /// `lease_status` or `refused`. Exits with 0, with 2 for the status of a job that ended
-        /// with no score, and with 1 for a refused op.
+        /// `lease_status` or `refused`. Exits with 0, with 2 for the status of a job that gave
+        /// no result, and with 1 for a refused op.
         /// Reports any other error on standard error, with nothing printed, and exits with 1.
         cmd sandboxctl {
             /// Prints this sandbox's limits: the time left to work, its CPU and memory, and
@@ -179,7 +179,7 @@ pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         // Bad arguments exit with 1, as sandboxctl's other errors do, and not with the 2 that
-        // xflags exits with, which here means a job that ended with no score.
+        // xflags exits with, which here means a job that gave no result.
         Err(error) => Err(format!("{error}: see `sandboxctl --help`")),
     };
     match reply {
@@ -211,8 +211,8 @@ fn exit_code(reply: &OpReply) -> u8 {
         | OpReply::Lease(_)
         | OpReply::LeaseStatus(_) => 0,
         OpReply::Status(StatusReply { state, .. }) => match state {
-            JobState::Queued | JobState::Running | JobState::Completed { scored: true, .. } => 0,
-            JobState::Completed { scored: false, .. } | JobState::Errored { .. } => 2,
+            JobState::Queued | JobState::Running | JobState::Completed { .. } => 0,
+            JobState::Errored { .. } => 2,
         },
         OpReply::Refused { .. } => 1,
     }

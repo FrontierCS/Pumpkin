@@ -43,7 +43,7 @@ import { RowList } from "./rows.js";
  * @property {string | null} task
  * @property {boolean} live
  * @property {string} state
- * @property {boolean} scored
+ * @property {boolean} has_result
  * @property {string} verdict
  * @property {{ command: string, error?: undefined } | { error: string, command?: undefined } | undefined} again
  * @property {string | null} other_build

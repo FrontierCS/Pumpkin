@@ -91,7 +91,7 @@ pub(crate) fn following(record: &Record, command: &str) {
 }
 
 /// Prints the run's outcome and says how it ended, with the commands to run next, and gives the
-/// exit code: success if the run was scored, 3 if it ended unscored or without a result, and
+/// exit code: success if the run finished with a result, 3 if it finished without one, and
 /// failure if it failed, was interrupted or was lost. `args` are those that run it again.
 pub(crate) fn end(
     record: &Record,
@@ -101,12 +101,10 @@ pub(crate) fn end(
 ) -> Result<ExitCode, String> {
     let id = record.id();
     let (exit, how, judge_stderr) = match ending {
-        Ending::Scored { score, after } => {
-            let score = progress::shown_score(score);
-            let how = format!("finished with a score of {score}, {after}");
-            (ExitCode::SUCCESS, how, None)
+        Ending::Judged { score, after } => {
+            (ExitCode::SUCCESS, judged(score.as_deref(), after), None)
         }
-        Ending::Unscored(why) => (ExitCode::from(3), why.clone(), None),
+        Ending::Unjudged(why) => (ExitCode::from(3), why.clone(), None),
         Ending::NoResult { why, judge_stderr } => {
             (ExitCode::from(3), why.clone(), Some(judge_stderr))
         }
@@ -161,6 +159,16 @@ fn again(record: &Record, args: &[String]) {
         ));
     }
     advise("run it again", &next::run_again(args));
+}
+
+pub(crate) fn judged(score: Option<&str>, after: &str) -> String {
+    match score {
+        Some(score) => format!(
+            "finished with a score of {}, {after}",
+            progress::shown_score(score)
+        ),
+        None => format!("finished with a result, {after}"),
+    }
 }
 
 pub(crate) fn closing(id: &str, how: &str, dir: &Path) -> String {

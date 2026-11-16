@@ -470,7 +470,7 @@ impl<'w> Core<'w> {
             Event::JudgeStarted { job } => {
                 self.on_job(job, |state| state.started(at), &mut actions);
             }
-            // The run log keeps the status; whether a call scored is its result's to say.
+            // The run log keeps the status; its `result.json` says whether a call gave a result.
             Event::JudgeExited { job, status: _ } => {
                 let ended = |state: &mut jobs::State| state.ended(at, jobs::End::Exited);
                 self.on_job(job, ended, &mut actions);

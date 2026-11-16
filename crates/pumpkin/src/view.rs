@@ -44,7 +44,7 @@ use stdx::Context;
 
 pub(crate) use self::export::{Exported, exported};
 use self::http::{Method, Request, Response};
-use self::json::{listed_json, live_row, record_json, run_json, scored, tokens_json};
+use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
 use crate::progress::{self, Listed};
@@ -671,10 +671,9 @@ impl View {
         let named = self.named.as_deref();
         let now = crate::unix_now();
         let lost = ending == Ending::Lost;
-        let scored = scored(Some(&ending));
         let json = if let Some(used) = record.used()? {
             let listed = Listed::of(&record, record.task()?, Some(ending), None);
-            let mut row = listed_json(record.id(), &listed, scored, now, named);
+            let mut row = listed_json(record.id(), &listed, now, named);
             row["time"] = json!(progress::column_span(used.ran));
             row["usd"] = json!(
                 used.usd
@@ -688,7 +687,7 @@ impl View {
             let progress = record.progress()?.progress;
             let model = progress.as_ref().map(|progress| progress.model.clone());
             let listed = Listed::of(&record, record.task()?, Some(ending), progress);
-            let mut row = listed_json(record.id(), &listed, scored, now, named);
+            let mut row = listed_json(record.id(), &listed, now, named);
             row["requests"] = json!(model.as_ref().map(|model| model.requests));
             row["tokens"] = json!(
                 model

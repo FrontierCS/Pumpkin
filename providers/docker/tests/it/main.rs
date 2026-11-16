@@ -1044,7 +1044,7 @@ fn ops() {
             $ sandboxctl judge train link: exit 0
               {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 1: exit 0
-              {"kind":"status","job":1,"state":"completed","returned":{"score":1},"scored":true,"remaining":{"calls":1,"seconds":null}}
+              {"kind":"status","job":1,"state":"completed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 2: exit 2
               {"kind":"status","job":2,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 3: exit 1
@@ -1131,7 +1131,7 @@ fn refused_calls() {
                 ctl judge Train huge
                 ctl status soon
                 ctl call train huge
-                ctl status 5
+                ctl status 1
                 second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
                 echo "a second sandboxd: exit $?: $second""#,
                 huge = MAX_OP_PAYLOAD_BYTES + 1,
@@ -1173,10 +1173,10 @@ fn refused_calls() {
               sandboxctl: `soon` is not a job: name one by the number a judge call returned
             $ sandboxctl call train huge: exit 1
               sandboxctl: unexpected argument: "call": see `sandboxctl --help`
-            $ sandboxctl status 5: exit 2
-              {"kind":"status","job":5,"state":"completed","returned":{"score":null},"scored":false,"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl status 1: exit 0
+              {"kind":"status","job":1,"state":"completed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
             a second sandboxd: exit 1: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: File exists (os error 17): expected nothing there yet, in a directory this user can write to
-            owner: status 5"#]],
+            owner: status 1"#]],
     );
 }
 
@@ -1597,17 +1597,7 @@ fn status(job: u64, remaining: Remaining) -> OpReply {
     let state = match job {
         1 => {
             let returned = Returned::from_iter([("score".to_owned(), 1.into())]);
-            JobState::Completed {
-                returned,
-                scored: true,
-            }
-        }
-        5 => {
-            let returned = Returned::from_iter([("score".to_owned(), serde_json::Value::Null)]);
-            JobState::Completed {
-                returned,
-                scored: false,
-            }
+            JobState::Completed { returned }
         }
         2 => {
             let failure = Failure {

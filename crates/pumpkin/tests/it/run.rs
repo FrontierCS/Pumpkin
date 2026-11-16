@@ -266,7 +266,7 @@ fn usage() {
                 pumpkin wait runs/20261108-000905-126a21e9
 
               Exit status:
-                0  The run finished with a score.
+                0  The run finished with a result.
                 3  The run finished without one.
                 1  The run failed, was interrupted, or was lost as its driver ended without
                    an outcome.json, which `pumpkin cancel` then records; or another error.
@@ -1056,7 +1056,7 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
             pumpkin: the final judge's standard error, <scratch>/runs/<id>/jobs/0/log/command.stderr, holds:
               scoring failed
               \u{1b}[1mbold\u{1b}[0m
-            pumpkin: run <id> finished without a score: the final judge returned no result (invalid_result: the judge wrote no result: write it at /pumpkin/out/result.json), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished without a result: the final judge gave none (invalid_result: the judge wrote no result: write it at /pumpkin/out/result.json), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/fails/task.star
             printed outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"invalid_result","reason":"the judge wrote no result: write it at /pumpkin/out/result.json"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
     );
@@ -2011,7 +2011,7 @@ fn runs_on_docker() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
               sandboxes: 1 on local/container, <t> in all, 1 created, all deleted
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/.pumpkin/runs/<id>
+            pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/.pumpkin/runs/<id>
             pumpkin: to run it again: pumpkin run --sandboxd <sandboxd> <scratch>/exits/task.star
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
@@ -2055,7 +2055,7 @@ fn runs_on_docker() {
             pumpkin: the final judge's standard error, <scratch>/runs/<id>/jobs/0/log/command.stderr, holds:
               scoring failed
               \u{1b}[1mbold\u{1b}[0m
-            pumpkin: run <id> finished without a score: the final judge returned no result (invalid_result: the judge wrote no result: write it at /pumpkin/out/result.json), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished without a result: the final judge gave none (invalid_result: the judge wrote no result: write it at /pumpkin/out/result.json), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/fails/task.star
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/command.stderr, jobs/0/log/command.stdout, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
@@ -2232,7 +2232,7 @@ const JUDGE: &str = r#"
     echo kept > /pumpkin/out/evidence/evidence.txt
     echo "judged $bytes bytes as $(id -u), with HOME=$HOME, in $(pwd)""#;
 
-/// `sandboxctl` exits with 1 for a refusal and 2 for a job that has no score.
+/// `sandboxctl` exits with 1 for a refusal and 2 for a job that gave no result.
 const AGENT: &str = r#"#!/bin/sh
     cd /workspace && stat -c '%a %n' .codex .codex/skills .codex/config.toml .tmp agent
     echo "standard input: $(cat)"
@@ -2578,7 +2578,7 @@ fn ops_on_docker() {
             sandboxctl judge train nine: exit 1: {"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}
             sandboxctl judge train seventeen: exit 1: {"kind":"refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16"}
             sandboxctl judge train six: exit 0: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":null}}
-            sandboxctl status 0: exit 0: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":6},"scored":true,"remaining":{"calls":99,"seconds":null}}
+            sandboxctl status 0: exit 0: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":6},"remaining":{"calls":99,"seconds":null}}
             sandboxctl judge train slow: exit 0: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":null}}
             sandboxctl status 1: exit 2: {"kind":"status","job":1,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":98,"seconds":null}}
             sandboxctl submit submit six --finalize: exit 0: {"kind":"submit","state":"accepted","remaining_seconds":"<s>"}

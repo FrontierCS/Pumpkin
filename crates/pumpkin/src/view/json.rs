@@ -65,7 +65,7 @@ pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     let progress = held.readout.progress.clone();
     let model = progress.as_ref().map(|progress| progress.model.clone());
     let listed = Listed::of(&held.record, held.task.clone(), None, progress);
-    let mut row = listed_json(held.record.id(), &listed, false, crate::unix_now(), named);
+    let mut row = listed_json(held.record.id(), &listed, crate::unix_now(), named);
     row["requests"] = json!(model.as_ref().map(|model| model.requests));
     row["tokens"] = json!(
         model
@@ -75,18 +75,12 @@ pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     row
 }
 
-/// Whether `ending` is a score.
-pub(super) fn scored(ending: Option<&Ending>) -> bool {
-    matches!(ending, Some(Ending::Scored { .. }))
-}
-
 /// The row of the run list for `id`, as `ls` shows it, at `now`.
 ///
 /// `named` is the runs directory as commands name it, `None` for the default.
 pub(super) fn listed_json(
     id: &str,
     listed: &Listed,
-    scored: bool,
     now: provider::UnixTime,
     named: Option<&str>,
 ) -> Value {
@@ -101,7 +95,7 @@ pub(super) fn listed_json(
         "id": id,
         "live": listed.live(),
         "state": state,
-        "scored": scored,
+        "has_result": listed.has_result(),
         "time": time,
         "bound": bound,
         "usd": usd,
@@ -130,11 +124,8 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
 
 fn how(ending: &Ending) -> String {
     match ending {
-        Ending::Scored { score, after } => format!(
-            "finished with a score of {}, {after}",
-            progress::shown_score(score)
-        ),
-        Ending::Unscored(why) | Ending::NoResult { why, .. } => why.clone(),
+        Ending::Judged { score, after } => crate::ending::judged(score.as_deref(), after),
+        Ending::Unjudged(why) | Ending::NoResult { why, .. } => why.clone(),
         Ending::Failed(how) | Ending::Interrupted(how) => how.clone(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),
     }
@@ -198,7 +189,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "task": held.task,
         "live": held.ending.is_none(),
         "state": state,
-        "scored": scored(held.ending.as_ref()),
+        "has_result": listed.has_result(),
         "verdict": verdict,
         "other_build": record.other_build(),
         "times": times,
