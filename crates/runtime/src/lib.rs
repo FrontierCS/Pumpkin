@@ -15,19 +15,15 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread::{self, Scope};
 use std::time::Duration;
-use std::{fs, io, mem};
+use std::{fs, io};
 
-use decision::{
-    Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, PayloadRef, Request, lasts,
-};
-use gateway::{
-    Arrival, Dialer, GrantListener, IncomingModelRequest, IncomingOp, Op, RefusedOp, Trees,
-};
+use decision::{Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Request, lasts};
+use gateway::{Arrival, Dialer, GrantListener, RefusedOp, Trees};
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
-use schema::ir::{Api, ModelName, Name};
-use schema::sandbox::op::{OpReply, SubmitReply, SubmitState};
-use schema::workflow::{ByProvider, ByRole, JudgeCall, LeaseGrantId, Placed, RoleId, Workflow};
+use schema::ir::ModelName;
+use schema::sandbox::op::OpReply;
+use schema::workflow::{ByProvider, ByRole, Placed, RoleId, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
@@ -39,12 +35,15 @@ mod judge;
 mod lease;
 mod log;
 mod model;
+mod op;
 mod price;
 mod record;
+mod routes;
 mod sandbox;
+mod start;
 
 use agent::Agent;
-use child::{Child, Deadlines, Message, Report};
+use child::{Message, Report};
 use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
@@ -53,15 +52,16 @@ pub use log::{
     Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver, TakenLine, Tokens,
     TokensCost, Unread, Used, Work,
 };
-use log::{Entry, Log, ModelAnswer};
-use model::{Exchange, Served};
+use log::{Entry, Log};
+use model::Served;
 pub use model::{KeptPart, KeptRequest};
+use op::{Unanswered, accepts, finalizes, request};
 pub use price::TokenPrices;
 pub use record::{
     BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
 };
 use record::{Lock, Payloads};
-use sandbox::{Published, Sandboxes, Which};
+use sandbox::{Published, Sandboxes};
 
 // The longest the loop waits on its inbox before it looks for a signal: a stop that comes this
 // late goes unnoticed by the person who asked for it, and the loop wakes for it at most 20 times a
@@ -281,52 +281,6 @@ impl Failure for Stopped {
     }
 }
 
-// Whether the core took the op that this answers: the record keeps the payload of such an op
-// alone.
-fn accepts(reply: &OpReply) -> bool {
-    match reply {
-        OpReply::Judge(_) | OpReply::Submit(_) => true,
-        OpReply::Ops(_)
-        | OpReply::Status(_)
-        | OpReply::Lease(_)
-        | OpReply::LeaseStatus(_)
-        | OpReply::Refused { .. } => false,
-    }
-}
-
-// Whether the actions answer a submission as accepted for good.
-fn finalizes(actions: &[Action]) -> bool {
-    actions.iter().any(|action| {
-        matches!(
-            action,
-            Action::Reply {
-                reply: OpReply::Submit(SubmitReply {
-                    state: SubmitState::Accepted,
-                    ..
-                }),
-                ..
-            }
-        )
-    })
-}
-
-enum Unanswered {
-    Query(IncomingOp),
-    Call {
-        incoming: IncomingOp,
-        payload: Vec<u8>,
-        reference: PayloadRef,
-    },
-}
-
-impl Unanswered {
-    fn into_incoming(self) -> IncomingOp {
-        match self {
-            Self::Query(incoming) | Self::Call { incoming, .. } => incoming,
-        }
-    }
-}
-
 // A judge call: its thread's orders, and what the run knows of its judge.
 struct Called {
     orders: Sender<Message<OpReply>>,
@@ -341,84 +295,6 @@ struct Called {
 enum Asked {
     Agent(Unanswered),
     Job(JobId),
-}
-
-#[expect(clippy::too_many_lines, reason = "one arm per op")]
-fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
-    // The request takes the op's fields, and what stays of the op only answers it.
-    let (request, call) = match mem::replace(&mut incoming.op, Op::Ops) {
-        Op::Judge { grant, payload } => {
-            let reference = record::reference(&payload);
-            let request = Request::Judge {
-                grant,
-                payload: reference.clone(),
-            };
-            (request, Some((payload, reference)))
-        }
-        Op::Submit {
-            grant,
-            finalize,
-            payload,
-        } => {
-            let reference = record::reference(&payload);
-            let request = Request::Submit {
-                grant,
-                finalize,
-                payload: reference.clone(),
-            };
-            (request, Some((payload, reference)))
-        }
-        Op::Ops => (Request::Ops, None),
-        Op::Status { job } => (Request::Status { job }, None),
-        Op::LeaseOpen {
-            grant,
-            instance_seconds,
-        } => (
-            Request::LeaseOpen {
-                grant,
-                instance_seconds,
-            },
-            None,
-        ),
-        Op::LeaseRun {
-            lease,
-            argv,
-            timeout_seconds,
-        } => (
-            Request::LeaseRun {
-                lease,
-                argv,
-                timeout_seconds,
-            },
-            None,
-        ),
-        Op::LeasePut {
-            lease,
-            tree,
-            to,
-            replace,
-        } => (
-            Request::LeasePut {
-                lease,
-                tree,
-                to,
-                replace,
-            },
-            None,
-        ),
-        Op::LeaseGet { lease, from, to } => (Request::LeaseGet { lease, from, to }, None),
-        Op::LeaseStatus { lease } => (Request::LeaseStatus { lease }, None),
-        Op::LeaseClose { lease } => (Request::LeaseClose { lease }, None),
-    };
-    let unanswered = match call {
-        Some((payload, reference)) => Unanswered::Call {
-            incoming,
-            payload,
-            reference,
-        },
-        None => Unanswered::Query(incoming),
-    };
-    (request, unanswered)
 }
 
 struct Runtime<'r, H: Host> {
@@ -646,91 +522,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
         };
         Ok(event.map(|event| (at, event)))
-    }
-
-    fn model_request<'s>(
-        &mut self,
-        scope: Option<&'s Scope<'s, 'r>>,
-        core: &Core<'_>,
-        (caller, at): (Caller, Duration),
-        incoming: IncomingModelRequest,
-    ) -> Result<(), String> {
-        let number = self.next_model_request;
-        self.next_model_request += 1;
-        // No type excludes a model request here, since one `Arrival` serves sessions with model
-        // requests and without.
-        let Some(served) = self.served.get(&caller).map(Arc::clone) else {
-            unreachable!(
-                "a model request arrived from {caller:?}, though a session takes them only if its \
-                 role has a route (`Sandboxes::start`), whose sandbox's start serves it, and one \
-                 breaks the protocol otherwise, which ends the session"
-            )
-        };
-        // `scope` is none once the run has ended, and no thread starts then.
-        let Some(scope) = scope else {
-            drop(incoming);
-            let note = format!("model request {number} wasn't answered: the run has ended");
-            return self.log.note(&note);
-        };
-        let allowed = core.model_requests_allowed(caller, at);
-        // A response still open at its deadline ends the caller's session, which its collect
-        // needs, so it is due by then; the core's stop of its requests ends it before that
-        // (`end_routes`).
-        let by = match caller {
-            Caller::Agent => self.teardown_end(),
-            Caller::Job(job) => self.call(job).collect,
-        };
-        let by = deadline(&self.clock, by);
-        let reports = self.inbox.sender();
-        let clock = self.clock.clone();
-        let exchange = Exchange::new(self.dir, number, clock.clone());
-        // A request stays in flight until its thread writes its response's end, the thread's last
-        // step, so the session's bound on the requests in flight, `MAX_MODEL_REQUESTS_IN_FLIGHT`,
-        // bounds these threads too, but for those writing that end.
-        let spawned = thread::Builder::new()
-            .name(format!("model-{number}"))
-            .spawn_scoped(scope, move || {
-                // The loop's inbox outlives every request's thread, which the run's end waits for.
-                // Both reports come before the answer's end, and so before what the caller does
-                // next. Each time is read here, as it happens, since the loop writes the record
-                // later, by however long it is busy.
-                let forwarding = || {
-                    let started = Entry::ModelRequestStarted((caller, number), clock.now());
-                    let _ = reports.send(Input::Logged(started));
-                };
-                let answered = |taken: Option<&(Name, Api)>, answer| {
-                    let answered = ModelAnswer {
-                        taken: taken.cloned(),
-                        answer,
-                        kept: exchange.kept(),
-                        first: exchange.timed(),
-                        ended: clock.now(),
-                    };
-                    let answered = Entry::ModelAnswered((caller, number), Box::new(answered));
-                    let _ = reports.send(Input::Logged(answered));
-                };
-                served.serve(
-                    (number, &exchange),
-                    incoming,
-                    allowed,
-                    by,
-                    forwarding,
-                    answered,
-                );
-                if let Some(failed) = exchange.finish() {
-                    let note = format!("model request {number} wasn't kept whole: {failed}");
-                    let _ = reports.send(Input::Logged(Entry::Note(note)));
-                }
-            });
-        match spawned {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let note = format!(
-                    "model request {number} wasn't answered: its thread didn't start: {error}"
-                );
-                self.log.note(&note)
-            }
-        }
     }
 
     fn report<'s>(
@@ -977,76 +768,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    fn start_judge<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        core: &Core<'_>,
-        job: JobId,
-        call: JudgeCall,
-        payload: &PayloadRef,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        let deadlines = self.judge_deadlines(core, call, timeout);
-        let slot = self.workflow().call_slot(call);
-        let call = judge::Call {
-            job,
-            slot,
-            payload: self.payloads.stored(payload),
-            timeout,
-        };
-        let which = Which::Job(job, slot.judge());
-        let run = move |mut child: Child<'r, H, OpReply>| judge::run(&call, &mut child);
-        let orders = self.start_child(scope, which, deadlines, run)?;
-        let collect = deadlines.collect;
-        let called = Called {
-            orders,
-            collect,
-            trees: None,
-            judge: slot.judge().role(),
-        };
-        self.jobs.insert(job, called);
-        Ok(())
-    }
-
-    fn start_lease<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        core: &Core<'_>,
-        (lease, instance, start_by): (LeaseId, u32, Duration),
-        (holder, grant): (Caller, LeaseGrantId),
-    ) -> Result<(), String> {
-        let runner_id = self.workflow().lease_grant(grant).runner;
-        let runner = self.workflow().runner(runner_id);
-        let (start, collect) = match holder {
-            // A lease of the agent's ends with the work phase, which ends by the core's next end of
-            // a phase, and what it left is collected by the agent's teardown's end, as a judge
-            // call's is.
-            Caller::Agent => (core.phase_due(), self.teardown_end()),
-            // A call's ends with the call's command, and what it left is collected by when the
-            // call's is.
-            Caller::Job(job) => {
-                let collect = self.call(job).collect;
-                (collect, collect)
-            }
-        };
-        // A sandbox's start ends by when the lease must start and by the core's `start_by`.
-        let startup = (self.clock.now())
-            .saturating_add(self.placed.startup(runner_id.role()))
-            .min(start)
-            .min(start_by);
-        let deadlines = Deadlines {
-            startup,
-            start,
-            collect,
-        };
-        let which = Which::Lease(lease, runner_id, instance);
-        let run =
-            move |mut child: Child<'r, H, lease::Order>| lease::run(lease, runner, &mut child);
-        let orders = self.start_child(scope, which, deadlines, run)?;
-        self.leases.insert(lease, orders);
-        Ok(())
-    }
-
     fn stop_job(&mut self, job: JobId) {
         // A call whose thread has ended has nothing left to stop.
         let _ = self.call(job).orders.send(Message::Stop);
@@ -1098,111 +819,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         // A lease whose thread has ended has run its last command, and the core hears of its end.
         let _ = orders.send(message);
-    }
-
-    fn start_child<'s, O: Send + 'static>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        which: Which,
-        deadlines: Deadlines,
-        run: impl FnOnce(Child<'r, H, O>) + Send + 's,
-    ) -> Result<Sender<Message<O>>, String> {
-        let dir = self.dir.join(which.record_dir());
-        let parent = dir.parent().unwrap_or(self.dir);
-        fs::create_dir_all(parent).context(parent.display())?;
-        fs::create_dir(&dir).context(dir.display())?;
-        let inbox = self.clock.inbox();
-        let sender = inbox.sender();
-        let child = Child {
-            which,
-            deadlines,
-            hard_end: self.unix_hard_end,
-            dir,
-            sandboxes: self.sandboxes,
-            clock: self.clock.clone(),
-            inbox,
-            reports: self.inbox.sender(),
-        };
-        let spawned = thread::Builder::new()
-            .name(which.name().to_string())
-            .spawn_scoped(scope, move || run(child));
-        if let Err(error) = spawned {
-            // Reported as the child's thread would have, behind what reached the host before.
-            let reason = format!("{} thread didn't start: {error}", which.noun());
-            let failed = Report::Event(self.clock.now(), which.failed(reason));
-            // The inbox holds its receiver, so the send can't fail.
-            let _ = self.inbox.sender().send(Input::Child(failed));
-        }
-        Ok(sender)
-    }
-
-    fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
-        let judge = self.workflow().call_slot(call).judge().role();
-        let startup = self.clock.now().saturating_add(self.placed.startup(judge));
-        match call {
-            // A call of the agent's ends with the work phase, which ends by the core's next act of
-            // its own, and what it left is collected by the agent's teardown's end, which leaves
-            // the final judge its share of the hard end.
-            JudgeCall::Grant(_) => {
-                let start = startup.min(core.phase_due());
-                Deadlines {
-                    startup: start,
-                    start,
-                    collect: self.teardown_end(),
-                }
-            }
-            // The final judge's command starts in time to run its whole timeout before the hard
-            // end, by which what it left is collected.
-            JudgeCall::Score => {
-                let start = self.hard_end().saturating_sub(timeout);
-                Deadlines {
-                    startup: startup.min(start),
-                    start,
-                    collect: self.hard_end(),
-                }
-            }
-        }
-    }
-
-    fn serve(&mut self, caller: Caller, role: RoleId) {
-        if let Some(served) = Served::new(self.routes.get(role)) {
-            self.served.insert(caller, Arc::new(served));
-        }
-    }
-
-    fn end_routes(&self, allowing: Option<(&Core<'_>, Duration)>) {
-        for (caller, served) in &self.served {
-            if allowing.is_none_or(|(core, at)| !core.model_requests_allowed(*caller, at)) {
-                served.end();
-            }
-        }
-    }
-
-    // Fails the run for a route whose upstream refused its key, unless the refusal came after the
-    // selection was locked on a route that served before it, and for a failure of the agent's last
-    // request.
-    fn routes_held(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
-        // A refusal heard after the lock can't change the score: the agent's or a call's whose
-        // answer the agent can't act on. The score's call starts after the lock, so a
-        // refusal on its route always fails the run.
-        for (caller, served) in &self.served {
-            if let Some(name) = served.key_refused_by()
-                && !self.held_at_lock.contains(caller)
-            {
-                let route = match caller {
-                    Caller::Agent => "the agent's".to_owned(),
-                    Caller::Job(job) => format!("job {}'s", job.0),
-                };
-                return Err(format!(
-                    "the upstream `{name}` refused its key, with a 401, which ended {route} \
-                     model route: give it a key that it takes, and run again"
-                ));
-            }
-        }
-        match self.served.get(&Caller::Agent) {
-            Some(agent) => agent.failed_last(outcome),
-            None => Ok(()),
-        }
     }
 
     fn stop_children(&self) {
