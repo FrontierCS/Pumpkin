@@ -22,11 +22,15 @@
 //! What the subset leaves out is refused where it is named, with what to write instead, not told
 //! to be unknown: a function by [`left_out`], a method by the lists of those it leaves out.
 
+mod call;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::fmt;
 use core::num::IntErrorKind;
+
+pub(crate) use call::{Call, Keyword};
 
 use crate::problem::{self, Fault, list, refusal};
 use crate::syntax::{Def, Name, is_name};
@@ -69,15 +73,6 @@ pub(crate) fn left_out(name: &str) -> Option<String> {
     ))
 }
 
-// A call's arguments, evaluated.
-pub(crate) struct Call<'a> {
-    /// The whole call, where a fault of the call points.
-    pub(crate) at: Span,
-    pub(crate) positional: Vec<(Span, Value)>,
-    pub(crate) keyword: Vec<(&'a Name, Value)>,
-    pub(crate) budget: &'a Budget,
-}
-
 /// Each of `params`, in order, with the argument that `call` gives it by position or by name, or
 /// `None` where it gives none. Only the first `positional` of `params` may be given by position.
 ///
@@ -98,17 +93,17 @@ pub(crate) fn place(
     for (place, (_, value)) in call.positional.iter().enumerate() {
         given[place] = Some(value.clone());
     }
-    for (keyword, value) in &call.keyword {
-        let Some(place) = params.iter().position(|param| *param == keyword.text) else {
+    for keyword in call.keywords() {
+        let Some(place) = params.iter().position(|param| *param == keyword.name) else {
             let message = if params.is_empty() {
                 format!(
                     "`{}` is no parameter of `{function}`, which takes no argument: drop it",
-                    keyword.text
+                    keyword.name
                 )
             } else {
                 format!(
                     "`{}` is no parameter of `{function}`: expected one of {}",
-                    keyword.text,
+                    keyword.name,
                     list(params)
                 )
             };
@@ -117,11 +112,11 @@ pub(crate) fn place(
         if given[place].is_some() {
             let message = format!(
                 "`{}` is given by position already: give it once",
-                keyword.text
+                keyword.name
             );
             return Err(Fault::new(keyword.span, message));
         }
-        given[place] = Some(value.clone());
+        given[place] = Some(keyword.value.clone());
     }
     Ok(given)
 }
@@ -291,20 +286,20 @@ fn positional<'c, const N: usize>(
     starlark: Takes,
     call: &'c Call<'_>,
 ) -> Result<&'c [(Span, Value); N], Fault> {
-    if let Some((name, _)) = call.keyword.first() {
+    if let Some(keyword) = call.keywords().next() {
         let takes = arguments(N);
-        let message = if starlark.keywords.contains(&name.text.as_str()) {
+        let message = if starlark.keywords.contains(&keyword.name) {
             refusal(
-                format_args!("`{function}`'s `{}`", name.text),
+                format_args!("`{function}`'s `{}`", keyword.name),
                 format_args!("give `{function}` {takes}, by position"),
             )
         } else {
             format!(
                 "`{function}` takes no keyword argument `{}`: give it {takes}, by position",
-                name.text
+                keyword.name
             )
         };
-        return Err(Fault::new(name.span, message));
+        return Err(Fault::new(keyword.span, message));
     }
     (call.positional.as_slice().try_into()).map_err(|_| {
         let (given, takes) = (call.positional.len(), arguments(N));
@@ -624,17 +619,18 @@ fn items(name: &str, dict: &Dict, call: &Call<'_>) -> Result<Value, Fault> {
 }
 
 fn get(name: &str, dict: &Dict, call: &Call<'_>) -> Result<Value, Fault> {
-    let (key, default) = match call.positional.as_slice() {
-        [key] if call.keyword.is_empty() => (key, None),
-        [key, default] if call.keyword.is_empty() => (key, Some(&default.1)),
-        [_] if call.keyword.len() == 1 && call.keyword[0].0.text == "default" => {
+    let keywords: Vec<Keyword<'_>> = call.keywords().collect();
+    let (key, default) = match (call.positional.as_slice(), keywords.as_slice()) {
+        ([key], []) => (key, None),
+        ([key, default], []) => (key, Some(&default.1)),
+        ([_], [keyword]) if keyword.name == "default" => {
             let message = refusal(
                 format_args!("`{name}`'s `default` by name"),
                 "give it by position, after the key",
             );
-            return Err(Fault::new(call.keyword[0].0.span, message));
+            return Err(Fault::new(keyword.span, message));
         }
-        [] | [_] | [_, _] | [_, _, _, ..] => {
+        (_, _) => {
             let message = format!(
                 "`{name}` takes 1 or 2 arguments, by position: give it a key, and a default or \
                  none"
@@ -870,18 +866,14 @@ impl Fields<'_, '_> {
         let reject = |message: String| unformatted(self.receiver, &message);
         let shown = escape(field);
         if is_name(field) {
-            let found = self
-                .call
-                .keyword
-                .iter()
-                .find(|(name, _)| name.text == field);
-            let Some((name, value)) = found else {
+            let found = self.call.keywords().find(|keyword| keyword.name == field);
+            let Some(keyword) = found else {
                 return Err(reject(format!(
                     "`{{{shown}}}` names no keyword argument of this `format` call: give it \
                      `{shown} = …`"
                 )));
             };
-            return Ok((name.span, value.clone()));
+            return Ok((keyword.span, keyword.value.clone()));
         }
         if let Some(zeros) = field.strip_prefix('-')
             && !zeros.is_empty()

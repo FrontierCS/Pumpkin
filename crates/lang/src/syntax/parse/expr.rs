@@ -35,6 +35,8 @@ const TRAILING: &str = "a tuple without parentheses can't end with `,`: drop the
 enum Argument {
     Positional(Expr),
     Keyword(Name, Expr),
+    /// The span of `**`, and the dict it passes.
+    Kwargs(Span, Expr),
 }
 
 impl Parser<'_> {
@@ -349,24 +351,42 @@ impl Parser<'_> {
         let (arguments, close) = self.sequence(Punct::RightParen, Self::argument)?;
         let mut positional = Vec::new();
         let mut keyword: Vec<(Name, Expr)> = Vec::new();
+        let mut kwargs = None;
+        // At most one `**`, after every other argument, as in starlark-go's resolver:
+        // https://github.com/google/starlark-go/blob/4f4267fb140d1e8b91c9bce55cee2f809e8840dd/resolve/resolve.go#L736-L789
         for argument in arguments {
             match argument {
+                Argument::Positional(arg) if kwargs.is_some() => {
+                    let message = "a positional argument follows `**`: put positional arguments \
+                                   first";
+                    return Err(Fault::new(arg.span, message));
+                }
                 Argument::Positional(arg) if keyword.is_empty() => positional.push(arg),
                 Argument::Positional(arg) => {
                     let message = "a positional argument follows a keyword argument: put \
                                    positional arguments first";
                     return Err(Fault::new(arg.span, message));
                 }
+                Argument::Keyword(name, _) if kwargs.is_some() => {
+                    let message = "a keyword argument follows `**`: put `**` last";
+                    return Err(Fault::new(name.span, message));
+                }
                 Argument::Keyword(name, _) if keyword.iter().any(|(n, _)| n.text == name.text) => {
                     let message = format!("`{}` is given twice: give it once", name.text);
                     return Err(Fault::new(name.span, message));
                 }
                 Argument::Keyword(name, arg) => keyword.push((name, arg)),
+                Argument::Kwargs(at, _) if kwargs.is_some() => {
+                    let message = "this is a second `**`: pass one dict, joining them with `|`";
+                    return Err(Fault::new(at, message));
+                }
+                Argument::Kwargs(_, arg) => kwargs = Some(arg),
             }
         }
         let args = Args {
             positional,
             keyword,
+            kwargs,
         };
         Ok((args, close))
     }
@@ -381,11 +401,8 @@ impl Parser<'_> {
                 return Err(Fault::new(self.peek().span, message));
             }
             TokenKind::Punct(Punct::StarStar) => {
-                let message = refusal(
-                    "`**` before an argument, which passes a dict's entries,",
-                    "name each keyword argument",
-                );
-                return Err(Fault::new(self.peek().span, message));
+                let at = self.advance();
+                return Ok(Argument::Kwargs(at, self.test()?));
             }
             _ => {}
         }

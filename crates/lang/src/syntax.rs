@@ -9,9 +9,9 @@
 //! - parameters: positional ones, then those after a bare `*`, which are keyword-only, each with
 //!   a default or without, but no positional one without a default after one with;
 //! - expressions: names, ints, strings, lists, tuples, dicts, list and dict comprehensions,
-//!   parentheses, calls with positional then keyword arguments, methods called where they are
-//!   named, indexing, `a if c else b`, `or`, `and`, `not`, comparisons, which don't chain, `in`,
-//!   `not in`, `|`, `+`, `-`, `*`, `//`, `%` and unary `-`.
+//!   parentheses, calls with positional then keyword arguments, then a `**` dict of keyword ones,
+//!   methods called where they are named, indexing, `a if c else b`, `or`, `and`, `not`,
+//!   comparisons, which don't chain, `in`, `not in`, `|`, `+`, `-`, `*`, `//`, `%` and unary `-`.
 //!
 //! Each place where the subset is narrower than the specification is refused at its token, and
 //! the rule of the refusal is written where it is checked: the lexical ones in `lex`, the
@@ -242,6 +242,8 @@ pub(crate) enum ExprKind {
 pub(crate) struct Args {
     pub(crate) positional: Vec<Expr>,
     pub(crate) keyword: Vec<(Name, Expr)>,
+    /// The dict that `**` passes, whose entries are keyword arguments after `keyword`.
+    pub(crate) kwargs: Option<Expr>,
 }
 
 /// A comprehension's clauses: a first `for`, whose iterable is read in the block around the
