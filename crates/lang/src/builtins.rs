@@ -33,6 +33,7 @@ use core::num::IntErrorKind;
 
 pub(crate) use call::{Call, Keyword};
 
+use crate::eval::{Purpose, body};
 use crate::problem::{self, Fault, list, refusal};
 use crate::syntax::{Def, Name, is_name};
 use crate::value::{
@@ -247,7 +248,8 @@ impl Universal {
                     | Kind::Function(_)
                     | Kind::Builtin(_)
                     | Kind::Image(_)
-                    | Kind::Module(_) => {
+                    | Kind::Module(_)
+                    | Kind::Hosted(_) => {
                         return Err(rejected(name, argument, "a list, a tuple or a dict"));
                     }
                 }
@@ -277,14 +279,14 @@ fn count(n: usize) -> i64 {
 // needs by position only, so a call that Starlark accepts and the subset does not is refused, and
 // any other call is Starlark's own error.
 #[derive(Clone, Copy)]
-struct Takes {
+pub(crate) struct Takes {
     min: usize,
     max: usize,
     keywords: &'static [&'static str],
 }
 
 impl Takes {
-    const fn exactly(n: usize) -> Self {
+    pub(crate) const fn exactly(n: usize) -> Self {
         Self {
             min: n,
             max: n,
@@ -294,7 +296,7 @@ impl Takes {
 }
 
 // The `N` arguments by position that `function` takes, or the fault of a call that gives other.
-fn positional<'c, const N: usize>(
+pub(crate) fn positional<'c, const N: usize>(
     function: &str,
     starlark: Takes,
     call: &'c Call<'_>,
@@ -394,7 +396,8 @@ fn text(function: &str, argument: &(Span, Value)) -> Result<String, Fault> {
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => Err(narrowed(function, argument, "a number or a string")),
+        | Kind::Module(_)
+        | Kind::Hosted(_) => Err(narrowed(function, argument, "a number or a string")),
     }
 }
 
@@ -412,7 +415,8 @@ fn float(argument: &(Span, Value)) -> Result<f64, Fault> {
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => {
+        | Kind::Module(_)
+        | Kind::Hosted(_) => {
             return Err(rejected("float", argument, "a number, a bool or a string"));
         }
     };
@@ -449,7 +453,8 @@ fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => {
+        | Kind::Module(_)
+        | Kind::Hosted(_) => {
             return Err(rejected(
                 "int",
                 argument,
@@ -486,7 +491,8 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => {
+        | Kind::Module(_)
+        | Kind::Hosted(_) => {
             return Err(rejected("sorted", argument, "a list, a tuple or a dict"));
         }
     };
@@ -576,14 +582,17 @@ const STRING_LEFT_OUT: [&str; 26] = [
 ];
 
 // What calling the method `name` on the receiver gives. A method that the subset lacks is refused
-// with the receiver's methods, or with a function to give the value to, where it has none.
+// with the receiver's methods, or, where it has none, with what to do instead, such as a function
+// to give the value to.
 pub(crate) fn method(
     receiver: &(Span, Value),
     name: &Name,
     call: &Call<'_>,
+    purpose: &mut Purpose<'_>,
 ) -> Result<Value, Fault> {
     let method = name.text.as_str();
-    let (methods, left_out): (Vec<&str>, &[&str]) = match &receiver.1.kind {
+    let to_a_function = "give it to a function, as `len`";
+    let (methods, left_out): (Result<Vec<&str>, &str>, &[&str]) = match &receiver.1.kind {
         Kind::Dict(dict) => {
             if let Some((_, run)) = DICT_METHODS.iter().find(|(has, _)| *has == method) {
                 return run(method, dict, call);
@@ -591,7 +600,7 @@ pub(crate) fn method(
             if DICT_CHANGING.contains(&method) {
                 return Err(changes(name, "dict", "make a new dict with `|`"));
             }
-            (DICT_METHODS.iter().map(|(has, _)| *has).collect(), &[])
+            (Ok(DICT_METHODS.iter().map(|(has, _)| *has).collect()), &[])
         }
         Kind::Str(text) => {
             if let Some((_, run)) = STRING_METHODS.iter().find(|(has, _)| *has == method) {
@@ -602,23 +611,25 @@ pub(crate) fn method(
                 });
             }
             let methods = STRING_METHODS.iter().map(|(has, _)| *has).collect();
-            (methods, &STRING_LEFT_OUT)
+            (Ok(methods), &STRING_LEFT_OUT)
         }
         Kind::List(_) => {
             if LIST_CHANGING.contains(&method) {
                 return Err(changes(name, "list", "make a new list with `+`"));
             }
-            (Vec::new(), &LIST_LEFT_OUT)
+            (Err(to_a_function), &LIST_LEFT_OUT)
         }
         Kind::Module(Module::Json) => {
             if let Some((_, run)) = JSON_METHODS.iter().find(|(has, _)| *has == method) {
                 return run(call);
             }
-            (
-                JSON_METHODS.iter().map(|(has, _)| *has).collect(),
-                &JSON_LEFT_OUT,
-            )
+            let methods = JSON_METHODS.iter().map(|(has, _)| *has).collect();
+            (Ok(methods), &JSON_LEFT_OUT)
         }
+        Kind::Hosted(hosted) => match body::method(*hosted, purpose, name, call) {
+            Some(called) => return called,
+            None => (hosted.methods(), &[]),
+        },
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
@@ -626,17 +637,16 @@ pub(crate) fn method(
         | Kind::Tuple(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
-        | Kind::Image(_) => (Vec::new(), &[]),
+        | Kind::Image(_) => (Err(to_a_function), &[]),
     };
     let what = receiver.1.kind.describe();
-    let instead = if methods.is_empty() {
-        String::from("give it to a function, as `len`")
-    } else {
-        format!("call one of {}", list(&methods))
+    let instead = match &methods {
+        Ok(methods) => format!("call one of {}", list(methods)),
+        Err(instead) => String::from(*instead),
     };
     let message = if left_out.contains(&method) {
         refusal(format_args!("`{method}` of {what}"), instead)
-    } else if methods.is_empty() {
+    } else if methods.is_err() {
         format!("{what} has no method `{method}`: {instead}")
     } else {
         format!("`{method}` is no method of {what}: {instead}")
@@ -758,7 +768,8 @@ fn join(name: &str, separator: &str, _: &(Span, Value), call: &Call<'_>) -> Resu
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => return Err(rejected(name, argument, "a list or a tuple of strings")),
+        | Kind::Module(_)
+        | Kind::Hosted(_) => return Err(rejected(name, argument, "a list or a tuple of strings")),
     };
     let mut parts = Vec::with_capacity(items.len());
     for item in items.iter() {

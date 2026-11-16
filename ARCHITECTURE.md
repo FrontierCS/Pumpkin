@@ -147,12 +147,16 @@ check of a task and the engine's build share one check without depending on each
 
 The workflow language, a subset of Starlark. `evaluate` runs an entry file and the files it loads,
 given its `Args`, to a `Plan` of the images it declares and the workflow that names them, or to
-its `Problems`.
+its `Problems`. `check` reads a body, a `def` of a file that a workflow loads, and `call` calls one
+for a host during a run.
 
 **Architecture Invariant:** evaluation is hermetic, so the same sources and args always give the
 same plan. It reads source only through its `Loader`, by `Label`s that stay below their root, the
 task's (`//`) or the standard library's (`@pumpkin//`); it only declares images, for its caller to
-build; and the crate is `#![no_std]`. Every evaluation ends, within its `Bounds` and `STACK_BYTES`.
+build, and reaches a host only through the handle that `call` gives a body; and the crate is
+`#![no_std]`. What a call returns rests also on the grant's keywords and on what the `Host`'s
+methods return. Every evaluation ends, within its `Bounds` and `STACK_BYTES`, once each method of
+the `Host` that it calls has returned.
 
 **Architecture Invariant:** the standard library depends on no task: a file below `@pumpkin//`
 loads only files below it, which evaluation refuses otherwise.

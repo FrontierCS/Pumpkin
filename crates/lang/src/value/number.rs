@@ -28,7 +28,8 @@ impl Number {
             | Kind::Function(_)
             | Kind::Builtin(_)
             | Kind::Image(_)
-            | Kind::Module(_) => None,
+            | Kind::Module(_)
+            | Kind::Hosted(_) => None,
         }
     }
 

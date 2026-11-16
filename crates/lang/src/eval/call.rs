@@ -13,7 +13,7 @@ use crate::syntax::{Def, Inside, Misfit, Simple, Step};
 use crate::value::{FileId, Function, Kind, Span, Value};
 use crate::{Loader, MAX_NESTING};
 
-impl<L: Loader> Evaluation<'_, L> {
+impl<L: Loader> Evaluation<'_, '_, L> {
     /// The function that `def` makes, run at `module`'s top level, where its defaults are
     /// evaluated, each refused unless it fits its parameter's annotation.
     pub(super) fn define(&mut self, def: &Rc<Def>, module: FileId) -> Result<Value, Fault> {
@@ -247,7 +247,7 @@ fn checked_return(def: &Def, returned: Option<(Span, Value)>, at: Span) -> Resul
 
 /// The refusal, at `at`, of the value that `inside` finds in the one that `whole` names, with a
 /// note on where that value is made.
-fn refusal_inside(inside: &Inside, whole: &str, at: Span) -> Fault {
+pub(super) fn refusal_inside(inside: &Inside, whole: &str, at: Span) -> Fault {
     let mut named = format!("{} ", inside.part.of());
     for part in &inside.outer {
         named.push_str(part.of());

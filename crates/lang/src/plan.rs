@@ -23,9 +23,6 @@ use crate::{Args, Label};
 // What `pumpkin`'s functions have recorded of an evaluation so far.
 pub(crate) struct Planned<'a> {
     pub(crate) args: &'a Args,
-    /// The entry file's directory below the root, such as `tasks/bench`, or empty for one at the
-    /// root.
-    pub(crate) package: String,
     pub(crate) workflow: Option<WorkflowCall>,
     /// Each arg an `arg()` call has declared, with its first call.
     pub(crate) declared: BTreeMap<String, Span>,
@@ -33,11 +30,9 @@ pub(crate) struct Planned<'a> {
 }
 
 impl<'a> Planned<'a> {
-    pub(crate) fn new(entry: &Label, args: &'a Args) -> Self {
-        let package = entry.path().rsplit_once('/').map_or("", |(dir, _)| dir);
+    pub(crate) fn new(args: &'a Args) -> Self {
         Self {
             args,
-            package: String::from(package),
             workflow: None,
             declared: BTreeMap::new(),
             images: Vec::new(),

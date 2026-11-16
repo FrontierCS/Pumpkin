@@ -35,7 +35,8 @@ pub(crate) use number::{Number, float_of, float_text, floor, modulo, truncated};
 pub(crate) struct FileId(pub(crate) usize);
 
 impl FileId {
-    pub(crate) const ENTRY: Self = Self(0);
+    /// The file that an evaluation reads first: a workflow's entry, or a body's file.
+    pub(crate) const FIRST: Self = Self(0);
 }
 
 /// A range of one file's text, in bytes, each end on a character's boundary.
@@ -77,6 +78,7 @@ pub(crate) enum Kind {
     Builtin(Builtin),
     Image(ImageId),
     Module(Module),
+    Hosted(Hosted),
 }
 
 /// An image that `image()` declares, by its place among its evaluation's.
@@ -207,7 +209,8 @@ impl Element for Value {
             | Kind::Str(_)
             | Kind::Builtin(_)
             | Kind::Image(_)
-            | Kind::Module(_) => 0,
+            | Kind::Module(_)
+            | Kind::Hosted(_) => 0,
             Kind::List(elements) | Kind::Tuple(elements) => elements.depth,
             Kind::Dict(dict) => dict.entries.depth,
             Kind::Function(function) => function.depth,
@@ -314,7 +317,7 @@ pub(crate) enum Key {
 fn hashable(value: &Value) -> bool {
     match &value.kind {
         Kind::Tuple(items) => items.iter().all(hashable),
-        Kind::List(_) | Kind::Dict(_) | Kind::Image(_) | Kind::Module(_) => false,
+        Kind::List(_) | Kind::Dict(_) | Kind::Image(_) | Kind::Module(_) | Kind::Hosted(_) => false,
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
@@ -339,7 +342,7 @@ impl Key {
             Kind::None | Kind::Bool(_) | Kind::Tuple(_) | Kind::Function(_) | Kind::Builtin(_) => {
                 Err(refusal(format_args!("{what} as a dict's key"), instead))
             }
-            Kind::List(_) | Kind::Dict(_) | Kind::Image(_) | Kind::Module(_) => {
+            Kind::List(_) | Kind::Dict(_) | Kind::Image(_) | Kind::Module(_) | Kind::Hosted(_) => {
                 Err(format!("{what} can't be a dict's key: {instead}"))
             }
         }
@@ -392,6 +395,29 @@ pub(crate) enum Module {
     Json,
 }
 
+/// A value that a call of a body makes for its host, and no name gives: the body's handle, or
+/// the payload. A call makes one handle and one payload, so a value equals each of its own kind.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Hosted {
+    /// A job's handle on the call's target.
+    Target,
+    /// A now function's handle on the run's state.
+    Run,
+    /// The call's payload, which only the host holds, so that a body passes it on but can't read
+    /// it.
+    Payload,
+}
+
+impl Hosted {
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Self::Target => "a `Target`",
+            Self::Run => "a `Run`",
+            Self::Payload => "the payload",
+        }
+    }
+}
+
 impl Value {
     pub(crate) fn truth(&self) -> bool {
         match &self.kind {
@@ -402,7 +428,11 @@ impl Value {
             Kind::Str(text) => !text.is_empty(),
             Kind::List(items) | Kind::Tuple(items) => !items.is_empty(),
             Kind::Dict(dict) => !dict.is_empty(),
-            Kind::Function(_) | Kind::Builtin(_) | Kind::Image(_) | Kind::Module(_) => true,
+            Kind::Function(_)
+            | Kind::Builtin(_)
+            | Kind::Image(_)
+            | Kind::Module(_)
+            | Kind::Hosted(_) => true,
         }
     }
 
@@ -430,6 +460,7 @@ impl Value {
             (Kind::Builtin(left), Kind::Builtin(right)) => left == right,
             (Kind::Image(left), Kind::Image(right)) => left == right,
             (Kind::Module(left), Kind::Module(right)) => left == right,
+            (Kind::Hosted(left), Kind::Hosted(right)) => left == right,
             (
                 Kind::None
                 | Kind::Bool(_)
@@ -442,7 +473,8 @@ impl Value {
                 | Kind::Function(_)
                 | Kind::Builtin(_)
                 | Kind::Image(_)
-                | Kind::Module(_),
+                | Kind::Module(_)
+                | Kind::Hosted(_),
                 _,
             ) => false,
         }
@@ -464,7 +496,8 @@ impl Value {
             | Kind::Function(_)
             | Kind::Builtin(_)
             | Kind::Image(_)
-            | Kind::Module(_) => String::from(self.kind.describe()),
+            | Kind::Module(_)
+            | Kind::Hosted(_) => String::from(self.kind.describe()),
         }
     }
 }
@@ -483,6 +516,7 @@ impl Kind {
             Self::Function(_) | Self::Builtin(_) => "a function",
             Self::Image(_) => "an image",
             Self::Module(Module::Json) => "the module `json`",
+            Self::Hosted(hosted) => hosted.describe(),
         }
     }
 }

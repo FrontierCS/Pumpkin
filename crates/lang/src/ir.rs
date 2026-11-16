@@ -111,7 +111,8 @@ fn child<'v>(value: &'v Value, token: &str) -> Option<&'v Value> {
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => None,
+        | Kind::Module(_)
+        | Kind::Hosted(_) => None,
     }
 }
 
@@ -347,7 +348,9 @@ impl<'de> de::Deserializer<'de> for De<'_> {
             Kind::Image(image) => visitor.visit_str(self.images[image.0].as_str()),
             Kind::List(items) | Kind::Tuple(items) => seq(self, items, visitor),
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
-            Kind::Function(_) | Kind::Builtin(_) | Kind::Module(_) => Err(self.mismatch("data")),
+            Kind::Function(_) | Kind::Builtin(_) | Kind::Module(_) | Kind::Hosted(_) => {
+                Err(self.mismatch("data"))
+            }
         }
     }
 

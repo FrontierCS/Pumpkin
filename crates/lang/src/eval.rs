@@ -9,14 +9,15 @@
 //! A function sees its parameters and the names it assigns, then its module's globals and loads,
 //! and never its caller's names. At most `MAX_CALLS` functions run at once.
 //!
-//! Evaluation always ends: every loop is a comprehension over a list, a tuple or a dict that
-//! exists already and never changes, no function runs while it is running, each module runs
-//! once, and loads make no cycle. It keeps to its [`Bounds`](crate::Bounds), its values' bytes as
-//! `Budget` counts them, and fits in [`STACK_BYTES`](crate::STACK_BYTES): nesting is at most
-//! `MAX_NESTING` deep, as the parser counts it, through calls, each running its function's body as
-//! deep as its arguments nest. The first error ends it, as Starlark handles none (spec.md,
-//! "Module execution"), noting calls.
+//! Evaluation always ends, on the condition that the crate's doc states: every loop is a
+//! comprehension over a list, a tuple or a dict that exists already and never changes, no
+//! function runs while it is running, each module runs once, and loads make no cycle. It keeps
+//! to its [`Bounds`](crate::Bounds), its values' bytes as `Budget` counts them, and fits in
+//! [`STACK_BYTES`](crate::STACK_BYTES): nesting is at most `MAX_NESTING` deep, as the parser
+//! counts it, through calls, each running its function's body as deep as its arguments nest. The
+//! first error ends it, as Starlark handles none (spec.md, "Module execution"), noting calls.
 
+pub(crate) mod body;
 mod call;
 mod operators;
 
@@ -28,6 +29,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::builtins::{self, Call, origin};
+use crate::eval::body::Host;
 use crate::plan::Planned;
 use crate::problem::{Fault, Problem, Sources, count, list, refusal};
 use crate::pumpkin::Site;
@@ -44,17 +46,18 @@ use crate::{Label, Loader, Root};
 // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/eval/runtime/evaluator.rs#L133
 const MAX_CALLS: usize = 48;
 
-pub(crate) struct Evaluation<'l, L> {
+pub(crate) struct Evaluation<'l, 'h, L> {
     loader: &'l mut L,
+    purpose: Purpose<'h>,
     /// Each file read so far.
     pub(crate) sources: Sources,
     pub(crate) planned: Planned<'l>,
     modules: BTreeMap<Label, State>,
-    /// The modules that are loading, the entry first, each loaded by the one before it.
+    /// The modules that are loading, the first file first, each loaded by the one before it.
     loading: Vec<Loading>,
     /// Each module's top level, by its file.
     tops: Vec<Top>,
-    /// The module whose statements run: the entry, before any does.
+    /// The module whose statements run: the first, before any does.
     running: FileId,
     /// The functions running now, outermost first, each with its call.
     calls: Vec<(Rc<Def>, Span)>,
@@ -77,7 +80,7 @@ enum State {
 // A module that is loading: it runs once each of its loads has.
 struct Loading {
     label: Label,
-    /// The `load` that loads it; `None` for the entry.
+    /// The `load` that loads it; `None` for the first file.
     at: Option<Span>,
     file: FileId,
     module: Module,
@@ -90,6 +93,28 @@ struct Top {
     /// `None` until the global is bound.
     globals: BTreeMap<String, Option<Value>>,
     loaded: BTreeMap<String, Value>,
+}
+
+/// What an evaluation is for, which decides what its first file is.
+pub(crate) enum Purpose<'h> {
+    /// A workflow's: its first file is the entry, which alone declares the workflow and images,
+    /// and `package` is the entry's directory below the root.
+    Workflow { package: String },
+    /// A check of a body, which no host calls: its first file is the body's.
+    Check,
+    /// A host's call of a body: its first file is the body's, and the body's handle reaches
+    /// `Host`.
+    Call(Host<'h>),
+}
+
+impl Purpose<'_> {
+    // The entry's directory, if `file` is a workflow's entry.
+    fn package(&self, file: FileId) -> Option<&str> {
+        match self {
+            Self::Workflow { package } => (file == FileId::FIRST).then_some(package.as_str()),
+            Self::Check | Self::Call(_) => None,
+        }
+    }
 }
 
 /// `None` until the name is bound.
@@ -112,21 +137,23 @@ enum Scope<'s> {
     },
 }
 
-impl<'l, L: Loader> Evaluation<'l, L> {
+impl<'l, 'h, L: Loader> Evaluation<'l, 'h, L> {
     pub(crate) fn new(
         loader: &'l mut L,
+        purpose: Purpose<'h>,
         planned: Planned<'l>,
         max_steps: u64,
         budget: &'l Budget,
     ) -> Self {
         Self {
             loader,
+            purpose,
             sources: Sources::default(),
             planned,
             modules: BTreeMap::new(),
             loading: Vec::new(),
             tops: Vec::new(),
-            running: FileId::ENTRY,
+            running: FileId::FIRST,
             calls: Vec::new(),
             steps: 0,
             max_steps,
@@ -135,8 +162,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         }
     }
 
-    // Runs the file at `label` and, before it, each file it loads. A file's syntax and name errors
-    // come all together, any other problem first.
+    // Runs the entry file at `label` and, before it, each file it loads.
     pub(crate) fn entry(&mut self, label: &Label) -> Result<(), Vec<Problem>> {
         if label.root() == Root::Library {
             let message = "a file of the standard library can't be an entry, whose directory is \
@@ -145,6 +171,12 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         }
         let text = (self.loader.load(label))
             .map_err(|message| Vec::from([Problem::file(label, message)]))?;
+        self.first(label, text)
+    }
+
+    // Runs `text`, the first file's, at `label`, and, before it, each file it loads. A file's
+    // syntax and name errors come all together, any other problem first.
+    fn first(&mut self, label: &Label, text: String) -> Result<(), Vec<Problem>> {
         self.open(label, None, text)?;
         // A module waits for its loads on `loading`, not on the call stack, so that a chain of
         // loads may be as long as there are files.
@@ -197,7 +229,8 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         // levels.
         self.tops.push(Top::default());
         let module = syntax::parse(file, self.sources.text(file))?;
-        let mut faults = syntax::resolve(&module, file == FileId::ENTRY);
+        let entry = self.purpose.package(file).is_some();
+        let mut faults = syntax::resolve(&module, entry);
         if label.root() == Root::Library {
             let task_loads = module
                 .loads
@@ -550,7 +583,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
                     at,
                 } => {
                     let call = self.arguments(scope, args, at)?;
-                    builtins::method(&(receiver, value), name, &call)?
+                    builtins::method(&(receiver, value), name, &call, &mut self.purpose)?
                 }
                 Suffix::Index(index) => {
                     let key = self.eval(scope, index)?;
@@ -577,7 +610,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
             Kind::Builtin(Builtin::Pumpkin(pumpkin)) => {
                 let site = Site {
                     module: self.sources.label(self.running),
-                    entry: self.running == FileId::ENTRY,
+                    package: self.purpose.package(self.running),
                     calls: &self.calls,
                 };
                 pumpkin.call(&call, &site, &mut self.planned)
@@ -591,7 +624,8 @@ impl<'l, L: Loader> Evaluation<'l, L> {
             | Kind::Tuple(_)
             | Kind::Dict(_)
             | Kind::Image(_)
-            | Kind::Module(_)) => {
+            | Kind::Module(_)
+            | Kind::Hosted(_)) => {
                 let message = format!("{} can't be called: call a function", other.describe());
                 let fault = Fault::new(callee, message);
                 let callee = Value {
@@ -709,7 +743,8 @@ fn assign<'t>(
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_)) => {
+        | Kind::Module(_)
+        | Kind::Hosted(_)) => {
             let message = format!(
                 "{} can't be unpacked into names: give a list or a tuple of {}",
                 other.describe(),
@@ -817,7 +852,7 @@ enum Made<'e> {
 impl Made<'_> {
     fn add<L: Loader>(
         &mut self,
-        evaluation: &mut Evaluation<'_, L>,
+        evaluation: &mut Evaluation<'_, '_, L>,
         scope: &Scope<'_>,
     ) -> Result<(), Fault> {
         match self {

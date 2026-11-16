@@ -2,18 +2,19 @@
 //! 8259's JSON, as the module of Bazel's and starlark-go's Starlark has them
 //! (<https://bazel.build/rules/lib/core/json>), but for what the subset refuses: an int past 64
 //! bits, an object that gives a key twice, and a string with a lone surrogate, which a Rust
-//! string can't hold.
+//! string can't hold. `value_of` makes the value of JSON that `serde_json` has read, with
+//! `decode`'s refusals of an int and of nesting.
 //!
-//! Both keep to the evaluation's bounds, and ask the byte budget for what they will hold before
+//! All keep to the evaluation's bounds, and ask the byte budget for what they will hold before
 //! they make it: `encode`'s text as it grows, `decode`'s values and the elements of the arrays
-//! and objects it has open. `decode` refuses an array or an object nested deeper than a value
-//! may be, `MAX_NESTING`, before it reads further.
+//! and objects it has open. `decode` and `value_of` refuse an array or an object nested deeper
+//! than a value may be, `MAX_NESTING`, before they read further.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 
 use crate::MAX_NESTING;
 use crate::builtins::{Call, origin};
@@ -97,7 +98,11 @@ fn write(text: &mut String, value: &Value, at: Span, budget: &Budget) -> Result<
             }
             push(text, "}", at, budget)?;
         }
-        Kind::Function(_) | Kind::Builtin(_) | Kind::Image(_) | Kind::Module(_) => {
+        Kind::Function(_)
+        | Kind::Builtin(_)
+        | Kind::Image(_)
+        | Kind::Module(_)
+        | Kind::Hosted(_) => {
             let message = format!(
                 "`json.encode` can't encode {}: give it `None`, bools, numbers and strings, and \
                  lists, tuples and dicts of them",
@@ -243,11 +248,10 @@ impl Decoder<'_> {
     fn open(&mut self) -> Result<(), Fault> {
         self.depth += 1;
         if self.depth > MAX_NESTING {
-            let message = format!(
-                "`json.decode`'s text nests arrays and objects {} deep at offset {}: nest them at \
-                 most {MAX_NESTING} deep",
+            let message = too_deep(format_args!(
+                "`json.decode`'s text nests arrays and objects {} deep at offset {}",
                 self.depth, self.offset
-            );
+            ));
             return Err(self.fault(message));
         }
         self.offset += 1;
@@ -479,12 +483,9 @@ impl Decoder<'_> {
         }
         let shown = escape(number);
         let message = if integer {
-            refusal(
-                format_args!(
-                    "`json.decode` of `{shown}`, at offset {start}, outside -2^63 to 2^63 - 1,"
-                ),
-                "give smaller ints, since ints are 64-bit",
-            )
+            past_64_bits(format_args!(
+                "`json.decode` of `{shown}`, at offset {start}"
+            ))
         } else {
             format!(
                 "`json.decode` reads `{shown}` at offset {start} of its text, which is no JSON \
@@ -516,4 +517,83 @@ impl Decoder<'_> {
         let (at, text) = self.argument;
         origin(Fault::new(*at, message), "the text", text)
     }
+}
+
+/// The value that `json`, which `serde_json` has read, holds, each part made at `at`: a number
+/// that `serde_json` holds as an int is an int, and any other a float. An int outside 64 bits is
+/// refused, as `decode` refuses it.
+pub(crate) fn value_of(
+    json: &serde_json::Value,
+    at: Span,
+    budget: &Budget,
+) -> Result<Value, Fault> {
+    nested_value_of(json, at, budget, 0)
+}
+
+// `value_of`, of a part `depth` deep in the value it is part of.
+fn nested_value_of(
+    json: &serde_json::Value,
+    at: Span,
+    budget: &Budget,
+    depth: usize,
+) -> Result<Value, Fault> {
+    let kind = match json {
+        serde_json::Value::Null => Kind::None,
+        serde_json::Value::Bool(bool) => Kind::Bool(*bool),
+        serde_json::Value::Number(number) => match (number.as_i64(), number.as_u64()) {
+            (Some(int), _) => Kind::Int(int),
+            (None, Some(unsigned)) => {
+                let message = past_64_bits(format_args!("`{unsigned}`"));
+                return Err(Fault::new(at, message));
+            }
+            (None, None) => {
+                let Some(float) = number.as_f64() else {
+                    unreachable!(
+                        "`serde_json` holds a number that is no 64-bit int as a float, so it gives \
+                         that float, as the workspace leaves its `arbitrary_precision` feature off"
+                    )
+                };
+                Kind::Float(float)
+            }
+        },
+        serde_json::Value::String(text) => Kind::Str(Text::new(text, at, budget)?),
+        // So that the walk's stack is bounded as a value's nesting is.
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) if depth == MAX_NESTING => {
+            let message = too_deep(format_args!(
+                "this JSON nests arrays and objects more than {MAX_NESTING} deep"
+            ));
+            return Err(Fault::new(at, message));
+        }
+        serde_json::Value::Array(items) => {
+            let items = (items.iter())
+                .map(|item| nested_value_of(item, at, budget, depth + 1))
+                .collect::<Result<_, _>>()?;
+            Kind::List(Nested::new(items, at, budget)?)
+        }
+        serde_json::Value::Object(entries) => {
+            let mut made = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                made.push(Entry {
+                    key: Key::Str(Text::new(key, at, budget)?),
+                    key_span: at,
+                    value: nested_value_of(value, at, budget, depth + 1)?,
+                });
+            }
+            Kind::Dict(Dict::new(made, at, budget)?)
+        }
+    };
+    Ok(Value { kind, span: at })
+}
+
+// The refusal of `number`, an int outside 64 bits.
+fn past_64_bits(number: fmt::Arguments<'_>) -> String {
+    refusal(
+        format_args!("{number}, outside -2^63 to 2^63 - 1,"),
+        "give smaller ints, since ints are 64-bit",
+    )
+}
+
+// The refusal of `nesting`, arrays and objects nested deeper than a value may be.
+fn too_deep(nesting: fmt::Arguments<'_>) -> String {
+    format!("{nesting}: nest them at most {MAX_NESTING} deep")
 }

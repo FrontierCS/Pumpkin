@@ -19,9 +19,10 @@
 //! code can name no file, clock, environment, process or randomly seeded hash, though `schema`'s
 //! I/O items stay reachable through it. An
 //! image is only declared, for its caller to build. The same sources and args always give the
-//! same plan. An evaluation always ends, within [`STACK_BYTES`] of stack and its [`Bounds`]; how
-//! its problems read is [`Problems`]' doc's, and a linter's findings in the files it read read so
-//! too ([`Plan::lint`]).
+//! same plan. An evaluation always ends, within [`STACK_BYTES`] of stack and its [`Bounds`], once
+//! each method of the [`Host`] that it calls has returned; how its problems read is [`Problems`]'
+//! doc's, and a linter's findings in the files it read read so too ([`Plan::lint`]). A host calls
+//! a body through [`call`], whose handle alone reaches the [`Host`].
 
 #![no_std]
 
@@ -44,9 +45,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub use eval::body::{Body, BodyKind, Host, Run, Target};
 pub use plan::{Declared, Plan, Recipe};
 pub use problem::{Finding, Problems};
 
+use crate::eval::Purpose;
 use crate::plan::Planned;
 
 /// How deep a file's syntax, an evaluation, and the values it makes may nest: brackets, calls,
@@ -57,8 +60,8 @@ use crate::plan::Planned;
 // also bounds the stack of every walk over a file's syntax or a value, a value's drop included.
 const MAX_NESTING: usize = 128;
 
-/// The stack that a thread calling [`evaluate`] needs: on a smaller one, a file that nests deep
-/// enough overflows it, which aborts the process.
+/// The stack that a thread calling [`evaluate`], [`check`] or [`call`] needs: on a smaller one, a
+/// file that nests deep enough overflows it, which aborts the process.
 // 2.4 times the most an evaluation was measured to take, about 3.3 MiB in a debug build and
 // 1.2 MiB in an optimized one, so that frames may grow with the code or the toolchain. The tests'
 // `bad/stack` nests in the shape measured deepest, so that growth past the margin aborts them.
@@ -99,18 +102,76 @@ pub fn evaluate(
     bounds: Bounds,
 ) -> Result<Plan, Problems> {
     let budget = value::Budget::new(bounds.bytes);
-    let planned = Planned::new(entry, args);
-    let mut evaluation = eval::Evaluation::new(loader, planned, bounds.steps, &budget);
+    let planned = Planned::new(args);
+    let package = entry.path().rsplit_once('/').map_or("", |(dir, _)| dir);
+    let purpose = Purpose::Workflow {
+        package: String::from(package),
+    };
+    let mut evaluation = eval::Evaluation::new(loader, purpose, planned, bounds.steps, &budget);
     if let Err(problems) = evaluation.entry(entry) {
         return Err(Problems::new(evaluation.sources, problems));
     }
     Plan::new(entry, evaluation.sources, evaluation.planned)
 }
 
+/// Checks, without calling it, that `body` takes a call of `kind`, on an evaluation of its file,
+/// each file read through `loader` once, given `args`, within `bounds`, on a [`STACK_BYTES`] stack.
+///
+/// # Errors
+///
+/// A problem of the evaluation; no function `body.def` in the file; or, in source order, each
+/// parameter that doesn't fit: the handle or the payload, first, with a default or another type;
+/// one after them without a default, or not annotated `str`, `int` or `bool`; a keyword-only one
+/// without a default that `body.keywords` misses; and each keyword that names none, or doesn't fit.
+pub fn check(
+    body: &Body<'_>,
+    kind: BodyKind,
+    loader: &mut impl Loader,
+    args: &Args,
+    bounds: Bounds,
+) -> Result<(), Problems> {
+    let budget = value::Budget::new(bounds.bytes);
+    let planned = Planned::new(args);
+    let purpose = Purpose::Check;
+    let mut evaluation = eval::Evaluation::new(loader, purpose, planned, bounds.steps, &budget);
+    match evaluation.body(body, kind) {
+        Ok(_) => Ok(()),
+        Err(problems) => Err(Problems::new(evaluation.sources, problems)),
+    }
+}
+
+/// Calls the body that `body` names, on an evaluation of its file as [`check`] has it.
+///
+/// It passes the handle on `host`, the payload, then `body.keywords` by name, and gives each name
+/// of the dict the body returns with its value's JSON, as `json.encode` writes it, in order.
+///
+/// # Errors
+///
+/// What [`check`] refuses for `host`'s kind; else the body's first error, or a return that is no
+/// dict, has a key that is no [`schema::ir::Name`], or has a value with no JSON.
+pub fn call(
+    body: &Body<'_>,
+    host: Host<'_>,
+    loader: &mut impl Loader,
+    args: &Args,
+    bounds: Bounds,
+) -> Result<Vec<(schema::ir::Name, serde_json::Value)>, Problems> {
+    let budget = value::Budget::new(bounds.bytes);
+    let planned = Planned::new(args);
+    let kind = host.kind();
+    let purpose = Purpose::Call(host);
+    let mut evaluation = eval::Evaluation::new(loader, purpose, planned, bounds.steps, &budget);
+    let returned = match evaluation.body(body, kind) {
+        Ok(read) => evaluation.returned(&read).map_err(Vec::from),
+        Err(problems) => Err(problems),
+    };
+    returned.map_err(|problems| Problems::new(evaluation.sources, problems))
+}
+
 /// Where an evaluation reads its source, below either [`Root`].
 pub trait Loader {
     /// The text of the file at `label`, or why it can't be read, which the evaluation reports at
-    /// the `load` that names it, or as the entry's problem.
+    /// the `load` that names it, or as the first file's problem.
     fn load(&mut self, label: &Label) -> Result<String, String>;
 }
 
