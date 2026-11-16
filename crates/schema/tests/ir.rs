@@ -739,7 +739,7 @@ fn parsed() {
     assert_eq!(workflow.submit_grant().name.as_str(), "submit");
     assert_eq!(name(workflow.score().slot.judge().role()), "final_judge");
     let model = workflow.sandbox(workflow.agent().role).model.as_ref();
-    let route = &model.unwrap().route;
+    let route = model.unwrap();
     let apis: Vec<ir::Api> = route.as_slice().iter().map(|e| e.api).collect();
     assert_eq!(apis, [ir::Api::Responses], "the agent's route");
     let ir::Runtime::Judge(judge) = &ir.roles[2].runtime else {
@@ -769,8 +769,8 @@ fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
     let result = "/roles/1/runtime/judge/result";
-    let route = "/roles/0/egress/model/route";
-    let entry = &fixture()["roles"][0]["egress"]["model"]["route"][0];
+    let route = "/roles/0/egress/model";
+    let entry = &fixture()["roles"][0]["egress"]["model"][0];
     // A `Value` holds a key once, so the IR repeats a name as text.
     let shows = r#""metrics": "/metrics" }"#;
     let repeated = WORKFLOW.replacen(shows, r#""metrics": "/metrics", "score": "/x" }"#, 1);
@@ -836,7 +836,7 @@ fn checked_values() {
             no models: a model route allows at least one
             `gpt-6-astra` is listed more than once: list each model once
             no APIs: a model route has an entry for one at least
-            the API `responses` has more than one entry: give each API one, which lists every model its requests may name
+            `gpt-6-astra` is in more than one `responses` entry: list each model in one entry for its API
             `Score` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             `raw_score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
             `/raw~2score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
@@ -855,7 +855,7 @@ fn checked_values() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn header_names() {
-    let entry = "/roles/0/egress/model/route/0";
+    let entry = "/roles/0/egress/model/0";
     let listed =
         |list: &str, names: &[&str]| fixture_with(&format!("{entry}/{list}"), json!(names));
     let refused = [

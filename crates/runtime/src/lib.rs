@@ -79,8 +79,8 @@ pub struct Recorded<'a> {
     pub prices: &'a BTreeMap<ModelName, TokenPrices>,
 }
 
-/// The upstreams that serve each role's model route, and the budgets that bound what the roles
-/// spend through them ([`budgets`]).
+/// The upstreams that serve each role's model route, one for each entry in the route's order, and
+/// the budgets that bound what the roles spend through them ([`budgets`]).
 pub struct ModelRoutes<'s> {
     pub servings: &'s ByRole<Vec<Serving>>,
     pub budgets: Budgets,

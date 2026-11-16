@@ -1,5 +1,5 @@
 //! The words for what a run cost, from [`runtime::Progress::cost`], each amount to the cent, and
-//! for what each role spent of its model budget.
+//! for what each role spent of each budgeted entry's model budget.
 //!
 //! A cost without a price is unknown, never zero: a run of which nothing has a price shows no
 //! cost, and a part of it without one is said to lack one. The tokens that a response didn't
@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use runtime::{Cost, ModelUse, Priced, Progress, TokenPrices, TokensCost};
-use schema::ir::ModelBudget;
+use schema::ir::{ApiRoute, ModelBudget, ModelName, Models};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -133,35 +133,37 @@ pub(super) fn more(unpriced: Option<&str>, unreported: u64) -> String {
     }
 }
 
-/// A line for each role that `ir`, the run's, gives a model budget, in the IR's order, with what
-/// the role spent of it at as many places as the budget states: `budget train_judge: $20.04 of
-/// $20.00, exhausted`. The spend is `at least` that if a response left its tokens unreported or
-/// its tokens can't be costed; the budget is `exhausted` once the spend reaches it
-/// ([`ModelBudget`]).
+/// A line for each entry of a role's model route that `ir`, the run's, gives a model budget, in
+/// the IR's order, naming the role and the entry's models, with what the role spent of it at as
+/// many places as the budget states: `budget train_judge (m-task): $20.04 of $20.00, exhausted`.
+/// The spend is `at least` that if a response left its tokens unreported or its tokens can't be
+/// costed; the budget is `exhausted` once the spend reaches it ([`ModelBudget`]).
 pub(super) fn budgets(progress: &Progress, ir: &Value) -> Vec<String> {
     let prices = &progress.token_prices;
     // Read loosely, as a record that another build made may hold an IR that this one doesn't
-    // parse: a role whose budget can't be read then shows none, and the rest of the summary stays.
+    // parse: an entry that can't be read then shows no budget, and the rest of the summary stays.
     let roles = ir["roles"].as_array().into_iter().flatten();
-    let budgeted = roles.filter_map(|role| {
-        let budget = ModelBudget::deserialize(&role["egress"]["model"]["budget"]).ok()?;
-        Some((role, role["name"].as_str()?, budget))
+    let entries = roles.flat_map(|role| {
+        let entries = role["egress"]["model"].as_array().into_iter().flatten();
+        entries.filter_map(move |entry| Some((role, ApiRoute::deserialize(entry).ok()?)))
     });
-    let lines = budgeted.filter_map(|(role, name, budget)| {
+    let lines = entries.filter_map(|(role, entry)| {
+        let name = role["name"].as_str()?;
+        let budget = entry.budget.as_ref()?;
         let spent = if role["runtime"]["agent"].is_null() {
             let own = (progress.calls.iter()).filter(|call| call.role.as_deref() == Some(name));
             own.fold(Spent::default(), |spent, call| {
-                spent.plus(Spent::of(&call.model, prices))
+                spent.plus(Spent::of(&call.model, &entry, prices))
             })
         } else {
-            Spent::of(progress.agent.model.as_ref()?, prices)
+            Spent::of(progress.agent.model.as_ref()?, &entry, prices)
         };
-        Some(spent.line(name, &budget))
+        Some(spent.line(name, &entry.models, budget))
     });
     lines.collect()
 }
 
-// What a role's model requests spent, as far as their responses reported it.
+// What a role's requests through an entry spent, as far as their responses reported it.
 #[derive(Clone, Copy, Default)]
 struct Spent {
     usd: f64,
@@ -170,12 +172,12 @@ struct Spent {
 }
 
 impl Spent {
-    fn of(model: &ModelUse, prices: &BTreeMap<String, TokenPrices>) -> Self {
+    fn of(model: &ModelUse, entry: &ApiRoute, prices: &BTreeMap<String, TokenPrices>) -> Self {
         let TokensCost {
             usd,
             unpriced,
             unreported,
-        } = model.usd(prices);
+        } = model.usd_of(prices, entry);
         Self {
             usd: usd.unwrap_or(0.0),
             partial: unreported > 0 || !unpriced.is_empty(),
@@ -189,7 +191,8 @@ impl Spent {
         }
     }
 
-    fn line(&self, role: &str, budget: &ModelBudget) -> String {
+    fn line(&self, role: &str, models: &Models, budget: &ModelBudget) -> String {
+        let models: Vec<&str> = models.as_slice().iter().map(ModelName::as_str).collect();
         let floor = if self.partial { "at least " } else { "" };
         let usd = budget.dollars(self.usd);
         let state = if budget.spent_by(self.usd) {
@@ -197,6 +200,9 @@ impl Spent {
         } else {
             ""
         };
-        format!("budget {role}: {floor}{usd} of {budget}{state}")
+        format!(
+            "budget {role} ({}): {floor}{usd} of {budget}{state}",
+            models.join(", ")
+        )
     }
 }

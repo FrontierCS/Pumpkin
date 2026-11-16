@@ -141,9 +141,9 @@ def claude_code(
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
         }},
-        "egress": {"model": {"route": [{
+        "egress": {"model": [{
             "api": "messages",
             "models": [model],
             "request_headers": _REQUEST_HEADERS,
-        }]}},
+        }]},
     }

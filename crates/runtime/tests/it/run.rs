@@ -350,15 +350,15 @@ fn reads_model_answers() {
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let answers = [
-        r#"{"answer":{"kind":"forwarded"},"model":"m","upstream_status":200}"#,
-        r#"{"answer":{"kind":"forwarded"},"model":"m","upstream_status":429}"#,
-        r#"{"answer":{"kind":"cut"},"model":"m","upstream_status":200}"#,
-        r#"{"answer":{"kind":"forwarded"},"model":"m","upstream_status":200,"failed":{"code":"rate_limit_exceeded"}}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream_status":200}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream_status":429}"#,
+        r#"{"answer":{"kind":"cut"},"model":"m","api":"messages","upstream_status":200}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream_status":200,"failed":{"code":"rate_limit_exceeded"}}"#,
         r#"{"answer":{"kind":"refused","status":502,"message":"m"},"upstream_status":null}"#,
         r#"{"answer":{"kind":"barred","status":400,"message":"m"},"upstream_status":null}"#,
         r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream":"u","upstream_status":200,"usage":{"input_tokens":2312,"output_tokens":5,"cached_tokens":2000,"cache_write_tokens":300}}"#,
         // As a Messages stream cut short reports its `message_start`'s counts.
-        r#"{"answer":{"kind":"cut"},"model":"m","upstream_status":200,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+        r#"{"answer":{"kind":"cut"},"model":"m","api":"messages","upstream_status":200,"usage":{"input_tokens":0,"output_tokens":0}}"#,
     ];
     let mut log = String::from(
         r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#,
@@ -417,7 +417,10 @@ fn reads_model_answers() {
                 reasoning: None,
             },
             by_model: {
-                "m": Tokens {
+                (
+                    Messages,
+                    "m",
+                ): Tokens {
                     reported: 2,
                     input: 2312,
                     output: 5,
@@ -431,7 +434,10 @@ fn reads_model_answers() {
                 },
             },
             unreported: {
-                "m": 4,
+                (
+                    Messages,
+                    "m",
+                ): 4,
             },
             dropped_headers: {},
             more_dropped_headers: false,

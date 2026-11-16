@@ -3611,16 +3611,14 @@ fn plans() {
               "roles": [
                 {
                   "egress": {
-                    "model": {
-                      "route": [
-                        {
-                          "api": "responses",
-                          "models": [
-                            "model-large"
-                          ]
-                        }
-                      ]
-                    }
+                    "model": [
+                      {
+                        "api": "responses",
+                        "models": [
+                          "model-large"
+                        ]
+                      }
+                    ]
                   },
                   "grants": [
                     {

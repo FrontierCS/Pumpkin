@@ -2062,9 +2062,8 @@ fn send_refusals() {
     }
     // A budget whose model the client's configuration gives no price.
     let mut budgeted = workflow(&image('0'), &["true"]);
-    let route = json!([{ "api": "responses", "models": ["model-a"] }]);
-    budgeted["roles"][0]["egress"] =
-        json!({ "model": { "route": route, "budget": { "microusd": 1 } } });
+    let route = json!([{ "api": "responses", "models": ["model-a"], "budget": { "microusd": 1 } }]);
+    budgeted["roles"][0]["egress"] = json!({ "model": route });
     scratch.write_task_in("repo", "stand-in", &budgeted);
     let (_, refused) = start(&scratch, &client);
     lines.extend([refused, calls(&scratch)]);
@@ -3321,14 +3320,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308311, end: 308311
+            next: 308383, end: 308383
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "agent"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 308311"#]],
+            state: "finished", end: 308383"#]],
     );
 }
 
@@ -3358,7 +3357,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: it ended before it replied in full; `ssh` ended with exit status: 255; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308311, end: 308311"#]],
+            next: 308383, end: 308383"#]],
     );
 }
 

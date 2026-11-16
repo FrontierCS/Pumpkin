@@ -55,7 +55,7 @@ def judged_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, mod
     needs and the routes to `models`, a train judge that returns `metrics`, and a final judge
     that scores, each judge with `judge`'s needs and the variables of `env`."""
     id = task.split("/")[-1]
-    egress = {"egress": {"model": {"route": [{"api": "responses", "models": sorted(models)}]}}} if models else {}
+    egress = {"egress": {"model": [{"api": "responses", "models": sorted(models)}]}} if models else {}
     workflow(
         name = "neutral/" + id.replace("_", "-"),
         roles = [

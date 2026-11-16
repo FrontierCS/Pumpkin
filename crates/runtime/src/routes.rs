@@ -44,12 +44,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             return self.log.note(&note);
         };
         let role = self.role(caller);
-        let admission = if core.model_requests_allowed(caller, at) {
-            self.budgets
-                .get(&role)
-                .map_or(Admission::Open, Budget::admission)
-        } else {
-            Admission::Ended
+        let allowed = core.model_requests_allowed(caller, at);
+        let spent = self.budgets.get(&role).map(Budget::spent);
+        let admission = move |entry| match (allowed, &spent) {
+            (false, _) => Admission::Ended,
+            (true, None) => Admission::Open,
+            (true, Some(spent)) => spent.admission(entry),
         };
         // A response still open at its deadline ends the caller's session, which its collect
         // needs, so it is due by then; the core's stop of its requests ends it before that
@@ -114,8 +114,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     pub(crate) fn count(&mut self, entry: &Entry) {
         if let Entry::ModelAnswered((caller, _), answered) = entry {
             let role = self.role(*caller);
-            if let Some(budget) = self.budgets.get_mut(&role) {
-                budget.add(&answered.answer);
+            if let (Some(budget), Some((_, api))) = (self.budgets.get_mut(&role), &answered.taken) {
+                budget.add(*api, &answered.answer);
             }
         }
     }

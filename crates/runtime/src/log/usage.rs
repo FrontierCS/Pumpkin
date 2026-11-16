@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use schema::ir::{Api, ApiRoute};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -96,16 +97,34 @@ impl ModelUse {
     /// What the tokens that responses reported cost at `prices`, in US dollars, and what that
     /// leaves out.
     pub fn usd(&self, prices: &BTreeMap<String, TokenPrices>) -> TokensCost {
+        self.cost(prices, |_| true)
+    }
+
+    /// As [`usd`](Self::usd), of the responses through `entry` alone: those for its API and its
+    /// models.
+    pub fn usd_of(&self, prices: &BTreeMap<String, TokenPrices>, entry: &ApiRoute) -> TokensCost {
+        self.cost(prices, |(api, model)| {
+            *api == entry.api
+                && (entry.models.as_slice().iter()).any(|counted| counted.as_str() == model)
+        })
+    }
+
+    fn cost(
+        &self,
+        prices: &BTreeMap<String, TokenPrices>,
+        counted: impl Fn(&(Api, String)) -> bool,
+    ) -> TokensCost {
         let mut cost = TokensCost {
             usd: None,
             unpriced: Vec::new(),
             unreported: 0,
         };
-        let models: BTreeSet<&String> =
-            self.by_model.keys().chain(self.unreported.keys()).collect();
-        for model in models {
-            let unreported = self.unreported.get(model).copied().unwrap_or(0);
-            match (prices.get(model), self.by_model.get(model)) {
+        let keys = self.by_model.keys().chain(self.unreported.keys());
+        let keys: BTreeSet<&(Api, String)> = keys.filter(|key| counted(key)).collect();
+        for key in keys {
+            let (_, model) = key;
+            let unreported = self.unreported.get(key).copied().unwrap_or(0);
+            match (prices.get(model), self.by_model.get(key)) {
                 (None, _) => cost.unpriced.push(model.clone()),
                 (Some(prices), Some(tokens)) => match prices.usd(tokens) {
                     Some(usd) => {
@@ -118,6 +137,9 @@ impl ModelUse {
                 (Some(_), None) => cost.unreported += unreported,
             }
         }
+        // A model may have answered through entries of two APIs.
+        cost.unpriced.sort_unstable();
+        cost.unpriced.dedup();
         cost
     }
 }

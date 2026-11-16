@@ -283,7 +283,7 @@ pub struct Slot {
 #[serde(deny_unknown_fields)]
 pub struct Egress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<Model>,
+    pub model: Option<ModelRoute>,
 }
 
 impl Egress {
@@ -293,25 +293,15 @@ impl Egress {
     }
 }
 
-/// A role's model route, and the budget that bounds what the role spends through it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Model {
-    pub route: ModelRoute,
-    /// None for a route whose spend is unbounded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget: Option<ModelBudget>,
-}
-
-/// The most that a role's model requests may cost, over all its sandboxes and every model of its
-/// route, at the prices that the run's configuration gives each model's tokens.
+/// The most that a role's model requests through one entry of its route may cost, over all the
+/// role's sandboxes, at the prices that the run's configuration gives each model's tokens.
 ///
-/// A run starts only if every kind of token of each model of the route has a price. What is
-/// counted is the tokens that each response reported, priced once it has ended; one that reported
-/// none, or more input read from and written to the cache than input, adds nothing. Once the
-/// count reaches the budget, the route refuses each later request of the role with a 400 that
-/// says that the role's model budget is exhausted. Requests in flight then are answered all the
-/// same, so the spend may pass the budget by what they cost.
+/// A run starts only if every kind of token of each model of the entry has a price. What is
+/// counted is the tokens that each response through the entry reported, priced once it has ended;
+/// one that reported none, or more input read from and written to the cache than input, adds
+/// nothing. Once the count reaches the budget, the route refuses each later request through the
+/// entry with a 400 that says that its budget is exhausted, and no other entry's. Requests in
+/// flight then are answered all the same, so the spend may pass the budget by what they cost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelBudget {
@@ -356,8 +346,10 @@ impl fmt::Display for ModelBudget {
     }
 }
 
-/// Access to the model provider: an entry for each API in which the role's code writes model
-/// requests, one at least, and each API in one entry alone.
+/// Access to the model provider: one entry at least, each for an API in which the role's code
+/// writes model requests, and each model in one entry alone for its API.
+///
+/// A request goes through the entry for its API that allows its model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<ApiRoute>", into = "Vec<ApiRoute>")]
 pub struct ModelRoute(Vec<ApiRoute>);
@@ -377,11 +369,13 @@ impl TryFrom<Vec<ApiRoute>> for ModelRoute {
             return Err("no APIs: a model route has an entry for one at least".to_owned());
         }
         let mut seen = BTreeSet::new();
-        if let Some(entry) = entries.iter().find(|entry| !seen.insert(entry.api)) {
+        let mut models = (entries.iter()).flat_map(|entry| {
+            (entry.models.as_slice().iter()).map(move |model| (entry.api, model))
+        });
+        if let Some((api, model)) = models.find(|named| !seen.insert(*named)) {
             return Err(format!(
-                "the API `{}` has more than one entry: give each API one, which lists every \
-                 model its requests may name",
-                entry.api
+                "`{model}` is in more than one `{api}` entry: list each model in one entry for \
+                 its API"
             ));
         }
         Ok(Self(entries))
@@ -410,6 +404,9 @@ pub struct ApiRoute {
     /// API's own. Any other response header stays behind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_headers: Vec<HeaderName>,
+    /// None for an entry whose spend is unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ModelBudget>,
 }
 
 /// An API of model providers', in which a role's code writes its model requests. It shows as

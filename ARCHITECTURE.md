@@ -219,11 +219,12 @@ control socket, and each provider mounts `sandboxctl` only for a role that makes
 
 ### `crates/route`
 
-The model route. `serve` answers each model request through the entry for its API, whose `Route`
-admits it in a closed form (`closure`), sends it upstream (`Upstream`), streams the response back,
-and says how it answered (`Answer`). `Serving` is the upstream that serves an entry, and `Keep` is
-where an exchange is kept as it passes. `read` reads a kept exchange of any API as the same kinds of
-items (`Item`), and takes a stream's first output where `serve` does, by the same rule.
+The model route. `serve` answers each model request through the entry for its API that allows its
+model, whose `Route` admits it in a closed form (`closure`), sends it upstream (`Upstream`), streams
+the response back, and says how it answered (`Answer`). `Serving` is the upstream that serves an
+entry, and `Keep` is where an exchange is kept as it passes. `read` reads a kept exchange of any API
+as the same kinds of items (`Item`), and takes a stream's first output where `serve` does, by the
+same rule.
 
 **Architecture Invariant:** the route stays closed. A request reaches the models that its workflow
 allows and nothing else of the model provider's: none of the state it keeps, the tools it runs or
@@ -537,9 +538,9 @@ A run's bounds are the workflow's: the agent's deadline and finalize grace, each
 calls and judge seconds, each lease grant's instances, seconds, commands and transfer bytes, each
 slot's size, and the score's timeout. The core meters each from its own jobs and leases, and
 refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's hard
-end, by which the core abandons the run if nothing has ended it. A role's model budget is the one
-bound the core doesn't meter: the runtime meters it, from its route's answers, at the machine's
-prices.
+end, by which the core abandons the run if nothing has ended it. The model budgets of the
+entries of a role's route are the one bound the core doesn't meter: the runtime meters each, from
+its entry's answers, at the machine's prices.
 
 Every sandbox ends by its run's hard end even if its driver dies: the EC2 provider schedules each
 instance's termination then, and `ec2-boot` kills its container; Modal ends each sandbox then; a

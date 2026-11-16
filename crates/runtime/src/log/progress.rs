@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 use provider::UnixTime;
-use schema::ir::{Gpu, Name};
+use schema::ir::{Api, Gpu, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde::Deserialize;
@@ -344,13 +344,14 @@ pub struct ModelUse {
     pub first_tokens: Vec<Duration>,
     /// What the responses reported.
     pub tokens: Tokens,
-    /// What the answers that name their model reported, by the route's name for it.
-    pub by_model: BTreeMap<String, Tokens>,
-    /// How many responses went with tokens unreported, in whole or in part, by the route's name
-    /// for their model: those with a 2xx status that were cut short, whose usage, if any, is only
-    /// the stream's so far, and those with one that came whole and reported none. An error status
-    /// and the route's own barred and refused answers are not counted.
-    pub unreported: BTreeMap<String, u64>,
+    /// What the answers that name their model reported, by the API of the entry that took them
+    /// and the route's name for their model, which together name the entry.
+    pub by_model: BTreeMap<(Api, String), Tokens>,
+    /// How many responses went with tokens unreported, in whole or in part, by the API and the
+    /// model as `by_model` keys them: those with a 2xx status that were cut short, whose usage, if
+    /// any, is only the stream's so far, and those with one that came whole and reported none. An
+    /// error status and the route's own barred and refused answers are not counted.
+    pub unreported: BTreeMap<(Api, String), u64>,
     /// The names of request headers that the route left behind, at most
     /// `route::MAX_DROPPED_HEADERS`.
     pub dropped_headers: BTreeSet<String>,
@@ -715,6 +716,7 @@ impl Reading {
             logged::Event::ModelAnswered {
                 caller,
                 request,
+                api,
                 model,
                 first_token_ns,
                 upstream_status,
@@ -725,7 +727,7 @@ impl Reading {
             } => {
                 let answered = Answered {
                     request: *request,
-                    model: model.as_deref(),
+                    model: api.zip(model.as_deref()),
                     dropped_headers: &kept.request.dropped_headers,
                     first_token: *first_token_ns,
                     upstream_status: *upstream_status,
@@ -903,7 +905,7 @@ impl Reading {
 
 struct Answered<'e> {
     request: u64,
-    model: Option<&'e str>,
+    model: Option<(Api, &'e str)>,
     dropped_headers: &'e [String],
     first_token: Option<Duration>,
     upstream_status: Option<u16>,
@@ -956,8 +958,9 @@ impl ModelUse {
                 logged::Answer::Forwarded => usage.is_none(),
                 logged::Answer::Barred | logged::Answer::Refused => false,
             };
-        if unreported && let Some(model) = model {
-            *self.unreported.entry((*model).to_owned()).or_default() += 1;
+        if unreported && let Some((api, model)) = model {
+            let key = (*api, (*model).to_owned());
+            *self.unreported.entry(key).or_default() += 1;
         }
         // As the log gives the status: `null` for none.
         let status = upstream_status.map_or_else(|| "null".to_owned(), |status| status.to_string());
@@ -970,9 +973,9 @@ impl ModelUse {
         *self.answers.entry(answer).or_default() += 1;
         if let Some(usage) = usage {
             self.tokens.add(usage);
-            if let Some(model) = model {
-                let tokens = self.by_model.entry((*model).to_owned()).or_default();
-                tokens.add(usage);
+            if let Some((api, model)) = model {
+                let key = (*api, (*model).to_owned());
+                self.by_model.entry(key).or_default().add(usage);
             }
         }
     }

@@ -344,7 +344,7 @@ fn serve_one(
     route::serve(
         slice::from_ref(entry),
         incoming,
-        admission,
+        |_| admission,
         by,
         &kept,
         || {},
@@ -405,7 +405,7 @@ fn upstream(case: &Case, key: &Path, address: &str) -> Result<(Route, Upstream),
         fs::write(key, text).unwrap();
     }
     let url = UpstreamUrl::try_from(case.url.replace("{stand-in}", address))?;
-    let route = Route::new(case.api, models(["m-large", "m-small"]), &listed(case.api));
+    let route = Route::new(case.api, models(&["m-large", "m-small"]), &listed(case.api));
     Ok((route, Upstream::new(case.api, &url, &Key::read(key)?)))
 }
 
@@ -545,7 +545,7 @@ fn forward() {
             },
             Case {
                 then: Some(spent()),
-                ..case("the role's budget spent", Answer::Refuses)
+                ..case("the entry's budget spent", Answer::Refuses)
             },
             case("a request forbidden", Answer::RefusesKey(403)),
             case("a redirect", Answer::Redirects),
@@ -641,7 +641,7 @@ fn forward() {
             the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; key refused: false
             the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 35 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 191 bytes; key refused: true
             the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false
-            the role's budget spent: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the role's model budget, $1.50 at the configured prices, is exhausted: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the role's model budget, $1.50 at the configured prices, is exhausted: make no more model requests" }); kept: request 552 bytes, response 178 bytes; key refused: false
+            the entry's budget spent: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model budget of the role's entry for `m-large`, `m-small`, $1.50 at the configured prices, is exhausted: make no more requests for its models","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model budget of the role's entry for `m-large`, `m-small`, $1.50 at the configured prices, is exhausted: make no more requests for its models" }); kept: request 552 bytes, response 225 bytes; key refused: false
             a request forbidden: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(403), request_id: None, status: 400, message: "the model provider refused the request, with a 403: send only requests that it allows" }); kept: request 552 bytes, response 35 bytes; key refused: false
             a redirect: the stand-in got the same head with the body as sent; the sandbox heard 307 [] ; told: Some(Forwarded { model: ModelName("m-large"), status: 307, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 0 bytes; key refused: false
             a coded body: the stand-in got the same head with the body as sent; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: Some(200), request_id: None, status: 502, message: "the model provider coded its answer, though the request asked for it uncoded: try again" }); kept: request 552 bytes, response 20 bytes; key refused: false
